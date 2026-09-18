@@ -1,0 +1,101 @@
+# The Python half of the toolchain's lint set.
+#
+# `src/` is linted by zlint against an explicit allowlist and `conformance/` by
+# clippy against a named set in Cargo.toml; the harness that produces every
+# number in the reports had nothing. This is that gate, written the same way:
+# an explicit `select`, so adding a rule is a decision someone made rather than
+# a default that arrived with a version bump.
+#
+#   uv run --project bench ruff check .        what CI runs
+#   uv run --project bench ruff check --fix .  the mechanical half
+#
+# Pinned in bench/pyproject.toml's dev group, for the reason the Zig toolchain,
+# the bfb commit and the Qdrant image digest are pinned.
+
+# Measured rather than chosen. The prose in this project is load-bearing and
+# the docstrings are long on purpose; the code sits at 92-100 columns, and the
+# tail past 100 is almost entirely §4's workload table, where a row is one
+# `flags(...)` call whose arguments read better on one line than wrapped.
+#
+# 110 leaves that table alone and still catches a genuinely runaway line. It is
+# looser than the 100 the bulk of the code keeps to; tightening it is 18 wraps,
+# 13 of them in that table, and is worth doing when the table is not about to
+# be measured from.
+line-length = 110
+target-version = "py311"
+
+exclude = [".venv", "bench/.venv", ".zig-cache", "zig-out", "bench/results"]
+
+[lint]
+select = [
+    "F",      # pyflakes: undefined names, unused imports, f-strings with no
+              # placeholders. The bug class that matters most here, because a
+              # harness that crashes mid-run costs the run.
+    "E",      # pycodestyle errors, including E501 at the length above.
+    "W",      # trailing whitespace, missing final newline.
+    "I",      # import order, so a diff to an import block is a real change.
+    "UP",     # pyupgrade: the project is >=3.11 and says so.
+    "B",      # bugbear: mutable defaults, `except` that swallows, loop-variable
+              # capture in a closure — all of which this harness has room for.
+    "C4",     # comprehension rewrites that are also clearer.
+    "SIM",    # simplifications that do not change behaviour.
+    "RUF",    # ruff's own: mutable class defaults, unused noqa.
+]
+
+# `sys.path.insert` before the local imports is how every entry point here
+# finds its siblings without a package; each of those sites carries its own
+# `# noqa: E402` explaining itself, so E402 stays selected and the ones that
+# are *not* that still fail.
+ignore = [
+    # Assigning a lambda, in a few table formatters where a def would separate
+    # the formatter from the column it formats.
+    "E731",
+    # `dict(x=1)` rather than `{"x": 1}`. Plotly's API is keyword-shaped and
+    # `layout(xaxis=dict(title=...))` reads as the call it mirrors; rewriting
+    # 58 of those to literals would make the chart code look less like the
+    # library's own documentation, not more.
+    "C408",
+    # Em dashes, section signs and multiplication signs. This project's prose
+    # is the load-bearing part of its files and uses real typography on
+    # purpose; every hit is a docstring or a report string, not a homoglyph
+    # slipped into an identifier.
+    "RUF001", "RUF002", "RUF003",
+
+    # --- Deferred, not dismissed --------------------------------------------
+    #
+    # Each of these has real hits in the tree today, listed with the count at
+    # the time the gate went in. They are off so that the gate is green and can
+    # therefore fail on a *regression*; a linter reporting 73 findings on every
+    # run is one nobody reads, which is the argument zlint.json's own comment
+    # makes about an allowlist. Turning one back on is a commit that fixes its
+    # hits, not a config change on its own.
+    #
+    # In the order worth doing them:
+    "B905",    # 11: `zip()` without `strict=`. The one here with a bug behind
+               # it — this code zips parallel sequences (passes against passes,
+               # engines against columns) and a length mismatch truncates in
+               # silence rather than raising. Wants each site *decided*, not a
+               # blanket `strict=False`, which is why it is not auto-fixed.
+    "E741",    # 10: `l` as a name, mostly `for l, v in ...` over labels.
+    "RUF005",  #  12: `[x] + xs` rather than `[x, *xs]`.
+    "RUF059",  #  9: unpacked and unused, usually a deliberate `a, _b = ...`
+               #  spelled without the underscore.
+    "SIM105",  #  6: `try/except/pass` rather than `contextlib.suppress`.
+    "B007",    #  3: unused loop control variable.
+    "RUF007",  #  2: `zip(x, x[1:])` rather than `itertools.pairwise`.
+]
+
+[lint.per-file-ignores]
+# The fixtures and the report are the two places with embedded data — a CSS
+# blob, a JS theme switcher, canned JSON — where a line break would corrupt the
+# thing being embedded.
+"bench/harness/report.py" = ["E501"]
+"bench/harness/harness_fixtures.py" = ["E501"]
+# Tests name what they assert in the assertion, and a long expected string is
+# the clearest form of that.
+"bench/harness/test_*.py" = ["E501"]
+
+[lint.isort]
+known-first-party = ["paths", "workloads", "compare", "recall", "regression",
+                     "procstat", "provenance", "report", "report_data",
+                     "report_charts", "results", "aggregate", "setup"]

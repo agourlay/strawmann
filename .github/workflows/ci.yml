@@ -1,0 +1,264 @@
+name: CI
+
+# Runs on every push to main and every pull request.
+#
+# It used to be `workflow_dispatch` only, on the grounds that this is a private
+# repository on an account without the Actions credits to spend per push. That
+# reason expires when the repository goes public, and it had a second cost while
+# it lasted: `ci-covers-gate` reported "all 21 gate steps are covered by CI" for
+# a workflow that had never executed once, so the drift it exists to catch could
+# not be caught. The check now refuses a workflow with no automatic trigger.
+#
+# Deliberately no `paths-ignore`. Skipping docs-only commits looks free and is
+# not: `readme-table-current` verifies the generated blocks in README.md and
+# `docs/comparison-<dataset>.md`, so a commit touching only those files is
+# exactly the commit that can break the check guarding published numbers. On
+# `pull_request` it is worse than a gap — a skipped run reports no status at
+# all, so those checks can never be made required.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Nothing in this workflow writes to the repository: it reads the tree, builds
+# it, and reports. A public repo's default token scope is wider than that.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# HOW THIS FILE RELATES TO scripts/check.py
+#
+# It does not reimplement the checks. Every job below invokes
+# `scripts/check.py --only '<label>'`, so there is one definition of each check,
+# run twice, once locally, once here.
+#
+# The alternative was tried in a sibling project and failed quietly: a
+# hand-maintained YAML mirror of the local gate drifted until 8 of its 18 checks
+# had no CI counterpart, and nothing reported it. A mirror has no failure mode.
+# It just covers less.
+#
+# `check.py`'s own `ci-covers-gate` step reads the `--only` patterns out of the
+# `run:` lines below and matches them against its step list the same way
+# `--only` does, so a gate step nothing here runs fails the gate. The `# gate:`
+# comments beside each step are for the reader; they are not what the check
+# believes, because a comment survives the step it describes being deleted.
+#
+# Every job pins a timeout. The GitHub default is six hours per job, which is
+# what a wedged `zig build` or a hung end-to-end socket test would spend.
+
+jobs:
+  # Style and syntax, and nothing that takes minutes: a formatting break should
+  # surface while the test jobs are still compiling. Needs Zig (`zig fmt`,
+  # `zlint`, and `doctor`'s version check) and uv (ruff comes from the lock).
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Pins the exact compiler. §9: "a benchmark that silently changes compiler
+      # is not a benchmark."
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: bench/uv.lock
+
+      # Version-pinned and content-pinned. The tag alone says which release was
+      # asked for, not which bytes arrived, and this is the only executable the
+      # pipeline fetches over the network rather than building or installing
+      # from a pinned action.
+      - name: Install zlint
+        env:
+          ZLINT_VERSION: v0.9.0
+          ZLINT_SHA256: 2485f4f744345e4b7c23a6023e96f0a22306d832f64ba3aeba08d35c90f81a71
+        run: |
+          curl -fsSL -o /usr/local/bin/zlint \
+            "https://github.com/DonIsaac/zlint/releases/download/${ZLINT_VERSION}/zlint-linux-x86_64"
+          echo "${ZLINT_SHA256}  /usr/local/bin/zlint" | sha256sum -c -
+          chmod +x /usr/local/bin/zlint
+
+      # gate: format
+      - name: Format
+        run: scripts/check.py --only '^format$'
+
+      # gate: zlint
+      - name: Lint
+        run: scripts/check.py --only '^zlint$'
+
+      # zlint.json is an allowlist: naming any rule disables every rule not
+      # named. A clean lint run is only evidence if a deliberate violation
+      # would break it.
+      # gate: zlint-not-vacuous
+      - name: Lint config is not vacuous
+        run: scripts/check.py --only 'zlint-not-vacuous'
+
+      # Through uv so it is the ruff bench/uv.lock pins, not whatever is on the
+      # machine.
+      # gate: ruff
+      - name: Lint the harness
+        run: scripts/check.py --only '^ruff$'
+
+      # gate: python-syntax
+      - name: Python drivers parse
+        run: scripts/check.py --only 'python-syntax'
+
+      # gate: doctor
+      - name: Doctor runs
+        run: scripts/check.py --only '^doctor$'
+
+  # The Python side of the gate: the refusals, the joins, the counter parsers
+  # and the results sink. These are tests, and they take about as long as a Zig
+  # compile, which is why they are not in `lint` — the job that used to hold all
+  # of them called itself "fast, test-free" while running 320 of them.
+  #
+  # No Zig or Rust: every step here is Python, and `check.py` reaches for uv
+  # itself where a step needs the locked dependencies.
+  harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: bench/uv.lock
+
+      # gate: no-scratchpad-paths
+      - name: No machine-specific paths
+        run: scripts/check.py --only 'no-scratchpad-paths'
+
+      # bench/results/ is gitignored, so this passes with a note here and only
+      # bites on a machine that has measured results.
+      # gate: readme-table-current
+      - name: README table matches measurements
+        run: scripts/check.py --only 'readme-table-current'
+
+      # `check.py` runs these under `uv run` when uv is on PATH (it is,
+      # installed above) and fails the step if the report tests were skipped
+      # rather than run: they need the uv project's jinja2/pandas/plotly.
+      # gate: harness-unit
+      - name: Harness refusals and joins behave as documented
+        run: scripts/check.py --only 'harness-unit'
+
+      # gate: regression-null
+      - name: Regression detector decision rule
+        run: scripts/check.py --only 'regression-null'
+
+      # gate: procstat
+      - name: Storage and I/O counters parse and difference correctly
+        run: scripts/check.py --only 'procstat'
+
+      # gate: perfstat
+      - name: Hardware counters parse and refuse what they could not measure
+        run: scripts/check.py --only 'perfstat'
+
+      # gate: results-sink
+      - name: The §8 results gate accepts and refuses correctly
+        run: scripts/check.py --only 'results-sink'
+
+      # The descriptor is read by datasets.py, by the Rust binary via
+      # include_str!, and by anything driving bfb. Malformed should fail here.
+      # gate: datasets-descriptor
+      - name: Dataset descriptor is valid
+        run: scripts/check.py --only 'datasets-descriptor'
+
+      # gate: datasets-self-test
+      - name: Dataset fetcher self-test
+        run: scripts/check.py --only 'datasets-self-test'
+
+      # The report path is the only thing in the tree with dependencies. They
+      # are pinned by bench/uv.lock, and this proves the lock still resolves.
+      # gate: report-tooling
+      - name: Report tooling imports
+        run: scripts/check.py --only 'report-tooling'
+
+      # gate: ci-covers-gate
+      - name: CI covers every gate step
+        run: scripts/check.py --only 'ci-covers-gate'
+
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
+
+      # The engine's own suite. Includes end-to-end tests that bind a real
+      # socket and speak HTTP/2 to themselves, so this is not a unit-test-only
+      # signal.
+      # gate: zig-test
+      - name: Zig tests
+        run: scripts/check.py --only 'zig-test'
+
+      # ReleaseFast is the only mode results are ever quoted from (§9), so it
+      # has to build, not merely typecheck.
+      # gate: zig-build
+      - name: Release build
+        run: scripts/check.py --only 'zig-build'
+
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # `conformance/rust-toolchain.toml` is the pin; this reads it rather than
+      # naming a version here, because two spellings of one version drift and
+      # the drift is invisible until a clippy release changes its mind.
+      - name: Read the pinned Rust toolchain
+        id: rust
+        run: |
+          channel=$(sed -n 's/^ *channel *= *"\(.*\)" *$/\1/p' conformance/rust-toolchain.toml)
+          test -n "$channel" || { echo "no channel in conformance/rust-toolchain.toml" >&2; exit 1; }
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+          components: clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: conformance
+
+      # The fp64 oracle, the T0–T4 differ tiers, ε calibration and the relevance
+      # metrics. These are the checks that decide whether a performance number
+      # is allowed to exist at all (§8), so they are not optional.
+      # gate: rust-test
+      - name: Conformance harness
+        run: scripts/check.py --only 'rust-test'
+
+      # The lint set is in `conformance/Cargo.toml`; this is what makes it
+      # binding. `cargo clippy` exits 0 while printing warnings, so the step
+      # denies them — without that it would report success on a tree carrying
+      # any number of them.
+      # gate: rust-clippy
+      - name: Conformance lints
+        run: scripts/check.py --only 'rust-clippy'
+
+  # Deliberately absent: the §4 workload table.
+  #
+  # W0–W13 need a built bfb, a multi-gigabyte dataset, a live engine and, per
+  # §7.1, a quiescent host with a fixed governor and no boost. A GitHub runner
+  # is none of those things, and `bench/setup.py check` would correctly fail on
+  # one. Running the workloads here would produce numbers that look real and are
+  # not, which is the specific failure this project exists to avoid.
+  #
+  # Benchmarks run on a gated host; CI proves the code that produces them is
+  # correct.

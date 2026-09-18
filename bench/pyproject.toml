@@ -1,0 +1,35 @@
+# The experiment tooling's dependencies, pinned by `uv.lock`.
+#
+# The engine has no dependencies and the badge in the README says so. That
+# claim is about `src/`: a vector engine that pulls in a package manager is a
+# different project. The analysis path is not the engine, and refusing it real
+# libraries only means reimplementing them worse, which is what the hand-rolled
+# SVG in the first version of this report was.
+#
+# It is locked for the same reason the Zig toolchain, the bfb commit and the
+# Qdrant image digest are locked: a report whose renderer drifts between runs
+# cannot be diffed against an earlier one.
+#
+#   uv sync --project bench          create bench/.venv from the lock
+#   uv run --project bench report.py strawmann qdrant
+[project]
+name = "strawmann-bench"
+version = "0.1.0"
+description = "Experiment drivers and reporting for strawmANN"
+requires-python = ">=3.11"
+dependencies = [
+    "jinja2>=3.1",      # templating, so the HTML is a template not f-strings
+    "plotly>=5.22",     # interactive charts, embedded offline
+    "pandas>=2.2",      # joins across result sets
+]
+
+#: The linter, pinned here with everything else the analysis path needs.
+#: `src/` has no dependencies and the badge says so; that claim is about the
+#: engine. The tooling is linted the way the engine is (`zlint`) and the
+#: conformance harness is (`clippy`), and a lint set that is not pinned drifts
+#: between machines and stops being a gate.
+[dependency-groups]
+dev = ["ruff>=0.6"]
+
+[tool.uv]
+package = false

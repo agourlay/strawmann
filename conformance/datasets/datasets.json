@@ -1,0 +1,427 @@
+[
+  {
+    "name": "sift1m",
+    "role": "CI tier: fast and universally comparable, but SIFT descriptors are not embeddings",
+    "format": "fvecs",
+    "vector_size": 128,
+    "distance": "euclid",
+    "n": 1000000,
+    "n_queries": 10000,
+    "gt_shipped": true,
+    "status": "available",
+    "files": [
+      {
+        "path": "sift.tar.gz",
+        "link": "https://huggingface.co/datasets/fzliu/sift1m/resolve/main/sift.tar.gz",
+        "bytes": 168280445,
+        "sha256": "92f1270c5e3a0cb46b89983e72b0511e4df065c31a9fa0276d8c9b1fca5bc81a",
+        "role": "archive"
+      }
+    ],
+    "extract": {
+      "kind": "tar.gz",
+      "members": [
+        {
+          "path": "sift/sift_base.fvecs",
+          "bytes": 516000000,
+          "role": "base"
+        },
+        {
+          "path": "sift/sift_query.fvecs",
+          "bytes": 5160000,
+          "role": "queries"
+        },
+        {
+          "path": "sift/sift_groundtruth.ivecs",
+          "bytes": 4040000,
+          "role": "ground_truth"
+        },
+        {
+          "path": "sift/sift_learn.fvecs",
+          "bytes": 51600000,
+          "role": "train"
+        }
+      ]
+    }
+  },
+  {
+    "name": "dbpedia-openai-1m",
+    "role": "headline tier: the dimensionality Qdrant users actually run",
+    "format": "parquet",
+    "vector_size": 1536,
+    "distance": "cosine",
+    "n": 1000000,
+    "n_queries": 10000,
+    "gt_shipped": false,
+    "status": "available",
+    "parts": {
+      "count": 26,
+      "start": 0,
+      "files": [
+        {
+          "path": "train-00000-of-00026-3c7b99d1c7eda36e.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00000-of-00026-3c7b99d1c7eda36e.parquet",
+          "bytes": 366570546,
+          "sha256": "81c446646185677e1c8a348595064acd8ebd51b23b1159281aec050f9bd3f1db"
+        },
+        {
+          "path": "train-00001-of-00026-2b24035a6390fdcb.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00001-of-00026-2b24035a6390fdcb.parquet",
+          "bytes": 361784660,
+          "sha256": "3312fdf9f4e5787017abf696d7e62f0e52f78f5d618484fd2549b9385eab4f43"
+        },
+        {
+          "path": "train-00002-of-00026-b05ce48965853dad.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00002-of-00026-b05ce48965853dad.parquet",
+          "bytes": 366492050,
+          "sha256": "42f31fab88c22717cf79da46e768ccd2bf987f979e485cd8659257bbca3d41cb"
+        },
+        {
+          "path": "train-00003-of-00026-d116c3c239aa7895.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00003-of-00026-d116c3c239aa7895.parquet",
+          "bytes": 366640192,
+          "sha256": "80feb11ed6a155477d361ed460e180db49579183aa637ea31ab5fc422a24ca9f"
+        },
+        {
+          "path": "train-00004-of-00026-5c2bcfc39e1019cd.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00004-of-00026-5c2bcfc39e1019cd.parquet",
+          "bytes": 366486412,
+          "sha256": "21214c6da378514c6d4a88aad15b053c71bfd5fe465280252c7428457584e477"
+        },
+        {
+          "path": "train-00005-of-00026-b674673d537c6296.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00005-of-00026-b674673d537c6296.parquet",
+          "bytes": 366417334,
+          "sha256": "0b4f6c9c1c5e6ff05e2ed1520bd16e15ac547272ee9a3725c55525670539cbaf"
+        },
+        {
+          "path": "train-00006-of-00026-56ad5cf7824f3ccd.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00006-of-00026-56ad5cf7824f3ccd.parquet",
+          "bytes": 366657034,
+          "sha256": "cb2fc30eaf7ee1489ae7e472801769047c072e6479d3d551647cc14b8e2b5bb5"
+        },
+        {
+          "path": "train-00007-of-00026-ff1a7a93f5f19199.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00007-of-00026-ff1a7a93f5f19199.parquet",
+          "bytes": 366603041,
+          "sha256": "eb96afb2d09a65071056c430cbcadbdddaa181676ecb95460a9eddafc31ba796"
+        },
+        {
+          "path": "train-00008-of-00026-90ec96c23a661926.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00008-of-00026-90ec96c23a661926.parquet",
+          "bytes": 366394176,
+          "sha256": "46de434826e0389b7cbd65baf7c843428228042356f83b50c81deaa676f09740"
+        },
+        {
+          "path": "train-00009-of-00026-8bcdf317ec2e082c.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00009-of-00026-8bcdf317ec2e082c.parquet",
+          "bytes": 366688108,
+          "sha256": "e27ee68da510258045935444529e5662d9649f4c35614d8505fa7c34fd22706a"
+        },
+        {
+          "path": "train-00010-of-00026-eb06930da76c47f3.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00010-of-00026-eb06930da76c47f3.parquet",
+          "bytes": 366706445,
+          "sha256": "2f7b4af385fdfc92d481ecb454df0cbc5e9aac895ff713aa84df5ba0c3a16e5a"
+        },
+        {
+          "path": "train-00011-of-00026-2df07d31f0aa1838.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00011-of-00026-2df07d31f0aa1838.parquet",
+          "bytes": 366584270,
+          "sha256": "4a206677c968f05dc99208095588c06d533ff6b039c54d502db105b187243d3a"
+        },
+        {
+          "path": "train-00012-of-00026-f2965048cabd6c86.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00012-of-00026-f2965048cabd6c86.parquet",
+          "bytes": 366749185,
+          "sha256": "d8831b3f3ecc910a84ce9c319a3407a82d94d27718e51629c08fcea56b723ada"
+        },
+        {
+          "path": "train-00013-of-00026-2036414050f9f044.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00013-of-00026-2036414050f9f044.parquet",
+          "bytes": 366510712,
+          "sha256": "f2e9fa2949f70b7211dbc271632293af6c06dd62d4290b938fbf9321e7af2e39"
+        },
+        {
+          "path": "train-00014-of-00026-820dc150346715fc.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00014-of-00026-820dc150346715fc.parquet",
+          "bytes": 366503034,
+          "sha256": "69b6712bab7da60d54310b4c953d62a2c7817f32d93559fdfd92916eeb77864d"
+        },
+        {
+          "path": "train-00015-of-00026-c3b25654a256c528.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00015-of-00026-c3b25654a256c528.parquet",
+          "bytes": 366588860,
+          "sha256": "59aadfada46ab1090efae44fe2451cbcf763221c8b8363470b23240005d6b1ef"
+        },
+        {
+          "path": "train-00016-of-00026-7deff0f4bdb4c24d.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00016-of-00026-7deff0f4bdb4c24d.parquet",
+          "bytes": 366387201,
+          "sha256": "0a2ee3cfd9c2b09926fa8c5154ec5b96da566ba2b3a3b782334f2fd9817a06c1"
+        },
+        {
+          "path": "train-00017-of-00026-ab8aaded21783fd6.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00017-of-00026-ab8aaded21783fd6.parquet",
+          "bytes": 366446823,
+          "sha256": "18cdfbcc3636888fd97ebad026960e98aeb048423c04b3d48cc46470131de98b"
+        },
+        {
+          "path": "train-00018-of-00026-27b906a8a01de2e0.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00018-of-00026-27b906a8a01de2e0.parquet",
+          "bytes": 366419175,
+          "sha256": "91e0499ad4a50707a845edbd3fe8d958bbde11d0d5f3fa414d7b0d8af85351e9"
+        },
+        {
+          "path": "train-00019-of-00026-9f5371122f68f762.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00019-of-00026-9f5371122f68f762.parquet",
+          "bytes": 366202703,
+          "sha256": "b7db6dea4986f4ee1e2e1e13e732bd349a7452705f0f0a13245c19f13f28f668"
+        },
+        {
+          "path": "train-00020-of-00026-e6ff711af402609d.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00020-of-00026-e6ff711af402609d.parquet",
+          "bytes": 366420989,
+          "sha256": "2e274eb4a1af67e433f17ba5be0dd98fd5e1fed65cc3f8511acc589abd24c754"
+        },
+        {
+          "path": "train-00021-of-00026-34a5d25f74b06b5f.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00021-of-00026-34a5d25f74b06b5f.parquet",
+          "bytes": 366239128,
+          "sha256": "3201e0dd39f170483dd25c49c041da356d45601055cd9474d4b1d137d2422f39"
+        },
+        {
+          "path": "train-00022-of-00026-61a9e6318ee525b5.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00022-of-00026-61a9e6318ee525b5.parquet",
+          "bytes": 366346934,
+          "sha256": "0433b307522dffdb689033534c6389b066c10b2cd70c62c46cddfdca0ee557fa"
+        },
+        {
+          "path": "train-00023-of-00026-2f7b85c21ea5f957.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00023-of-00026-2f7b85c21ea5f957.parquet",
+          "bytes": 366323438,
+          "sha256": "d9a6345a34b72335f5594606d52e371e5e01e6eb7f7ac8df0de1eff041f2f0f4"
+        },
+        {
+          "path": "train-00024-of-00026-c8000d2c489222ab.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00024-of-00026-c8000d2c489222ab.parquet",
+          "bytes": 366375272,
+          "sha256": "159b270917d06e458e48e6ce677d589f98ce2790682bb291ffa5df51e4b9b41a"
+        },
+        {
+          "path": "train-00025-of-00026-769064ea76815001.parquet",
+          "link": "https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M/resolve/main/data/train-00025-of-00026-769064ea76815001.parquet",
+          "bytes": 366298393,
+          "sha256": "22ffc66fa57d60f969aacdab45ed0ed60748ae0854d3044e95ebefc532d4ed61"
+        }
+      ]
+    },
+    "column": "openai",
+    "held_out_queries": 9988
+  },
+  {
+    "name": "beir-slice",
+    "role": "the only source of semantic relevance judgements (\u00a74.4)",
+    "format": "parquet",
+    "vector_size": 768,
+    "distance": "cosine",
+    "n": 1000000,
+    "n_queries": 5000,
+    "gt_shipped": false,
+    "status": "declared"
+  },
+  {
+    "name": "gist1m",
+    "role": "high-dim stress",
+    "format": "fvecs",
+    "vector_size": 960,
+    "distance": "euclid",
+    "n": 1000000,
+    "n_queries": 1000,
+    "gt_shipped": true,
+    "status": "declared"
+  },
+  {
+    "name": "glove-100",
+    "role": "angular/cosine path, well-known baselines",
+    "format": "hdf5",
+    "vector_size": 100,
+    "distance": "cosine",
+    "n": 1183514,
+    "n_queries": 10000,
+    "gt_shipped": true,
+    "status": "declared"
+  },
+  {
+    "name": "text2image-10m",
+    "role": "cross-modal: query distribution differs from base; OOD queries are a known hard case",
+    "format": "fbin",
+    "vector_size": 200,
+    "distance": "dot",
+    "n": 10000000,
+    "n_queries": 100000,
+    "gt_shipped": true,
+    "status": "declared"
+  },
+  {
+    "name": "laion-small-clip",
+    "role": "filtered search at 512 dim over float16 vectors: every query carries a range condition and the shipped neighbours are computed under it (k=10)",
+    "format": "tar",
+    "vector_size": 512,
+    "distance": "cosine",
+    "n": 100000,
+    "n_queries": 5000,
+    "gt_shipped": true,
+    "status": "available",
+    "dtype": "float16",
+    "notes": "CLIP embeddings stored as float16, the only entry here that is not f32: a reader assuming f32 gets half the rows at twice the dimension and no error. tests.jsonl ships k=10 neighbours per query, computed under that query's `similarity` range condition, so it is filtered ground truth and not \u00a74.3's unfiltered k=100.",
+    "files": [
+      {
+        "path": "laion-small-clip.tgz",
+        "link": "https://storage.googleapis.com/ann-filtered-benchmark/datasets/laion-small-clip.tgz",
+        "bytes": 119600694,
+        "sha256": "6c88614ea225b0ebc959e2da7b345452381d927560c864ece45377e9ceb7d12c",
+        "md5": "d21320a714d0b7e4f3242d10faafac3f",
+        "role": "archive"
+      }
+    ],
+    "extract": {
+      "kind": "tar.gz",
+      "dir": "laion-small-clip/laion-small-clip",
+      "members": [
+        {
+          "path": "vectors.npy",
+          "bytes": 102400128,
+          "role": "base"
+        },
+        {
+          "path": "tests.jsonl",
+          "bytes": 52473071,
+          "role": "queries"
+        },
+        {
+          "path": "payloads.jsonl",
+          "bytes": 49819237,
+          "role": "payloads"
+        }
+      ]
+    },
+    "payload_schema": {
+      "similarity": "float"
+    }
+  },
+  {
+    "name": "h-and-m-2048-angular-filters",
+    "role": "filtered search at 2048 dim over a 24-field product payload, where W12 filters bfb-generated keywords over SIFT; shipped neighbours are computed under each query's condition (k=25)",
+    "format": "tar",
+    "vector_size": 2048,
+    "distance": "cosine",
+    "n": 105100,
+    "n_queries": 10000,
+    "gt_shipped": true,
+    "status": "available",
+    "dtype": "float32",
+    "notes": "tests.jsonl ships k=25 neighbours per query under that query's `match` condition, so it is filtered ground truth; filters.json holds the condition set the query generator drew from.",
+    "files": [
+      {
+        "path": "hnm.tgz",
+        "link": "https://storage.googleapis.com/ann-filtered-benchmark/datasets/hnm.tgz",
+        "bytes": 993336680,
+        "sha256": "43502d1ca8b8f950064dabdbb5fbb0af8862c5416ff3a74abe09044078411111",
+        "md5": "f80e97f84f10882715ef019c07b7dff8",
+        "role": "archive"
+      }
+    ],
+    "extract": {
+      "kind": "tar.gz",
+      "dir": "h-and-m-2048-angular/hnm",
+      "members": [
+        {
+          "path": "vectors.npy",
+          "bytes": 860979328,
+          "role": "base"
+        },
+        {
+          "path": "tests.jsonl",
+          "bytes": 447902904,
+          "role": "queries"
+        },
+        {
+          "path": "payloads.jsonl",
+          "bytes": 87793542,
+          "role": "payloads"
+        },
+        {
+          "path": "filters.json",
+          "bytes": 14226,
+          "role": "filters"
+        }
+      ]
+    },
+    "payload_schema": {
+      "product_code": "int",
+      "prod_name": "keyword",
+      "product_type_no": "int",
+      "product_type_name": "keyword",
+      "product_group_name": "keyword",
+      "graphical_appearance_no": "int",
+      "graphical_appearance_name": "keyword",
+      "colour_group_code": "int",
+      "colour_group_name": "keyword",
+      "perceived_colour_value_id": "int",
+      "perceived_colour_value_name": "keyword",
+      "perceived_colour_master_id": "int",
+      "perceived_colour_master_name": "keyword",
+      "department_no": "int",
+      "department_name": "keyword",
+      "index_code": "keyword",
+      "index_name": "keyword",
+      "index_group_no": "int",
+      "index_group_name": "keyword",
+      "section_no": "int",
+      "section_name": "keyword",
+      "garment_group_no": "int",
+      "garment_group_name": "keyword",
+      "detail_desc": "text"
+    }
+  },
+  {
+    "name": "dbpedia-openai-100K-1536-angular",
+    "role": "the headline tier's dimensionality at a tenth of its size, for iterating on the 1536-dim path without the 9 GB fetch; queries are unconditional and ship k=10 neighbours",
+    "format": "tar",
+    "vector_size": 1536,
+    "distance": "cosine",
+    "n": 100000,
+    "n_queries": 5000,
+    "gt_shipped": true,
+    "status": "available",
+    "dtype": "float32",
+    "notes": "The same corpus and embedding model as dbpedia-openai-1m, cut to 100k rows, so it is a smaller dataset and not a subset of that one: row order differs, and \u00a74.3's ground truth indexes into row order. Queries are unconditional here (`conditions` is empty) and tests.jsonl ships k=10 neighbours.",
+    "files": [
+      {
+        "path": "dbpedia_openai_100K.tgz",
+        "link": "https://storage.googleapis.com/ann-filtered-benchmark/datasets/dbpedia_openai_100K.tgz",
+        "bytes": 583193754,
+        "sha256": "2132e103720e417f84e98ab8cc01803be64df1e95a64102eb541ab39de8a9e6d",
+        "md5": "27b8496be3ffaaec2cb721e54960eefd",
+        "role": "archive"
+      }
+    ],
+    "extract": {
+      "kind": "tar.gz",
+      "dir": "dbpedia-openai-100K-1536-angular/dbpedia_openai_100K",
+      "members": [
+        {
+          "path": "vectors.npy",
+          "bytes": 614400128,
+          "role": "base"
+        },
+        {
+          "path": "tests.jsonl",
+          "bytes": 173681958,
+          "role": "queries"
+        }
+      ]
+    }
+  }
+]

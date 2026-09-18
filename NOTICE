@@ -1,0 +1,25 @@
+strawmANN
+Copyright 2026 Arnaud Gourlay
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+---
+
+Third-party content redistributed in this repository:
+
+The rendered benchmark reports under `docs/reports/` are self-contained HTML
+pages with their JavaScript inlined rather than fetched, so that a page opens
+with no network and still renders years later. Each therefore embeds a copy of
+Plotly.js and its dependencies, which carry their own licences (MIT, and others
+named in the bundle's own notices). Those files are redistributed unmodified and
+are not covered by the copyright above; their licence headers travel inside each
+page. Plotly.js is Copyright (c) Plotly, Inc., MIT licensed.
+
+The engine itself vendors nothing: `zig build` links no third-party code. The
+analysis tooling's Python dependencies are declared in `bench/pyproject.toml`
+and pinned by `bench/uv.lock`, and are fetched rather than redistributed here.
+
+The load generator `qdrant/bfb` is fetched and built, not redistributed here.
+The one patch this project carried against it — findings 32's `--rps` reaping
+fix — was authored here and merged upstream as qdrant/bfb#172, so `BFB_PIN`
+names a plain upstream commit and no fork is vendored.

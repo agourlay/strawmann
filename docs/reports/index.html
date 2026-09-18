@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>strawmANN run reports</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #5a5a5a;
+    --line: #e2e2e2; --link: #0b5ed7; --card: #fafafa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14161a; --fg: #e8e8e8; --muted: #a0a0a0;
+      --line: #2c3038; --link: #7fb0ff; --card: #1a1d22;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14161a; --fg: #e8e8e8; --muted: #a0a0a0;
+    --line: #2c3038; --link: #7fb0ff; --card: #1a1d22;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg); margin: 0;
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 48px 16px 72px; }
+  h1 { font-size: 1.7rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h1 em { font-style: normal; color: var(--muted); }
+  .lede { color: var(--muted); margin: 0 0 32px; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; padding: 16px 18px; margin: 0 0 14px;
+  }
+  a { color: var(--link); }
+  .name { font-weight: 600; font-size: 1.02rem; word-break: break-word; }
+  .what { color: var(--muted); font-size: 0.93rem; margin-top: 6px; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.88em; background: rgba(127,127,127,0.14);
+    padding: 1px 5px; border-radius: 4px;
+  }
+  footer { margin-top: 36px; padding-top: 18px; border-top: 1px solid var(--line);
+           color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>strawm<em>ANN</em> run reports</h1>
+  <p class="lede">
+    Each page is one full benchmark run, self-contained and needing no network.
+    It states its own licence in the header: the gate verdict per arm, the
+    conformance tier and hash, the environment hash, the pass count, and a
+    banner on every row the comparison refuses. Read that before quoting a
+    number off it.
+  </p>
+
+  <ul>
+    <li>
+      <div class="name"><a href="report-sift1m-sm-sift-perf-rel-0908-vs-qd-sift-perf-rel-0908-2026-09-08-1805.html">sift1m, 2026-09-08</a></div>
+      <div class="what">The current sift1m comparison, and the source of the tables in
+      <code>README.md</code> and <code>comparison-sift1m.md</code>. T4, gate <code>pass</code>
+      both arms, 3 passes, equal-work, <code>--perf</code>. First page to carry W12's two
+      selectivity grades with recall measured under their conditions.</div>
+    </li>
+    <li>
+      <div class="name"><a href="report-sift1m-sm-sift-perf-rel-0907-vs-qd-sift-perf-rel-0907-2026-09-07-0730.html">sift1m, 2026-09-07</a></div>
+      <div class="what">The pair the front page quoted until 2026-09-08. T4, gate
+      <code>pass</code> both arms, 3 passes, as-deployed, <code>--perf</code>. It and the page
+      above are two Qdrant experiments rather than two measurements of one, so no ratio
+      crosses them.</div>
+    </li>
+    <li>
+      <div class="name"><a href="report-sift1m-sm-sift-perf-rel-0903-vs-qd-sift-perf-rel-0903-2026-09-03-1652.html">sift1m, 2026-09-03</a></div>
+      <div class="what">The pair the front page quoted until 2026-09-07, and
+      <code>regression.py</code>'s baseline. Same two binaries as the 09-07 page, so the two
+      are a reproducibility check rather than two measurements.</div>
+    </li>
+    <li>
+      <div class="name"><a href="report-dbpedia-openai-1m-sm-dbp1m-perf-rel-0903-vs-qd-dbp1m-perf-rel-0903-2026-09-03-1952.html">dbpedia-openai-1m, 2026-09-03</a></div>
+      <div class="what">The headline tier, d=1536 at 1M. Its differ reached only T2, so no
+      ratio is licensed and there is no per-dataset document. The per-engine numbers are
+      here.</div>
+    </li>
+    <li>
+      <div class="name"><a href="report-dbpedia-openai-1m-strawmann-vs-qdrant-2026-08-27-2309.html">dbpedia-openai-1m, 2026-08-27</a></div>
+      <div class="what">The only rendering of the run at labels <code>strawmann</code> and
+      <code>qdrant</code>. It carries no <code>conformance.json</code>, so no comparison is
+      licensed from it. A licensed dbpedia-openai-1m run retires this page.</div>
+    </li>
+  </ul>
+
+  <footer>
+    The pages are not a series. Between 09-07 and 09-08 the bfb pin moved, W12 became two
+    rows, its query count went from 5,000 to 50,000, W11's append became throttled, and
+    Qdrant was rebuilt twice, so <code>compare.py</code> refuses ratios across them as
+    STALE. Read each page against itself.
+    <br><br>
+    Source: <a href="https://github.com/agourlay/strawmann">github.com/agourlay/strawmann</a>
+  </footer>
+</main>
+</body>
+</html>

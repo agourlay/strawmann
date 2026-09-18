@@ -1,0 +1,11 @@
+# §9 pins the Zig toolchain because "a benchmark that silently changes compiler
+# is not a benchmark". The same argument reaches further here than it does for
+# Zig: §8 makes this crate's differ the precondition for publishing any number
+# at all, and `rust-clippy` is a deny-warnings gate, so an unpinned `stable`
+# reddens a green tree on a day nobody touched it.
+#
+# `.github/workflows/ci.yml` reads the channel out of this file rather than
+# naming a version of its own, so there is one pin and not two that can drift.
+[toolchain]
+channel = "1.98"
+components = ["clippy", "rustfmt"]

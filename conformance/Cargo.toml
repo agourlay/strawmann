@@ -1,0 +1,81 @@
+[package]
+name = "strawmann-conformance"
+version = "0.1.0"
+edition = "2024"
+
+# §8.5: "`conformance/` is a Rust binary using the same `qdrant-client` crate
+# that bfb uses. This is deliberate: one client, one encoder, one decoder, both
+# engines. Any difference observed is then necessarily server-side, not an
+# artefact of how the harness talks to each engine."
+#
+# The client version is PINNED, not floated. §8.9: "The Qdrant version is pinned
+# and recorded per row: comparing against a moving target across months of work
+# produces numbers that cannot be reasoned about." The same argument applies to
+# the client — a client upgrade can change defaults, wire encodings, and which
+# RPC a high-level call maps to.
+[dependencies]
+qdrant-client = "=1.19.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1"
+# The fp64 oracle is exhaustive by definition (§8.2 tier 1), so it is the one
+# part of the harness where wall-clock actually bites: SIFT1M is 10^10 distance
+# evaluations and the headline tier is 12x that. Parallelism is applied across
+# *queries* only — never inside a distance — so the fp64 summation order, and
+# therefore the ground truth, is unchanged by thread count.
+rayon = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.10.0"
+rand_chacha = "0.10.0"
+parquet = { version = "59.3.0", default-features = false, features = ["arrow", "snap", "zstd", "brotli", "flate2", "flate2-zlib-rs","lz4"] }
+arrow-array = "59.3.0"
+arrow-schema = "59.3.0"
+
+[dev-dependencies]
+# Only to construct a `tonic::Status` in the T0 status-code test; the runtime
+# path gets its statuses from `qdrant-client`, whose own tonic this pins to.
+tonic = "0.14"
+
+[[bin]]
+name = "conformance"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[workspace.lints.clippy]
+cast_lossless = "warn"
+doc_link_with_quotes = "warn"
+enum_glob_use = "warn"
+explicit_into_iter_loop = "warn"
+filter_map_next = "warn"
+flat_map_option = "warn"
+implicit_clone = "warn"
+inconsistent_struct_constructor = "warn"
+inefficient_to_string = "warn"
+manual_is_variant_and = "warn"
+manual_let_else = "warn"
+needless_continue = "warn"
+needless_raw_string_hashes = "warn"
+ptr_as_ptr = "warn"
+ref_option_ref = "warn"
+uninlined_format_args = "warn"
+unnecessary_wraps = "warn"
+unused_self = "warn"
+used_underscore_binding = "warn"
+match_wildcard_for_single_variants = "warn"
+needless_pass_by_ref_mut = "warn"
+unused_async = "warn"
+wildcard_enum_match_arm = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+# Release speed with the symbols a profiler needs. `debug` costs nothing at
+# run time; it only stops `perf` reporting the whole solver as one
+# unnamed frame.
+[profile.profiling]
+inherits = "release"
+debug = true

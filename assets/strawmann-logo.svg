@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="strawmANN logo: a plot frame with two bars inside it and one straw-coloured bar breaking out through the top edge">
+  <!-- A plot frame, two ordinary bars, and one straw-coloured bar that leaves
+       through the top. The frame is cut where that bar passes rather than
+       drawn behind it: the break is the mark, and an overlap would read as an
+       accident. "A deliberately unfair strawman" is the claim, and a number
+       that does not fit the axis the others are measured on is the picture of
+       it. The straw bar is both the engine and the pun.
+       Light-mode variant (dark ink). The light-ink twin is strawmann-logo-dark.svg;
+       the README picks between them with a <picture> element, which keys off the
+       reader's GitHub theme. Keep the two in sync. -->
+
+  <!-- the frame: three sides, then the top edge in two segments so the gap at
+       x 82..118 is a real hole. The gold bar spans x 89..111 and clears it. -->
+  <g stroke="#1b1b1b" stroke-width="9" stroke-linecap="round" fill="none">
+    <line x1="28"  y1="44"  x2="28"  y2="166"/>
+    <line x1="28"  y1="166" x2="172" y2="166"/>
+    <line x1="172" y1="166" x2="172" y2="44"/>
+    <line x1="28"  y1="44"  x2="82"  y2="44"/>
+    <line x1="118" y1="44"  x2="172" y2="44"/>
+  </g>
+
+  <!-- the bars that stayed on the chart -->
+  <g fill="#1b1b1b">
+    <rect x="52"  y="100" width="22" height="66" rx="11"/>
+    <rect x="126" y="118" width="22" height="48" rx="11"/>
+  </g>
+
+  <!-- the strawman: off the top of the axis -->
+  <rect x="89" y="14" width="22" height="152" rx="11" fill="#E0A82E"/>
+</svg>
