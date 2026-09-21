@@ -347,6 +347,56 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
 
 /// Reopen a collection from `dir`.
 ///
+/// Structural validation of a graph read from `graph.bin`, before anything
+/// indexes with it.
+///
+/// The header CRC covers the header only (`storage.Header.crcRegion`), so the
+/// body arrives unvalidated -- and the first thing that touches it is
+/// `Graph.checksum`, which walks `neighbours(node, lvl)` for every `lvl` up to
+/// `node_levels[node]`. `upperSlice` computes
+/// `upper_neighbours[upper_offsets[node] + (lvl - 1) * m ..][0..m]` with no
+/// bounds check of its own, so a truncated or corrupted file reached that walk
+/// unvalidated and the checksum meant to catch it was itself the out-of-bounds
+/// read: a panic in a safe build, a wild read in ReleaseFast. The same shape as
+/// the `count`-past-`capacity` header above, one file over.
+///
+/// What is checked here is the layout invariant the writer maintains
+/// (`index/build.zig`: a running cursor of `level * m` per node, laid out in
+/// node order) plus the range of every id a traversal can dereference.
+/// Everything else about the graph is the checksum's job, which is sound once
+/// this has run.
+fn validateGraph(g: *const hnsw.Graph) !void {
+    if (g.count > g.capacity) return error.GraphCorrupt;
+    if (g.max_level > hnsw.level_cap) return error.GraphCorrupt;
+    if (g.count == 0) {
+        if (g.entry_point != hnsw.empty_neighbour) return error.GraphCorrupt;
+    } else {
+        // `Index.search` descends from the entry point through every level
+        // down to 1, so the entry must own the levels `max_level` claims.
+        if (g.entry_point >= g.count) return error.GraphCorrupt;
+        if (g.node_levels[g.entry_point] < g.max_level) return error.GraphCorrupt;
+    }
+
+    // `usize` rather than the `u32` the file holds: the accumulator is derived
+    // from bytes that may be anything, and `level_cap * m * capacity` overflows
+    // a u32 long before the comparison that would have caught it.
+    var cursor: usize = 0;
+    for (g.node_levels[0..g.count], 0..) |lvl, i| {
+        if (lvl > hnsw.level_cap) return error.GraphCorrupt;
+        if (g.upper_offsets[i] != cursor) return error.GraphCorrupt;
+        const start = cursor;
+        cursor += @as(usize, lvl) * g.params.m;
+        if (cursor > g.upper_neighbours.len) return error.GraphCorrupt;
+        for (g.level0[i * g.params.m0 ..][0..g.params.m0]) |nb| {
+            if (nb != hnsw.empty_neighbour and nb >= g.count) return error.GraphCorrupt;
+        }
+        for (g.upper_neighbours[start..cursor]) |nb| {
+            if (nb != hnsw.empty_neighbour and nb >= g.count) return error.GraphCorrupt;
+        }
+    }
+    if (g.upper_offsets[g.count] != cursor) return error.GraphCorrupt;
+}
+
 /// §6.4: "no index rebuild", the graph is read back rather than reconstructed,
 /// and its checksum is verified against the one recorded at save time so a
 /// truncated or mismatched graph fails loudly instead of degrading recall.
@@ -526,6 +576,16 @@ pub fn load(alloc: std.mem.Allocator, name: []const u8, dir: []const u8, placeme
             // A graph cannot cover more points than exist, or than it has
             // room for; `needsRebuild` asserts the first on the next upsert.
             if (gh.count > gh.capacity or gh.count > vh.count) return error.Mismatch;
+            // `gh.capacity` sizes every array below, and the extend-build path
+            // (`Graph.copyFrom`) asserts the two graphs' capacities are equal:
+            // an assert that vanishes in ReleaseFast and would then memcpy one
+            // graph's CSR into the other's shorter arena.
+            if (gh.capacity != coll.config.capacity) return error.Mismatch;
+            // Level 0's stride, as `vh.stride` is the arena's. A file whose
+            // level-0 rows are a different width is read here at *our* width,
+            // so every section after it is offset; the checksum would catch
+            // that, but as a mismatch rather than as the shape error it is.
+            if (gh.stride != 2 * gh.dim) return error.StrideMismatch;
 
             const g = try alloc.create(hnsw.Graph);
             errdefer alloc.destroy(g);
@@ -556,8 +616,16 @@ pub fn load(alloc: std.mem.Allocator, name: []const u8, dir: []const u8, placeme
 
             g.count = @intCast(gh.count);
             g.entry_point = @intCast(gh.entryPointField());
+            // Range-checked before the narrowing cast, for the same reason
+            // `ScrollPoints.limit` is: `@intCast` of a u32 past 255 is a panic
+            // in a safe build and a truncation in ReleaseFast, and a truncated
+            // level is a plausible one.
+            if (gh.flags > hnsw.level_cap) return error.GraphCorrupt;
             g.max_level = @intCast(gh.flags);
 
+            // Before the checksum, because the checksum is what would index
+            // with these bytes. See `validateGraph`.
+            try validateGraph(g);
             // §8.7 option (b) put to work: the checksum recorded at save time
             // must match what was read back, or the graph is not the one the
             // results were measured against.
@@ -811,17 +879,89 @@ test "§8.7: a corrupted graph file is refused rather than silently degrading re
     try buildIndex(&c, .serial, 1);
 
     const dir = "/tmp/strawmann-test-corrupt";
-    try save(&c, dir);
-
-    // Flip a neighbour entry in the persisted graph.
     var pbuf: [512]u8 = undefined;
-    const p = try Persistence.path(&pbuf, dir, "graph.bin");
-    const fd = try storage.openSized(p, 0, false);
-    var poison: [4]u8 = .{ 0xde, 0xad, 0xbe, 0xef };
-    _ = std.os.linux.pwrite(fd, &poison, 4, storage.header_size + 16);
-    storage.closeFd(fd);
 
-    try testing.expectError(error.GraphChecksumMismatch, load(testing.allocator, "c", dir, .pinned));
+    const poke = struct {
+        fn f(path: []const u8, off: usize, word: u32) !void {
+            const fd = try storage.openSized(path, 0, false);
+            defer storage.closeFd(fd);
+            var bytes: [4]u8 = undefined;
+            std.mem.writeInt(u32, &bytes, word, .little);
+            _ = std.os.linux.pwrite(fd, &bytes, 4, @intCast(off));
+        }
+        fn peek(path: []const u8, off: usize) !u32 {
+            const fd = try storage.openSized(path, 0, false);
+            defer storage.closeFd(fd);
+            var bytes: [4]u8 = undefined;
+            _ = std.os.linux.pread(fd, &bytes, 4, @intCast(off));
+            return std.mem.readInt(u32, &bytes, .little);
+        }
+    };
+
+    const g = c.graph.?;
+    const w = @sizeOf(u32);
+    const upper_off = storage.header_size + g.level0.len * w;
+    const offsets_off = upper_off + g.upper_neighbours.len * w;
+    const levels_off = offsets_off + g.upper_offsets.len * w;
+
+    // A neighbour id that names no node. Structural, so it is refused by
+    // `validateGraph` before the checksum: the checksum walks every neighbour
+    // list, so an id it cannot dereference has to be caught ahead of it.
+    {
+        try save(&c, dir);
+        const p = try Persistence.path(&pbuf, dir, "graph.bin");
+        try poke.f(p, storage.header_size + 16, 0xefbeadde);
+        try testing.expectError(error.GraphCorrupt, load(testing.allocator, "c", dir, .pinned));
+    }
+
+    // A CSR base offset that points outside the arena. This is the one that
+    // used to crash: `Graph.checksum` walks `neighbours(node, lvl)` up to
+    // `node_levels[node]`, and `upperSlice` slices
+    // `upper_neighbours[upper_offsets[node] + (lvl - 1) * m ..][0..m]` with no
+    // bounds check, so the checksum meant to catch the corruption was itself
+    // the out-of-bounds read: a panic here, a wild read in ReleaseFast.
+    {
+        var node: u32 = 0;
+        while (node < g.count and g.node_levels[node] == 0) node += 1;
+        // The fixture must contain a node with an upper level, or this case
+        // corrupts a row nothing reads and passes for the wrong reason.
+        try testing.expect(node < g.count);
+        try save(&c, dir);
+        const p = try Persistence.path(&pbuf, dir, "graph.bin");
+        try poke.f(p, offsets_off + node * w, 0xffff0000);
+        try testing.expectError(error.GraphCorrupt, load(testing.allocator, "c", dir, .pinned));
+    }
+
+    // A level that does not match the CSR the file also carries: in range, so
+    // it is the layout check rather than the range check that refuses it.
+    {
+        try save(&c, dir);
+        const p = try Persistence.path(&pbuf, dir, "graph.bin");
+        const orig = try poke.peek(p, levels_off);
+        const swapped: u32 = (orig & 0xffffff00) | @as(u32, if (orig & 0xff == 1) 2 else 1);
+        try poke.f(p, levels_off, swapped);
+        try testing.expectError(error.GraphCorrupt, load(testing.allocator, "c", dir, .pinned));
+    }
+
+    // And a corruption that is structurally fine: one valid neighbour id
+    // replaced by another. Nothing but the checksum can see this one, which is
+    // what §8.7 option (b) is for.
+    {
+        try save(&c, dir);
+        const p = try Persistence.path(&pbuf, dir, "graph.bin");
+        const orig = try poke.peek(p, storage.header_size + 16);
+        try poke.f(p, storage.header_size + 16, @intCast((@as(u64, orig) + 1) % 50));
+        try testing.expectError(error.GraphChecksumMismatch, load(testing.allocator, "c", dir, .pinned));
+    }
+
+    // The untouched file still loads, so the cases above are refusals of the
+    // corruption rather than of the format.
+    {
+        try save(&c, dir);
+        var reloaded = try load(testing.allocator, "c", dir, .pinned);
+        defer reloaded.deinit();
+        try testing.expectEqual(g.checksum(), reloaded.graph.?.checksum());
+    }
 }
 
 test "§6.4: a header whose count exceeds its capacity is refused, not read past the arena" {

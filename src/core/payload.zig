@@ -226,21 +226,34 @@ fn repeatedStringsContain(list: []const u8, s: []const u8) bool {
     return false;
 }
 
+/// `RepeatedIntegers { repeated int64 integers = 1; }`.
+///
+/// The field is checked *before* the payload is consumed, as
+/// `repeatedStringsContain` and `PostingLists` do. Reading the nested blob
+/// first and testing the field inside it meant a length-delimited field under
+/// some other number was parsed as a run of varints, so malformed bytes in a
+/// field this has no interest in abandoned the whole condition (`catch return
+/// false`) instead of being skipped. Four walks over this message shape exist
+/// in this file and two of them did it the other way round; they now agree.
 fn repeatedIntegersContain(list: []const u8, v: i64) bool {
     var r = wire.Reader.init(list);
     while (!r.atEnd()) {
         const t = r.tag() catch return false;
+        if (t.field != 1) {
+            r.skip(t.wire_type) catch return false;
+            continue;
+        }
         switch (t.wire_type) {
             .varint => {
                 const x: i64 = @bitCast(r.varint() catch return false);
-                if (t.field == 1 and x == v) return true;
+                if (x == v) return true;
             },
             // `repeated int64` is packed in proto3.
             .length_delimited => {
                 var packed_r = r.nested() catch return false;
                 while (!packed_r.atEnd()) {
                     const x: i64 = @bitCast(packed_r.varint() catch return false);
-                    if (t.field == 1 and x == v) return true;
+                    if (x == v) return true;
                 }
             },
             else => r.skip(t.wire_type) catch return false,
@@ -778,20 +791,21 @@ pub const Store = struct {
                 var r = wire.Reader.init(list);
                 while (!r.atEnd()) {
                     const t = r.tag() catch return null;
+                    // Field first, then the payload. See `repeatedIntegersContain`.
+                    if (t.field != 1) {
+                        r.skip(t.wire_type) catch return null;
+                        continue;
+                    }
                     switch (t.wire_type) {
                         .varint => {
                             const v: i64 = @bitCast(r.varint() catch return null);
-                            if (t.field == 1) if (f.integers.get(v)) |p| {
-                                n += p.items.len;
-                            };
+                            if (f.integers.get(v)) |p| n += p.items.len;
                         },
                         .length_delimited => {
                             var pr = r.nested() catch return null;
                             while (!pr.atEnd()) {
                                 const v: i64 = @bitCast(pr.varint() catch return null);
-                                if (t.field == 1) if (f.integers.get(v)) |p| {
-                                    n += p.items.len;
-                                };
+                                if (f.integers.get(v)) |p| n += p.items.len;
                             }
                         },
                         else => r.skip(t.wire_type) catch return null,

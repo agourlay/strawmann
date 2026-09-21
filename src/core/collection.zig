@@ -1426,10 +1426,22 @@ pub const SearchGuard = struct {
         // *reader* mutates, which is what makes an otherwise immutable-during-
         // search structure reclaimable at all.
         const mutable: *Collection = @constCast(coll);
-        // seq_cst, not acquire: this increment is one half of the
-        // store-buffering pair `beginInPlace` describes, and the load of
-        // `in_place_updates` that follows it in `Probe.scoreNode` is the
-        // other. On x86 a locked RMW is the same instruction either way.
+        // seq_cst, not acquire, and the same is required of what it pairs
+        // with. Three reclamation rules have this shape: a reader bumps this
+        // counter and *then* loads a pointer the writer may be replacing,
+        // while the writer replaces the pointer and *then* reads this counter
+        // to decide the old one is unreachable. That is store buffering, and
+        // acquire/release does not forbid the outcome that breaks it -- the
+        // reader seeing the old pointer while the writer sees a zero count,
+        // and freeing it underneath. Only seq_cst on all four accesses does,
+        // so `publishedGraph`, `Collection.quant`, `Scroll.published` and the
+        // two counter loads (`reclaimRetired`, `Scroll.retire`) are seq_cst
+        // as well. On x86 every one of them is the instruction it already
+        // was, a locked RMW or a plain mov; the guarantee is for the weaker
+        // models the source is written against, not for this host.
+        //
+        // The fourth instance is `beginInPlace`'s, whose other half is the
+        // load of `in_place_updates` in `Probe.scoreNode`.
         _ = mutable.active_searches.fetchAdd(1, .seq_cst);
         return .{ .coll = coll };
     }
@@ -1457,7 +1469,9 @@ pub fn reclaimRetired(coll: *Collection) usize {
     // *current* graph, because publication happened before the caller invoked
     // this. A non-zero count is not a failure, it just defers the work to the
     // next rebuild.
-    if (coll.active_searches.load(.acquire) != 0) return 0;
+    // seq_cst: the writer half of the store-buffering pair `SearchGuard.begin`
+    // describes, against the publication a few lines above the call site.
+    if (coll.active_searches.load(.seq_cst) != 0) return 0;
 
     var freed: usize = 0;
     for (coll.retired_graphs.items) |g| {
@@ -1815,7 +1829,7 @@ pub fn buildIndex(coll: *Collection, mode: BuildMode, threads: usize) !void {
         .serial => {
             var b = try build_hnsw.Builder.init(coll.alloc, g, scorerFor(coll));
             defer b.deinit(coll.alloc);
-            b.buildSerial(n);
+            try b.buildSerial(n);
         },
         .parallel => {
             const stats = try build_hnsw.extendParallel(coll.alloc, g, scorerFor(coll), extend_from, n, threads);
@@ -1886,7 +1900,7 @@ pub fn buildIndex(coll: *Collection, mode: BuildMode, threads: usize) !void {
     // rebuild, a search may be loading this pointer at this very moment
     // (`publishedGraph`). It sees the old one or the new one, each whole, and
     // the old one is retired below rather than freed while it is held.
-    @atomicStore(?*hnsw.Graph, &coll.graph, g, .release);
+    @atomicStore(?*hnsw.Graph, &coll.graph, g, .seq_cst);
     coll.graph_count.store(n, .release);
     coll.indexed_count = n;
     // Not zero: the rows overwritten after the builder read them are in the
@@ -2000,7 +2014,7 @@ pub fn quantizeWith(coll: *Collection, mode: quant_mod.Mode, threads: usize) !vo
     if (store == .none) {
         coll.write_lock.lock();
         defer coll.write_lock.unlock();
-        if (coll.quant.swap(null, .acq_rel)) |old| {
+        if (coll.quant.swap(null, .seq_cst)) |old| {
             coll.retired_quant.append(coll.alloc, old) catch {
                 // Unreachable in practice, capacity was reserved below on the
                 // last publish; kept alive rather than freed under a reader.
@@ -2019,16 +2033,18 @@ pub fn quantizeWith(coll: *Collection, mode: quant_mod.Mode, threads: usize) !vo
     const boxed = coll.alloc.create(quantized.Store) catch return error.OutOfMemory;
     boxed.* = store;
 
-    // One-word publish with release ordering; `searchQuantized` loads it with
-    // acquire under `SearchGuard`, so it sees a whole store or none, and the
-    // one it saw stays allocated until no reader can hold it (`reclaimRetired`).
+    // One-word publish; `searchQuantized` loads it under `SearchGuard`, so it
+    // sees a whole store or none, and the one it saw stays allocated until no
+    // reader can hold it (`reclaimRetired`). seq_cst on both, per
+    // `SearchGuard.begin`: this store and that load are the two halves of the
+    // same store-buffering pair as the graph pointer's.
     //
     // Under the write lock, so that `noteOverwrite`, which runs under the
     // same lock, never encodes into a store that has just been retired: the
     // one it loads is the one that is still published when it is done.
     coll.write_lock.lock();
     defer coll.write_lock.unlock();
-    if (coll.quant.swap(boxed, .acq_rel)) |old| {
+    if (coll.quant.swap(boxed, .seq_cst)) |old| {
         coll.retired_quant.appendAssumeCapacity(old);
     }
 }
@@ -2219,14 +2235,18 @@ pub fn choosePath(coll: *const Collection, exact: Exactness, quant: QuantUse) Se
     // `.ready` reader always had with a publish, and is closed the same way:
     // the old graph is retired, never freed, while a `SearchGuard` is held.
     if (publishedGraph(coll) == null) return .brute;
-    if (coll.quant.load(.acquire) != null and quant == .use) return .quantized;
+    if (coll.quant.load(.seq_cst) != null and quant == .use) return .quantized;
     return .graph;
 }
 
 /// The graph a search may traverse, or null. Loaded once per query, under
 /// the caller's `SearchGuard`; a rebuild publishes with a release store.
 pub inline fn publishedGraph(coll: *const Collection) ?*hnsw.Graph {
-    return @atomicLoad(?*hnsw.Graph, &coll.graph, .acquire);
+    // seq_cst rather than acquire: see `SearchGuard.begin`. A reader that
+    // takes the guard and then reads a stale pointer here, while
+    // `reclaimRetired` reads a stale zero from the counter, is exactly the
+    // outcome acquire/release permits and this forbids.
+    return @atomicLoad(?*hnsw.Graph, &coll.graph, .seq_cst);
 }
 
 /// Scan the points appended since the graph was built, merging them into `out`.

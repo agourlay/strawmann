@@ -69,8 +69,12 @@ pub const Scroll = struct {
     /// Orders replaced by a mutation. Mutated only under `write_lock`.
     retired: std.ArrayList(*ScrollOrder) = .empty,
 
+    /// seq_cst, not acquire: a scroll takes `SearchGuard` and *then* calls
+    /// this, while `retire` unpublishes and *then* reads the guard counter.
+    /// See `SearchGuard.begin` for why both halves have to be seq_cst for
+    /// "the reader has it, so do not free it" to hold.
     pub fn current(self: *const Scroll) ?*ScrollOrder {
-        return self.published.load(.acquire);
+        return self.published.load(.seq_cst);
     }
 
     pub fn publish(self: *Scroll, order: *ScrollOrder) void {
@@ -84,7 +88,7 @@ pub const Scroll = struct {
     /// freed under its binary search. `reclaimRetired` reads its counter after
     /// publication for the same reason; this is the same rule.
     pub fn retire(self: *Scroll, alloc: std.mem.Allocator, readers: *const std.atomic.Value(usize)) void {
-        if (self.published.swap(null, .acq_rel)) |old| {
+        if (self.published.swap(null, .seq_cst)) |old| {
             self.retired.append(alloc, old) catch {
                 // Keep it alive rather than free it under a reader; `deinit`
                 // cannot reach it from here, so this is a bounded leak on OOM,
@@ -93,7 +97,7 @@ pub const Scroll = struct {
             };
         }
         if (self.retired.items.len == 0) return;
-        if (readers.load(.acquire) != 0) return;
+        if (readers.load(.seq_cst) != 0) return;
         for (self.retired.items) |o| destroyScrollOrder(alloc, o);
         self.retired.clearRetainingCapacity();
     }
@@ -113,7 +117,7 @@ fn destroyScrollOrder(alloc: std.mem.Allocator, o: *ScrollOrder) void {
 
 /// Build (or return) the id-ordered offset list.
 ///
-/// The fast path is one acquire load: after the first page of an epoch every
+/// The fast path is one atomic load: after the first page of an epoch every
 /// scroll finds the order published and allocates nothing (§6.3). The build
 /// itself runs under the write lock, which is what makes it safe to read the
 /// id space and to publish: two readers cannot both build, and no upsert can

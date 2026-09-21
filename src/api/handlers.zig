@@ -1326,9 +1326,18 @@ const BatchJob = struct {
     };
 
     remaining: std.atomic.Value(u32),
-    /// The first refusal wins; `failed` is the flag, `failure` the detail,
-    /// written before the flag is raised (release) and read after the last
-    /// decrement (acquire).
+    /// The first refusal wins, in two words rather than one.
+    ///
+    /// `claimed` decides the winner, `failure` is the detail, and `failed` is
+    /// what advertises that the detail is there: written in that order, so a
+    /// thread that sees `failed` set can read `failure`. One word doing both
+    /// jobs cannot have that property, because the winner is only known after
+    /// the exchange that sets the flag, so the detail necessarily landed
+    /// after it. That was safe only by way of `remaining`: the writer's store
+    /// is ordered before its own decrement and `finishBatchJob` reads after
+    /// the last one. `runBatchSub` already loads the flag on its own, so the
+    /// property the field comment claimed is the one it should have.
+    claimed: std.atomic.Value(bool),
     failed: std.atomic.Value(bool),
     failure: QueryFailure,
     n: u32,
@@ -1364,6 +1373,7 @@ const BatchJob = struct {
         if (n < 2) return null;
         job.n = n;
         job.remaining = std.atomic.Value(u32).init(n);
+        job.claimed = std.atomic.Value(bool).init(false);
         job.failed = std.atomic.Value(bool).init(false);
         job.candidates = cands[0..off];
         return job;
@@ -1372,9 +1382,11 @@ const BatchJob = struct {
     fn fail(self: *BatchJob, f: QueryFailure) void {
         // First writer wins; later refusals are dropped, as they are on the
         // sequential path where the first one returns.
-        if (self.failed.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
-            self.failure = f;
-        }
+        if (self.claimed.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return;
+        self.failure = f;
+        // Release, and after the detail: whoever acquires this flag may read
+        // `failure`.
+        self.failed.store(true, .release);
     }
 };
 

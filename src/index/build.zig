@@ -78,6 +78,40 @@ pub const EntrySnapshot = struct {
     }
 };
 
+/// Assign levels to `from..count` and lay out their upper-level CSR offsets.
+///
+/// `Graph.init` sizes `upper_neighbours` from an *expected* level distribution
+/// (`(capacity / 4 + 1) * m * 2`, generous at m=16 where the expected total is
+/// `capacity * m / (m - 1)`), so the budget is a heuristic and the layout is
+/// what discovers whether it held. That check used to be
+/// `std.debug.assert(cursor <= upper_neighbours.len)`, which is nothing at all
+/// in ReleaseFast: past the budget, every `upperSlice` on a high node is an
+/// out-of-bounds write into the heap. `api/collections.zig` bounds `m` to
+/// [4, 512] specifically because of this and says in its own comment that "the
+/// only guard downstream is an assert that vanishes in ReleaseFast". This is
+/// that guard.
+///
+/// Returning an error rather than growing the arena: growth mid-build is the
+/// allocation policy §3 declines to pay for ("capacity is preallocated... and
+/// never grown mid-run"), and a build that cannot lay out its own graph is a
+/// refusal the caller can report, not a condition to paper over.
+///
+/// `cursor` is a `usize` while the offsets it writes are `u32`: the running
+/// total is bounded by the check below, but computing it in the narrower type
+/// would let it wrap past the comparison that catches it.
+fn layoutUpperLevels(g: *Graph, from: usize, count: usize) error{CsrOverflow}!void {
+    var cursor: usize = if (from == 0) 0 else g.upper_offsets[from];
+    for (from..count) |i| {
+        const node: u32 = @intCast(i);
+        const lvl = hnsw.assignLevel(g.params, node);
+        g.node_levels[node] = lvl;
+        g.upper_offsets[node] = @intCast(cursor);
+        cursor += @as(usize, lvl) * g.params.m;
+        if (cursor > g.upper_neighbours.len) return error.CsrOverflow;
+    }
+    g.upper_offsets[count] = @intCast(cursor);
+}
+
 pub const Builder = struct {
     graph: *Graph,
     scorer: Scorer,
@@ -152,7 +186,7 @@ pub const Builder = struct {
     /// §8.7 option (c). Deterministic for a given (seed, dataset): the
     /// insertion order is fixed, the level assignment is a pure function of the
     /// node id, and every tie is broken by the total order of §8.7.
-    pub fn buildSerial(self: *Builder, count: usize) void {
+    pub fn buildSerial(self: *Builder, count: usize) error{CsrOverflow}!void {
         const g = self.graph;
         g.count = 0;
         g.entry_point = empty_neighbour;
@@ -162,16 +196,7 @@ pub const Builder = struct {
 
         // Assign levels and lay out the CSR offsets first, so an insertion can
         // write into any node's upper lists without a second allocation pass.
-        var cursor: u32 = 0;
-        for (0..count) |i| {
-            const node: u32 = @intCast(i);
-            const lvl = hnsw.assignLevel(g.params, node);
-            g.node_levels[node] = lvl;
-            g.upper_offsets[node] = cursor;
-            cursor += @intCast(lvl * g.params.m);
-        }
-        g.upper_offsets[count] = cursor;
-        std.debug.assert(cursor <= g.upper_neighbours.len);
+        try layoutUpperLevels(g, 0, count);
 
         for (0..count) |i| {
             self.insertOne(@intCast(i));
@@ -604,16 +629,7 @@ pub fn extendParallel(
     // Levels are a pure function of the node id (`assignLevel`), so the ones
     // already assigned are the ones this would compute; only the new range
     // needs doing, and the CSR cursor picks up where the copy left it.
-    var cursor: u32 = if (from == 0) 0 else graph.upper_offsets[from];
-    for (from..count) |i| {
-        const node: u32 = @intCast(i);
-        const lvl = hnsw.assignLevel(graph.params, node);
-        graph.node_levels[node] = lvl;
-        graph.upper_offsets[node] = cursor;
-        cursor += @intCast(lvl * graph.params.m);
-    }
-    graph.upper_offsets[count] = cursor;
-    std.debug.assert(cursor <= graph.upper_neighbours.len);
+    try layoutUpperLevels(graph, from, count);
 
     if (count == 0) return .{ .threads = threads, .nodes = 0 };
     if (from >= count) {
@@ -743,6 +759,29 @@ pub fn extendParallel(
 const testing = std.testing;
 const dist = @import("../dist/dist.zig");
 
+test "a CSR layout that outruns the arena is an error, not an assert that vanishes" {
+    // `Graph.init` budgets `upper_neighbours` from an *expected* level
+    // distribution, so the layout pass is what finds out whether the budget
+    // held. It used to find out with `std.debug.assert`, which is nothing in
+    // ReleaseFast, and past the budget every `upperSlice` on a high node is an
+    // out-of-bounds write. `api/collections.zig` refuses `m < 4` because of
+    // exactly this and says so in its own comment.
+    const n = 512;
+    var g = try Graph.init(testing.allocator, Params.fromM(16, 100, 7), n);
+    defer g.deinit();
+
+    // The real budget lays all of them out, and they need more than one slot,
+    // so the shrunken arena below is genuinely too small rather than trivially
+    // sufficient.
+    try layoutUpperLevels(&g, 0, n);
+    try testing.expect(g.upper_offsets[n] > 1);
+
+    const full = g.upper_neighbours;
+    g.upper_neighbours = full[0..1];
+    try testing.expectError(error.CsrOverflow, layoutUpperLevels(&g, 0, n));
+    g.upper_neighbours = full; // `deinit` frees what `init` allocated
+}
+
 test "EntrySnapshot packs and unpacks the pair losslessly, including the sentinel" {
     for ([_]EntrySnapshot{
         .{ .entry_point = 0, .max_level = 0 },
@@ -862,7 +901,7 @@ test "serial build produces a connected, searchable graph" {
 
     var b = try Builder.init(testing.allocator, &g, corpus.scorer());
     defer b.deinit(testing.allocator);
-    b.buildSerial(n);
+    try b.buildSerial(n);
 
     try testing.expectEqual(@as(usize, n), g.count);
     try testing.expect(g.entry_point != empty_neighbour);
@@ -886,7 +925,7 @@ test "search recall against brute force is high at a reasonable ef" {
     defer g.deinit();
     var b = try Builder.init(testing.allocator, &g, corpus.scorer());
     defer b.deinit(testing.allocator);
-    b.buildSerial(n);
+    try b.buildSerial(n);
 
     // The index is rebound per query, because the query lives in the context
     // now: one line where it used to be an argument.
@@ -944,7 +983,7 @@ test "§8.7: the serial build is bit-reproducible for a given seed" {
         defer g.deinit();
         var b = try Builder.init(testing.allocator, &g, corpus.scorer());
         defer b.deinit(testing.allocator);
-        b.buildSerial(n);
+        try b.buildSerial(n);
 
         const sum = g.checksum();
         if (run == 0) first = sum else try testing.expectEqual(first, sum);
@@ -965,7 +1004,7 @@ test "§8.7: a different seed produces a different graph" {
         defer g.deinit();
         var b = try Builder.init(testing.allocator, &g, corpus.scorer());
         defer b.deinit(testing.allocator);
-        b.buildSerial(n);
+        try b.buildSerial(n);
         sums[i] = g.checksum();
     }
     try testing.expect(sums[0] != sums[1]);
@@ -981,7 +1020,7 @@ test "search returns results in the §8.7 total order" {
     defer g.deinit();
     var b = try Builder.init(testing.allocator, &g, corpus.scorer());
     defer b.deinit(testing.allocator);
-    b.buildSerial(n);
+    try b.buildSerial(n);
 
     var probe = corpus.probe(corpus.row(7));
     const idx = hnsw.Index{ .graph = &g, .scorer = .of(&probe) };
@@ -1012,7 +1051,7 @@ test "§8.6 metamorphic: an indexed vector finds itself" {
     defer g.deinit();
     var b = try Builder.init(testing.allocator, &g, corpus.scorer());
     defer b.deinit(testing.allocator);
-    b.buildSerial(n);
+    try b.buildSerial(n);
 
     var probe = corpus.probe(corpus.row(7));
     const idx = hnsw.Index{ .graph = &g, .scorer = .of(&probe) };
@@ -1055,7 +1094,7 @@ test "empty and single-point graphs behave" {
     try testing.expectEqual(@as(usize, 0), out.finish().len);
 
     // One point: it is the entry point and the only result.
-    b.buildSerial(1);
+    try b.buildSerial(1);
     var out2 = heap.TopK.init(&buf, 5);
     idx.search(16, &scratch, &out2);
     const got = out2.finish();
@@ -1076,7 +1115,7 @@ test "recall improves monotonically with ef" {
     defer g.deinit();
     var b = try Builder.init(testing.allocator, &g, corpus.scorer());
     defer b.deinit(testing.allocator);
-    b.buildSerial(n);
+    try b.buildSerial(n);
 
     var probe = corpus.probe(corpus.row(7));
     const idx = hnsw.Index{ .graph = &g, .scorer = .of(&probe) };
@@ -1210,14 +1249,14 @@ test "§8.7 (b): the parallel graph is checksum-stable for a fixed thread count"
         defer g1.deinit();
         var b1 = try Builder.init(testing.allocator, &g1, corpus.scorer());
         defer b1.deinit(testing.allocator);
-        b1.buildSerial(n);
+        try b1.buildSerial(n);
         const s1 = g1.checksum();
 
         var g2 = try Graph.init(testing.allocator, Params.fromM(8, 64, 31337), n);
         defer g2.deinit();
         var b2 = try Builder.init(testing.allocator, &g2, corpus.scorer());
         defer b2.deinit(testing.allocator);
-        b2.buildSerial(n);
+        try b2.buildSerial(n);
         try testing.expectEqual(s1, g2.checksum());
     }
 }
@@ -1529,7 +1568,7 @@ test "almost every node is reachable, not merely out-linked" {
     defer g.deinit();
     var b = try Builder.init(testing.allocator, &g, corpus.scorer());
     defer b.deinit(testing.allocator);
-    b.buildSerial(n);
+    try b.buildSerial(n);
 
     const r = try reachability(testing.allocator, &g);
     const orphans = n - r.reachable;
@@ -1791,7 +1830,7 @@ test "serial build: every node is reachable from the entry point on level 0" {
     defer g.deinit();
     var b = try Builder.init(testing.allocator, &g, corpus.scorer());
     defer b.deinit(testing.allocator);
-    b.buildSerial(n);
+    try b.buildSerial(n);
 
     try testing.expectEqual(@as(usize, n), try reachableAtLevel(testing.allocator, &g, 0));
 }

@@ -133,7 +133,7 @@ pub fn searchQuantized(
     // retired (never freed) while a guard is held, so this cannot be null and
     // cannot dangle. Re-reading `coll.quant` later could observe a
     // replacement mid-query and score stage 1 against two different codebooks.
-    const store = coll.quant.load(.acquire) orelse {
+    const store = coll.quant.load(.seq_cst) orelse {
         // A `quantize` that unpublished between `choosePath` and here: fall
         // back to the fp32 path, which answers the same question.
         search(coll, query, ef, .approximate, hnsw_scratch, out);

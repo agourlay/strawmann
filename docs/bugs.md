@@ -347,6 +347,70 @@ the wrong number was.
   denormals; the bandwidth probe was one FADD chain; huge pages were requested
   and never verified; perf counters were not a group.
 
+## Found by a later review pass
+
+*Validation that was one step behind the thing it protected:*
+
+- **`persist.load` handed `graph.bin`'s body to the checksum that was meant to
+  validate it.** The header CRC covers the header only, so `node_levels`,
+  `upper_offsets`, `entry_point` and `max_level` arrived unchecked, and the
+  first thing to touch them was `Graph.checksum`: it walks
+  `neighbours(node, lvl)` up to `node_levels[node]`, and `upperSlice` slices
+  `upper_offsets[node] + (lvl - 1) * m` with no bounds check of its own. A
+  corrupted CSR base offset was therefore an out-of-bounds read *inside the
+  detection*, `index out of bounds: index 4294901776, len 1056`, rather than
+  the `GraphChecksumMismatch` the file promises: a panic here, a wild read in
+  ReleaseFast. The same shape as the header whose `count` exceeded its
+  `capacity`, one file over. `validateGraph` now re-derives the layout
+  invariant the writer maintains, and the range of every id a traversal can
+  dereference, before the checksum runs; test "a corrupted graph file is
+  refused rather than silently degrading recall" covers all three cases,
+  including one only the checksum can see.
+
+- **The HNSW CSR budget was guarded by an assert.** `Graph.init` sizes
+  `upper_neighbours` from an *expected* level distribution, so the layout pass
+  is what discovers whether the estimate held, and it discovered it with
+  `std.debug.assert`. That is nothing at all in ReleaseFast, the mode §9 quotes
+  numbers from, and past the budget every `upperSlice` on a high node is an
+  out-of-bounds write into the heap. `api/collections.zig` already refused
+  `m < 4` because of this and said in its own comment that "the only guard
+  downstream is an assert that vanishes in ReleaseFast". It is now
+  `error.CsrOverflow` from one shared `layoutUpperLevels`, which both build
+  paths call.
+
+*Ordering that the comments described but the code did not implement:*
+
+- **Three reclamation rules were store-buffering pairs with seq_cst on one
+  side only.** `SearchGuard.begin` bumps the reader count as seq_cst and says
+  why; the other halves (`publishedGraph`, `Collection.quant`,
+  `Scroll.published`, and the counter loads in `reclaimRetired` and
+  `Scroll.retire`) were acquire/release, which does not forbid the outcome
+  that breaks the rule: the reader sees the old pointer while the writer sees
+  a zero count and frees it underneath. Every locked RMW is a full fence on
+  x86, so this was correct on the host and not in the source, which is written
+  against a weaker model. No test: the outcome is unobservable on x86 and the
+  fix is an ordering argument, not a behaviour.
+
+- **`BatchJob.fail` raised its flag before writing the detail the flag
+  advertises**, against its own field comment ("written before the flag is
+  raised"). One word cannot do both jobs, because the winner of the exchange
+  is only known once the flag is already set. It was safe by way of
+  `remaining`: the store is ordered before the failing worker's decrement and
+  `finishBatchJob` reads after the last one. But `runBatchSub` already loads
+  the flag on its own, so the property the comment claimed is the one worth
+  having. Claim and publication are now separate words. *(no test; the race it
+  would need is one `remaining` already excludes.)*
+
+*Consistency:*
+
+- **Four walks over `RepeatedIntegers` in `payload.zig`, two of which consumed
+  the payload before checking the field number.** `repeatedIntegersContain` and
+  `postingLen` parsed any length-delimited field as a packed varint run and
+  tested `field == 1` inside the loop, so malformed bytes under a field they
+  have no interest in abandoned the whole condition (`catch return false`)
+  instead of being skipped; `repeatedStringsContain` and `PostingLists` check
+  first. Only reachable from a hand-rolled client, and the four now agree.
+
 ## Found in Qdrant 1.19.0, by §8.6's metamorphic properties
 
 **Neither reproduces any more, and nothing here has run 1.19.0 since.** Both
