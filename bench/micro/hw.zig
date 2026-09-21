@@ -625,13 +625,43 @@ test "latency over a small region is fast, over a large region is slower" {
     // Non-vacuous sanity: an L2-resident chase must beat a DRAM-resident one.
     // Deliberately loose, this asserts the benchmark measures *something*
     // real, not a specific host's timings.
+    //
+    // Pinned and taken best-of-N, which is what the driver does and what this
+    // did not. Unpinned, the L2-resident arm swung 9 ns to 47 ns run to run on
+    // an idle host: on a hybrid part the thread migrates between clusters
+    // mid-measurement, and `pinToCpu`'s own doc says so. The DRAM arm barely
+    // moves (125 ns +/- 3), because it is bound by a latency that does not
+    // depend on which core is waiting -- so the spread was one-sided and the
+    // margin was whatever the small arm happened to draw. Under `zig build
+    // test` the three test binaries run as parallel build steps, so this one
+    // measures while the engine suite thrashes memory on every other core,
+    // and the draw occasionally crossed.
+    //
+    // Minimum rather than mean: for a latency probe, contention, migration and
+    // a frequency dip can only *add* time, so the smallest of a few runs is
+    // the least contaminated estimate of the quantity being asserted about.
+    // Averaging would fold the contamination in and need a tolerance to
+    // survive it, which is the kind of loose threshold that stops the test
+    // failing for real reasons too.
+    const here = currentCpu() orelse return error.SkipZigTest;
+    var prior: linux.cpu_set_t = undefined;
+    const had_prior = linux.errno(linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &prior)) == .SUCCESS;
+    pinToCpu(here) catch return error.SkipZigTest;
+    // Zig runs tests sequentially on one thread, so an affinity set here
+    // outlives the test. Put it back rather than pinning everything after it.
+    defer if (had_prior) linux.sched_setaffinity(0, &prior) catch {};
+
     var prng = std.Random.DefaultPrng.init(11);
     const small = try Region.alloc(256 * 1024, .small_pages);
     defer small.free();
     const big = try Region.alloc(256 * 1024 * 1024, .small_pages);
     defer big.free();
 
-    const l_small = latency(small, 100_000, prng.random());
-    const l_big = latency(big, 100_000, prng.random());
-    try std.testing.expect(l_small.ns_per_access < l_big.ns_per_access);
+    var best_small: f64 = std.math.inf(f64);
+    var best_big: f64 = std.math.inf(f64);
+    for (0..3) |_| {
+        best_small = @min(best_small, latency(small, 100_000, prng.random()).ns_per_access);
+        best_big = @min(best_big, latency(big, 100_000, prng.random()).ns_per_access);
+    }
+    try std.testing.expect(best_small < best_big);
 }

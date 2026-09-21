@@ -730,6 +730,34 @@ class ReportHostTests(unittest.TestCase):
         # The column every pass did measure is unaffected.
         self.assertEqual(rows[0]["qps"], 100.0)
 
+    def test_a_latency_percentile_one_pass_measured_is_not_published_either(self):
+        """The same refusal, one field set over, where it was missing.
+
+        The column loop refuses a partial column and says so; `latency` is a
+        nested dict and went through a bare `_median` that drops non-numbers,
+        so a percentile only one pass carried was published as that pass's raw
+        value on a row stamped `reps: 3`. The percentiles are what the
+        comparison tables print beside the throughput ratio, so an unmarked
+        pass-1 p95 there is exactly the shipped `ctx_switches_voluntary` bug
+        in the field a reader is most likely to quote.
+        """
+        import importlib
+        agg = importlib.import_module("aggregate")
+        workloads = importlib.import_module("workloads")
+
+        def row(mult, **lat):
+            base = {"p50": 1.0 * mult}
+            base.update(lat)
+            return {"id": "W6", "status": workloads.Status.ok,
+                    "qps": 100.0 * mult, "latency": base}
+
+        rows, _rsd, notes = agg.fold([[row(1, p95=9.0)], [row(2)], [row(3)]])
+        self.assertIsNone(rows[0]["latency"]["p95"])
+        self.assertTrue(any("latency p95 measured in 1 of 3" in n
+                            for n in notes), notes)
+        # The percentile every pass did measure is still medianed.
+        self.assertEqual(rows[0]["latency"]["p50"], 2.0)
+
     def test_the_fold_medians_workloads_own_columns_too(self):
         """The half of the old list that no module could derive, and that drifted.
 

@@ -256,7 +256,25 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
         lat = [r.get("latency") or {} for r in got]
         keys = {k for d in lat for k in d}
         if keys:
-            merged["latency"] = {k: _median([d.get(k) for d in lat]) for k in keys}
+            # Same rule as the numeric columns above, and for the same reason:
+            # `_median` drops non-numbers, so a percentile one pass of three
+            # carried was medianed over that single value and published on a
+            # row stamped `reps: 3` with nothing to say so. The percentiles
+            # feed the comparison tables, so an unmarked pass-1 value there is
+            # the same silently-wrong number the loop above refuses.
+            folded = {}
+            for k in sorted(keys):
+                have = [d.get(k) for d in lat
+                        if isinstance(d.get(k), (int, float))
+                        and not isinstance(d.get(k), bool)]
+                if len(have) != n:
+                    folded[k] = None
+                    notes.append(f"{wid}: latency {k} measured in {len(have)} "
+                                 f"of {n} passes, so no median is published "
+                                 f"for it")
+                    continue
+                folded[k] = _median(have)
+            merged["latency"] = folded
         merged["reps"] = n
         # Said on the row, because a reader looking at one row should not have
         # to find the run-level record to learn it is a median of three.

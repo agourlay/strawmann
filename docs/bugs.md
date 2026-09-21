@@ -411,6 +411,32 @@ the wrong number was.
   instead of being skipped; `repeatedStringsContain` and `PostingLists` check
   first. Only reachable from a hand-rolled client, and the four now agree.
 
+*The harness, and its own tests:*
+
+- **`aggregate.fold` published a latency percentile one pass of three carried
+  as a three-pass median.** The numeric-column loop refuses a partial column
+  and says so in a note (the `ctx_switches_voluntary` entry above is the
+  shipped example that put it there), and the `latency` dict went through a
+  bare `_median`, which drops non-numbers and medians whatever is left. A p95
+  present in one pass was published as that pass's raw value on a row stamped
+  `reps: 3`, with nothing to distinguish it and no note, in the field the
+  comparison tables print beside the throughput ratio. Test
+  "a_latency_percentile_one_pass_measured_is_not_published_either".
+
+- **The pointer-chase sanity test was one unpinned shot per region.** `zig
+  build test` builds three test binaries as independent steps and runs them in
+  parallel, so the hardware test measures while the engine suite thrashes
+  memory on every other core. The DRAM arm barely notices (125 ns idle,
+  152 ns loaded: it waits on a latency that does not care which core waits),
+  while the L2-resident arm has nothing left to be resident in. Measured over
+  four full-suite runs it read 73, 95, **143** and 101 ns against a DRAM arm of
+  152 to 158, so the assertion `small < big` came down to 143 against 152, and
+  it lost often enough to be seen. Unpinned it also drew a cluster per run on
+  this hybrid host, 9 ns to 47 ns idle, which `pinToCpu`'s own doc predicts and
+  `docs/cost-model.md` records for the driver. Now pinned, with the minimum of
+  three runs per arm, since contention can only add time to a latency probe:
+  28 to 30 ns against 136 to 138 under the same full-suite load.
+
 ## Found in Qdrant 1.19.0, by §8.6's metamorphic properties
 
 **Neither reproduces any more, and nothing here has run 1.19.0 since.** Both
