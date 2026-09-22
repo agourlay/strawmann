@@ -310,6 +310,12 @@ pub const Workspace = struct {
     /// by `payload.Store.select` from the index (§6.3: preallocated, sized
     /// with the HNSW scratch to the largest collection this worker served).
     filter_bits: []u64 = &.{},
+    /// `ensureGather`'s buffers, and what they are currently sized for.
+    gather_queries: []f32 = &.{},
+    gather_results: []index.Candidate = &.{},
+    gather_probe: []u8 = &.{},
+    gather_dim: usize = 0,
+    gather_stride: usize = 0,
 
     pub const max_limit = 4096;
     pub const max_ef = 4096;
@@ -349,6 +355,35 @@ pub const Workspace = struct {
         self.hnsw_capacity = want_cap;
     }
 
+    /// Scratch for a gathered exact batch: K query vectors, K probe buffers and
+    /// K result heaps, so one pass of the arena can answer K queries.
+    ///
+    /// Lazily sized like `ensureQuant` and for the same reason: a worker that
+    /// never serves an all-exact batch never pays for it, and §6.3's
+    /// no-allocation rule is about the *query* path, which this is not on once
+    /// it has been sized. Freed and regrown only when a larger collection
+    /// arrives, so the steady state is one allocation per worker.
+    pub fn ensureGather(self: *Workspace, alloc: std.mem.Allocator, coll: *const core.Collection) !void {
+        const stride = core.collection.probeScratchStride(coll);
+        const k = core.collection.max_gather;
+        if (self.gather_dim >= coll.config.dim and self.gather_stride >= stride) return;
+
+        const queries = try alloc.alloc(f32, k * coll.config.dim);
+        errdefer alloc.free(queries);
+        const results = try alloc.alloc(index.Candidate, k * max_limit);
+        errdefer alloc.free(results);
+        const probe = try alloc.alignedAlloc(u8, .fromByteUnits(core.collection.Probe.buffer_align), k * stride);
+
+        if (self.gather_queries.len > 0) alloc.free(self.gather_queries);
+        if (self.gather_results.len > 0) alloc.free(self.gather_results);
+        if (self.gather_probe.len > 0) alloc.free(self.gather_probe);
+        self.gather_queries = queries;
+        self.gather_results = results;
+        self.gather_probe = probe;
+        self.gather_dim = coll.config.dim;
+        self.gather_stride = stride;
+    }
+
     pub fn ensureQuant(self: *Workspace, alloc: std.mem.Allocator, dim: usize) !void {
         if (self.quant_dim >= dim and self.qscratch != null) return;
         const want = @max(dim, self.quant_dim);
@@ -377,6 +412,9 @@ pub const Workspace = struct {
         if (self.hnsw_owned) |*s| s.deinit(alloc);
         if (self.qscratch) |*s| s.deinit(alloc);
         if (self.filter_bits.len > 0) alloc.free(self.filter_bits);
+        if (self.gather_queries.len > 0) alloc.free(self.gather_queries);
+        if (self.gather_results.len > 0) alloc.free(self.gather_results);
+        if (self.gather_probe.len > 0) alloc.free(self.gather_probe);
     }
 };
 
@@ -980,6 +1018,15 @@ fn queryBatch(ctx: *Context, req: *const server.Request, body: []const u8, out: 
         return err(req, .internal, "workspace allocation failed");
     };
 
+    // Gather before fanning out. For an *exact* batch the two go in opposite
+    // directions: fanning K exact queries across workers costs K passes over
+    // the same arena, and W9's own numbers say the engine ahead is the one that
+    // reads less (findings 45). `runGatheredExact` reads each row once and
+    // scores all K against it. It answers only the narrow case it is certain
+    // about, all-exact and unfiltered, and returns null for anything else, so
+    // the fan-out and the sequential path below are untouched.
+    if (runGatheredExact(ctx, req, qb, coll, out, held)) |done| return done;
+
     // Fan out when there is more than one query and room to hold the
     // results; otherwise the plain sequential path below.
     if (BatchJob.plan(req, qb, coll)) |job| {
@@ -1017,6 +1064,108 @@ const QueryFailure = struct {
     status: Status,
     message: []const u8,
 };
+
+/// Answer an all-exact, unfiltered `QueryBatch` in one pass of the arena.
+///
+/// `null` when this batch is not that shape, which leaves every existing path
+/// exactly as it was: more queries than `max_gather`, any query that is not
+/// exact, any filter, any `offset`/`limit` past the page bound, any of the
+/// options `searchOne` refuses by name. The narrowness is the point, since the
+/// win is only available where the whole batch scans the same rows.
+///
+/// Correctness is `collection.bruteForceRangeMulti`'s: the differential test
+/// there asserts K gathered queries return the same ids and the same scores as
+/// K sequential ones, tombstones and filters included.
+fn runGatheredExact(
+    ctx: *Context,
+    req: *const server.Request,
+    qb: msg.QueryBatchPoints,
+    coll: *core.Collection,
+    out: *server.ResponseBuf,
+    held: Engine.Handle,
+) ?server.Completion {
+    // Only where a scan is what every query would do anyway. `fullScanPreferred`
+    // is the other route into the exact path and is a property of the
+    // collection, so it applies to the whole batch or to none of it.
+    const scan_all = fullScanPreferred(coll);
+
+    var n: usize = 0;
+    var it = qb.queryIterator();
+    while (it.next() catch return null) |q| {
+        if (n == core.collection.max_gather) return null;
+        if (!(q.params.exact or scan_all)) return null;
+        // Anything with a filter, a refused option or a page past the bound
+        // goes the ordinary way rather than being half-handled here.
+        if (q.filter() catch return null) |_| return null;
+        if (q.params.indexed_only or q.with_vectors) return null;
+        if (q.using) |name| if (name.len > 0) return null;
+        const want = pageWant(q.limit, q.offset) orelse return null;
+        if (want == 0 or want > Workspace.max_limit) return null;
+        const query = q.query orelse return null;
+        const dense = query.nearest.dense orelse return null;
+        if (dense.dim() != coll.config.dim) return null;
+        n += 1;
+    }
+    if (n < 2) return null; // one query is not a gather
+
+    ctx.workspace.ensureGather(ctx.engine.alloc, coll) catch {
+        held.release();
+        return err(req, .internal, "workspace allocation failed");
+    };
+
+    // Decode and preprocess each query into its own slot, by the same funnel
+    // `searchOne` uses: per datatype, not per metric.
+    const dim = coll.config.dim;
+    var queries: [core.collection.max_gather][]const f32 = undefined;
+    var tops: [core.collection.max_gather]index.TopK = undefined;
+    var top_ptrs: [core.collection.max_gather]*index.TopK = undefined;
+    var wants: [core.collection.max_gather]usize = undefined;
+    var i: usize = 0;
+    it = qb.queryIterator();
+    while (it.next() catch return null) |q| {
+        const raw = ctx.workspace.gather_queries[i * dim ..][0..dim];
+        const dense = q.query.?.nearest.dense.?;
+        _ = dense.copyInto(raw) catch {
+            held.release();
+            return err(req, .invalid_argument, "query vector too large");
+        };
+        if (!allFinite(raw)) {
+            held.release();
+            return err(req, .invalid_argument, "query vector contains a NaN or infinite component");
+        }
+        if (coll.config.datatype.normalisesAtIngest(coll.config.metric)) {
+            _ = dist.norm.preprocessInPlace(coll.config.metric, raw);
+        }
+        queries[i] = raw;
+        wants[i] = pageWant(q.limit, q.offset).?;
+        tops[i] = index.TopK.init(ctx.workspace.gather_results[i * Workspace.max_limit ..][0..wants[i]], wants[i]);
+        top_ptrs[i] = &tops[i];
+        i += 1;
+    }
+
+    // One pass, under one guard: the arena must not be replaced mid-scan, and
+    // taking the guard once is also what makes this cheaper than K searches.
+    {
+        const guard = core.collection.SearchGuard.begin(coll);
+        defer guard.end();
+        core.collection.bruteForceRangeMulti(coll, queries[0..n], 0, @intCast(coll.id_space.count()), null, ctx.workspace.gather_probe, top_ptrs[0..n]);
+    }
+    defer held.release();
+
+    var w = wire.Writer.init(out.available());
+    var resp = msg.QueryBatchResponseWriter.init(&w);
+    i = 0;
+    it = qb.queryIterator();
+    while (it.next() catch |e| return decodeErr(req, e)) |q| {
+        var fail: ?QueryFailure = null;
+        encodeOne(coll, q, tops[i].finish(), &w, &resp, &fail) catch {
+            const f = fail.?;
+            return err(req, f.status, f.message);
+        };
+        i += 1;
+    }
+    return ok(req, out.commit(w.pos));
+}
 
 /// Validate one query and search it into this worker's result heap. Returns
 /// the ranked candidates, or null with `fail` set. Everything about the query

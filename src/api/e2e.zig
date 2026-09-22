@@ -4659,3 +4659,123 @@ test "e2e: every deferred RPC answers UNIMPLEMENTED, names itself, and cites §2
         try testing.expectEqual(@as(usize, 1), resp.headers_frames);
     }
 }
+
+test "e2e: a gathered exact batch answers what the same queries answer one at a time" {
+    // `runGatheredExact` reads the arena once and scores every query in the
+    // batch against each row, instead of one pass per query. The property it
+    // has to hold is that nothing about the answers changes, so this asks the
+    // server the same questions twice: once as a batch of four, once as four
+    // batches of one, which take different paths through the handler.
+    var h = try Harness.start(testing.allocator);
+    defer h.stop();
+    var c = try Client.connect(h.port);
+    defer c.close();
+
+    var req_buf: [1 << 16]u8 = undefined;
+    var out: [1 << 16]u8 = undefined;
+
+    {
+        const body = try buildCreateCollection(&req_buf, "gather", 4, 3);
+        const resp = try c.call("/qdrant.Collections/Create", body, &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+    }
+
+    // Small enough to sit under `full_scan_threshold`, which is what makes
+    // every query on it exact and so makes this the gathered path.
+    var prng = std.Random.DefaultPrng.init(0x6A17);
+    const rnd = prng.random();
+    const n = 64;
+    var vecs: [n][4]f32 = undefined;
+    var slices: [n][]const f32 = undefined;
+    var ids: [n]u64 = undefined;
+    for (0..n) |i| {
+        for (&vecs[i]) |*x| x.* = rnd.floatNorm(f32);
+        slices[i] = &vecs[i];
+        ids[i] = 100 + i;
+    }
+    {
+        const body = try buildUpsert(&req_buf, "gather", true, &ids, &slices);
+        const resp = try c.call("/qdrant.Points/Upsert", body, &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+    }
+
+    const Parsed = struct {
+        ids: [8]u64 = undefined,
+        scores: [8]f32 = undefined,
+        per_query: [8]usize = undefined,
+        queries: usize = 0,
+        total: usize = 0,
+    };
+    const parse = struct {
+        fn go(body: []const u8) !Parsed {
+            var p: Parsed = .{};
+            var r = wire.Reader.init(body);
+            while (!r.atEnd()) {
+                const t = try r.tag();
+                if (t.field != 1) {
+                    try r.skip(t.wire_type);
+                    continue;
+                }
+                var batch = try r.nested();
+                var this_query: usize = 0;
+                while (!batch.atEnd()) {
+                    const bt = try batch.tag();
+                    if (bt.field != 1) {
+                        try batch.skip(bt.wire_type);
+                        continue;
+                    }
+                    var sp = try batch.nested();
+                    while (!sp.atEnd()) {
+                        const st = try sp.tag();
+                        switch (st.field) {
+                            1 => {
+                                var idr = try sp.nested();
+                                p.ids[p.total] = (try msg.PointId.decode(&idr)).num;
+                            },
+                            3 => p.scores[p.total] = try sp.float(),
+                            else => try sp.skip(st.wire_type),
+                        }
+                    }
+                    p.total += 1;
+                    this_query += 1;
+                }
+                p.per_query[p.queries] = this_query;
+                p.queries += 1;
+            }
+            return p;
+        }
+    }.go;
+
+    // Four queries in one request: the gathered path.
+    var qv: [4][4]f32 = undefined;
+    var qs: [4][]const f32 = undefined;
+    for (0..4) |i| {
+        for (&qv[i]) |*x| x.* = rnd.floatNorm(f32);
+        qs[i] = &qv[i];
+    }
+    const limit = 2;
+    const gathered = blk: {
+        const body = try buildQueryBatch(&req_buf, "gather", &qs, limit);
+        const resp = try c.call("/qdrant.Points/QueryBatch", body, &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+        break :blk try parse(resp.body);
+    };
+    try testing.expectEqual(@as(usize, 4), gathered.queries);
+    try testing.expectEqual(@as(usize, 4 * limit), gathered.total);
+
+    // The same four, one request each: the sequential path, since a batch of
+    // one is not a gather.
+    for (0..4) |i| {
+        var one: [1][]const f32 = .{qs[i]};
+        const body = try buildQueryBatch(&req_buf, "gather", &one, limit);
+        const resp = try c.call("/qdrant.Points/QueryBatch", body, &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+        const solo = try parse(resp.body);
+        try testing.expectEqual(@as(usize, 1), solo.queries);
+        try testing.expectEqual(@as(usize, limit), solo.total);
+        for (0..limit) |k| {
+            try testing.expectEqual(solo.ids[k], gathered.ids[i * limit + k]);
+            try testing.expectEqual(solo.scores[k], gathered.scores[i * limit + k]);
+        }
+    }
+}
