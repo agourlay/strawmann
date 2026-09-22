@@ -1179,18 +1179,68 @@ this is paired:
 
 **Nothing.** Stabilising the level assignment leaves both the spread and the
 level of recall exactly where they were, and both stay 0.0007 below what file
-order returns. So the level draw is not the lever, despite being the part of
-this that looks most like a bug: what the graph is made of is the order the
-points were *inserted* in, and each point's neighbours are chosen against
-whatever was already linked when it arrived.
+order returns, despite the level draw being the part of this that looks most
+like a bug.
 
-That kills the obvious fix. Keying the level on the external id would make the
-level assignment reproducible and would not make the graph reproducible. The
-lever is the insertion sequence: a bulk build that inserted in external-id
-order rather than in offset order would put every pass back in the file-order
-regime, which is both the tighter one and the better one by 0.0007 of recall.
-`assignLevelKey` and `Graph.level_keys` stay as the instrument that measured
-this, not as a fix; nothing in the engine sets them.
+The obvious next candidate is the other half, the sequence, and
+`Graph.insert_order` tests it the same way: link the points in vector order
+whatever order they arrived in. **It is worse.** Five
+builds, batch-100 arrival, `ef` 512:
+
+| | recall | spread |
+|---|--:|--:|
+| arrival order, arrival levels | 0.99871 to 0.99895 | 0.00024 |
+| arrival order, point levels | 0.99870 to 0.99893 | 0.00023 |
+| vector order, arrival levels | 0.99634 to 0.99880 | **0.00246** |
+| vector order, point levels | 0.99646 to 0.99665 | 0.00019 |
+| file order (both, by construction) | 0.99955 | 0.00000 |
+
+Fixing the sequence alone multiplies the spread tenfold. Fixing both together is
+tight again, and 0.0029 *below* the file-order build it was meant to reproduce,
+where the only remaining difference is which points sit at which level.
+
+### The level draw is worth more than the whole published spread
+
+The cleanest arm says it alone. File order, one insertion sequence, three
+builds, changing nothing but the hash the level is drawn from (the node id as
+four bytes, against the same number as eight):
+
+| level drawn from | ef 128 | ef 512 |
+|---|--:|--:|
+| `assignLevel(node)` | 0.98870 / 0.98873 / 0.98874 | 0.99955 x3 |
+| `assignLevelKey(node)` | 0.98665 / 0.98667 / 0.98665 | 0.99727 / 0.99726 / 0.99727 |
+
+Each is reproducible to 0.00002 and they are **0.0023 apart** at `ef` 512, which
+is larger than the 0.00168 this entry is about. Two equally valid pseudo-random
+level assignments over one corpus, in one insertion order, build graphs that
+differ by more than the published pass-to-pass draw.
+
+And it is not an artifact of that one hash. The same build at four level seeds,
+file order, two builds each, recall@10:
+
+| seed | ef 128 | ef 512 |
+|---|--:|--:|
+| `0x57ea3111` (the engine's default) | 0.98871 / 0.98872 | 0.99955 / 0.99955 |
+| `0x1` | 0.98883 / 0.98884 | 0.99955 / 0.99955 |
+| `0x2` | 0.98665 / 0.98663 | 0.99739 / 0.99738 |
+| `0x3` | 0.98739 / 0.98740 | 0.99794 / 0.99794 |
+
+Each seed reproduces itself to 0.00001 and the four span **0.00216**. §8.7
+records the seed in `meta.json` as provenance; what it does not record is that
+the choice is worth more than the pass-to-pass draw this entry set out to
+explain, and that two of these four sit at what looks like a ceiling while two
+do not. Nothing in the comparison is wrong because of it, since both engines are
+measured as configured, but a recall figure quoted without its seed is quoted
+without 0.002 of its own uncertainty.
+
+That is where this stops, because it changes the question. The upload's arrival
+order is demonstrated as *what varies between passes*, the serial arm being
+exactly reproducible and the concurrent one not; but neither of its halves is
+separately fixable. Stabilising the levels changes nothing, stabilising the
+sequence makes it worse, and stabilising both lands on a different and worse
+graph than file order builds. `assignLevelKey`, `Graph.level_keys` and
+`Graph.insert_order` stay as the instruments that measured this; nothing in the
+engine sets any of them.
 
 ### What this does not say
 

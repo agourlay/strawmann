@@ -17,21 +17,20 @@ with the result. `--max-segment-size` is in the harness and the sift1m tier is
 clean; the tier the finding is about was never re-run. Until it is, the largest
 claim this project wants to make is unmeasured.
 
-**2. Bulk-build in external-id order, not in arrival order (findings 34).**
-The mechanism is settled and it was not the builder: the per-pass recall draw
-is the *upload*. `ids.IdSpace.reserve` hands out internal offsets as points
-arrive, the bulk build then inserts in offset order, and W2 uploads over eight
-streams, so every pass links the corpus in a different sequence. Uploading
-serially collapses the `ef` 512 spread from 0.00120 to 0.00000 and buys 0.0007
-of recall ([`decisions.md`](decisions.md), `bench/harness/upload_order_ab.py`).
-The level assignment, which the same reordering also moves, was measured and is
-not the lever.
+**2. Why one level assignment beats another by 0.0022 (findings 34).**
+The per-pass draw is the upload's arrival order, demonstrated in the real path:
+a serial upload returns the same recall three times over and a concurrent one
+spreads 0.00120 at `ef` 512 ([`decisions.md`](decisions.md)). What is not
+settled is *why*, and neither half of a reordered arrival is separately
+fixable. Stabilising the level draw changes nothing, stabilising the insertion
+sequence multiplies the spread tenfold, and stabilising both builds a graph
+0.0029 below what file order builds.
 
-So the lever is the sequence: `build.extendParallel` hands its workers node ids
-0 to n, and handing them a permutation sorted by external id would put every
-pass in the file-order regime whatever the upload did. What is unmeasured: what
-the sort costs W2 (1M u64, once per build), whether the gain survives the whole
-harness path rather than an isolated `bench2`, what it means for a corpus whose
-ids are not the base-file row index, and whether the entry point needs a
-deterministic tie-break too (`promoteEntry` resolves equal max-level nodes by
-arrival).
+Underneath it is something larger than the finding it came from. Four level
+seeds, one corpus, one insertion order, two builds each: 0.99955, 0.99955,
+0.99739, 0.99794 at `ef` 512, each reproducible to 0.00001. **The seed is worth
+0.00216**, more than the pass-to-pass draw and more than the gap between the
+engines at that point, and §8.7 records it as provenance without recording what
+it costs. Until that is understood, a recall figure is quoted without 0.002 of
+its own uncertainty, and the instruments for it are in place: `graph-diff
+--seed`, `--stable-levels`, `--stable-order`.

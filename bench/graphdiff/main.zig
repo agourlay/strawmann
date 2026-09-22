@@ -654,6 +654,14 @@ const Args = struct {
     /// decides what the greedy descent had to work with when each point was
     /// linked. Without it they move together and neither can be blamed.
     stable_levels: bool = false,
+    /// Link the points in vector-id order whatever order they arrived in
+    /// (`Graph.insert_order`).
+    ///
+    /// The engine's stand-in for "sorted by external id": the bulk build links
+    /// in offset order, which is arrival order, and this is the lever
+    /// findings 34 ends at. With `--shuffle`, a spread that survives this is a
+    /// spread the insertion sequence does not explain.
+    stable_order: bool = false,
 };
 
 fn parseArgs(argv: []const []const u8) !Args {
@@ -672,6 +680,8 @@ fn parseArgs(argv: []const []const u8) !Args {
             a.histogram = true;
         } else if (std.mem.eql(u8, arg, "--stable-levels")) {
             a.stable_levels = true;
+        } else if (std.mem.eql(u8, arg, "--stable-order")) {
+            a.stable_order = true;
         } else if (std.mem.eql(u8, arg, "--shuffle")) {
             a.shuffle = try std.fmt.parseInt(usize, try val(argv, &i), 10);
             if (a.shuffle == 0) return error.ShuffleBatchZero;
@@ -809,9 +819,9 @@ pub fn main(init: std.process.Init) !void {
     try w.print("points   {d} x {d}, {s}\n", .{ corpus.count, corpus.dim, @tagName(args.kernel) });
     if (args.shuffle != 0) try w.print("arrival  reordered in batches of {d} " ++
         "(the harness uploads with -b 100 -t 8 -p 8)\n", .{args.shuffle});
-    try w.print("params   m={d} ef_construct={d} seed=0x{x} threads={d}{s}{s}\n", .{
-        args.m,                                                                         args.ef_construct,                                              args.seed, threads,
-        if (args.shuffle != 0) ", a fresh arrival order per build" else ", file order", if (args.stable_levels) ", levels keyed on the vector" else "",
+    try w.print("params   m={d} ef_construct={d} seed=0x{x} threads={d}{s}{s}{s}\n", .{
+        args.m,                                                                         args.ef_construct,                                              args.seed,                                                 threads,
+        if (args.shuffle != 0) ", a fresh arrival order per build" else ", file order", if (args.stable_levels) ", levels keyed on the vector" else "", if (args.stable_order) ", linked in vector order" else "",
     });
     try w.flush();
 
@@ -863,6 +873,13 @@ pub fn main(init: std.process.Init) !void {
             for (k, 0..) |*x, node| x.* = if (order) |o| o[node] else node;
             g.level_keys = k;
             keys = k;
+        }
+        // `inv[vector]` is the node holding it, so walking `inv` in vector
+        // order links the points in the order the file has them, whatever
+        // order they arrived in. With no permutation the two coincide and the
+        // graph does not need telling.
+        if (args.stable_order) {
+            if (inv) |iv| g.insert_order = iv;
         }
         const t0 = nowNs();
         const stats = try build_hnsw.buildParallel(alloc, g, corpus.scorer(), corpus.count, threads);
@@ -1075,6 +1092,8 @@ test "the argument parser refuses what it cannot measure" {
     try testing.expectError(error.ShuffleBatchZero, parseArgs(&.{ "g", "v.fbin", "--shuffle", "0" }));
     const stable = try parseArgs(&.{ "g", "v.fbin", "--shuffle", "100", "--stable-levels" });
     try testing.expect(stable.stable_levels and stable.shuffle == 100);
+    const ordered = try parseArgs(&.{ "g", "v.fbin", "--shuffle", "100", "--stable-order" });
+    try testing.expect(ordered.stable_order and !ordered.stable_levels);
 }
 
 test "a reordering keeps every point exactly once" {

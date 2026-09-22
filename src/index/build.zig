@@ -689,8 +689,13 @@ pub fn extendParallel(
     // Seeded from node 0 on a bulk build; an extension inherits whatever the
     // copied graph already had, which is a real entry point over real edges.
     if (from == 0) {
-        graph.entry_point = 0;
-        graph.max_level = graph.node_levels[0];
+        // The first node in the *insertion* order, not node 0: a build that
+        // links its points in another sequence must seed from the point it
+        // links first, or every other insertion descends from a node with no
+        // edges yet.
+        const first: u32 = if (graph.insert_order) |o| o[0] else 0;
+        graph.entry_point = first;
+        graph.max_level = graph.node_levels[first];
     }
     graph.count = count; // neighbours() needs the full range addressable
 
@@ -744,7 +749,7 @@ pub fn extendParallel(
             while (true) {
                 const i = sh.next.fetchAdd(1, .monotonic);
                 if (i >= sh.count) break;
-                const node: u32 = @intCast(i);
+                const node: u32 = if (sh.graph.insert_order) |o| o[i] else @intCast(i);
                 b.insertOne(node);
 
                 // Entry point promotion, under its own lock. The unlocked
@@ -1202,6 +1207,88 @@ test "recall improves monotonically with ef" {
         last_recall = recall;
     }
     try testing.expect(last_recall > 0.95);
+}
+
+test "a permuted insertion order builds a graph that is just as good" {
+    // `decisions.md`: the sequence points are linked in is what makes two
+    // uploads of one corpus two different graphs, so the insertion order is
+    // the lever, and a build that takes one has to remain a correct build.
+    // Two things asserted: the order is honoured (the graph differs), and the
+    // graph is no worse (recall holds, and nothing is left unreachable).
+    const n = 3000;
+    const dim = 24;
+    const k = 10;
+    var corpus = try Corpus.init(testing.allocator, n, dim, 0x5a1, .euclid);
+    defer corpus.deinit(testing.allocator);
+
+    const order = try testing.allocator.alloc(u32, n);
+    defer testing.allocator.free(order);
+    for (order, 0..) |*o, i| o.* = @intCast(n - 1 - i);
+
+    var checksums: [2]u64 = undefined;
+    var recalls: [2]f64 = undefined;
+    for (0..2) |arm| {
+        var g = try Graph.init(testing.allocator, Params.fromM(16, 100, 7), n);
+        defer g.deinit();
+        if (arm == 1) g.insert_order = order;
+        _ = try buildParallel(testing.allocator, &g, corpus.scorer(), n, 4);
+        checksums[arm] = g.checksum();
+
+        // The seed node is the first one the build links, whichever that is.
+        try testing.expect(g.entry_point != empty_neighbour);
+
+        var scratch = try hnsw.Index.Scratch.init(testing.allocator, n, 128);
+        defer scratch.deinit(testing.allocator);
+        var hits: usize = 0;
+        for (0..100) |qi| {
+            const q = corpus.row(@intCast(qi * 7 % n));
+            var truth_buf: [k]Candidate = undefined;
+            const truth = bruteTop(&corpus, n, q, k, &truth_buf);
+            var probe = corpus.probe(q);
+            const idx = hnsw.Index{ .graph = &g, .scorer = .of(&probe) };
+            var got_buf: [k]Candidate = undefined;
+            var out = heap.TopK.init(&got_buf, k);
+            idx.search(128, &scratch, &out);
+            for (out.finish()) |gc| {
+                for (truth) |t| {
+                    if (t.id == gc.id) {
+                        hits += 1;
+                        break;
+                    }
+                }
+            }
+        }
+        recalls[arm] = @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(100 * k));
+
+        // Every node reachable, which is `repairUnreachable`'s contract and
+        // the property a reversed insertion order is most likely to break.
+        const seen = try testing.allocator.alloc(bool, n);
+        defer testing.allocator.free(seen);
+        @memset(seen, false);
+        var queue = std.ArrayList(u32).empty;
+        defer queue.deinit(testing.allocator);
+        try descentSeeds(testing.allocator, &g, seen, &queue);
+        var head: usize = 0;
+        while (head < queue.items.len) : (head += 1) {
+            for (g.level0Slice(queue.items[head])) |nb| {
+                if (nb == empty_neighbour) break;
+                if (nb < n and !seen[nb]) {
+                    seen[nb] = true;
+                    try queue.append(testing.allocator, nb);
+                }
+            }
+        }
+        var unreachable_count: usize = 0;
+        for (seen) |x| {
+            if (!x) unreachable_count += 1;
+        }
+        try testing.expectEqual(@as(usize, 0), unreachable_count);
+    }
+
+    try testing.expect(checksums[0] != checksums[1]);
+    try testing.expect(recalls[0] > 0.9);
+    try testing.expect(recalls[1] > 0.9);
+    try testing.expect(@abs(recalls[0] - recalls[1]) < 0.05);
 }
 
 test "parallel build produces a searchable graph with good recall" {

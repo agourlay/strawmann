@@ -103,6 +103,20 @@ pub const Graph = struct {
     /// afterwards.
     level_keys: ?[]const u64 = null,
 
+    /// Optional order to *insert* nodes in, as node ids: `insert_order[k]` is
+    /// the node the build links k-th. Null inserts 0, 1, 2, ...
+    ///
+    /// Which is arrival order, because `ids.IdSpace.reserve` hands out offsets
+    /// as points arrive. `decisions.md` measures what that costs: eight
+    /// concurrent upload streams link the corpus in a different sequence every
+    /// pass, which is the whole of findings 34's per-build recall draw, and it
+    /// is the *sequence* rather than the level assignment that does it. An
+    /// order derived from something stable (the external id) is what puts
+    /// every pass back in one regime.
+    ///
+    /// Borrowed, not owned, and covers `[from, count)` at its own indices.
+    insert_order: ?[]const u32 = null,
+
     entry_point: u32 = empty_neighbour,
     max_level: u8 = 0,
     count: usize = 0,
