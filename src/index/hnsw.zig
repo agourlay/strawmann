@@ -391,6 +391,21 @@ pub const Index = struct {
             if (out.isFull() and current.worse(out.peekWorst())) break;
 
             const ns = self.graph.neighbours(current.id, level);
+            // And the *next* candidate's list, while this one's rows are being
+            // fetched. The two-pass prefetch below covers the neighbours of the
+            // node in hand; what it cannot cover is the load that starts the
+            // next iteration, `neighbours(peek().id)`, which is a random row of
+            // a 128 MB array and is the one link of the chain nothing hides.
+            // At `-p 1` there is no other query on the core to overlap it with,
+            // which is where W3 spends 972k cycles per query against W4's 650k
+            // for the same work (profiled: `Probe.prefetch` is 17.1% of samples
+            // at `-p 1` against 9.9% saturated).
+            if (frontier.peek()) |next| {
+                const row = self.graph.neighbours(next.id, level);
+                if (row.len > 0) {
+                    @prefetch(&row[0], .{ .rw = .read, .locality = 3, .cache = .data });
+                }
+            }
             // Two passes over the list, as hnswlib does: first ask for every
             // neighbour's visited stamp and the first line of its row, then
             // score. Each neighbour is a random node of the collection, so

@@ -29,41 +29,26 @@ in-edge in `linkBack`.
 
 ### P2. Engine work with a named lever
 
-**3. W3's deficit is memory-level parallelism, not a wake cost, so the lever is
-intra-query parallelism (findings 50).** strawmANN spends 972k cycles per query
-at `-p 1` against 650k at saturation, and W3 is the one search row it loses
-(0.85x). This entry used to guess that the 322k of overhead was "a wake or spin
-cost". **Profiled 2026-09-22 and it is not.** Three states, same binary, same
-collection:
+**3. Intra-query parallelism for W3, and what a prefetch already recovered
+(findings 50).** W3 spends 972k cycles per query at `-p 1` against 650k
+saturated, and the profile says the difference is unhidden memory latency, not a
+wake cost: 6.5% kernel against 5.3%, with `Probe.prefetch` at 17.1% of samples
+against 9.9%. One query is a serial dependent chain of cache misses with nothing
+on the core to overlap it.
 
-| | kernel | user | `Probe.prefetch` share |
-|---|--:|--:|--:|
-| idle (no queries) | 86.8% | 13.2% | - |
-| W3, `-p 1` | **6.5%** | 90.4% | **17.1%** |
-| W4, saturated | 5.3% | 91.4% | 9.9% |
+**The cheap half of that is done** (2026-09-22). The traversal prefetched each
+popped node's neighbours but not the load that *starts the next iteration*,
+`neighbours(peek().id)`, a random row of a 128 MB array and the one link nothing
+covered. Prefetching it is worth **1.049x on W3** (server p50 488 to 459 µs) and
+1.026x on W4 and W10-ef128, all clearing a 2.0 to 2.2% band over three
+alternated passes. That is about 15% of W3's unsaturated overhead, and it helps
+every search row rather than only the one.
 
-A wake or spin cost would put W3's kernel share far above W4's. It is 1.2 points
-above, and both rows are ~91% userspace in the same four symbols. What actually
-moves is the stall absorber: `Probe.prefetch` takes 17.1% of samples at `-p 1`
-against 9.9% saturated, which against each row's own cycles is **166k cycles per
-query against 65k**, a third of the whole gap concentrated in the instruction
-that waits for memory.
-
-So the 322k is unhidden memory latency. One query is a serial dependent chain of
-cache misses and there is nothing else on the core to overlap them with; at
-`-p 64` sixty-four queries' misses interleave. That also explains the W3
-measurement from `rel-0921`: Qdrant spends 1.05 cores per query there against
-strawmANN's 0.86, which is Qdrant spreading one query across cores and hiding
-its own misses. §6.3's one-thread-per-core discipline is what buys strawmANN
-every other row and what costs it this one (findings 36 argues the same trade
-from the I/O thread's side).
-
-The open work is therefore intra-query parallelism for the single-query case,
-and it is a design change rather than a tuning knob. What would settle whether
-it is worth it: the same profile against a build that splits one traversal's
-neighbour expansion across two workers, which is the smallest version of it.
-
-*Caveats.* Profiled with ~0.4 cores of foreign load, which perturbs the absolute
-rates and not the relative shares this reads. `kptr_restrict` left the kernel
-symbols unresolved, so the idle row's 86.8% is unattributed; it does not affect
-the W3-against-W4 comparison, which is entirely userspace.
+What is left is the expensive half: expanding one query's frontier across
+workers, which means giving up §6.3's one-thread-per-core discipline for the
+single-query case. That discipline is what buys every other row its tail latency
+(findings 36, 41: zero migrations against Qdrant's tens of thousands), so the
+measurement that decides it is not W3's rate alone but W4-sat90's p99 beside it.
+The ceiling is known from the counters: closing the whole 322k would take W3's
+p50 to roughly 338 µs against Qdrant's 411, so the row would flip from 0.85x to
+about 1.2x.
