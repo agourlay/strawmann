@@ -322,6 +322,47 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&run_bench_micro.step);
 
     // ---------------------------------------------------------------------
+    // findings 34, `zig build graph-diff` compares two builds of one
+    // collection. Structure only, so it needs no quiet host; ReleaseFast
+    // because it walks tens of millions of edges and nothing it prints is a
+    // timing.
+    // ---------------------------------------------------------------------
+    const graph_diff_mod = b.createModule(.{
+        .root_source_file = b.path("bench/graphdiff/main.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "strawmann", .module = mod },
+            .{ .name = "build_options", .module = options_mod },
+        },
+    });
+    const graph_diff = b.addExecutable(.{ .name = "graph-diff", .root_module = graph_diff_mod });
+    b.installArtifact(graph_diff);
+
+    const run_graph_diff = b.addRunArtifact(graph_diff);
+    run_graph_diff.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_graph_diff.addArgs(args);
+    const graph_diff_step = b.step("graph-diff", "Diff two graph.bin files (findings 34)");
+    graph_diff_step.dependOn(&run_graph_diff.step);
+
+    // Its own root, like `bench/micro/`, so its tests need their own step or
+    // they are never run. Debug, so the diff's assertions are live.
+    const graph_diff_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/graphdiff/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "strawmann", .module = mod },
+                .{ .name = "build_options", .module = options_mod },
+            },
+        }),
+        .use_llvm = true,
+        .filters = test_filters,
+    });
+    test_step.dependOn(&b.addRunArtifact(graph_diff_tests).step);
+
+    // ---------------------------------------------------------------------
     // §6.6.5 / §9, `zig build bench-isa` produces the whole matrix from one
     // source tree. Each arm is a separate ReleaseFast binary; the only variable
     // is the ISA.
