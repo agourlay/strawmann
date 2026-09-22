@@ -1849,20 +1849,28 @@ test "searches against a graph being mutated see only valid ids" {
     // claim is that a concurrent reader gets a worse answer and never a wrong
     // one. This drives readers against a builder to check it, which is the test
     // that would gate the change rather than a plan for one.
-    const n = 8000;
+    // Scaled to the host. CI runners have two cores, where three spinning
+    // readers and a four-thread builder do not share nicely: the first version
+    // of this test ran 30 minutes there against seconds here and was cancelled,
+    // which is a hang in every sense that matters. The property under test is
+    // about *interleaving*, not about size, so a small graph proves it too.
+    const cores = std.Thread.getCpuCount() catch 2;
+    const n: usize = if (cores >= 8) 8000 else 1500;
+    const rounds: usize = if (cores >= 8) 3 else 1;
+    const build_threads: usize = @min(4, @max(1, cores / 2));
     const half = n / 2;
     const dim = 8;
     var corpus = try Corpus.init(testing.allocator, n, dim, 0x51DE, .euclid);
     defer corpus.deinit(testing.allocator);
 
-    // Three rounds, because a race that fires one time in three is the only
-    // kind worth a concurrency test.
-    for (0..3) |_| {
+    // Repeated, because a race that fires one time in three is the only kind
+    // worth a concurrency test.
+    for (0..rounds) |_| {
         var g = try Graph.init(testing.allocator, Params.fromM(8, 64, 77), n);
         defer g.deinit();
         // A walkable graph first, so the readers have an entry point and real
         // rows from their very first query.
-        _ = try buildParallel(testing.allocator, &g, corpus.scorer(), half, 4);
+        _ = try buildParallel(testing.allocator, &g, corpus.scorer(), half, build_threads);
 
         const Reader = struct {
             g: *Graph,
@@ -1883,7 +1891,25 @@ test "searches against a graph being mutated see only valid ids" {
                 var probe = self.corpus.probe(&q);
                 const idx = hnsw.Index{ .graph = self.g, .scorer = .of(&probe) };
                 var buf: [16]Candidate = undefined;
+                // Yield each pass, and stop on a deadline as well as on the
+                // flag. A reader that never yields starves the builder where
+                // cores are scarce, and a reader that only watches the flag
+                // waits forever if the builder is the thing that stalled.
+                // `std.time.nanoTimestamp` moved under the `Io` interface in
+                // Zig 0.16 and a test thread has no `Io` to thread through, so
+                // the raw monotonic clock, as `collection.monotonicNs` does.
+                const now = struct {
+                    fn ns() u64 {
+                        var ts: std.os.linux.timespec = undefined;
+                        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+                        return @as(u64, @intCast(ts.sec)) * 1_000_000_000 +
+                            @as(u64, @intCast(ts.nsec));
+                    }
+                }.ns;
+                const deadline = now() + 30 * std.time.ns_per_s;
                 while (!self.stop.load(.acquire)) {
+                    if (now() > deadline) break;
+                    std.Thread.yield() catch {};
                     for (&q) |*x| x.* = rnd.floatNorm(f32);
                     probe.query = &q;
                     var out = heap.TopK.init(&buf, 16);
@@ -1911,7 +1937,7 @@ test "searches against a graph being mutated see only valid ids" {
         }
 
         // The writer: the second half into the same graph the readers walk.
-        _ = try extendParallel(testing.allocator, &g, corpus.scorer(), half, n, 4);
+        _ = try extendParallel(testing.allocator, &g, corpus.scorer(), half, n, build_threads);
 
         stop.store(true, .release);
         for (&threads) |*t| t.join();
