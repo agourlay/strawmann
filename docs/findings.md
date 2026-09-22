@@ -63,11 +63,41 @@ converted queries need the per-worker workspace, not a local, if §6.3's
 no-allocation-on-the-query-path rule is to hold. Budget it as a workspace
 change plus a scheduler change, not an afternoon.
 
-**5. Incremental insertion for W11 (findings 31).** Serving the old graph
-through a rebuild was worth 5x on the slowest queries and moved the median the
-wrong way, because every query pays the tail scan for as long as the rebuild
-takes. The row's ceiling is that tail scan, and the fix is not having a rebuild
-window: inserting appended points into a graph sized to capacity as they arrive.
+**5. Incremental insertion for W11 (findings 31), and the invariant it rests on
+is weaker than that entry says.** Serving the old graph through a rebuild was
+worth 5x on the slowest queries and moved the median the wrong way: every query
+pays the tail scan for as long as the rebuild takes, and a 200k tail at d=128 is
+~3 ms of memory traffic per query however it is served. The fix is not having a
+rebuild window, by inserting appended points into a graph sized to capacity as
+they arrive.
+
+Findings 31 justifies that as safe because "the stale-but-valid, never-empty
+list invariant already holds". Reading `build.zig` (2026-09-22), that is not
+what the writers guarantee, and the file says so at
+`assertEmptiesAreASuffix`: `linkBack` publishes a pruned row as a prefix write
+followed by `@memset(list[kept..], empty)`, so mid-rewrite an unlocked reader
+genuinely observes `[new0, new1, empty, old3]`, breaks at the first empty and
+expands a *shorter* row. What holds is narrower, that slot 0 always carries a
+live id, so a reader never sees an empty list and never an invalid id.
+
+That changes the question rather than closing it. Inserting under live readers
+is **safe** (no torn ids, no use-after-free, unlike the `noteOverwrite` class of
+bug) and costs **recall**, transiently, in proportion to the write rate, which
+is the same connectivity loss the parallel build already measures at 8 threads.
+So the design question is no longer "is it safe" but "is a small transient
+recall loss during writes better than the tail scan it replaces", and both sides
+of that are measurable: W11's search rate against the recall of queries served
+during the append window.
+
+Preconditions the code already sets: the CSR must have slots past
+`graph.count`, so the published graph has to be sized to `--capacity` rather
+than to the built count; `graph_count` must become the thing readers observe
+monotonically, published after a node is fully linked; and `insertOne` and
+`linkBack` already take per-node locks and promote the entry point under
+`entry_lock` with `EntrySnapshot`, so writer-writer races are handled. What is
+new is reader-writer, and the test for it is the one the concurrency work in
+this project has always needed: N searchers against a live inserter, asserting
+no invalid id is ever returned and recall recovers, run in a loop for flakiness.
 
 **6. The unsaturated path (findings 50).** strawmANN spends 972k cycles per
 query at `-p 1` against 650k at saturation. W3 is the one search row it loses
