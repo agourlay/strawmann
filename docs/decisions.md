@@ -965,3 +965,48 @@ there and not here.
 
 The flag stays. It is cheap, it is tested, and it is the instrument that will
 answer the same question at a scale where the footprint might matter.
+
+---
+
+## Live insertion is built, measured, and off by default
+
+findings 31 argued that W11's ceiling is the pending tail scan, which costs every
+query ~3 ms for as long as a rebuild takes, and that the fix is to insert
+appended points into the live graph. `-Dlive-insert` does that (`build.insertLive`,
+`collection.Bounded`). Measured 2026-09-22 on a quiet gated host, the trade is
+sharper and stranger than that entry expected.
+
+**Search during writes gets ten times faster.** W11's server-side p50 falls from
+**3,307 µs to 329 µs**. The tail scan disappears exactly as predicted.
+
+**Ingest collapses.** Each point pays a single-threaded HNSW insertion under the
+collection's write lock, where the bulk path builds the whole graph in parallel
+afterwards. W11's throttled append fell 3,300 to 2,426 points/s, and an
+*unthrottled* 200,000-point upload **timed out after 40,700 points** against a
+bulk rate of ~950,000 points/s. That is the number that decides the default.
+
+**W11's headline qps reads 0.33x and that is an artefact.** The row's wall clock
+is set by the append, not by the queries: 50,000 searches finish long before
+200,000 appends do, and the engine sits at 1.19 cores through it. A row whose
+duration is the writer's cannot report the reader's rate.
+
+**The graph is not worse.** Two collections of exactly sift1m's 1M points, one
+built in a single pass and one with its last 50,000 inserted live, scored
+against the shipped ground truth at `ef` 128: recall@10 **0.9870 against
+0.9866**, CIs [0.9810, 0.9911] and [0.9805, 0.9908], MRDE 3.04e-4 against
+3.00e-4, and recall@1 marginally *higher* incrementally. Whatever incremental
+insertion costs, it is not graph quality.
+
+So the default is **off**, because bulk load is the common path and it would
+stall there. The flag stays because the split is a workload property rather than
+a defect: a collection taking a trickle of writes would get ten times better
+search latency during them at no cost in recall, and a collection being
+bulk-loaded must not have it. Turning it on by default would need the insertion
+moved off the write path, which is a different piece of work.
+
+Two things it must never do, and does not: a quantized collection opts out
+entirely, because a live-inserted point is reachable in the graph while the
+quantizer encoded only what the build covered, so stage 1 would have no code to
+score it by (the differential test against the exact scan returned a stale point
+as the nearest). And every reader bounds its traversal by its own snapshot, or a
+node lands in both the traversal and the tail scan and the client sees it twice.

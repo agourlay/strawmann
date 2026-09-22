@@ -48,39 +48,7 @@ and `bruteForceRangeMulti` is the scan it would gather into. Worth doing only
 with a measurement beside it, since the win is a slope (1.51x against Qdrant's
 2.22x) and not a row.
 
-**4. Measure what live insertion trades, then decide its default (findings 31).**
-W11 spends its row scanning the pending tail while a rebuild re-does the whole
-corpus. **Implemented 2026-09-22 behind `-Dlive-insert`, off by default**, the
-same shape `-Dvisited` used: an appended point joins the published graph instead
-of waiting, `build.insertLive` publishing `count` with a release store only
-after the node is fully linked, and `collection.Bounded` bounding a reader's
-traversal by its own snapshot so every node is in exactly one of the two regions
-a query answers from. The bound is composed only when the graph holds more than
-the reader covers, so with the flag off nothing is built and no query pays.
-
-`liveInsert` declines rather than half-working: no published graph, a graph
-already behind its frontier, a quantized collection, a full CSR, or a builder
-that will not allocate all leave the point in the pending tail exactly as
-before. A declined insert costs what it cost yesterday and never correctness.
-
-Three defects the suite caught, none of them predicted: the builder leaked six
-allocations because `Collection.deinit` never freed it; the quantized path was
-unbounded and so hit the duplicate-and-invisible failure that had only been
-fixed on the fp32 side; and **live insertion silently breaks a quantized
-collection**, because a live-inserted point is reachable in the graph while the
-quantizer encoded only what the build covered, so stage 1 has no code to score
-it by. The differential test against the exact scan returned a stale point as
-the nearest, which is exactly the class of defect this project exists to catch.
-Quantized collections therefore opt out entirely.
-
-**What is left is the measurement that sets the default.** W11's search rate
-with the flag on against off, and the recall of queries served during the append
-window, because the trade is a transient recall dip while a row is rewritten
-under readers against a tail scan that costs ~3 ms per query for as long as a
-rebuild takes. Both arms build and pass the full suite today; neither has been
-run against W11.
-
-**5. W3's deficit is memory-level parallelism, not a wake cost, so the lever is
+**4. W3's deficit is memory-level parallelism, not a wake cost, so the lever is
 intra-query parallelism (findings 50).** strawmANN spends 972k cycles per query
 at `-p 1` against 650k at saturation, and W3 is the one search row it loses
 (0.85x). This entry used to guess that the 322k of overhead was "a wake or spin
