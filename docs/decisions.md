@@ -1010,3 +1010,44 @@ quantizer encoded only what the build covered, so stage 1 would have no code to
 score it by (the differential test against the exact scan returned a stale point
 as the nearest). And every reader bounds its traversal by its own snapshot, or a
 node lands in both the traversal and the tail scan and the client sees it twice.
+
+---
+
+## Gathering exact queries is not the fix for W9, measured
+
+findings 45 reads W9's concurrency scaling (strawmANN 1.51x from `-p 1` to
+`-p 8` against Qdrant's 2.22x) as Qdrant "reading the corpus less than once per
+query", and proposes gathering concurrent exact queries into one pass of the
+arena. `collection.bruteForceRangeMulti` and `handlers.runGatheredExact` do that
+*within a request*; the open item was to do it *across* requests, which needs a
+scheduler change.
+
+Measured 2026-09-22 before building it, using the batch path as the proxy: a
+batched exact request already takes one arena pass for the whole batch, so
+batches of 8 are what a perfect cross-request gather would achieve.
+
+| | queries in flight | passes per 8 queries | qps |
+|---|--:|--:|--:|
+| `-p 8`, one query per request | 8 | 8, on 8 workers | 191.8 |
+| `-p 1`, batches of 8 | 8 | 1, on 1 worker | **66.4** |
+| `-p 8`, batches of 8 | 64 | 8, on 8 workers | **467.6** |
+
+**The middle row is the experiment.** A cross-request gather at W9's own
+concurrency collects the 8 queries in flight into one pass on one worker, and
+that is 66.4 qps against the 191.8 the same 8 queries reach today: three times
+worse. Eight workers each streaming the same 512 MB at the same time already
+share the lines, so the arena is not being read eight times in any sense the
+memory system cares about. `191.8 x 614.4 MB` is 118 GB/s of implied traffic
+against a 73 GB/s bus, which is the amortisation findings 45 attributed to
+Qdrant alone, happening here too.
+
+Gathering wins only where in-flight queries greatly exceed workers, which is the
+bottom row: 64 in flight, gathered eight ways, 2.44x the baseline. That is a
+real result for a client that batches, and the intra-request gather already
+serves it. It is not a reason to change the scheduler for W9, whose `-p 8` is
+the case the change would make worse.
+
+So the cross-request gather is dropped rather than deferred. What remains true
+from findings 45 is narrower than it looked: the exact path is bandwidth-bound,
+and the lever is reading less per query, which batching achieves when the client
+offers batches and a scheduler cannot conjure.

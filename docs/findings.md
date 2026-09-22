@@ -29,26 +29,7 @@ in-edge in `linkBack`.
 
 ### P2. Engine work with a named lever
 
-**3. Gather exact queries across concurrent requests (findings 45).** W9 is
-bandwidth-bound at 85% of the bus, so no kernel, ISA or prefetch work touches
-it; Qdrant scales 2.22x from `-p 1` to `-p 8` against strawmANN's 1.51x because
-it reads the corpus less than once per query.
-
-**The batch half is done** (2026-09-22): `collection.bruteForceRangeMulti` reads
-each row once and scores K queries against it, and `handlers.runGatheredExact`
-routes an all-exact unfiltered `QueryBatch` of 2 to 16 queries through it, so
-such a batch costs one pass rather than K. Differential tests at every batch
-size, an e2e test comparing one batch of four against four batches of one, and
-the path instrumented once to confirm the tests reach it.
-
-**What is left is the half that moves W9**, which sends single-query requests at
-`-p 8`: gathering across *concurrent requests* rather than within one. That is a
-scheduler change, collecting pending exact queries and scoring them in one pass,
-and `bruteForceRangeMulti` is the scan it would gather into. Worth doing only
-with a measurement beside it, since the win is a slope (1.51x against Qdrant's
-2.22x) and not a row.
-
-**4. W3's deficit is memory-level parallelism, not a wake cost, so the lever is
+**3. W3's deficit is memory-level parallelism, not a wake cost, so the lever is
 intra-query parallelism (findings 50).** strawmANN spends 972k cycles per query
 at `-p 1` against 650k at saturation, and W3 is the one search row it loses
 (0.85x). This entry used to guess that the 322k of overhead was "a wake or spin
