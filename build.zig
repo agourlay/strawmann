@@ -316,7 +316,10 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(bench_micro);
 
     const run_bench_micro = b.addRunArtifact(bench_micro);
-    run_bench_micro.step.dependOn(b.getInstallStep());
+    // Its own install, not the global one: see the note on `graph-diff` below.
+    // `zig build bench` with no `-Doptimize` would otherwise leave a Debug
+    // server in `zig-out/bin`, which the harness starts by path.
+    run_bench_micro.step.dependOn(&b.addInstallArtifact(bench_micro, .{}).step);
     if (b.args) |args| run_bench_micro.addArgs(args);
     const bench_step = b.step("bench", "Run the hardware + kernel microbenchmarks");
     bench_step.dependOn(&run_bench_micro.step);
@@ -337,12 +340,19 @@ pub fn build(b: *std.Build) void {
         },
     });
     const graph_diff = b.addExecutable(.{ .name = "graph-diff", .root_module = graph_diff_mod });
-    b.installArtifact(graph_diff);
+    // Its *own* install step, not the global one. `b.getInstallStep()` installs
+    // every artifact in the tree at whatever `-Doptimize` the command carried,
+    // so a plain `zig build graph-diff` (Debug by default) quietly replaces
+    // `zig-out/bin/strawmann` with a Debug server. That cost a measurement: an
+    // A/B started the engine by path afterwards and spent a minute building an
+    // index in Debug before the banner gave it away. §9 quotes numbers from
+    // ReleaseFast only, and a bench step has no business rebuilding the server.
+    const install_graph_diff = b.addInstallArtifact(graph_diff, .{});
 
     const run_graph_diff = b.addRunArtifact(graph_diff);
-    run_graph_diff.step.dependOn(b.getInstallStep());
+    run_graph_diff.step.dependOn(&install_graph_diff.step);
     if (b.args) |args| run_graph_diff.addArgs(args);
-    const graph_diff_step = b.step("graph-diff", "Diff two graph.bin files (findings 34)");
+    const graph_diff_step = b.step("graph-diff", "Compare N builds of one corpus (findings 34)");
     graph_diff_step.dependOn(&run_graph_diff.step);
 
     // Its own root, like `bench/micro/`, so its tests need their own step or
