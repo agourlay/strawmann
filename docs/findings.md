@@ -752,12 +752,12 @@ the shape rules out the obvious explanation.
 | ef | strawmANN recall@10 | Qdrant recall@10 |
 |--:|--:|--:|
 | 512 | 0.9949 | 0.9988 |
-| 1024 | 0.9954 |, |
-| 2048 | **0.9955** |, |
-| 4096 | **0.9955** | (|
+| 1024 | 0.9954 | not measured |
+| 2048 | **0.9955** | not measured |
+| 4096 | **0.9955** | not measured |
 
 > **Still holding.** The latest gated sift1m run measures recall@10 **0.9995**
-> at `ef` 512, against the 0.9994 the fix recorded below) so the repair has
+> at `ef` 512, against the 0.9994 the fix recorded below, so the repair has
 > held across every run since. `ef` 2048 and 4096 have not been re-measured,
 > so the *shape* of the table below is untested rather than refuted.
 
@@ -1425,7 +1425,7 @@ are indistinguishable from each other; strawmANN's are not.
 > |---|--:|--:|--:|--:|
 > | bench2 fp32 | 0.00178 | 0.00062 | 0.00016 | 0.00045 |
 > | bench6 SQ8 | 0.00130 | 0.00022 | 0.00091 | 0.00037 |
-> | bench7 binary |, | 0.00018 | 0.00061 | 0.00037 |
+> | bench7 binary | not measured | 0.00018 | 0.00061 | 0.00037 |
 > | bench8 PQ | 0.00160 | 0.00040 | 0.00101 | 0.00040 |
 >
 > At `ef` 512 the 100K and 1M spreads are the same order, 0.0002 to 0.0006, and
@@ -2552,13 +2552,6 @@ it are not the same measurement, and nothing on the page currently says so.
 > not carrying the result, but an interleaved run at both concurrencies is
 > what would license quoting these as table figures.
 
-**The experiment is cheap and named.** Prefetch row `off + k` in**The experiment is cheap and named.** Prefetch row `off + k` in
-`bruteForceRange` for small `k`, and the neighbour list's rows in the HNSW
-search loop, and re-measure W9 and W4 on db100k with the counters on. If the
-demand fills fall toward Qdrant's and the cycles with them, this is the
-highest-leverage change available to the engine at d=1536; if they do not,
-the stall is somewhere else and the counters will say where. Not done here.
-
 One thing the same run does *not* explain: db100k's W4 read 0.96x on
 2026-08-26 and 1.25x here. Qdrant 1.19.0 in a container then, 1.19.1-dev
 native now, `--perf` on now, and the earlier run's segment count is not on
@@ -2862,3 +2855,210 @@ the right refusal for a row-by-row table, which cannot know the shape of either
 curve; the fix is not a narrower band but the matched-recall table beside it,
 which `report_charts.filtered_matched_recall_table` now renders for both
 grades. What the band cannot do is notice that it is standing on a cliff.
+
+## 50. The 2.20x is three factors multiplied, and only one of them is per-query efficiency
+
+`rel-0921` publishes W4 at **2.20x**, the same ratio `rel-0908` published, and
+the page reads it as throughput. The hardware counters say what it is made of.
+Throughput is `cores_busy x frequency / cycles_per_query`, and for this row that
+identity closes to within 5 qps on both engines:
+
+| | cores busy | eff. GHz | cycles/query | predicted | measured | 8-core ceiling |
+|---|--:|--:|--:|--:|--:|--:|
+| strawmANN | 7.50 | 1.97 | 649,557 | 22,789 | 22,784 | 24,311 |
+| Qdrant | 5.55 | 1.91 | 1,022,894 | 10,352 | 10,351 | 14,922 |
+
+So the ratio factors as **1.57x less work per query, 1.35x better core
+occupancy, 1.03x frequency** (1.57 x 1.35 x 1.03 = 2.18 against the measured
+2.20). Roughly a third of the gap is Qdrant not filling the cores it was given,
+not strawmANN being cheaper per query.
+
+The occupancy is not an artefact of this run or of the segment policy. Four
+runs, three weeks, both Qdrant experiments:
+
+| label | policy | W4 qps | cores busy | cycles/query |
+|---|---|--:|--:|--:|
+| `qd-sift-perf-rel-0921` | equal-work | 10,351 | 5.55 | 1,022,894 |
+| `qd-sift-perf-rel-0908` | equal-work | 10,446 | 5.48 | 998,093 |
+| `qd-sift-perf-rel-0907` | **as-deployed** | 10,492 | 5.48 | 995,699 |
+| `qd-sift-perf-rel-0903` | equal-work | 10,364 | 5.47 | 1,006,195 |
+
+`as-deployed` gives Qdrant `default_segment_number` = CPU count and changes the
+occupancy by 0.00 cores, so findings 39's segment question does not explain it.
+W4 offers `-p 64 -t 16` and strawmANN reaches 7.50 cores on the identical
+client, so it is not the load generator either. What remains is Qdrant's own
+search runtime, and on this row it is a 31% shortfall against its own
+per-query cost.
+
+Two per-query counters worth keeping beside that. DRAM traffic is 795 KiB
+against 1,086 KiB, so 27% less memory moved per query, which tracks the work
+ratio. **Branch misses do not:** 3,645 per query against 3,577, a 1.9%
+difference, while instruction counts differ by 34%. strawmANN's 5.4 MPKI
+against Qdrant's 3.5 is entirely the denominator. The misses are the graph
+walk's, both engines pay the same number of them, and at roughly 17 cycles each
+they are about 10% of strawmANN's per-query cycles. Any plan that reads MPKI as
+a strawmANN defect is reading the instruction count.
+
+### What this does not establish
+
+The equal-`ef` ratio is not the comparison this page exists to make. The
+matched-recall table on the same run reads **2.04x to 2.12x** (CI 1.95x to
+2.29x), and that is the number to quote. The decomposition above explains the
+2.20x; it does not license it.
+
+## 51. The W12 ladders, measured inside a publication run: the directions hold, the magnitudes shrink
+
+Findings 49 closed by naming what would settle it: "a ladder measured inside a
+`--perf` publication run is what would settle the magnitude, and the rows are in
+the table now, so the next one does it." `rel-0921` is that run: both grades'
+ladders, three passes, `--perf`, one licensed environment. Full-precision recall,
+not the page's four decimals:
+
+| ef | sm recall | sm qps | qd recall | qd qps |
+|--:|--:|--:|--:|--:|
+| **sel1** | | | | |
+| 32 | 1.000000 | 2,562 | 0.995950 | 6,465 |
+| 64 | 1.000000 | 2,564 | 0.999650 | 5,136 |
+| 128 | 1.000000 | 2,564 | 0.999970 | 3,832 |
+| 256 | 1.000000 | 2,562 | 1.000000 | 2,617 |
+| 512 | 1.000000 | 2,567 | 1.000000 | 1,714 |
+| **sel10** | | | | |
+| 32 | 0.987640 | 382 | 0.796170 | 4,614 |
+| 64 | 1.000000 | 302 | 0.933450 | 3,354 |
+| 128 | 1.000000 | 299 | 0.989470 | 2,209 |
+| 256 | 1.000000 | 301 | 0.999140 | 1,391 |
+| 512 | 1.000000 | 299 | 0.999940 | 836 |
+
+At the first width where Qdrant actually reaches 1.000000 on the narrow grade
+(`ef=256`, 2,617 qps) strawmANN serves 2,562, so **0.98x**, rising to **1.50x**
+at `ef=512`. Findings 49's single-pass ladder said 1.92x to 3.32x. The sign of
+its claim survives (the published `W12-sel1` row of 0.67x still understates
+strawmANN, which ties rather than loses at matched recall) and the magnitude
+does not.
+
+On the wide grade the anchors come back **0.17x to 0.36x** against findings 48's
+0.21x to 0.66x. The shape reproduces, as 48 predicted it would, and the top
+anchor moved by a third for the second time running, as 48 warned it does.
+
+The reason to trust these over the earlier ladders is not that they are newer:
+it is that both grades, both engines and the recall they are joined against came
+out of one gated run at one environment hash, where the 2026-09-09 ladders were
+single-pass, `--perf`-less, and separately labelled. `compare.py` would refuse a
+ratio across the two sets as STALE, and it is right to; what is compared here is
+one method against itself.
+
+### What this does not establish
+
+Nothing here is banded. The ladders carry a spread now, but the anchors are
+interpolations between rungs and the interpolation is not error-propagated. And
+the whole sel1 result turns on the last 0.00003 of recall: at `ef=128` Qdrant
+is at 0.999970 and serves 3,832, which rounds to the same 1.0000 the page prints
+for strawmANN. A reader working from the four-decimal table would conclude
+Qdrant is 1.49x faster at matched recall. That is findings 49's cliff, still
+standing, now inside the published page's own rounding.
+
+## What is open, in priority order
+
+Only open work belongs here. Finding numbers are identifiers, cited from
+`src/*.zig` and `bench/harness/*.py`, so they are never renumbered and a closed
+entry leaves a gap rather than a shuffle. Ranked by what a wrong or missing
+number costs. Anything not listed is settled; what was wrong and what fixed it
+is in [`bugs.md`](bugs.md), and why a choice was made is in
+[`decisions.md`](decisions.md).
+
+### P1. The comparison's largest open questions
+
+**1. Re-run dbpedia-openai-1m with the segment ceiling set (findings 37, 39).**
+The README calls d=1536 the headline tier and it has no licensed comparison:
+T3 failed at 1M x 1536 with strawmANN 0.0135 behind, and the Qdrant arm was four
+populated graphs against strawmANN's one, a confound that covaries perfectly
+with the result. `--max-segment-size` is in the harness and the sift1m tier is
+clean; the tier the finding is about was never re-run. Until it is, the largest
+claim this project wants to make is unmeasured.
+
+**2. The parallel build is a per-build draw (findings 34).** strawmANN's graphs
+disagree with each other by 0.00288 at `ef` 512 against Qdrant's 0.00009, which
+is wider than the gap between the engines at that point, so a single pass can
+report either engine ahead at high recall. Unreachable nodes were eliminated as
+the mechanism (two hundred times too small); what is left is which edges the
+pruning race keeps, and nothing measures that yet. A graph-diff between two
+builds is the instrument. The named candidates are a deterministic insertion
+order, a post-build reachability repair, or refusing to prune a node's last
+in-edge in `linkBack`.
+
+**3. Decompose W4's 2.20x on the page (findings 50).** It factors into 1.57x
+less work per query, 1.35x core occupancy and 1.03x frequency, and the occupancy
+reproduces across four runs and both segment policies. **The client has been
+ruled out** (2026-09-22): W4 re-run against Qdrant alone, through `run_one` so
+the queries and the arithmetic are the harness's, at four concurrencies from the
+standard `-p 64 -t 16 -c 2` to `-p 512 -t 32 -c 16`:
+
+| offered | qps | cores busy |
+|---|--:|--:|
+| `-p 64 -t 16 -c 2` | 9,122 | 5.30 |
+| `-p 128 -t 16 -c 4` | 9,004 | 5.30 |
+| `-p 256 -t 32 -c 8` | 8,910 | 5.29 |
+| `-p 512 -t 32 -c 16` | 8,875 | 5.38 |
+
+Eight times the offered concurrency moves occupancy 1.02x and throughput 0.97x,
+so Qdrant does not fill more cores when offered more work and the 1.35x term is
+its own. Development grade, and the level does not reproduce the run's: 9,122
+qps at 5.30 cores against 10,351 at 5.55, a single pass without `--perf`, run
+after W2 alone rather than after W0-upload, W1, W2 and W3. The *slope* is what
+the probe was for and it is flat in all of it.
+
+What is left is the reporting change: the page presents 2.20x whole, a third of
+it is a scaling property a differently-tuned Qdrant might not have, and the
+matched-recall 2.04x to 2.12x is the licensed comparison that should lead.
+
+### P2. Engine work with a named lever
+
+**4. Where strawmANN's SQ8 rescore spends its cycles.** Per query at `ef` 128,
+three passes with `--perf` on `rel-0921`: 783k cycles against its own fp32 path's
+640k, IPC 0.78 against 1.07, and 538 KiB of DRAM traffic where Qdrant's SQ8
+reads 60 KiB for the same encoding. A 13x traffic gap for one encoding says the
+rescore pool is being read from fp32 far more widely here. Measure the pool size
+before touching code. Findings 29 already took stage 1 from 46% to 26% of server
+CPU, so what is left is the walk and the rescore rather than the distance kernel.
+
+**5. Gather concurrent exact queries into one scan (findings 45).** W9 is
+bandwidth-bound at 85% of the bus, so no kernel, ISA or prefetch work touches
+it; the prefetch attempt halved demand misses and bought one percent. Qdrant
+scales 2.22x from `-p 1` to `-p 8` against strawmANN's 1.51x because it reads the
+corpus less than once per query. `handlers.BatchJob` established that a request's
+queries can be fanned across workers; the inverse does not exist.
+
+**6. Incremental insertion for W11 (findings 31).** Serving the old graph
+through a rebuild was worth 5x on the slowest queries and moved the median the
+wrong way, because every query pays the tail scan for as long as the rebuild
+takes. The row's ceiling is that tail scan, and the fix is not having a rebuild
+window: inserting appended points into a graph sized to capacity as they arrive.
+
+**7. The unsaturated path (findings 50).** strawmANN spends 972k cycles per
+query at `-p 1` against 650k at saturation. W3 is the one search row it loses
+(0.85x), and 322k cycles of per-query overhead that saturation amortises away is
+a wake or spin cost.
+
+### P3. Decisions and hygiene
+
+**8. Whether T3 should gate the matched-recall table (findings 40).** Matched
+recall does not assume equal recall, it constructs it, so gating it on T3
+withholds the one comparison that survives exactly when it is needed. Left
+deliberately unchanged, because loosening a licence gate because a banner is
+inconvenient is the pressure this project exists to resist. It needs a spec
+answer, not a patch.
+
+**9. The matched-oversampling experiment (findings 42, `validation.md` item 6).**
+Qdrant's SQ8 plateau is entirely recoverable at `oversampling 2`, at which point
+it matches strawmANN. Whether equalising with a knob one engine did not need is
+the same experiment is the open question.
+
+**10. Fold the W12 result into the entries it settles (findings 51).** Findings
+48 and 49 each name an open item that `rel-0921` answers, and the file holds
+three sets of anchors with no statement of which run is authoritative.
+
+**11. Annotate the two rows that measure the harness (findings 50).** W13's
+server-side p50 is 11 µs against a 137 µs client p50, so 92% of it is the load
+generator and the socket. W11 climbs 1,475 to 1,794 to 1,847 qps monotonically
+across three passes, so its median is a warm-up average rather than a steady
+state.
