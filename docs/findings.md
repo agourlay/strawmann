@@ -48,55 +48,37 @@ and `bruteForceRangeMulti` is the scan it would gather into. Worth doing only
 with a measurement beside it, since the win is a slope (1.51x against Qdrant's
 2.22x) and not a row.
 
-**4. Incremental insertion for W11 (findings 31). The safety question is
-answered; what is left is the trade.** Serving the old graph through a rebuild
-was worth 5x on the slowest queries and moved the median the wrong way, because
-every query pays the tail scan for as long as the rebuild takes. The fix is not
-having a rebuild window, by inserting appended points into the live graph.
+**4. Measure what live insertion trades, then decide its default (findings 31).**
+W11 spends its row scanning the pending tail while a rebuild re-does the whole
+corpus. **Implemented 2026-09-22 behind `-Dlive-insert`, off by default**, the
+same shape `-Dvisited` used: an appended point joins the published graph instead
+of waiting, `build.insertLive` publishing `count` with a release store only
+after the node is fully linked, and `collection.Bounded` bounding a reader's
+traversal by its own snapshot so every node is in exactly one of the two regions
+a query answers from. The bound is composed only when the graph holds more than
+the reader covers, so with the flag off nothing is built and no query pays.
 
-Findings 31 justified that as safe with an invariant that does not hold as
-stated: `linkBack` publishes a pruned row as a prefix write followed by
-`@memset(list[kept..], empty)`, so mid-rewrite a reader observes
-`[new0, new1, empty, old3]`, breaks at the first empty and expands a shorter
-row. What holds is narrower, that slot 0 always carries a live id.
+`liveInsert` declines rather than half-working: no published graph, a graph
+already behind its frontier, a quantized collection, a full CSR, or a builder
+that will not allocate all leave the point in the pending tail exactly as
+before. A declined insert costs what it cost yesterday and never correctness.
 
-**Measured rather than argued (2026-09-22).** "searches against a graph being
-mutated see only valid ids" drives three readers against a four-thread builder
-inserting into the same graph, three rounds, asserting every returned id is in
-range and every score finite, with a query counter so the assertion cannot pass
-vacuously. Zero bad results, and green four times in a row. So a concurrent
-reader gets a *worse* answer and never a wrong one, and the hazard is recall,
-not safety. That is the test that gates the change, written before the change.
+Three defects the suite caught, none of them predicted: the builder leaked six
+allocations because `Collection.deinit` never freed it; the quantized path was
+unbounded and so hit the duplicate-and-invisible failure that had only been
+fixed on the fp32 side; and **live insertion silently breaks a quantized
+collection**, because a live-inserted point is reachable in the graph while the
+quantizer encoded only what the build covered, so stage 1 has no code to score
+it by. The differential test against the exact scan returned a stale point as
+the nearest, which is exactly the class of defect this project exists to catch.
+Quantized collections therefore opt out entirely.
 
-**The hard part is visibility, not safety or recall.** A query answers from two
-regions, the traversal over the graph and `scanPendingTail` over
-`[covered, total)`, and `covered` is one snapshot taken before the traversal.
-The search path already anticipates one failure: a node "linked into the graph
-after this query traversed, counted before this query scanned the tail, and
-therefore in neither", which its comment calls "a no-op that stops being one the
-moment anything inserts into a live graph". The mirror case is not recorded
-anywhere and is worse, because it is silent: a node whose edges exist while the
-reader's snapshot is behind is reached by the traversal *and* scored by the tail,
-and `heap.TopK.push` does not deduplicate, so the client gets one point twice.
-
-Pinned by "a graph covering more than the reader's snapshot returns a point
-twice", which constructs the window directly rather than racing for it, asserts
-the duplicate, and then shows the fix's shape: bounding the traversal to the
-reader's own snapshot puts every node in exactly one region and nothing repeats.
-So live insertion needs that bound, and the bound costs a predicate on the
-traversal's hot path unless it is hoisted behind `graph.count <= covered`, which
-is true on every query today.
-
-The other preconditions are better than findings 31 assumed, and all three are
-checked rather than assumed: `buildIndex` calls
-`hnsw.Graph.init(..., coll.config.capacity)` (`collection.zig:1839`), so the
-published graph has slots up to `--capacity` and not merely to the built count;
-`upper_offsets` already carries a CSR cursor for appending; and
-`quantized_search` already reads `g.count` with an acquire load, as does the
-search path itself. What is left is the bounded traversal, publishing `count` after a
-node is fully linked, and the measurement that decides it: whether a transient
-recall dip during writes beats the tail scan it replaces, on W11's search rate
-and on the recall of queries served during the append window.
+**What is left is the measurement that sets the default.** W11's search rate
+with the flag on against off, and the recall of queries served during the append
+window, because the trade is a transient recall dip while a row is rewritten
+under readers against a tail scan that costs ~3 ms per query for as long as a
+rebuild takes. Both arms build and pass the full suite today; neither has been
+run against W11.
 
 **5. W3's deficit is memory-level parallelism, not a wake cost, so the lever is
 intra-query parallelism (findings 50).** strawmANN spends 972k cycles per query

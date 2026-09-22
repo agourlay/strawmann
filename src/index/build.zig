@@ -112,6 +112,46 @@ fn layoutUpperLevels(g: *Graph, from: usize, count: usize) error{CsrOverflow}!vo
     g.upper_offsets[count] = @intCast(cursor);
 }
 
+/// Insert one appended point into a graph that is already being searched.
+///
+/// The rebuild path builds a *separate* graph and publishes it, so no reader
+/// ever walks a graph that is being written. This does the opposite, which is
+/// what W11 wants: a point appended to a collection joins the live graph
+/// instead of waiting in the pending tail for a rebuild that re-does the whole
+/// corpus.
+///
+/// Three properties make it safe, and all three are tested rather than argued:
+///
+///   * a reader never sees an invalid id. `linkBack` publishes a pruned row as
+///     a prefix write then `@memset(list[kept..], empty)`, so a concurrent
+///     reader can observe a *shorter* row and expand fewer neighbours, which
+///     costs recall and not correctness ("searches against a graph being
+///     mutated see only valid ids").
+///   * a node is in exactly one of the two regions a query answers from. The
+///     count is published *after* the node is fully linked, and the traversal
+///     is bounded by the reader's own snapshot (`collection.Bounded`), so a
+///     node is either traversed or scanned in the tail, never both and never
+///     neither.
+///   * there is room. The graph is allocated at the collection's capacity
+///     rather than at the built count, and the CSR cursor carries forward, so
+///     `layoutUpperLevels` extends by one node without a second pass.
+///
+/// The caller holds the collection's write lock, so there is one writer; the
+/// builder therefore runs unsynchronised, as the serial build does.
+pub fn insertLive(b: *Builder, node: u32) error{CsrOverflow}!void {
+    const g = b.graph;
+    // Only ever extends the frontier by one. A graph that is already behind has
+    // a pending tail, and filling the gap out of order would leave nodes that
+    // neither region covers.
+    std.debug.assert(@atomicLoad(usize, &g.count, .acquire) == node);
+    try layoutUpperLevels(g, node, node + 1);
+    b.insertOne(node);
+    b.promoteEntry(node);
+    // Last, and with release: a reader that sees this count finds the node
+    // fully linked, and one that does not scans it in the tail instead.
+    @atomicStore(usize, &g.count, @as(usize, node) + 1, .release);
+}
+
 pub const Builder = struct {
     graph: *Graph,
     scorer: Scorer,

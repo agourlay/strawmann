@@ -244,11 +244,20 @@ pub fn searchQuantized(
     var cand = heap.TopK.init(cand_storage, pool);
     var adm: collection.Admission = undefined;
     const filter = collection.admission(coll, req.filter, &adm);
+    // The same bound the fp32 path applies, for the same reason and against the
+    // same two failures: with live insertion the graph can hold nodes past this
+    // query's `covered`, and those belong to its tail scan below, not to its
+    // traversal. Without this the quantized path returns a point twice (it is
+    // in both regions) or not at all (in neither), which the differential test
+    // against the exact scan catches. Costs nothing when the graph holds no
+    // more than `covered`, which is every query with the flag off.
+    var bnd: collection.Bounded = undefined;
+    const traversal_filter = collection.bounded(filter, covered, @atomicLoad(usize, &g.count, .acquire), &bnd);
     // Tombstones are dropped as candidates are admitted, so stage 1 yields
     // `stage1` *live* candidates rather than `stage1` minus however many
     // happened to be deleted, otherwise oversampling silently buys less than
     // it claims and the rescore stage has fewer rows to choose from.
-    idx.searchFiltered(@max(ef, pool), hnsw_scratch, &cand, filter);
+    idx.searchFiltered(@max(ef, pool), hnsw_scratch, &cand, traversal_filter);
     const found = cand.finish();
 
     var n: usize = 0;
@@ -921,7 +930,11 @@ test "randomised differential: approximate search against the exact scan under m
         }
         try testing.expectEqual(collection.IndexState.ready, c.index_state.load(.acquire));
         const covered: u32 = @intCast(c.graph_count.load(.acquire));
-        try testing.expectEqual(n, covered);
+        // Either the appended tail is pending (the default), or `-Dlive-insert`
+        // put it in the graph and there is no tail. Both are correct states and
+        // this test is about the *answers*, which must match the exact scan
+        // either way, so it asserts the state it is in rather than one of them.
+        try testing.expect(covered == n or covered == n + tail);
 
         var hs = try hnsw.Index.Scratch.init(testing.allocator, 1024, 128);
         defer hs.deinit(testing.allocator);

@@ -28,6 +28,7 @@ const storage = @import("storage.zig");
 const heap = @import("../index/heap.zig");
 const hnsw = @import("../index/hnsw.zig");
 const build_hnsw = @import("../index/build.zig");
+const build_options = @import("build_options");
 const scroll_mod = @import("scroll.zig");
 const quantized = @import("quantized.zig");
 const quant_mod = @import("../quant/quant.zig");
@@ -545,6 +546,15 @@ pub const Collection = struct {
     /// Retired entries are freed by `reclaimRetired`, from the build thread
     /// after the next publish, once `active_searches` reads zero; whatever is
     /// still here at `deinit` is freed there, when no searches can be running.
+    /// The builder live insertion runs through, made on first use and kept.
+    ///
+    /// One per collection rather than one per worker, because every live insert
+    /// happens under `write_lock`: there is exactly one writer, so the builder
+    /// runs unsynchronised exactly as the serial build does. Null until a point
+    /// is appended to a collection that already has a published graph, which on
+    /// most collections is never.
+    live_builder: ?build_hnsw.Builder = null,
+
     retired_graphs: std.ArrayList(*hnsw.Graph) = .empty,
     retired_quant: std.ArrayList(*quantized.Store) = .empty,
     /// Searches currently inside `search` or `searchQuantized`.
@@ -726,6 +736,12 @@ pub const Collection = struct {
             t.join();
             self.build_thread = null;
         }
+        // Before the graph it points at, though it owns none of it: the
+        // builder holds six of its own allocations and nothing else frees them.
+        if (self.live_builder) |*b| {
+            b.deinit(self.alloc);
+            self.live_builder = null;
+        }
         if (self.graph) |g| {
             g.deinit();
             self.alloc.destroy(g);
@@ -844,6 +860,10 @@ pub const Collection = struct {
                 error.MapFull => Error.MapFull,
                 error.CapacityExceeded => Error.CapacityExceeded,
             };
+            // `-Dlive-insert`: join the published graph now instead of waiting
+            // in the pending tail for a rebuild of the whole corpus. Off by
+            // default until W11 says what the trade is worth (decisions.md).
+            if (build_options.live_insert) liveInsert(self, r.offset);
         } else {
             // An in-place overwrite of a row a search may be reading right
             // now. `beginInPlace` makes that visible to readers and drains the
@@ -2365,6 +2385,41 @@ pub const Admission = struct {
     }
 };
 
+/// A query's own view of the graph: nodes below `bound`, and whatever the
+/// composed `Admission` admits.
+///
+/// A query answers from two regions, the traversal and `scanPendingTail` over
+/// `[covered, total)`, where `covered` is one snapshot taken before the
+/// traversal. With a graph that only ever grows by *replacement* the two can
+/// never overlap. The moment anything inserts into the live graph they can, in
+/// both directions: a node linked after the traversal and counted before the
+/// tail scan is in neither, and a node whose edges exist while the snapshot is
+/// behind is in *both* — and `heap.TopK.push` does not deduplicate, so the
+/// client gets one point twice.
+///
+/// Bounding the traversal by the reader's own snapshot puts every node in
+/// exactly one region. `bounded` is what builds it, and only when the graph
+/// actually holds more than the reader covers, so a query on a graph that is
+/// not being written pays nothing at all.
+pub const Bounded = struct {
+    bound: u32,
+    inner: ?hnsw.Index.Filter,
+
+    pub fn pred(ctx: *const anyopaque, node: u32) bool {
+        const self: *const Bounded = @ptrCast(@alignCast(ctx));
+        if (node >= self.bound) return false;
+        return if (self.inner) |f| f.admits(node) else true;
+    }
+};
+
+/// The traversal filter for a reader covering `[0, bound)`, or `inner`
+/// unchanged when the graph holds no more than that.
+pub fn bounded(inner: ?hnsw.Index.Filter, bound: u32, graph_count: usize, storage_: *Bounded) ?hnsw.Index.Filter {
+    if (graph_count <= bound) return inner;
+    storage_.* = .{ .bound = bound, .inner = inner };
+    return .{ .pred = Bounded.pred, .ctx = storage_ };
+}
+
 pub fn admission(coll: *const Collection, extra: ?hnsw.Index.Filter, storage_: *Admission) ?hnsw.Index.Filter {
     if (extra) |e| {
         storage_.* = .{ .coll = coll, .extra = e };
@@ -2372,6 +2427,42 @@ pub fn admission(coll: *const Collection, extra: ?hnsw.Index.Filter, storage_: *
     }
     if (coll.deleted_count > 0) return .{ .pred = notDeleted, .ctx = coll };
     return null;
+}
+
+/// Extend the published graph by the point just appended, or leave it to the
+/// tail scan.
+///
+/// Best effort by design: every reason to decline leaves the point exactly
+/// where it would have been without the flag, in `[graph.count, total)`, which
+/// `scanPendingTail` covers exhaustively. So a declined insert costs the tail
+/// scan it already cost and never correctness.
+///
+/// Declines when there is no graph to extend, when the graph is already behind
+/// (a tail exists, and filling the frontier out of order would strand the
+/// nodes in between), and when the builder cannot be made or the CSR is full.
+///
+/// The caller holds `write_lock`.
+fn liveInsert(coll: *Collection, offset: u32) void {
+    const g = publishedGraph(coll) orelse return;
+    if (@atomicLoad(usize, &g.count, .acquire) != offset) return;
+    // Never into a quantized collection. §6.7's stage 1 traverses on *codes*,
+    // and the quantizer encoded the points the build covered: a live-inserted
+    // point would be reachable in the graph with no code to score it by. The
+    // pending tail is what scores those, in fp32, and it only does so while the
+    // graph does not claim them. Caught by the quantized path's differential
+    // test against the exact scan, which returned a stale point as the nearest.
+    if (coll.quant.load(.acquire) != null) return;
+
+    if (coll.live_builder) |*b| {
+        // A rebuild publishes a new graph; the builder follows it. The scratch
+        // is sized to the collection's capacity, which does not change.
+        b.graph = g;
+    } else {
+        coll.live_builder = build_hnsw.Builder.init(coll.alloc, g, scorerFor(coll)) catch return;
+    }
+    build_hnsw.insertLive(&coll.live_builder.?, offset) catch return;
+    coll.graph_count.store(@as(usize, offset) + 1, .release);
+    coll.indexed_count = @as(usize, offset) + 1;
 }
 
 /// Search over fp32, using the graph when one is published and brute force
@@ -2427,13 +2518,19 @@ pub fn searchFiltered(
             // no-op that stops being one the moment anything inserts into a
             // live graph.
             const covered: u32 = @intCast(@atomicLoad(usize, &g.count, .acquire));
+            // Nodes past this reader's snapshot belong to its tail scan, not to
+            // its traversal, or they land in both and the client sees a point
+            // twice (`Bounded`). Costs nothing while nothing inserts into the
+            // live graph, because then the graph holds exactly `covered`.
+            var bnd: Bounded = undefined;
+            const traversal_filter = bounded(filter, covered, @atomicLoad(usize, &g.count, .acquire), &bnd);
             if (scratch) |sc| {
                 var buf: [Probe.max_buffer]u8 align(Probe.buffer_align) = undefined;
                 const probe = Probe.init(coll, query, &buf);
                 const idx = hnsw.Index{ .graph = g, .scorer = .of(&probe) };
                 // Tombstones are dropped as results are admitted to `out`, not
                 // after it has been truncated to `k`, see `Index.Filter`.
-                idx.searchFiltered(ef, sc, out, filter);
+                idx.searchFiltered(ef, sc, out, traversal_filter);
 
                 // Points appended since the graph was built are not in it, so
                 // scan them exhaustively and let `out` merge the two sets.
@@ -2579,6 +2676,11 @@ test "deleted points are filtered from graph results without disconnecting it" {
 }
 
 test "a write keeps the graph and the pending tail is searched exhaustively" {
+    // Pins the flag-off state machine: a write keeps the graph, the tail is
+    // scanned, and the graph is dropped once the tail is worth rebuilding for.
+    // `-Dlive-insert` deliberately removes the tail, so there is nothing here
+    // to observe and the behaviour it would assert is the other arm's.
+    if (build_options.live_insert) return error.SkipZigTest;
     // The old contract dropped the graph on any upsert, so one new point sent
     // every subsequent query through a brute force of the whole collection.
     // W11 measured that at 121 qps against 1,645 for an engine that indexes
@@ -2632,6 +2734,11 @@ test "a write keeps the graph and the pending tail is searched exhaustively" {
 }
 
 test "the graph is only dropped once the tail is worth rebuilding for" {
+    // Pins the flag-off state machine: a write keeps the graph, the tail is
+    // scanned, and the graph is dropped once the tail is worth rebuilding for.
+    // `-Dlive-insert` deliberately removes the tail, so there is nothing here
+    // to observe and the behaviour it would assert is the other arm's.
+    if (build_options.live_insert) return error.SkipZigTest;
     var c = try makeCollection(4, .dot, 4096);
     defer c.deinit();
     var v = [_]f32{ 1, 0, 0, 0 };
@@ -3099,6 +3206,11 @@ test "a rebuild after an append extends the graph, and an overwrite forces a ful
 }
 
 test "the previous graph is served while the collection has stepped aside and while it rebuilds" {
+    // Pins the flag-off state machine: a write keeps the graph, the tail is
+    // scanned, and the graph is dropped once the tail is worth rebuilding for.
+    // `-Dlive-insert` deliberately removes the tail, so there is nothing here
+    // to observe and the behaviour it would assert is the other arm's.
+    if (build_options.live_insert) return error.SkipZigTest;
     // W11's mechanism (findings 25): once the tail crossed `rebuild_ratio`
     // the state left `.ready` and every query brute-forced the whole
     // collection until the rebuild published. The graph it had stepped
@@ -3908,8 +4020,8 @@ test "a graph covering more than the reader's snapshot returns a point twice" {
 
     // And the shape of the fix: bounding the traversal to the reader's own
     // snapshot puts every node in exactly one region, so nothing repeats.
-    var bounded_store: [32]Candidate = undefined;
-    var bounded = heap.TopK.init(&bounded_store, 32);
+    var one_region_store: [32]Candidate = undefined;
+    var one_region = heap.TopK.init(&one_region_store, 32);
     {
         const Bound = struct {
             limit: u32,
@@ -3922,13 +4034,126 @@ test "a graph covering more than the reader's snapshot returns a point twice" {
         var buf: [Probe.max_buffer]u8 align(Probe.buffer_align) = undefined;
         const probe = Probe.init(&c, &q, &buf);
         const idx = hnsw.Index{ .graph = c.graph.?, .scorer = .of(&probe) };
-        idx.searchFiltered(64, &scratch, &bounded, .{ .ctx = @ptrCast(&b), .pred = Bound.pred });
-        scanPendingTail(&c, &q, covered, &bounded);
+        idx.searchFiltered(64, &scratch, &one_region, .{ .ctx = @ptrCast(&b), .pred = Bound.pred });
+        scanPendingTail(&c, &q, covered, &one_region);
     }
     var seen2 = std.AutoHashMap(u32, void).init(testing.allocator);
     defer seen2.deinit();
-    for (bounded.finish()) |cand| {
+    for (one_region.finish()) |cand| {
         const e = try seen2.getOrPut(cand.id);
         try testing.expect(!e.found_existing);
     }
+}
+
+test "live insertion keeps every appended point findable exactly once" {
+    // The whole point of the flag, and the two failures it must not have: a
+    // point that is in neither region (invisible) or in both (returned twice).
+    // Compiled out unless `-Dlive-insert=true`, because with the flag off the
+    // graph never grows under a reader and there is nothing to test.
+    if (!build_options.live_insert) return error.SkipZigTest;
+
+    const dim = 8;
+    var c = try makeCollection(dim, .euclid, 4096);
+    defer c.deinit();
+    var prng = std.Random.DefaultPrng.init(0x11FE);
+    const rnd = prng.random();
+
+    const built = 800;
+    for (0..built) |i| {
+        var v: [dim]f32 = undefined;
+        for (&v) |*x| x.* = rnd.floatNorm(f32);
+        _ = try c.upsert(.{ .num = i }, &v);
+    }
+    try buildIndex(&c, .serial, 1);
+    try testing.expectEqual(@as(usize, built), c.graph.?.count);
+
+    // Append past the built graph. With the flag on these join it directly.
+    const appended = 400;
+    for (built..built + appended) |i| {
+        var v: [dim]f32 = undefined;
+        for (&v) |*x| x.* = rnd.floatNorm(f32);
+        _ = try c.upsert(.{ .num = i }, &v);
+    }
+    // The graph grew with the collection: no pending tail is left.
+    try testing.expectEqual(@as(usize, built + appended), c.graph.?.count);
+    try testing.expectEqual(@as(usize, built + appended), c.count());
+
+    var scratch = try hnsw.Index.Scratch.init(testing.allocator, 4096, 256);
+    defer scratch.deinit(testing.allocator);
+
+    var dupes: usize = 0;
+    var missing: usize = 0;
+    for (0..60) |_| {
+        var q: [dim]f32 = undefined;
+        for (&q) |*x| x.* = rnd.floatNorm(f32);
+
+        var store: [24]Candidate = undefined;
+        var out = heap.TopK.init(&store, 24);
+        search(&c, &q, 256, .approximate, &scratch, &out);
+
+        var seen = std.AutoHashMap(u32, void).init(testing.allocator);
+        defer seen.deinit();
+        for (out.finish()) |cand| {
+            const e = try seen.getOrPut(cand.id);
+            if (e.found_existing) dupes += 1;
+        }
+
+        // Against the exact answer: an appended point must be reachable, not
+        // merely present. The graph is approximate, so compare the top-1, which
+        // a 256-wide search over 1200 points must not miss.
+        var tb: [1]Candidate = undefined;
+        var truth = heap.TopK.init(&tb, 1);
+        bruteForce(&c, &q, &truth);
+        const want = truth.finish()[0].id;
+        var found = false;
+        for (out.finish()) |cand| {
+            if (cand.id == want) found = true;
+        }
+        if (!found) missing += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), dupes);
+    try testing.expectEqual(@as(usize, 0), missing);
+}
+
+test "live insertion leaves the collection searchable after a rebuild" {
+    // The builder follows the published graph. A rebuild swaps that pointer,
+    // and the next live insert must extend the new graph rather than the
+    // retired one.
+    if (!build_options.live_insert) return error.SkipZigTest;
+
+    const dim = 8;
+    var c = try makeCollection(dim, .euclid, 4096);
+    defer c.deinit();
+    var prng = std.Random.DefaultPrng.init(0x22FE);
+    const rnd = prng.random();
+    for (0..400) |i| {
+        var v: [dim]f32 = undefined;
+        for (&v) |*x| x.* = rnd.floatNorm(f32);
+        _ = try c.upsert(.{ .num = i }, &v);
+    }
+    try buildIndex(&c, .serial, 1);
+    for (400..500) |i| {
+        var v: [dim]f32 = undefined;
+        for (&v) |*x| x.* = rnd.floatNorm(f32);
+        _ = try c.upsert(.{ .num = i }, &v);
+    }
+    // Rebuild over everything, then append again.
+    try buildIndex(&c, .serial, 1);
+    const g_after = c.graph.?;
+    for (500..560) |i| {
+        var v: [dim]f32 = undefined;
+        for (&v) |*x| x.* = rnd.floatNorm(f32);
+        _ = try c.upsert(.{ .num = i }, &v);
+    }
+    try testing.expectEqual(g_after, c.graph.?);
+    try testing.expectEqual(@as(usize, 560), c.graph.?.count);
+
+    var scratch = try hnsw.Index.Scratch.init(testing.allocator, 4096, 256);
+    defer scratch.deinit(testing.allocator);
+    var q: [dim]f32 = undefined;
+    for (&q) |*x| x.* = rnd.floatNorm(f32);
+    var store: [10]Candidate = undefined;
+    var out = heap.TopK.init(&store, 10);
+    search(&c, &q, 256, .approximate, &scratch, &out);
+    try testing.expect(out.finish().len == 10);
 }

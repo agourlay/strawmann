@@ -114,6 +114,7 @@ const BuildOptions = struct {
     force_isa: []const u8,
     isa_build_name: []const u8,
     visited_set: []const u8,
+    live_insert: bool,
     optimize: std.builtin.OptimizeMode,
 };
 
@@ -131,6 +132,12 @@ fn buildOptions(b: *std.Build, o: BuildOptions) *std.Build.Module {
     // traffic and 47% of an fp32 one's. Comptime, so the hot path keeps no
     // branch it did not have before.
     opts.addOption([]const u8, "visited_set", o.visited_set);
+    // Off by default and measured before it is ever on. W11 spends its row
+    // scanning the pending tail while a rebuild re-does the whole corpus, and
+    // inserting appended points into the live graph is the alternative; what it
+    // trades is a transient recall dip while a row is being rewritten under
+    // readers, which is a number rather than an argument.
+    opts.addOption(bool, "live_insert", o.live_insert);
     // §9: "results are only ever quoted from ReleaseFast." The banner said which
     // ISA a binary carried but never which optimize mode built it, so a Debug
     // binary left at `zig-out/bin/strawmann` served a whole run while every row
@@ -180,11 +187,18 @@ pub fn build(b: *std.Build) void {
         "Which visited set the search path uses (generation|bitmap). §6.5's default is generation, a stamped u32 array at 4 MB/worker per 1M points; bitmap is 1 bit/point plus a dirty list, 21x smaller and paying a reset proportional to what was visited. §11 open question 3 asks where they cross",
     ) orelse "generation";
 
+    const live_insert = b.option(
+        bool,
+        "live-insert",
+        "Insert appended points into the live graph instead of leaving them in the pending tail until a rebuild (default false; W11's lever, and it trades a transient recall dip during writes)",
+    ) orelse false;
+
     const options_mod = buildOptions(b, .{
         .qdrant_version = qdrant_version,
         .force_isa = force_isa,
         .isa_build_name = isa_build_name,
         .visited_set = visited_set,
+        .live_insert = live_insert,
         .optimize = optimize,
     });
 
@@ -338,6 +352,7 @@ pub fn build(b: *std.Build) void {
             // run's visited set so a kernel matrix is not also a data-structure
             // matrix.
             .visited_set = visited_set,
+            .live_insert = live_insert,
             .optimize = .ReleaseFast,
         });
 
