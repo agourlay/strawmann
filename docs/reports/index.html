@@ -58,11 +58,19 @@
 
   <ul>
     <li>
-      <div class="name"><a href="report-sift1m-sm-sift-perf-rel-0908-vs-qd-sift-perf-rel-0908-2026-09-08-1805.html">sift1m, 2026-09-08</a></div>
+      <div class="name"><a href="report-sift1m-sm-sift-perf-rel-0921-vs-qd-sift-perf-rel-0921-2026-09-21-1916.html">sift1m, 2026-09-21</a></div>
       <div class="what">The current sift1m comparison, and the source of the tables in
       <code>README.md</code> and <code>comparison-sift1m.md</code>. T4, gate <code>pass</code>
-      both arms, 3 passes, equal-work, <code>--perf</code>. First page to carry W12's two
-      selectivity grades with recall measured under their conditions.</div>
+      both arms, 3 passes, equal-work, <code>--perf</code>, and no contaminated row in any
+      pass. Measured against a rebuilt Qdrant (1.19.2-dev, a different sha256 from the 09-08
+      page), which reproduced that page's saturating ratio of 2.20x and its other headline
+      rows to within about 1%.</div>
+    </li>
+    <li>
+      <div class="name"><a href="report-sift1m-sm-sift-perf-rel-0908-vs-qd-sift-perf-rel-0908-2026-09-08-1805.html">sift1m, 2026-09-08</a></div>
+      <div class="what">The pair the front page quoted until 2026-09-21. T4, gate
+      <code>pass</code> both arms, 3 passes, equal-work, <code>--perf</code>. First page to
+      carry W12's two selectivity grades with recall measured under their conditions.</div>
     </li>
     <li>
       <div class="name"><a href="report-sift1m-sm-sift-perf-rel-0907-vs-qd-sift-perf-rel-0907-2026-09-07-0730.html">sift1m, 2026-09-07</a></div>
