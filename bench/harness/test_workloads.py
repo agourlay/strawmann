@@ -2304,3 +2304,84 @@ class ConcurrencyKnobTests(unittest.TestCase):
         w4 = next(x for x in w.table() if x.id == "W4")
         flags = [str(f) for f in w4.args]
         self.assertEqual(flags[flags.index("-c") + 1], "8")
+
+
+class ClientConcurrencyTests(unittest.TestCase):
+    """`client_concurrency`: what the load generator offered, per row.
+
+    Findings 52. The rows do not agree about concurrency and their throughput
+    shares one column, so a qps read across rows without this compares two
+    different loads. Both wrong conclusions in that entry were drawn from the
+    published columns in one sitting.
+    """
+
+    def setUp(self):
+        self.w = importlib.reload(workloads)
+
+    def _of(self, wid: str) -> dict:
+        w = next(x for x in self.w.table() if x.id == wid)
+        return self.w.client_concurrency(w)
+
+    def test_an_unpinned_flag_records_bfbs_default_not_none(self):
+        """The row did offer a concurrency; `None` would read as unknown."""
+        c = self._of("W6-ef128")
+        self.assertEqual(c["client_parallel"], self.w.BFB_DEFAULT_PARALLEL)
+        self.assertEqual(c["client_parallel"], 2)
+        self.assertIn("-p", c["client_defaults"].split())
+
+    def test_a_pinned_flag_is_recorded_and_not_marked_default(self):
+        c = self._of("W10-ef128")
+        self.assertEqual(c["client_parallel"], 8)
+        self.assertNotIn("-p", c["client_defaults"].split())
+
+    def test_the_pair_that_caused_the_misreading_differs(self):
+        """W10's ladder runs at four times W6's, and the table prints both."""
+        self.assertEqual(self._of("W10-ef128")["client_parallel"], 8)
+        self.assertEqual(self._of("W6-ef128")["client_parallel"], 2)
+        self.assertEqual(self._of("W12-sel10-ef128")["client_parallel"], 2)
+        self.assertEqual(self._of("W5")["client_parallel"], 2)
+
+    def test_open_loop_records_no_parallel(self):
+        """bfb ignores `--parallel` under `--rps`, so a number would be fiction."""
+        c = self._of("W4-sat90")
+        self.assertIsNone(c["client_parallel"])
+        self.assertEqual(c["client_threads"], 16)
+
+    def test_single_query_row_is_one(self):
+        self.assertEqual(self._of("W3")["client_parallel"], 1)
+
+    def test_w4_records_all_three(self):
+        c = self._of("W4")
+        self.assertEqual((c["client_parallel"], c["client_threads"]), (64, 16))
+        self.assertEqual(c["client_connections"], self.w.W4_CONNS)
+        self.assertEqual(c["client_defaults"], "")
+
+    def test_every_search_row_records_a_concurrency(self):
+        """A qps with no recorded load is the state this fix exists to end."""
+        for w in self.w.table():
+            if w.upload_only:
+                continue
+            c = self.w.client_concurrency(w)
+            with self.subTest(row=w.id):
+                self.assertIsNotNone(c["client_threads"])
+                self.assertIsNotNone(c["client_connections"])
+                if self.w.load_mode_of(w) is not self.w.LoadMode.open_loop:
+                    self.assertIsNotNone(c["client_parallel"])
+
+    def test_long_flag_spellings_are_read(self):
+        w = self.w.Workload("X", "x", ["--parallel", "9", "--threads", "3",
+                                       "--connections", "4", "--search"])
+        c = self.w.client_concurrency(w)
+        self.assertEqual((c["client_parallel"], c["client_threads"],
+                          c["client_connections"]), (9, 3, 4))
+        self.assertEqual(c["client_defaults"], "")
+
+    def test_a_row_reaching_rows_json_carries_it(self):
+        """The field has to survive `Result`, not merely exist in the helper."""
+        from dataclasses import asdict
+        r = self.w.Result("W6-ef128", self.w.Status.ok, 1, 0, 0, "", 1.0, 1.0, "",
+                          **self.w.client_concurrency(
+                              next(x for x in self.w.table() if x.id == "W6-ef128")))
+        d = asdict(r)
+        self.assertEqual(d["client_parallel"], 2)
+        self.assertIn("-p", d["client_defaults"])

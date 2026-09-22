@@ -285,6 +285,40 @@ IO_FIELDS = ("syscall_reads", "syscall_writes",
              "disk_read_ops", "disk_write_ops",
              "disk_read_bytes", "disk_write_bytes")
 
+#: Fields a row carries only when a concurrent writer ran during it (W11,
+#: W11-steady). Their presence is what marks a row as mutating, which no single
+#: field does reliably: `background_pps` is absent when bfb's upload stats are.
+MUTATING_KEYS = ("background_pps", "background_s", "overlap_s")
+
+
+def is_mutating(row) -> bool:
+    """Did a concurrent writer run during this row?"""
+    return any(row.get(k) is not None for k in MUTATING_KEYS)
+
+
+def settled_rows(rows: list) -> list:
+    """The rows an end-state level may be read from: those with no writer.
+
+    `storage on disk` is a level, and a level is the last row that saw one. The
+    last row of a run is W11, which appends 200,000 points, and Qdrant's
+    optimiser rewrites segments while it does: its storage moves 4.03 GiB to
+    10.11 GiB inside that row and the sample lands wherever the rewrite happens
+    to be. The same row read 3.47 GiB on a single-pass run of the same binary
+    three hours earlier, and the published `rel-0908` page says 10.7 GiB, a 3x
+    spread in a cell a reader takes for a property of the format (findings 53).
+
+    Excluding the mutating rows gives the footprint of the settled corpus,
+    which is what the cell is read as, and it reproduces: 3.47 GiB on both of
+    those runs. A peak is different and is not filtered here, because a peak
+    during a rewrite is still a peak the engine reached.
+
+    Falls back to every row when a run is *all* mutating rows, so a caller
+    never gets an empty list and a partial run still reports something.
+    """
+    kept = [r for r in rows if not is_mutating(r)]
+    return kept or list(rows)
+
+
 #: What the scheduler and the fault handler did to the engine during a row.
 #:
 #: Split by how trustworthy the difference is, which is not cosmetic:

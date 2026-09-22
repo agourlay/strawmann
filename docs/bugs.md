@@ -437,6 +437,50 @@ the wrong number was.
   three runs per arm, since contention can only add time to a latency probe:
   28 to 30 ns against 136 to 138 under the same full-suite load.
 
+## Found by reading a published page against its own rows
+
+*Both produced a plausible wrong number on the front page, which is what this
+file is for. Found 2026-09-21 while analysing `rel-0921`, fixed 2026-09-22.*
+
+- **`storage on disk` was sampled while Qdrant was rewriting segments.** The
+  cell is a level, and a level was "the last row that saw one". The last row of
+  a run is W11, which appends 200,000 points, and Qdrant's optimiser rewrites
+  segments while it does: its storage moves 4.03 GiB to 10.11 GiB inside that
+  one row. So the published footprint was whatever the sample caught, and it
+  caught different things on runs of the same binary hours apart: 10.11 GiB on
+  the three-pass `rel-0921`, **3.47 GiB** on the single-pass run of the same
+  night, 10.7 GiB on the published `rel-0908` page. A reader takes that cell for
+  a property of the storage format, and `docs/comparison-sift1m.md` invited a
+  3.7-against-10.1 GiB comparison on the strength of it. `procstat.settled_rows`
+  is now the one definition of which rows an end state may be read from, both
+  renderers take the level from the last row with no concurrent writer and name
+  the rows they skipped, and the corrected cell reads 3.7 against **3.5** GiB,
+  reproducing the other run rather than spreading 3x across runs. Peak RSS keeps
+  every row deliberately: it is labelled a peak, and a peak reached during a
+  rewrite is one the engine reached. `StorageLevelTests`.
+
+- **The qps column mixed rows offering different client concurrency, and said
+  nothing.** W3 pins `-p 1`, W4 `-p 64 -t 16 -c`, the W10 ladder `-p 8`, and W5,
+  W6, the W6 ladder and both W12 ladders pin nothing and take bfb's default of
+  2 (`src/args/mod.rs`). None of it reached `rows.json`, the report or the
+  generated tables, so two throughput cells printed side by side could differ by
+  four times the offered load with nothing on the page to say so. It is not a
+  hypothetical: reading the published columns cold produced "SQ8 is a 5x
+  throughput regression against fp32" (W6-ef128 at `-p 2` against W10-ef128 at
+  `-p 8`; per query the real figure is 1.22x) and "W5's 4.75x is the engine"
+  (Qdrant holds 1.98 cores there in every run on record, strawmANN 7.05, because
+  `handlers.BatchJob` fans one batch across workers and bfb offers two requests
+  at a time). `workloads.client_concurrency` now records `client_parallel`,
+  `client_threads` and `client_connections` with a `client_defaults` marker for
+  the flags a row did not pin, since "pinned at 8" and "bfb's default of 2" are
+  different facts; `report._row_config` prints them, closing a gap its own
+  docstring had described since it was written; `aggregate.CONFIG_NUMERIC`
+  carries them as configuration so a fold copies rather than medians them. An
+  unpinned flag records the default rather than `None`, because the row did
+  offer a concurrency and `None` reads as unknown; `client_parallel` is `None`
+  on an open-loop row, where bfb ignores `--parallel` and a number would be
+  fiction. `ClientConcurrencyTests`, `RowConfigAndStorageTests`.
+
 ## Found in Qdrant 1.19.0, by §8.6's metamorphic properties
 
 **Neither reproduces any more, and nothing here has run 1.19.0 since.** Both

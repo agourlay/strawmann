@@ -1289,7 +1289,13 @@ def storage_and_io(a_label: str, b_label: str,
     """
     def totals(rows: dict[str, dict]) -> dict:
         out: dict = dict.fromkeys(procstat.IO_FIELDS)
-        out.update(source="", storage=None, rss=None)
+        out.update(source="", storage=None, rss=None, storage_excludes=[])
+        # Totals and the peak see every row; the storage *level* sees only the
+        # settled ones, because the last row appends 200,000 points and catches
+        # a segment-rewriting engine mid-rewrite (findings 53).
+        settled = {id(r) for r in procstat.settled_rows(list(rows.values()))}
+        out["storage_excludes"] = [r["id"] for r in rows.values()
+                                   if procstat.is_mutating(r)]
         for r in rows.values():
             if r.get("io_source"):
                 out["source"] = r["io_source"]
@@ -1301,7 +1307,7 @@ def storage_and_io(a_label: str, b_label: str,
                     # different cells rather than the same zero.
                     out[k] = (out[k] or 0) + v
             # Levels, not sums: the last row that saw one is the end state.
-            if r.get("storage_bytes") is not None:
+            if r.get("storage_bytes") is not None and id(r) in settled:
                 out["storage"] = r["storage_bytes"]
             if r.get("rss_peak_bytes") is not None:
                 out["rss"] = max(out["rss"] or 0, r["rss_peak_bytes"])
@@ -1372,10 +1378,21 @@ def trim_row_note(note: str) -> str:
 
 
 def note_text(ta: dict, tb: dict) -> str:
+    # Run order, not sorted: "W11, W11-steady" is alphabetical and reverses the
+    # order they ran in, which is what the sentence is describing.
+    skipped: list[str] = []
+    for x in (ta.get("storage_excludes") or []) + (tb.get("storage_excludes") or []):
+        if x not in skipped:
+            skipped.append(x)
     s = ("Storage and RSS are end states; the rest are totals over every row. "
          "The syscall rows count every descriptor, sockets included, so on a "
          "search row they measure the network rather than the disk, and no "
          "ratio between them and the disk rows means anything.")
+    if skipped:
+        s += (f" Storage on disk is the level before {', '.join(skipped)}, the rows "
+              f"with a concurrent writer: an engine that rewrites segments is caught "
+              f"mid-rewrite there, and the same row has read 3.47 and 10.11 GiB on two "
+              f"runs of one binary. Peak RSS does include those rows, being a peak.")
     if ta["source"] and tb["source"] and ta["source"] != tb["source"]:
         s += (f" The two engines were measured through different interfaces "
               f"({ta['source']} and {tb['source']}): `proc` supplies syscalls and "

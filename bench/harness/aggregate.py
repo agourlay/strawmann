@@ -104,6 +104,9 @@ NUMERIC = tuple(dict.fromkeys(
 #: mid-run is not a configuration, and that is worth a line either way.
 CONFIG_NUMERIC = frozenset((
     "ef", "n_requested", "n_queries",
+    # What the client offered. A constant of the row, and `notes` reports it if
+    # two passes ever disagree, which would mean the row changed mid-run.
+    "client_parallel", "client_threads", "client_connections",
     "rps_target", "rps_fraction", "saturation_qps",
     "quantization_oversampling",
     # Written by the fold itself, further down.

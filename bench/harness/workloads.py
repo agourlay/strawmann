@@ -1793,6 +1793,13 @@ class Result:
     #: closed-loop p99 is not a latency result. Which one produced this row is
     #: a property of the row, not something a reader should infer from its id.
     load_mode: LoadMode = LoadMode.unset
+    #: What the load generator offered: bfb's `-p`, `-t` and `-c` for this row,
+    #: with `client_defaults` naming the ones it did not pin. The qps column is
+    #: not readable across rows without them (`client_concurrency`).
+    client_parallel: int | None = None
+    client_threads: int | None = None
+    client_connections: int | None = None
+    client_defaults: str = ""
     #: Client-side and server-side percentiles, in microseconds.
     latency: dict = field(default_factory=dict)
     #: The `ef` this row searched at, when it stated one. It is what the recall
@@ -2019,6 +2026,67 @@ def quant_of(w: Workload) -> dict:
         except (IndexError, KeyError):
             pass
     return out
+
+
+#: bfb's own defaults at the pinned commit (`src/args/mod.rs`): `--parallel 2`,
+#: `--threads 2`, `--connections 1`. `check_bfb_pin` is what makes recording
+#: them a fact rather than a guess.
+BFB_DEFAULT_PARALLEL = 2
+BFB_DEFAULT_THREADS = 2
+BFB_DEFAULT_CONNECTIONS = 1
+
+
+def _flag_int(args: list[str], *names: str) -> int | None:
+    """The integer value of the first of `names` present in `args`, or None."""
+    for n in names:
+        if n in args:
+            i = args.index(n)
+            if i + 1 < len(args):
+                try:
+                    return int(args[i + 1])
+                except ValueError:
+                    return None
+    return None
+
+
+def client_concurrency(w: Workload) -> dict:
+    """What the load generator was asked to offer, per row.
+
+    The rows do not agree about this and the table prints their throughput in
+    one column: W3 pins `-p 1`, W4 `-p 64 -t 16 -c`, the W10 ladder `-p 8`, and
+    W5, W6, the W6 ladder and both W12 ladders pin nothing and take bfb's
+    default of 2. None of it reached `rows.json`, so a reader comparing two qps
+    cells could not see that one row offered four times the concurrency of the
+    other. Findings 52 has the two wrong conclusions that came of it, both drawn
+    in one sitting from the published columns.
+
+    An unpinned flag records bfb's default rather than `None`: the row *did*
+    offer a concurrency, and "unset" reads as "unknown" when it is neither.
+    `client_defaults` says which values were not the row's own, because "pinned
+    at 8" and "bfb's default of 2" are different facts about a measurement.
+
+    `client_parallel` is `None` on an open-loop row, where it would be a
+    fiction: bfb's own help says `--parallel` is "ignored when --rps is set",
+    and §4's arms omit it deliberately, the rate being what paces them.
+    """
+    args = [str(a) for a in w.args]
+    parallel = _flag_int(args, "-p", "--parallel")
+    threads = _flag_int(args, "-t", "--threads")
+    conns = _flag_int(args, "-c", "--connections")
+    defaulted: list[str] = []
+    if "--rps" in args or w.rps_fraction is not None:
+        parallel = None
+    elif parallel is None:
+        parallel = BFB_DEFAULT_PARALLEL
+        defaulted.append("-p")
+    if threads is None:
+        threads = BFB_DEFAULT_THREADS
+        defaulted.append("-t")
+    if conns is None:
+        conns = BFB_DEFAULT_CONNECTIONS
+        defaulted.append("-c")
+    return {"client_parallel": parallel, "client_threads": threads,
+            "client_connections": conns, "client_defaults": " ".join(defaulted)}
 
 
 def load_mode_of(w: Workload) -> LoadMode:
@@ -2811,6 +2879,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
         w.id, status, secs, l0, l1, foreign, qps, rps, detail,
         when=when, session=SESSION,
         load_mode=load_mode_of(w), latency=latency_of(results, w.id),
+        **client_concurrency(w),
         ef=ef_of(w),
         exact=exact_of(w),
         wall_s=round(wall, 3),

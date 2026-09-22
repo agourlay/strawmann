@@ -450,6 +450,20 @@ def _row_config(rows: list) -> str:
         bits.append(bit)
     if r.get("collection"):
         bits.append(f"collection={r['collection']}")
+    # What the client offered. The rows do not agree about it (W10's ladder is
+    # `-p 8`, W6's and W12's are bfb's default of 2) and their throughput
+    # shares one column, so a qps read across rows without this is a
+    # comparison of two different loads (findings 52). A defaulted value is
+    # marked, because "pinned at 8" and "bfb's default" are different facts.
+    if r.get("client_parallel") is not None or r.get("client_threads") is not None:
+        got = [(f"-p {r['client_parallel']}" if r.get("client_parallel") is not None
+                else "-p n/a under --rps")]
+        for flag, key in (("-t", "client_threads"), ("-c", "client_connections")):
+            if r.get(key) is not None:
+                got.append(f"{flag} {r[key]}")
+        deflt = (r.get("client_defaults") or "").split()
+        bits.append("client " + " ".join(got)
+                    + (f" ({', '.join(deflt)} bfb default)" if deflt else ""))
     if r.get("n_requested"):
         bits.append(f"n={r['n_requested']:,}")
     ov, rs = r.get("quantization_oversampling"), r.get("quantization_rescore")
@@ -2818,7 +2832,13 @@ def storage_table(runs: list[Run]) -> str:
     different and much stronger claim.
     """
     def cell(run: Run, key: str, fmt: str, kind: str) -> str:
-        vals = [r.get(key) for r in run.rows if r.get(key) is not None]
+        # A level is read from the settled rows only: the run's last row is
+        # W11, and an end state sampled while Qdrant's optimiser rewrites
+        # segments is that rewrite rather than the corpus (findings 53,
+        # `procstat.settled_rows`). A peak keeps every row, a peak being a peak.
+        src = run.rows if (kind != "level" or key.startswith("rss_")) \
+            else procstat.settled_rows(run.rows)
+        vals = [r.get(key) for r in src if r.get(key) is not None]
         if not vals:
             # Runs measured before `procstat.store_bytes_for` recorded this can
             # still be answered from provenance they did keep: an engine whose
@@ -2838,7 +2858,14 @@ def storage_table(runs: list[Run]) -> str:
         # The resident levels take the largest across the rows, like the peak
         # they sit under; every other level is the end state.
         v = (max(vals) if key.startswith("rss_") else vals[-1]) if kind == "level" else sum(vals)
-        return f'<td class="num">{procstat.human_bytes(v) if fmt == "bytes" else procstat.human_count(v)}</td>'
+        shown = procstat.human_bytes(v) if fmt == "bytes" else procstat.human_count(v)
+        # Named rather than silently dropped: the reader is owed the row the
+        # level came from when it is not the run's last one.
+        if kind == "level" and not key.startswith("rss_") and len(src) != len(run.rows):
+            skipped = [r.get("id") for r in run.rows if procstat.is_mutating(r)]
+            return (f'<td class="num">{shown}'
+                    f'<span class="sub">before {", ".join(str(x) for x in skipped)}</span></td>')
+        return f'<td class="num">{shown}</td>'
 
     body = []
     for label, key, fmt, kind in STORAGE_ROWS:
@@ -2869,7 +2896,11 @@ def storage_table(runs: list[Run]) -> str:
             f'block-layer operations and bytes, so a row one interface does not carry '
             f'reads <em>n/a via …</em>. <em>unknown</em> means it was not measured, '
             f'and <b>0</b> means it was: an engine started with no <code>--data-dir</code> '
-            f'has no store, which is the row this section exists for.</p>')
+            f'has no store, which is the row this section exists for. '
+            f'<b>storage on disk</b> is the level before the rows with a concurrent '
+            f'writer: during those an engine that rewrites segments is caught '
+            f'mid-rewrite, and the same row has read 3.47 and 10.11 GiB on two runs '
+            f'of one binary. <b>peak RSS</b> does include them, being a peak.</p>')
 
 
 #: bfb's `wait_index` polling floor, restated here because the report is read

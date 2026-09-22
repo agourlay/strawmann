@@ -13,6 +13,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from harness_fixtures import CONF_T2, CONF_T3, Fixture, N, _reload, _row, _sweep, good_stamp
 
@@ -1512,3 +1513,152 @@ class EstimateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StorageLevelTests(unittest.TestCase):
+    """`storage on disk` is a level, and the last row is a rewrite in progress.
+
+    Findings 53: the cell is sampled after W11's 200,000-point append, during
+    which Qdrant's storage moves 4.03 GiB to 10.11 GiB while its optimiser
+    rewrites segments. The same row read 3.47 GiB on a single-pass run of the
+    same binary three hours earlier, and the published `rel-0908` page says
+    10.7 GiB: a 3x spread in a cell read as a property of the format.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = _reload(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    #: A run in measurement order: two settled rows, then the mutating pair.
+    def _rows(self, settled_bytes: int, mutating_bytes: int) -> dict[str, dict]:
+        rows = [
+            _row("W3", 1000.0, storage_bytes=settled_bytes - 10, rss_peak_bytes=100),
+            _row("W13", 2000.0, storage_bytes=settled_bytes, rss_peak_bytes=110),
+            _row("W11-steady", 300.0, storage_bytes=settled_bytes + 400,
+                 rss_peak_bytes=180, background_pps=2000.0, background_s=10.0),
+            _row("W11", 200.0, storage_bytes=mutating_bytes,
+                 rss_peak_bytes=900, background_pps=3300.0, background_s=20.0),
+        ]
+        return {r["id"]: r for r in rows}
+
+    def test_level_comes_from_before_the_mutating_rows(self):
+        cmp = self.m["compare"]
+        a = self._rows(3_900_000_000, 3_900_000_000)     # does not rewrite
+        b = self._rows(3_700_000_000, 10_900_000_000)    # rewrites under append
+        out = cmp.storage_and_io("a", "b", a, b, markdown=True)
+        line = next(l for l in out if l.startswith("| storage on disk"))
+        self.assertIn(self.m["procstat"].human_bytes(3_900_000_000), line)
+        self.assertIn(self.m["procstat"].human_bytes(3_700_000_000), line)
+        self.assertNotIn(self.m["procstat"].human_bytes(10_900_000_000), line)
+
+    def test_peak_rss_still_sees_every_row(self):
+        """A peak during a rewrite is still a peak the engine reached."""
+        cmp = self.m["compare"]
+        a = self._rows(1_000, 1_000)
+        out = cmp.storage_and_io("a", "b", a, self._rows(1_000, 1_000), markdown=True)
+        line = next(l for l in out if l.startswith("| peak RSS"))
+        self.assertIn(self.m["procstat"].human_bytes(900), line)
+
+    def test_the_note_names_the_excluded_rows_in_run_order(self):
+        cmp = self.m["compare"]
+        a = self._rows(1_000, 9_000)
+        out = cmp.storage_and_io("a", "b", a, a, markdown=True)
+        note = out[-1]
+        self.assertIn("W11-steady, W11", note)
+        self.assertNotIn("W11, W11-steady", note)
+
+    def test_a_run_of_only_mutating_rows_still_reports(self):
+        """Fallback: a partial run reports something rather than nothing."""
+        cmp = self.m["compare"]
+        only = {r["id"]: r for r in [
+            _row("W11", 200.0, storage_bytes=7_000, rss_peak_bytes=10,
+                 background_pps=3300.0)]}
+        out = cmp.storage_and_io("a", "b", only, only, markdown=True)
+        line = next(l for l in out if l.startswith("| storage on disk"))
+        self.assertIn(self.m["procstat"].human_bytes(7_000), line)
+
+    def test_totals_are_unaffected_and_still_sum_every_row(self):
+        """Only the level changed: a total over the run is still the run's."""
+        cmp = self.m["compare"]
+        rows = {r["id"]: r for r in [
+            _row("W13", 2000.0, disk_write_ops=5, storage_bytes=1),
+            _row("W11", 200.0, disk_write_ops=7, storage_bytes=2,
+                 background_pps=3300.0)]}
+        out = cmp.storage_and_io("a", "b", rows, rows, markdown=True)
+        line = next(l for l in out if l.startswith("| disk write ops"))
+        self.assertIn("12", line)
+
+
+class EnvironmentFloorTests(unittest.TestCase):
+    """A floor measured in another environment bands nothing (findings 46).
+
+    Qdrant's saturating row read 10,313 against a twelve-run aggregate of
+    14,716 and was taken for a 30% regression; the aggregate was SMT-off and
+    the run SMT-on. strawmANN moved 1.5% across the same change, so the two
+    engines are not even affected alike and no correction factor exists.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(Path(self.tmp.name))
+        self.m = _reload(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _label(self, name: str, env: str | None):
+        self.fx.label(name, [_row("W4", 1000.0)], good_stamp())
+        p = Path(self.tmp.name) / "bench/results" / name / "run.json"
+        meta = json.loads(p.read_text())
+        if env is not None:
+            meta["env_hash"] = env
+        meta["engine_comm"] = name
+        p.write_text(json.dumps(meta))
+
+    def test_a_floor_from_another_environment_is_refused(self):
+        self._label("a", "smt-on")
+        self._label("b", "smt-on")
+        self.assertFalse(self.m["compare"].env_matches({"env_hash": "smt-off"}, "a", "b"))
+
+    def test_the_same_environment_is_accepted(self):
+        self._label("a", "smt-on")
+        self._label("b", "smt-on")
+        self.assertTrue(self.m["compare"].env_matches({"env_hash": "smt-on"}, "a", "b"))
+
+    def test_one_arm_disagreeing_is_enough_to_refuse(self):
+        self._label("a", "smt-on")
+        self._label("b", "smt-off")
+        self.assertFalse(self.m["compare"].env_matches({"env_hash": "smt-on"}, "a", "b"))
+
+    def test_permissive_where_it_cannot_know(self):
+        """A floor predating the stamp, or a run without one, refuses nothing."""
+        self._label("a", None)
+        self._label("b", None)
+        self.assertTrue(self.m["compare"].env_matches({}, "a", "b"))
+        self.assertTrue(self.m["compare"].env_matches({"env_hash": "smt-off"}, "a", "b"))
+
+    def test_parity_band_declines_across_environments(self):
+        """The guard has to reach the band, not merely exist beside it."""
+        self._label("a", "smt-on")
+        self._label("b", "smt-on")
+        cmp = self.m["compare"]
+        floor = {"rsd": {"W4": 0.01}, "arms": ["a", "b"], "env_hash": "smt-off"}
+        with mock.patch.object(cmp, "read_noise_meta", return_value=floor):
+            self.assertIsNone(cmp.parity_band("W4", "a", "b"))
+        floor["env_hash"] = "smt-on"
+        with mock.patch.object(cmp, "read_noise_meta", return_value=floor):
+            self.assertIsNotNone(cmp.parity_band("W4", "a", "b"))
+
+    def test_the_verdict_tool_refuses_it_too(self):
+        """`regression.floor_refusals` applies the same rule to `cmd_compare`."""
+        self._label("a", "smt-on")
+        self._label("b", "smt-on")
+        reg = self.m["regression"]
+        noise = reg.Noise({"W4": 0.01}, {"W4": 3}, "src", [], env_hash="smt-off")
+        why = reg.floor_refusals(noise, ["a", "b"])
+        self.assertTrue(any("environment" in w for w in why), why)
+        clean = reg.Noise({"W4": 0.01}, {"W4": 3}, "src", [], env_hash="smt-on")
+        self.assertEqual(reg.floor_refusals(clean, ["a", "b"]), [])

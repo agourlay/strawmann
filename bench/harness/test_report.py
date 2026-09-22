@@ -2263,3 +2263,68 @@ class SegmentPolicyReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RowConfigAndStorageTests(unittest.TestCase):
+    """What the page says a row ran at, and where its end state came from."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import jinja2  # noqa: F401
+            import pandas  # noqa: F401
+            import plotly  # noqa: F401
+        except ImportError as e:
+            raise unittest.SkipTest(
+                "report.py needs the uv project (jinja2/pandas/plotly)") from e
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = _reload(Path(self.tmp.name))
+        self.m["report"] = importlib.reload(importlib.import_module("report"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_row_config_line_states_the_client_load(self):
+        """Findings 52: two rows at different `-p` share one qps column."""
+        rep = self.m["report"]
+        line = rep._row_config([_row("W10-ef128", 1.0, client_parallel=8,
+                                     client_threads=2, client_connections=1,
+                                     client_defaults="-t -c")])
+        self.assertIn("client -p 8", line)
+        self.assertIn("bfb default", line)
+
+    def test_a_defaulted_parallel_is_marked_as_one(self):
+        rep = self.m["report"]
+        line = rep._row_config([_row("W6-ef128", 1.0, client_parallel=2,
+                                     client_threads=2, client_connections=1,
+                                     client_defaults="-p -t -c")])
+        self.assertIn("client -p 2", line)
+        self.assertIn("-p, -t, -c bfb default", line)
+
+    def test_an_open_loop_row_does_not_claim_a_parallel(self):
+        rep = self.m["report"]
+        line = rep._row_config([_row("W4-sat90", 1.0, load_mode="open-loop",
+                                     client_parallel=None, client_threads=16,
+                                     client_connections=2, client_defaults="")])
+        self.assertIn("n/a under --rps", line)
+        self.assertIn("-t 16", line)
+
+    def test_a_row_without_the_fields_says_nothing_about_the_client(self):
+        """Runs measured before this existed must not grow a fabricated line."""
+        rep = self.m["report"]
+        self.assertNotIn("client", rep._row_config([_row("W3", 1.0)]))
+
+    def test_storage_level_skips_the_mutating_rows_and_says_so(self):
+        """Findings 53: the last row is a rewrite in progress, not a footprint."""
+        rep = self.m["report"]
+        rows = [_row("W13", 2000.0, storage_bytes=3_700_000_000, rss_peak_bytes=10),
+                _row("W11", 200.0, storage_bytes=10_900_000_000, rss_peak_bytes=99,
+                     background_pps=3300.0)]
+        html = rep.storage_table([rep.Run("a", rows, "", True, "h")])
+        self.assertIn(rep.procstat.human_bytes(3_700_000_000), html)
+        self.assertNotIn(rep.procstat.human_bytes(10_900_000_000), html)
+        self.assertIn("before W11", html)
+        # The peak is still the peak, so it keeps the mutating row.
+        self.assertIn(rep.procstat.human_bytes(99), html)
