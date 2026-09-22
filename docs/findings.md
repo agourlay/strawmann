@@ -46,22 +46,24 @@ W10-ef128 and W6-ef128, and folds. **Needs a quiet host.** The bitmap trades 4 M
 of footprint for a reset proportional to what the query touched, and nothing has
 priced the reset.
 
-**4. Gather concurrent exact queries into one scan (findings 45).** W9 is
+**4. Gather exact queries across concurrent requests (findings 45).** W9 is
 bandwidth-bound at 85% of the bus, so no kernel, ISA or prefetch work touches
-it: the prefetch attempt halved demand misses and bought one percent. Qdrant
-scales 2.22x from `-p 1` to `-p 8` against strawmANN's 1.51x because it reads
-the corpus less than once per query.
+it; Qdrant scales 2.22x from `-p 1` to `-p 8` against strawmANN's 1.51x because
+it reads the corpus less than once per query.
 
-Two things reading the code settles about the shape of the fix. **The batch path
-is not it.** `handlers.BatchJob` fans a `QueryBatch` *out* across workers, which
-for exact queries means N workers each scanning the whole arena; gathering there
-would fix that pathology and would not move W9, which sends single-query
-requests at `-p 8`. Moving W9 needs gathering *across concurrent requests*,
-which is a scheduler change. **And the probes cannot live on the stack.**
-`Probe.max_buffer` is `max_converted_dim * @sizeOf(f16)` = 32 KiB, so K
-converted queries need the per-worker workspace, not a local, if §6.3's
-no-allocation-on-the-query-path rule is to hold. Budget it as a workspace
-change plus a scheduler change, not an afternoon.
+**The batch half is done** (2026-09-22): `collection.bruteForceRangeMulti` reads
+each row once and scores K queries against it, and `handlers.runGatheredExact`
+routes an all-exact unfiltered `QueryBatch` of 2 to 16 queries through it, so
+such a batch costs one pass rather than K. Differential tests at every batch
+size, an e2e test comparing one batch of four against four batches of one, and
+the path instrumented once to confirm the tests reach it.
+
+**What is left is the half that moves W9**, which sends single-query requests at
+`-p 8`: gathering across *concurrent requests* rather than within one. That is a
+scheduler change, collecting pending exact queries and scoring them in one pass,
+and `bruteForceRangeMulti` is the scan it would gather into. Worth doing only
+with a measurement beside it, since the win is a slope (1.51x against Qdrant's
+2.22x) and not a row.
 
 **5. Incremental insertion for W11 (findings 31), and the invariant it rests on
 is weaker than that entry says.** Serving the old graph through a rebuild was
