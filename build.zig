@@ -348,6 +348,11 @@ pub fn build(b: *std.Build) void {
     // index in Debug before the banner gave it away. §9 quotes numbers from
     // ReleaseFast only, and a bench step has no business rebuilding the server.
     const install_graph_diff = b.addInstallArtifact(graph_diff, .{});
+    // Also part of the default install, so `zig build -Doptimize=ReleaseFast`
+    // refreshes `zig-out/bin/graph-diff` along with everything else. Without
+    // this it was only ever written by `zig build graph-diff`, and a run that
+    // invoked the binary by path got whichever build happened to be there.
+    b.installArtifact(graph_diff);
 
     const run_graph_diff = b.addRunArtifact(graph_diff);
     run_graph_diff.step.dependOn(&install_graph_diff.step);

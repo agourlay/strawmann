@@ -645,6 +645,15 @@ const Args = struct {
     /// harness's concurrent upload does to point ids. Zero is file order;
     /// otherwise the reordering granularity, and 100 is the harness's `-b`.
     shuffle: usize = 0,
+    /// Draw each point's level from the *vector* it holds rather than from the
+    /// node id it was given (`hnsw.assignLevelKey`).
+    ///
+    /// With `--shuffle`, this is the experiment that separates the two things
+    /// a reordered arrival changes: the level assignment, which decides the
+    /// upper levels and the entry point, and the insertion sequence, which
+    /// decides what the greedy descent had to work with when each point was
+    /// linked. Without it they move together and neither can be blamed.
+    stable_levels: bool = false,
 };
 
 fn parseArgs(argv: []const []const u8) !Args {
@@ -661,6 +670,8 @@ fn parseArgs(argv: []const []const u8) !Args {
         }.next;
         if (std.mem.eql(u8, arg, "--histogram")) {
             a.histogram = true;
+        } else if (std.mem.eql(u8, arg, "--stable-levels")) {
+            a.stable_levels = true;
         } else if (std.mem.eql(u8, arg, "--shuffle")) {
             a.shuffle = try std.fmt.parseInt(usize, try val(argv, &i), 10);
             if (a.shuffle == 0) return error.ShuffleBatchZero;
@@ -798,9 +809,9 @@ pub fn main(init: std.process.Init) !void {
     try w.print("points   {d} x {d}, {s}\n", .{ corpus.count, corpus.dim, @tagName(args.kernel) });
     if (args.shuffle != 0) try w.print("arrival  reordered in batches of {d} " ++
         "(the harness uploads with -b 100 -t 8 -p 8)\n", .{args.shuffle});
-    try w.print("params   m={d} ef_construct={d} seed=0x{x} threads={d}{s}\n", .{
-        args.m,                                                                         args.ef_construct, args.seed, threads,
-        if (args.shuffle != 0) ", a fresh arrival order per build" else ", file order",
+    try w.print("params   m={d} ef_construct={d} seed=0x{x} threads={d}{s}{s}\n", .{
+        args.m,                                                                         args.ef_construct,                                              args.seed, threads,
+        if (args.shuffle != 0) ", a fresh arrival order per build" else ", file order", if (args.stable_levels) ", levels keyed on the vector" else "",
     });
     try w.flush();
 
@@ -842,6 +853,17 @@ pub fn main(init: std.process.Init) !void {
 
         const g = try alloc.create(Graph);
         g.* = try Graph.init(alloc, hnsw.Params.fromM(args.m, args.ef_construct, args.seed), corpus.count);
+        // The level key is the vector id, which is the stand-in here for the
+        // external point id the engine would use: both are stable across
+        // ingests, and only stability matters to the draw.
+        var keys: ?[]u64 = null;
+        defer if (keys) |k| alloc.free(k);
+        if (args.stable_levels) {
+            const k = try alloc.alloc(u64, corpus.count);
+            for (k, 0..) |*x, node| x.* = if (order) |o| o[node] else node;
+            g.level_keys = k;
+            keys = k;
+        }
         const t0 = nowNs();
         const stats = try build_hnsw.buildParallel(alloc, g, corpus.scorer(), corpus.count, threads);
         const seconds = @as(f64, @floatFromInt(nowNs() - t0)) / std.time.ns_per_s;
@@ -1051,6 +1073,8 @@ test "the argument parser refuses what it cannot measure" {
     try testing.expectEqual(@as(usize, 3), ladder.n_ef);
     try testing.expectEqual(@as(usize, 512), ladder.ef[ladder.n_ef - 1]);
     try testing.expectError(error.ShuffleBatchZero, parseArgs(&.{ "g", "v.fbin", "--shuffle", "0" }));
+    const stable = try parseArgs(&.{ "g", "v.fbin", "--shuffle", "100", "--stable-levels" });
+    try testing.expect(stable.stable_levels and stable.shuffle == 100);
 }
 
 test "a reordering keeps every point exactly once" {

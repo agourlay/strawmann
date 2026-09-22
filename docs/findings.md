@@ -17,12 +17,21 @@ with the result. `--max-segment-size` is in the harness and the sift1m tier is
 clean; the tier the finding is about was never re-run. Until it is, the largest
 claim this project wants to make is unmeasured.
 
-**2. The parallel build is a per-build draw (findings 34).** strawmANN's graphs
-disagree with each other by 0.00288 at `ef` 512 against Qdrant's 0.00009, which
-is wider than the gap between the engines at that point, so a single pass can
-report either engine ahead at high recall. Unreachable nodes were eliminated as
-the mechanism (two hundred times too small); what is left is which edges the
-pruning race keeps, and nothing measures that yet. A graph-diff between two
-builds is the instrument. The named candidates are a deterministic insertion
-order, a post-build reachability repair, or refusing to prune a node's last
-in-edge in `linkBack`.
+**2. Bulk-build in external-id order, not in arrival order (findings 34).**
+The mechanism is settled and it was not the builder: the per-pass recall draw
+is the *upload*. `ids.IdSpace.reserve` hands out internal offsets as points
+arrive, the bulk build then inserts in offset order, and W2 uploads over eight
+streams, so every pass links the corpus in a different sequence. Uploading
+serially collapses the `ef` 512 spread from 0.00120 to 0.00000 and buys 0.0007
+of recall ([`decisions.md`](decisions.md), `bench/harness/upload_order_ab.py`).
+The level assignment, which the same reordering also moves, was measured and is
+not the lever.
+
+So the lever is the sequence: `build.extendParallel` hands its workers node ids
+0 to n, and handing them a permutation sorted by external id would put every
+pass in the file-order regime whatever the upload did. What is unmeasured: what
+the sort costs W2 (1M u64, once per build), whether the gain survives the whole
+harness path rather than an isolated `bench2`, what it means for a corpus whose
+ids are not the base-file row index, and whether the entry point needs a
+deterministic tie-break too (`promoteEntry` resolves equal max-level nodes by
+arrival).

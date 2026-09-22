@@ -93,6 +93,16 @@ pub const Graph = struct {
     /// Highest level each node participates in. 0 means level 0 only.
     node_levels: []u8,
 
+    /// Optional stable key per node for the level draw (`assignLevelKey`).
+    ///
+    /// Null keeps the node id as the key, which is what every graph built
+    /// before this existed used. Set, it makes the level assignment a property
+    /// of the *point* rather than of the offset it happened to be given, which
+    /// is what stops two uploads of one corpus producing two different graphs.
+    /// Borrowed, not owned: it has to outlive the build, and nothing reads it
+    /// afterwards.
+    level_keys: ?[]const u64 = null,
+
     entry_point: u32 = empty_neighbour,
     max_level: u8 = 0,
     count: usize = 0,
@@ -220,7 +230,33 @@ pub const Graph = struct {
 /// which would defeat §8.7's checksum stability before the neighbour lists even
 /// came into it.
 pub fn assignLevel(params: Params, node: u32) u8 {
-    const h = std.hash.Wyhash.hash(params.seed, std.mem.asBytes(&node));
+    return levelFromHash(params, std.hash.Wyhash.hash(params.seed, std.mem.asBytes(&node)));
+}
+
+/// The same draw, keyed on something that survives a re-ingest.
+///
+/// The node id does not. `ids.IdSpace.reserve` hands out internal offsets from
+/// a monotone counter as points arrive, so uploading one corpus twice over
+/// eight concurrent streams gives the same vector two different node ids and
+/// therefore two different levels.
+///
+/// An instrument, not a fix, and the distinction is measured. A reordered
+/// arrival moves both the level assignment and the insertion sequence; this
+/// separates them, and `decisions.md` records the answer: over five builds at
+/// the same five arrival orders, drawing the level from the point instead of
+/// from the slot left the recall spread at 0.00023 against 0.00024 and the
+/// mean at 0.99883 against 0.99884. The level draw is not what makes two
+/// uploads of one corpus two different graphs; the order the points were
+/// linked in is. Nothing in the engine sets `Graph.level_keys`, and keying it
+/// on the external id would buy nothing on this evidence.
+///
+/// Kept because the question recurs: anything that changes the insertion
+/// sequence will want this column beside it again.
+pub fn assignLevelKey(params: Params, key: u64) u8 {
+    return levelFromHash(params, std.hash.Wyhash.hash(params.seed, std.mem.asBytes(&key)));
+}
+
+fn levelFromHash(params: Params, h: u64) u8 {
     // Uniform in (0, 1].
     const u = @as(f64, @floatFromInt(h | 1)) / @as(f64, @floatFromInt(std.math.maxInt(u64)));
     const level = -@log(u) * params.levelMultiplier();
@@ -690,6 +726,56 @@ test "a different seed produces a different level assignment" {
         if (assignLevel(a, @intCast(i)) != assignLevel(b, @intCast(i))) differences += 1;
     }
     try testing.expect(differences > 0);
+}
+
+test "a key-drawn level follows the point, not the slot it landed in" {
+    // The whole of findings 34. Two uploads of one corpus give a vector two
+    // different internal offsets, and a level drawn from the offset therefore
+    // moves with the upload; drawn from a stable key it does not.
+    const p = Params.fromM(16, 100, 1);
+    const key: u64 = 0xdeadbeef;
+    try testing.expectEqual(assignLevelKey(p, key), assignLevelKey(p, key));
+    // And it is still the same draw: keyed on a node id's own value, the two
+    // functions must agree about the *distribution*, not about each point.
+    var counts: [level_cap + 1]usize = @splat(0);
+    for (0..100_000) |i| counts[assignLevelKey(p, i)] += 1;
+    // At mL = 1/ln(16), level 0 takes 15/16 of the points.
+    const at0: f64 = @as(f64, @floatFromInt(counts[0])) / 100_000.0;
+    try testing.expect(at0 > 0.92 and at0 < 0.96);
+    // A different seed is a different assignment, as for `assignLevel`.
+    var differences: usize = 0;
+    for (0..1000) |i| {
+        if (assignLevelKey(p, i) != assignLevelKey(Params.fromM(16, 100, 2), i)) differences += 1;
+    }
+    try testing.expect(differences > 0);
+}
+
+test "level_keys makes the layout independent of the node order" {
+    // Two graphs over the same points in two different orders: with the key
+    // following the point, every point keeps its level. This is what the
+    // engine would get by keying on the external id.
+    const n = 2000;
+    const p = Params.fromM(16, 100, 7);
+    var forward: [n]u64 = undefined;
+    var reversed: [n]u64 = undefined;
+    for (0..n) |i| {
+        forward[i] = i;
+        reversed[i] = n - 1 - i;
+    }
+    for (0..n) |node| {
+        // Node `node` holds point `forward[node]` in one and `reversed[node]`
+        // in the other; the point's level has to match in both.
+        const point = forward[node];
+        const other_node = n - 1 - node;
+        try testing.expectEqual(reversed[other_node], point);
+        try testing.expectEqual(assignLevelKey(p, forward[node]), assignLevelKey(p, reversed[other_node]));
+    }
+    // Whereas the node id gives them different levels for at least some.
+    var moved: usize = 0;
+    for (0..n) |node| {
+        if (assignLevel(p, @intCast(node)) != assignLevel(p, @intCast(n - 1 - node))) moved += 1;
+    }
+    try testing.expect(moved > 0);
 }
 
 test "graph layout: level 0 stride is 2M and addresses are computed" {

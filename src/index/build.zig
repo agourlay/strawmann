@@ -103,7 +103,10 @@ fn layoutUpperLevels(g: *Graph, from: usize, count: usize) error{CsrOverflow}!vo
     var cursor: usize = if (from == 0) 0 else g.upper_offsets[from];
     for (from..count) |i| {
         const node: u32 = @intCast(i);
-        const lvl = hnsw.assignLevel(g.params, node);
+        const lvl = if (g.level_keys) |k|
+            hnsw.assignLevelKey(g.params, k[node])
+        else
+            hnsw.assignLevel(g.params, node);
         g.node_levels[node] = lvl;
         g.upper_offsets[node] = @intCast(cursor);
         cursor += @as(usize, lvl) * g.params.m;

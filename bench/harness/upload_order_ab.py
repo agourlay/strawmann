@@ -44,9 +44,18 @@ import fullrun
 import recall
 import workloads
 
-ARMS: tuple[tuple[str, int, int], ...] = (
-    ("concurrent", 8, 8),
-    ("serial", 1, 1),
+#: name, bfb `-t`, bfb `-p`, and whether a second 1M collection's index build
+#: is left running while this one uploads.
+#:
+#: The third arm is W1 followed by W2. W1 ingests `bench1` with
+#: `--skip-wait-index`, so the server is still building that graph on its eight
+#: workers when W2 creates `bench2`, uploads it and waits. Whether the two
+#: builds overlap, and by how much, is a per-pass accident of timing, and it is
+#: the one thing a published pass has that an isolated `bench2` does not.
+ARMS: tuple[tuple[str, int, int, bool], ...] = (
+    ("concurrent", 8, 8, False),
+    ("serial", 1, 1, False),
+    ("overlapped", 8, 8, True),
 )
 
 #: The sweep's widths. findings 34 quotes `ef` 512, and the lower rungs are
@@ -56,7 +65,8 @@ EF = [128, 256, 512]
 PORT = 6334
 
 
-def upload(uri: str, label: str, threads: int, parallel: int, client_cpus: str) -> int:
+def upload(uri: str, label: str, threads: int, parallel: int, client_cpus: str,
+           collection: str = "bench2", skip_wait: bool = False) -> int:
     """W2's bfb invocation with its upload concurrency as the variable.
 
     Spelled out rather than taken from `workloads.table()` because the row's
@@ -71,25 +81,27 @@ def upload(uri: str, label: str, threads: int, parallel: int, client_cpus: str) 
         str(workloads.BFB),
         "--retry", "0", "--timeout", str(workloads.BFB_TIMEOUT_S), "--p9", "3",
         "--uri", uri,
-        "--json", str(results / "upload.json"),
+        "--json", str(results / f"upload-{collection}.json"),
         *workloads.CREATE,
-        "--collection-name", "bench2",
+        "--collection-name", collection,
         "--fbin", str(workloads.corpus()),
         "-n", str(workloads.upload_n()),
         "-d", str(workloads.DIM),
         "-b", "100",
         "-t", str(threads),
         "-p", str(parallel),
+        *(["--skip-wait-index"] if skip_wait else []),
     ]
-    (results / "upload.cmd").write_text(" ".join(argv) + "\n")
+    (results / f"upload-{collection}.cmd").write_text(" ".join(argv) + "\n")
     p = subprocess.run(argv, capture_output=True, text=True, timeout=3600)
-    (results / "upload.stdout").write_text(p.stdout + p.stderr)
+    (results / f"upload-{collection}.stdout").write_text(p.stdout + p.stderr)
     if p.returncode != 0:
         print(p.stdout[-2000:], file=sys.stderr)
     return p.returncode
 
 
-def one_pass(label: str, threads: int, parallel: int, args) -> dict[int, float] | None:
+def one_pass(label: str, threads: int, parallel: int, overlap: bool,
+             args) -> dict[int, float] | None:
     """Upload, build, sweep. Returns recall@10 per `ef`, or None if it failed."""
     fullrun.wipe_strawmann_storage()
     log = fullrun.RESULTS / label / "server.log"
@@ -101,6 +113,10 @@ def one_pass(label: str, threads: int, parallel: int, args) -> dict[int, float] 
         return None
     uri = f"http://localhost:{PORT}"
     try:
+        # W1's ingest, whose index build this deliberately does not wait for.
+        if overlap and upload(uri, label, 8, 8, args.client_cpus,
+                              collection="bench1", skip_wait=True) != 0:
+            return None
         if upload(uri, label, threads, parallel, args.client_cpus) != 0:
             return None
         if recall.sweep(uri, label, "bench2", queries=args.queries, ef=list(EF)) != 0:
@@ -128,16 +144,20 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--passes", type=int, default=3)
     ap.add_argument("--queries", type=int, default=10000)
     ap.add_argument("--tag", default="uporder")
+    ap.add_argument("--arms", default="", help="comma-separated subset of ARMS")
     args = ap.parse_args(argv[1:])
 
     got: dict[str, list[dict[int, float]]] = {}
-    for arm, threads, parallel in ARMS:
+    for arm, threads, parallel, overlap in ARMS:
+        if args.arms and arm not in args.arms.split(","):
+            continue
         got[arm] = []
         for i in range(1, args.passes + 1):
             label = f"{args.tag}-{arm}-p{i}"
-            print(f"\n=== {arm} (-t {threads} -p {parallel}), pass {i} of {args.passes}",
-                  flush=True)
-            r = one_pass(label, threads, parallel, args)
+            print(f"\n=== {arm} (-t {threads} -p {parallel}"
+                  f"{', bench1 building alongside' if overlap else ''}), "
+                  f"pass {i} of {args.passes}", flush=True)
+            r = one_pass(label, threads, parallel, overlap, args)
             if r is None:
                 print(f"  {label} failed; arm abandoned", file=sys.stderr)
                 break
@@ -147,7 +167,7 @@ def main(argv: list[str]) -> int:
     print(f"\n{'arm':<12} {'ef':>5}  " + "  ".join(f"{'pass ' + str(i):>9}"
                                                    for i in range(1, args.passes + 1)) +
           f"  {'spread':>9}")
-    for arm, _, _ in ARMS:
+    for arm, _, _, _ in ARMS:
         for e in EF:
             vals = [r[e] for r in got.get(arm, []) if e in r]
             if not vals:

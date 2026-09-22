@@ -1094,3 +1094,113 @@ harness's per-row counters; the shape and the server-side p50s are what this
 reads. And part of the fall from `-p 1` to `-p 4` is inter-query cache sharing
 rather than intra-query overlap, which a threaded single query would not get.
 Both caveats push the same way: the real headroom is at most the 60 µs above.
+
+## findings 34's per-build draw is the upload, not the builder
+
+Every published run measured strawmANN's graphs disagreeing with each other by
+more than the two engines differ. rel-0921's three passes read recall@10 at
+`ef` 512 of 0.99957 / 0.99789 / 0.99796, a spread of **0.00168** against
+Qdrant's **0.00004**; rel-0908's read 0.00320 against 0.00006. findings 34
+named `buildParallel`'s thread interleaving, because `linkBack` re-prunes in
+arrival order and the graph is legitimately a draw. It named the wrong thing.
+
+Measured 2026-09-22 with `zig build graph-diff`, which builds one corpus N
+times in one process and scores each build against its own exact ground truth.
+SIFT1M, `m=16 ef_construct=100`, recall@10 over all 10,000 held-out queries,
+five builds per row, spread across the five:
+
+| how the corpus was inserted | threads | ef 128 | ef 256 | ef 512 |
+|---|--:|--:|--:|--:|
+| file order | 24 | 0.00011 | 0.00003 | 0.00002 |
+| file order | 8 | 0.00004 | 0.00002 | **0.00000** |
+| arrival reordered, per point | 24 | 0.00062 | 0.00033 | 0.00021 |
+| arrival reordered, batches of 100 | 8 | 0.00026 | 0.00048 | 0.00024 |
+
+**The pruning race is worth 0.00002.** Five builds in file order at 8 threads
+returned 0.99955 five times. That is below Qdrant's own 0.00004 and eighty
+times below what the published runs show, at the thread count the server uses
+and at the one that races hardest. Reordering *arrival* is what moves it, and
+it also costs 0.0007 of recall outright.
+
+### Why arrival order is not a detail
+
+`ids.IdSpace.reserve` hands out internal offsets from a monotone counter as
+points arrive. `hnsw.assignLevel` is a pure function of the offset. W2 uploads
+with `-b 100 -t 8 -p 8`. So which vector becomes node 7 is decided by eight
+racing streams, and with it that point's level, the membership of every upper
+layer, and the entry point. Two uploads of one corpus are two different graphs
+before the builder has pruned anything.
+
+`graph-diff` says how different. Two builds in file order share 99.7% of their
+level-0 edges, agree about the entry point, and differ by a handful of edges
+above level 1 (four of 4,048 at level 3, none at all in some pairs). Two builds
+under reordered arrival share **35.8%** of level-0 edges, agree about *no*
+upper-level row, and pick different entry points, with 11.7% of points sitting
+at a different level.
+
+### The measurement that settles it
+
+`bench/harness/upload_order_ab.py`, the real engine and the real upload, three
+passes per arm, changing one flag:
+
+| arm | ef 128 | ef 256 | ef 512 |
+|---|--:|--:|--:|
+| `-t 8 -p 8`, as every published run uploads | 0.00111 | 0.00114 | **0.00120** |
+| `-t 1 -p 1`, one stream | 0.00003 | 0.00001 | **0.00000** |
+
+The serial arm returned 0.99955 at `ef` 512 in all three passes, which is the
+same figure the in-process file-order builds returned, and is more reproducible
+than Qdrant. The concurrent arm reproduced the published behaviour, including
+its shape: two passes at 0.99958 and 0.99955 and one bad draw at 0.99838. That
+bimodality is what rel-0921 (0.99957, 0.99789, 0.99796) and rel-0908 (0.99951,
+0.99951, 0.99631) both show, and it is why a single pass could report either
+engine ahead at high recall.
+
+The spread is also flat across `ef` in both the published runs and the
+concurrent arm, which is the tell that was there all along: a graph that is
+merely *worse built* loses less as the search widens, and these do not.
+
+### Which half of "arrival order" does the damage
+
+A reordered arrival changes two things at once: the level each point is drawn
+into, because `assignLevel` is keyed on the offset, and the sequence the points
+are linked in. `Graph.level_keys` separates them, drawing the level from the
+point instead. Five builds, the same five arrival orders in both columns, so
+this is paired:
+
+| build | level from the arrival slot | level from the point |
+|--:|--:|--:|
+| 0 | 0.99883 | 0.99883 |
+| 1 | 0.99888 | 0.99883 |
+| 2 | 0.99895 | 0.99893 |
+| 3 | 0.99881 | 0.99884 |
+| 4 | 0.99871 | 0.99870 |
+| spread | 0.00024 | 0.00023 |
+
+**Nothing.** Stabilising the level assignment leaves both the spread and the
+level of recall exactly where they were, and both stay 0.0007 below what file
+order returns. So the level draw is not the lever, despite being the part of
+this that looks most like a bug: what the graph is made of is the order the
+points were *inserted* in, and each point's neighbours are chosen against
+whatever was already linked when it arrived.
+
+That kills the obvious fix. Keying the level on the external id would make the
+level assignment reproducible and would not make the graph reproducible. The
+lever is the insertion sequence: a bulk build that inserted in external-id
+order rather than in offset order would put every pass back in the file-order
+regime, which is both the tighter one and the better one by 0.0007 of recall.
+`assignLevelKey` and `Graph.level_keys` stay as the instrument that measured
+this, not as a fix; nothing in the engine sets them.
+
+### What this does not say
+
+Nothing here exonerates the pruning race as a source of *some* variation, only
+as the source of this one. It is measurable, at 0.00002, and it is eighty times
+too small to be what the reports carried. Unreachable nodes were already
+eliminated at two hundred times too small (findings 34, `repairUnreachable`),
+and both eliminations have the same shape: a real effect of the right kind and
+the wrong magnitude.
+
+The remaining candidates from findings 34's list are retired with it. A
+deterministic insertion order and refusing to prune a last in-edge were both
+answers to a question whose premise was wrong.
