@@ -1834,3 +1834,90 @@ test "serial build: every node is reachable from the entry point on level 0" {
 
     try testing.expectEqual(@as(usize, n), try reachableAtLevel(testing.allocator, &g, 0));
 }
+
+test "searches against a graph being mutated see only valid ids" {
+    // The hazard P2 item 5 turns on, and the reason to measure it rather than
+    // argue it. Today a rebuild builds a *separate* graph and publishes it, so
+    // no reader ever walks a graph that is being written. Inserting appended
+    // points into the live graph, which is what W11 wants, creates exactly that
+    // situation, and `assertEmptiesAreASuffix` documents what a reader can then
+    // observe: a pruned row mid-rewrite reads `[new0, new1, empty, old3]`, so
+    // the walk breaks at the first empty and expands a shorter row.
+    //
+    // What that must never become is an *invalid* id. Slot 0 always carries a
+    // live id and every slot holds either an old neighbour or a new one, so the
+    // claim is that a concurrent reader gets a worse answer and never a wrong
+    // one. This drives readers against a builder to check it, which is the test
+    // that would gate the change rather than a plan for one.
+    const n = 8000;
+    const half = n / 2;
+    const dim = 8;
+    var corpus = try Corpus.init(testing.allocator, n, dim, 0x51DE, .euclid);
+    defer corpus.deinit(testing.allocator);
+
+    // Three rounds, because a race that fires one time in three is the only
+    // kind worth a concurrency test.
+    for (0..3) |_| {
+        var g = try Graph.init(testing.allocator, Params.fromM(8, 64, 77), n);
+        defer g.deinit();
+        // A walkable graph first, so the readers have an entry point and real
+        // rows from their very first query.
+        _ = try buildParallel(testing.allocator, &g, corpus.scorer(), half, 4);
+
+        const Reader = struct {
+            g: *Graph,
+            corpus: *const Corpus,
+            capacity: usize,
+            stop: *std.atomic.Value(bool),
+            bad: *std.atomic.Value(usize),
+            queries: *std.atomic.Value(usize),
+
+            fn run(self: *@This()) void {
+                var scratch = hnsw.Index.Scratch.init(testing.allocator, self.capacity, 64) catch return;
+                defer scratch.deinit(testing.allocator);
+                // The query is this thread's own, as it is per request in the
+                // server: the probe holds it and the scorer points at the probe.
+                var q: [dim]f32 = undefined;
+                var prng = std.Random.DefaultPrng.init(0xA11CE);
+                const rnd = prng.random();
+                var probe = self.corpus.probe(&q);
+                const idx = hnsw.Index{ .graph = self.g, .scorer = .of(&probe) };
+                var buf: [16]Candidate = undefined;
+                while (!self.stop.load(.acquire)) {
+                    for (&q) |*x| x.* = rnd.floatNorm(f32);
+                    probe.query = &q;
+                    var out = heap.TopK.init(&buf, 16);
+                    idx.search(64, &scratch, &out);
+                    for (out.finish()) |c| {
+                        // The property: in range, and a real score. A torn read
+                        // of a neighbour list would show up as either.
+                        if (c.id >= self.capacity or !std.math.isFinite(c.score)) {
+                            _ = self.bad.fetchAdd(1, .monotonic);
+                        }
+                    }
+                    _ = self.queries.fetchAdd(1, .monotonic);
+                }
+            }
+        };
+
+        var stop = std.atomic.Value(bool).init(false);
+        var bad = std.atomic.Value(usize).init(0);
+        var queries = std.atomic.Value(usize).init(0);
+        var readers: [3]Reader = undefined;
+        var threads: [3]std.Thread = undefined;
+        for (&readers, &threads) |*r, *t| {
+            r.* = .{ .g = &g, .corpus = &corpus, .capacity = n, .stop = &stop, .bad = &bad, .queries = &queries };
+            t.* = try std.Thread.spawn(.{}, Reader.run, .{r});
+        }
+
+        // The writer: the second half into the same graph the readers walk.
+        _ = try extendParallel(testing.allocator, &g, corpus.scorer(), half, n, 4);
+
+        stop.store(true, .release);
+        for (&threads) |*t| t.join();
+
+        try testing.expectEqual(@as(usize, 0), bad.load(.acquire));
+        // And the readers actually ran, or the assertion above is vacuous.
+        try testing.expect(queries.load(.acquire) > 0);
+    }
+}

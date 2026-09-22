@@ -65,41 +65,34 @@ and `bruteForceRangeMulti` is the scan it would gather into. Worth doing only
 with a measurement beside it, since the win is a slope (1.51x against Qdrant's
 2.22x) and not a row.
 
-**5. Incremental insertion for W11 (findings 31), and the invariant it rests on
-is weaker than that entry says.** Serving the old graph through a rebuild was
-worth 5x on the slowest queries and moved the median the wrong way: every query
-pays the tail scan for as long as the rebuild takes, and a 200k tail at d=128 is
-~3 ms of memory traffic per query however it is served. The fix is not having a
-rebuild window, by inserting appended points into a graph sized to capacity as
-they arrive.
+**5. Incremental insertion for W11 (findings 31). The safety question is
+answered; what is left is the trade.** Serving the old graph through a rebuild
+was worth 5x on the slowest queries and moved the median the wrong way, because
+every query pays the tail scan for as long as the rebuild takes. The fix is not
+having a rebuild window, by inserting appended points into the live graph.
 
-Findings 31 justifies that as safe because "the stale-but-valid, never-empty
-list invariant already holds". Reading `build.zig` (2026-09-22), that is not
-what the writers guarantee, and the file says so at
-`assertEmptiesAreASuffix`: `linkBack` publishes a pruned row as a prefix write
-followed by `@memset(list[kept..], empty)`, so mid-rewrite an unlocked reader
-genuinely observes `[new0, new1, empty, old3]`, breaks at the first empty and
-expands a *shorter* row. What holds is narrower, that slot 0 always carries a
-live id, so a reader never sees an empty list and never an invalid id.
+Findings 31 justified that as safe with an invariant that does not hold as
+stated: `linkBack` publishes a pruned row as a prefix write followed by
+`@memset(list[kept..], empty)`, so mid-rewrite a reader observes
+`[new0, new1, empty, old3]`, breaks at the first empty and expands a shorter
+row. What holds is narrower, that slot 0 always carries a live id.
 
-That changes the question rather than closing it. Inserting under live readers
-is **safe** (no torn ids, no use-after-free, unlike the `noteOverwrite` class of
-bug) and costs **recall**, transiently, in proportion to the write rate, which
-is the same connectivity loss the parallel build already measures at 8 threads.
-So the design question is no longer "is it safe" but "is a small transient
-recall loss during writes better than the tail scan it replaces", and both sides
-of that are measurable: W11's search rate against the recall of queries served
-during the append window.
+**Measured rather than argued (2026-09-22).** "searches against a graph being
+mutated see only valid ids" drives three readers against a four-thread builder
+inserting into the same graph, three rounds, asserting every returned id is in
+range and every score finite, with a query counter so the assertion cannot pass
+vacuously. Zero bad results, and green four times in a row. So a concurrent
+reader gets a *worse* answer and never a wrong one, and the hazard is recall,
+not safety. That is the test that gates the change, written before the change.
 
-Preconditions the code already sets: the CSR must have slots past
-`graph.count`, so the published graph has to be sized to `--capacity` rather
-than to the built count; `graph_count` must become the thing readers observe
-monotonically, published after a node is fully linked; and `insertOne` and
-`linkBack` already take per-node locks and promote the entry point under
-`entry_lock` with `EntrySnapshot`, so writer-writer races are handled. What is
-new is reader-writer, and the test for it is the one the concurrency work in
-this project has always needed: N searchers against a live inserter, asserting
-no invalid id is ever returned and recall recovers, run in a loop for flakiness.
+What remains is the implementation and the trade it makes. The preconditions are
+better than findings 31 assumed: `Graph` is already `capacity`-sized rather than
+`count`-sized, `upper_offsets` already carries a CSR cursor for appending, and
+`quantized_search` already reads `g.count` with an acquire load. The work is to
+publish `count` after a node is fully linked and to run the builder's insert
+against the published graph, and the question it answers is whether a transient
+recall dip during writes beats the tail scan it replaces, on W11's search rate
+and on the recall of queries served during the append window.
 
 **6. W3's deficit is memory-level parallelism, not a wake cost, so the lever is
 intra-query parallelism (findings 50).** strawmANN spends 972k cycles per query
