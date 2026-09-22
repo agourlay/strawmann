@@ -29,48 +29,39 @@ in-edge in `linkBack`.
 
 ### P2. Engine work with a named lever
 
-**3. The quantized row's traffic is the visited set, not the rescore pool.**
-The premise this item started with was wrong and the counters on disk say so.
-Model the two rows at one `ef`: `fp32 = N * (512 + V)` and
-`sq8 = N * (128 + V) + 512 * pool`, where N is nodes actually scored, V is the
-non-vector bytes each one costs, and the pool is `max(asked, ef) = ef`
-(decisions.md §5). Two measured numbers per rung, two unknowns, and V is shared
-across rungs, so five rungs overdetermine it. From `rel-0921`:
+**3. Measure the visited set, then pick one (findings 28).** The traffic
+decomposition stands: at `ef` 128 the quantized row's 538 KiB per query is 12%
+rescore pool, 20% quantized codes and **68% walk overhead**, and the same
+overhead is 47% of the fp32 row's. V holds at 354 to 457 B per scored node
+across a sixteen-fold change in `ef`, which is roughly six cache lines, and
+§6.5's visited set is a 4 MB generation-stamped array taking one random line per
+neighbour probed.
 
-| ef | fp32 KiB/q | sq8 KiB/q | nodes scored | V B/node |
-|--:|--:|--:|--:|--:|
-| 32 | 249.9 | 162.1 | 277 | 413 |
-| 64 | 440.0 | 297.6 | 465 | 457 |
-| 128 | 794.9 | 538.0 | 856 | 439 |
-| 256 | 1,442.0 | 959.0 | 1,629 | 394 |
-| 512 | 2,582.5 | 1,693.4 | 3,054 | 354 |
-
-V holds at 354 to 457 B across a sixteen-fold change in `ef`, which is the
-check: a wrong model would not keep still. At `ef` 128, where the row is
-published, the 538 KiB splits **64 KiB rescore pool (12%), 107 KiB of quantized
-codes (20%), 367 KiB of walk overhead (68%)**. The same overhead is 47% of the
-fp32 row. Rescoring `ef` vectors instead of `limit` is not what costs the row.
-
-**The named lever is already written and not wired in.** `V` is roughly six
-cache lines per scored node, and §6.5's visited set is a generation-stamped
-`u32` array, 4 MB per worker at 1M points, one random line per neighbour probed
-(findings 28 measured that as "one cache miss per neighbour").
-`src/index/visited.zig` also implements `Bitmap`, 128 KB at 1M, tested, behind
-the same interface, and `hnsw.zig` constructs `visited.Generation`. §11's open
-question 3 asks where the two cross; this says the answer is worth 68% of a
-quantized row's memory traffic and 47% of an fp32 one's.
-
-Next step is a profile, not a patch: confirm where V goes on a quiet machine
-(`perf record` on W6-ef128, or a counter on visited probes) before swapping the
-structure, because the bitmap trades footprint for a per-query clear and this
-model does not price the clear.
+Both implementations now build: `-Dvisited=generation|bitmap` selects at
+comptime, the arm is in the banner and on every row, and a randomised
+differential test pins that they are indistinguishable through the interface
+search uses. What is left is the measurement, and it is scripted:
+`bench/harness/visited_ab.sh` builds both, alternates them A/B/A/B over W4,
+W10-ef128 and W6-ef128, and folds. **Needs a quiet host.** The bitmap trades 4 MB
+of footprint for a reset proportional to what the query touched, and nothing has
+priced the reset.
 
 **4. Gather concurrent exact queries into one scan (findings 45).** W9 is
 bandwidth-bound at 85% of the bus, so no kernel, ISA or prefetch work touches
-it; the prefetch attempt halved demand misses and bought one percent. Qdrant
-scales 2.22x from `-p 1` to `-p 8` against strawmANN's 1.51x because it reads the
-corpus less than once per query. `handlers.BatchJob` established that a request's
-queries can be fanned across workers; the inverse does not exist.
+it: the prefetch attempt halved demand misses and bought one percent. Qdrant
+scales 2.22x from `-p 1` to `-p 8` against strawmANN's 1.51x because it reads
+the corpus less than once per query.
+
+Two things reading the code settles about the shape of the fix. **The batch path
+is not it.** `handlers.BatchJob` fans a `QueryBatch` *out* across workers, which
+for exact queries means N workers each scanning the whole arena; gathering there
+would fix that pathology and would not move W9, which sends single-query
+requests at `-p 8`. Moving W9 needs gathering *across concurrent requests*,
+which is a scheduler change. **And the probes cannot live on the stack.**
+`Probe.max_buffer` is `max_converted_dim * @sizeOf(f16)` = 32 KiB, so K
+converted queries need the per-worker workspace, not a local, if §6.3's
+no-allocation-on-the-query-path rule is to hold. Budget it as a workspace
+change plus a scheduler change, not an afternoon.
 
 **5. Incremental insertion for W11 (findings 31).** Serving the old graph
 through a rebuild was worth 5x on the slowest queries and moved the median the
@@ -81,4 +72,7 @@ window: inserting appended points into a graph sized to capacity as they arrive.
 **6. The unsaturated path (findings 50).** strawmANN spends 972k cycles per
 query at `-p 1` against 650k at saturation. W3 is the one search row it loses
 (0.85x), and 322k cycles of per-query overhead that saturation amortises away is
-a wake or spin cost.
+a wake or spin cost. Scripted as `bench/harness/unsaturated_profile.sh`, which
+samples three states rather than one, W3 at `-p 1`, W4 saturated, and the engine
+idle, because the answer is the difference between them and a flat profile of
+any one cannot show it. **Needs a quiet host.**
