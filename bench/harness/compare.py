@@ -697,12 +697,62 @@ class Row:
             # it; what is left here is the refusal, which only a row that got
             # this far could have earned.
             return self._refuse(f"drifted across passes ({', '.join(drifted)})")
+        # Said only where the ratio survives every refusal above: a decomposition
+        # of a number the page is not going to print would be furniture.
+        decomp = self._decomposition(ra, rb)
+        if decomp:
+            self.notes.append(decomp)
         if band is not None and abs(self.qa / self.qb - 1.0) <= band:
             self.notes.append(
                 f"[within the ±{100 * band:.1f}% band this dataset's noise floor "
                 f"puts on {self.id}: no measured difference, not a small one]")
             return "parity"
         return f"{self.qa / self.qb:.2f}x"
+
+    #: How far apart the two engines' core occupancy must be before the ratio
+    #: stops being a statement about per-query efficiency. A fifth: below that
+    #: the term is smaller than what a reader would misattribute to speed, and
+    #: at ten percent this fired on sixteen of thirty rows and became furniture.
+    #: W4's is 1.35x, a third of the headline ratio.
+    OCCUPANCY_TOL = 0.20
+
+    def _decomposition(self, ra: dict, rb: dict) -> str | None:
+        """The ratio as the three things that actually produce it.
+
+        Throughput is `cores_busy x frequency / cycles_per_query`, an identity
+        that closes to within 5 qps on both engines of `rel-0921`'s W4, so a
+        ratio of two throughputs factors exactly:
+
+            qps_a/qps_b = cores_a/cores_b * ghz_a/ghz_b * cyc_b/cyc_a
+
+        W4's 2.20x is 1.57x less work per query, 1.35x core occupancy and 1.03x
+        clock. The middle term is Qdrant not filling the eight cores it was
+        given, reproducibly and under both segment policies, and a reader who
+        takes 2.20x for per-query efficiency has read a third of it as something
+        it is not. `None` when a row cannot say: no counters, no duration, or
+        the two engines occupancy-matched, which is the ordinary case.
+        """
+        def parts(r: dict):
+            cyc, tc = r.get("perf_cycles"), r.get("perf_task_clock_s")
+            dur, n = r.get("duration_s"), r.get("n_queries")
+            if not (cyc and tc and dur and n):
+                return None
+            return tc / dur, cyc / tc, cyc / n     # cores, hz, cycles/query
+        pa, pb = parts(ra), parts(rb)
+        if not pa or not pb:
+            return None
+        occupancy = pa[0] / pb[0]
+        if abs(occupancy - 1.0) <= self.OCCUPANCY_TOL:
+            return None
+        work, clock = pb[2] / pa[2], pa[1] / pb[1]
+        # "cores busy during the row", not "of its cpuset": on `-p 1` rows the
+        # number is how many cores one query used, which is a real result (at
+        # W3 Qdrant spends 1.05 cores on a query and strawmANN 0.86) and not a
+        # statement about filling a cpuset the row never tried to fill.
+        return (f"[{work * occupancy * clock:.2f}x is {work:.2f}x less work per "
+                f"query x {occupancy:.2f}x cores busy during the row "
+                f"({pa[0]:.2f} against {pb[0]:.2f}) x {clock:.2f}x clock: the "
+                f"middle term is occupancy, not search speed]")
 
     #: How far apart the client's and the server's p50 must be before the row
     #: is measuring the harness more than the engine. Five is where W13 sits at
@@ -1606,6 +1656,40 @@ def column_title(label: str) -> str:
     return f"{name} {'.'.join(str(v).split('.')[:2])}" if v else name
 
 
+def matched_line(a_label: str, b_label: str) -> str | None:
+    """The equal-recall comparison, for the block that leads with equal-`ef`.
+
+    §7.4 compares at equal recall, and every ratio in the table above it is at
+    equal `ef`, which is not equal work. The frontier is the licensed number and
+    it lived only on the report page, so the front page led with 2.20x and a
+    reader had no way to know that the comparison the spec actually asks for
+    reads lower and is not flat.
+
+    `report_data` imports this module, so the import is deferred rather than
+    circular, and the line is dropped rather than raised when the pair cannot
+    produce a frontier -- one arm without a sweep, or a T3 refusal.
+    """
+    try:
+        import report_data as rd
+        a, b = rd.load_run(a_label), rd.load_run(b_label)
+        rows = rd.matched_ratios(rd.frontier_points(a, bfb_only=True),
+                                 rd.frontier_points(b, bfb_only=True))
+    except Exception:
+        return None
+    if len(rows) < 2:
+        return None
+    rows = sorted(rows, key=lambda r: r["recall"])
+    best, top = max(rows, key=lambda r: r["ratio"]), rows[-1]
+    # Best and top-of-curve rather than a bare range, because the range's own
+    # endpoints hide the shape: on `rel-0921` the minimum *is* the highest-recall
+    # anchor, so "1.48x to 2.12x" and "narrowing to 1.48x" said the same thing
+    # twice and neither said that the frontier falls where recall is tightest.
+    return (f"at equal recall (§7.4's comparison, not equal ef): "
+            f"{best['ratio']:,.2f}x at recall {best['recall']:.4f}, falling to "
+            f"{top['ratio']:,.2f}x at {top['recall']:.4f}, over "
+            f"{len(rows)} anchors")
+
+
 def header_block(a_label: str, b_label: str,
                  a: dict[str, dict], b: dict[str, dict]) -> str:
     """The compact block README.md embeds.
@@ -1647,6 +1731,9 @@ def header_block(a_label: str, b_label: str,
             notes.append(f"  {name}: {as_engines(r.note_text)}")
     lines.append(f"  {'':<{width}}  {'':>12} {'':>16} {'queries/second':>10}")
     lines += ["", as_engines(scope_line(a_label, b_label))]
+    ml = matched_line(a_label, b_label)
+    if ml:
+        lines += ["", "  " + ml]
     if notes:
         lines += [""] + notes
     for bnr in banners(a_label, b_label):

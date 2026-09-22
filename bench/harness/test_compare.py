@@ -1731,3 +1731,143 @@ class HarnessBoundRowTests(unittest.TestCase):
     def test_a_steady_row_is_not_called_drifted(self):
         rows = self._joined([_row("W4", 1000.0)], [_row("W4", 900.0)])
         self.assertNotIn("monotonically", rows["W4"].note_text)
+
+
+class DecompositionTests(unittest.TestCase):
+    """A ratio said as the three things that produce it.
+
+    Throughput is `cores_busy * frequency / cycles_per_query`, so a ratio of two
+    throughputs factors exactly. W4's 2.20x is 1.57x work per query, 1.35x core
+    occupancy and 1.03x clock, and a reader who takes the whole of it for
+    per-query efficiency has misread a third.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(Path(self.tmp.name))
+        self.m = _reload(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _perf(cores, ghz, cyc_per_q, n=N, dur=2.0):
+        """A row whose counters say exactly these three things."""
+        return {"duration_s": dur, "n_queries": n,
+                "perf_task_clock_s": cores * dur,
+                "perf_cycles": cyc_per_q * n,
+                "perf_ref_hz": 2e9}
+
+    def _row_note(self, a_extra, b_extra, qa=22784.0, qb=10351.0):
+        # W4 needs recall on both sides or it refuses before reaching any of
+        # this; equal recall, so the only thing under test is the arithmetic.
+        sw = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.9873))]
+        self.fx.label("a", [_row("W4", qa, **a_extra)], good_stamp(), CONF_T3, sw)
+        self.fx.label("b", [_row("W4", qb, **b_extra)], good_stamp(), CONF_T3, sw)
+        cmp = self.m["compare"]
+        cmp._RECALL_CACHE.clear()
+        rows = {r.id: r for r in cmp.joined("a", "b", cmp.load("a"), cmp.load("b"))}
+        return rows["W4"].note_text
+
+    def test_the_three_factors_multiply_to_the_ratio(self):
+        """`rel-0921`'s W4, to the digits the page prints."""
+        a = self._perf(cores=7.50, ghz=1.97e9, cyc_per_q=649_557)
+        b = self._perf(cores=5.55, ghz=1.91e9, cyc_per_q=1_022_894)
+        # The cycles the counters imply have to agree with the frequency and the
+        # occupancy, or the fixture is not a measurement of anything.
+        a["perf_cycles"] = 1.97e9 * a["perf_task_clock_s"]
+        b["perf_cycles"] = 1.91e9 * b["perf_task_clock_s"]
+        a["n_queries"] = a["perf_cycles"] / 649_557
+        b["n_queries"] = b["perf_cycles"] / 1_022_894
+        note = self._row_note(a, b)
+        self.assertIn("1.57x less work per query", note)
+        self.assertIn("1.35x cores busy", note)
+        self.assertIn("1.03x clock", note)
+        self.assertIn("(7.50 against 5.55)", note)
+
+    def test_silent_when_the_engines_are_occupancy_matched(self):
+        """The ordinary case: the ratio is per-query efficiency and says so by
+        carrying no note at all."""
+        note = self._row_note(self._perf(6.0, 2e9, 500_000),
+                              self._perf(6.1, 2e9, 1_000_000))
+        self.assertNotIn("cores busy", note)
+
+    def test_fires_once_the_gap_passes_a_fifth(self):
+        note = self._row_note(self._perf(7.5, 2e9, 500_000),
+                              self._perf(5.5, 2e9, 1_000_000))
+        self.assertIn("cores busy", note)
+
+    def test_silent_without_counters(self):
+        """A run measured without `--perf` states nothing about occupancy."""
+        self.assertNotIn("cores busy", self._row_note({}, {}))
+
+    def test_silent_when_the_row_has_no_ratio(self):
+        """A decomposition of a number the page refuses is furniture."""
+        a = self._perf(7.5, 2e9, 500_000)
+        b = self._perf(5.5, 2e9, 1_000_000)
+        a["foreign"] = "rustc(120%)"
+        note = self._row_note(a, b)
+        self.assertNotIn("cores busy", note)
+        self.assertIn("contaminated", note)
+
+
+class MatchedLineTests(unittest.TestCase):
+    """The front page carries the comparison §7.4 actually asks for.
+
+    Every ratio in the header block is at equal `ef`, which is not equal work.
+    The frontier lived only on the report page, so the front page led with 2.20x
+    and nothing told a reader the licensed number reads lower and is not flat.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = _reload(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_it_states_the_best_and_the_top_of_the_curve(self):
+        cmp = self.m["compare"]
+        anchors = [{"recall": 0.9075, "ratio": 2.04}, {"recall": 0.9626, "ratio": 2.12},
+                   {"recall": 0.9980, "ratio": 1.48}]
+
+        class FakeRD:
+            @staticmethod
+            def load_run(label): return label
+            @staticmethod
+            def frontier_points(run, bfb_only=False): return run
+            @staticmethod
+            def matched_ratios(pa, pb): return anchors
+
+        with mock.patch.dict("sys.modules", {"report_data": FakeRD}):
+            line = cmp.matched_line("a", "b")
+        self.assertIn("2.12x at recall 0.9626", line)
+        self.assertIn("falling to 1.48x at 0.9980", line)
+        self.assertIn("3 anchors", line)
+
+    def test_a_pair_with_no_frontier_drops_the_line(self):
+        """A T3 refusal or a missing sweep loses the line, never the block."""
+        cmp = self.m["compare"]
+
+        class Empty:
+            @staticmethod
+            def load_run(label): return label
+            @staticmethod
+            def frontier_points(run, bfb_only=False): return []
+            @staticmethod
+            def matched_ratios(pa, pb): return []
+
+        with mock.patch.dict("sys.modules", {"report_data": Empty}):
+            self.assertIsNone(cmp.matched_line("a", "b"))
+
+    def test_an_import_failure_is_not_an_error(self):
+        """`report_data` imports compare, so this import is deferred; a stdlib
+        caller without pandas still gets its block."""
+        cmp = self.m["compare"]
+
+        class Boom:
+            @staticmethod
+            def load_run(label): raise RuntimeError("no pandas")
+
+        with mock.patch.dict("sys.modules", {"report_data": Boom}):
+            self.assertIsNone(cmp.matched_line("a", "b"))

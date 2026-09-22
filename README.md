@@ -40,7 +40,11 @@
 
   sift1m, d=128, euclid — these ratios are this dimension's. Also measured: dbpedia-openai-100K-1536-angular
 
+  at equal recall (§7.4's comparison, not equal ef): 2.12x at recall 0.9626, falling to 1.48x at 0.9980, over 8 anchors
+
+  saturating: [2.20x is 1.57x less work per query x 1.35x cores busy during the row (7.50 against 5.55) x 1.03x clock: the middle term is occupancy, not search speed]
   mixed read/write: [append 3,300 points/s] [strawmann +25% across its passes, monotonically: the spread on this row is drift rather than noise, so the median is a trend's midpoint and not a repeatable measurement] [search-during-write; no recall join]
+  exact: [1.33x is 0.78x less work per query x 1.70x cores busy during the row (6.95 against 4.08) x 1.00x clock: the middle term is occupancy, not search speed]
 ```
 <!-- END compare-table -->
 

@@ -27,69 +27,72 @@ builds is the instrument. The named candidates are a deterministic insertion
 order, a post-build reachability repair, or refusing to prune a node's last
 in-edge in `linkBack`.
 
-**3. Decompose W4's 2.20x on the page (findings 50).** It factors into 1.57x
-less work per query, 1.35x core occupancy and 1.03x frequency, and the occupancy
-reproduces across four runs and both segment policies. **The client has been
-ruled out** (2026-09-22): W4 re-run against Qdrant alone, through `run_one` so
-the queries and the arithmetic are the harness's, at four concurrencies from the
-standard `-p 64 -t 16 -c 2` to `-p 512 -t 32 -c 16`:
-
-| offered | qps | cores busy |
-|---|--:|--:|
-| `-p 64 -t 16 -c 2` | 9,122 | 5.30 |
-| `-p 128 -t 16 -c 4` | 9,004 | 5.30 |
-| `-p 256 -t 32 -c 8` | 8,910 | 5.29 |
-| `-p 512 -t 32 -c 16` | 8,875 | 5.38 |
-
-Eight times the offered concurrency moves occupancy 1.02x and throughput 0.97x,
-so Qdrant does not fill more cores when offered more work and the 1.35x term is
-its own. Development grade, and the level does not reproduce the run's: 9,122
-qps at 5.30 cores against 10,351 at 5.55, a single pass without `--perf`, run
-after W2 alone rather than after W0-upload, W1, W2 and W3. The *slope* is what
-the probe was for and it is flat in all of it.
-
-What is left is the reporting change: the page presents 2.20x whole, a third of
-it is a scaling property a differently-tuned Qdrant might not have, and the
-matched-recall 2.04x to 2.12x is the licensed comparison that should lead.
-
 ### P2. Engine work with a named lever
 
-**4. Where strawmANN's SQ8 rescore spends its cycles.** Per query at `ef` 128,
-three passes with `--perf` on `rel-0921`: 783k cycles against its own fp32 path's
-640k, IPC 0.78 against 1.07, and 538 KiB of DRAM traffic where Qdrant's SQ8
-reads 60 KiB for the same encoding. A 13x traffic gap for one encoding says the
-rescore pool is being read from fp32 far more widely here. Measure the pool size
-before touching code. Findings 29 already took stage 1 from 46% to 26% of server
-CPU, so what is left is the walk and the rescore rather than the distance kernel.
+**3. The quantized row's traffic is the visited set, not the rescore pool.**
+The premise this item started with was wrong and the counters on disk say so.
+Model the two rows at one `ef`: `fp32 = N * (512 + V)` and
+`sq8 = N * (128 + V) + 512 * pool`, where N is nodes actually scored, V is the
+non-vector bytes each one costs, and the pool is `max(asked, ef) = ef`
+(decisions.md §5). Two measured numbers per rung, two unknowns, and V is shared
+across rungs, so five rungs overdetermine it. From `rel-0921`:
 
-**5. Gather concurrent exact queries into one scan (findings 45).** W9 is
+| ef | fp32 KiB/q | sq8 KiB/q | nodes scored | V B/node |
+|--:|--:|--:|--:|--:|
+| 32 | 249.9 | 162.1 | 277 | 413 |
+| 64 | 440.0 | 297.6 | 465 | 457 |
+| 128 | 794.9 | 538.0 | 856 | 439 |
+| 256 | 1,442.0 | 959.0 | 1,629 | 394 |
+| 512 | 2,582.5 | 1,693.4 | 3,054 | 354 |
+
+V holds at 354 to 457 B across a sixteen-fold change in `ef`, which is the
+check: a wrong model would not keep still. At `ef` 128, where the row is
+published, the 538 KiB splits **64 KiB rescore pool (12%), 107 KiB of quantized
+codes (20%), 367 KiB of walk overhead (68%)**. The same overhead is 47% of the
+fp32 row. Rescoring `ef` vectors instead of `limit` is not what costs the row.
+
+**The named lever is already written and not wired in.** `V` is roughly six
+cache lines per scored node, and §6.5's visited set is a generation-stamped
+`u32` array, 4 MB per worker at 1M points, one random line per neighbour probed
+(findings 28 measured that as "one cache miss per neighbour").
+`src/index/visited.zig` also implements `Bitmap`, 128 KB at 1M, tested, behind
+the same interface, and `hnsw.zig` constructs `visited.Generation`. §11's open
+question 3 asks where the two cross; this says the answer is worth 68% of a
+quantized row's memory traffic and 47% of an fp32 one's.
+
+Next step is a profile, not a patch: confirm where V goes on a quiet machine
+(`perf record` on W6-ef128, or a counter on visited probes) before swapping the
+structure, because the bitmap trades footprint for a per-query clear and this
+model does not price the clear.
+
+**4. Gather concurrent exact queries into one scan (findings 45).** W9 is
 bandwidth-bound at 85% of the bus, so no kernel, ISA or prefetch work touches
 it; the prefetch attempt halved demand misses and bought one percent. Qdrant
 scales 2.22x from `-p 1` to `-p 8` against strawmANN's 1.51x because it reads the
 corpus less than once per query. `handlers.BatchJob` established that a request's
 queries can be fanned across workers; the inverse does not exist.
 
-**6. Incremental insertion for W11 (findings 31).** Serving the old graph
+**5. Incremental insertion for W11 (findings 31).** Serving the old graph
 through a rebuild was worth 5x on the slowest queries and moved the median the
 wrong way, because every query pays the tail scan for as long as the rebuild
 takes. The row's ceiling is that tail scan, and the fix is not having a rebuild
 window: inserting appended points into a graph sized to capacity as they arrive.
 
-**7. The unsaturated path (findings 50).** strawmANN spends 972k cycles per
+**6. The unsaturated path (findings 50).** strawmANN spends 972k cycles per
 query at `-p 1` against 650k at saturation. W3 is the one search row it loses
 (0.85x), and 322k cycles of per-query overhead that saturation amortises away is
 a wake or spin cost.
 
 ### P3. Decisions and hygiene
 
-**8. Whether T3 should gate the matched-recall table (findings 40).** Matched
+**7. Whether T3 should gate the matched-recall table (findings 40).** Matched
 recall does not assume equal recall, it constructs it, so gating it on T3
 withholds the one comparison that survives exactly when it is needed. Left
 deliberately unchanged, because loosening a licence gate because a banner is
 inconvenient is the pressure this project exists to resist. It needs a spec
 answer, not a patch.
 
-**9. The matched-oversampling experiment (findings 42, `validation.md` item 6).**
+**8. The matched-oversampling experiment (findings 42, `validation.md` item 6).**
 Qdrant's SQ8 plateau is entirely recoverable at `oversampling 2`, at which point
 it matches strawmANN. Whether equalising with a knob one engine did not need is
 the same experiment is the open question.
