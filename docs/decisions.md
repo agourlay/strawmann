@@ -921,3 +921,47 @@ Each is deliberate and stated where it occurs in the source.
    This costs nothing: no new collection, no second upload, no change to
    `required_capacity`, and the harness stamp is unchanged, so the runs already
    measured stay comparable.
+
+---
+
+## §6.5's visited set stays the generation-stamped array, measured
+
+§6.5 specifies "a generation-stamped `u32` array, sized to point count ... 4 MB
+per worker at 1M points" and asks for it to be measured against "a bitmap plus
+dirty list, which is smaller but requires clearing". §11's open question 3 puts
+it as "at what point count does the 4 MB/worker footprint start hurting?".
+Both were implemented behind one interface and only one was ever reachable.
+
+`-Dvisited=generation|bitmap` selects at comptime, so the traversal's inner loop
+carries no branch it did not have before, and the arm is recorded in the banner,
+in `--probe`, on every row and in `BUILD_KEYS`: two binaries that answer
+identically and move different amounts of memory are exactly the case that
+record exists for.
+
+**Measured 2026-09-22**, sift1m at 1M points, three alternated passes per arm on
+a gated host, every pass carrying its arm:
+
+| row | generation | bitmap | ratio |
+|---|--:|--:|--:|
+| W4 | 22,114 | 22,464 | 1.016x |
+| W10-ef128 | 20,142 | 20,458 | 1.016x |
+
+The band those must clear is 5.1% to 8.9% (`regression.noise_band` at the
+measured spreads, two arms), so this is **no measured difference**, and the
+default does not move. W6-ef128 drifted monotonically in both arms, -13% and
+-23%, so `aggregate.py` refuses to band it and it is not read here.
+
+**Why it does not move is the more useful half**, from a counter pass on each
+arm: the bitmap is 21x smaller and cuts DRAM traffic by **0.9%**, 787 KiB per
+query against 795. It does cut dTLB walks 18% (2,350 against 2,853) and lift IPC
+from ~1.05 to ~1.12, which is worth about 1% of cycles and disappears into the
+noise.
+
+So the visited set is not where the walk's memory traffic goes. A traffic
+decomposition of `rel-0921` put 367 KiB per query in "stamps, lists and heap"
+and the stamps are ~7 KiB of it; the rest is the neighbour lists and the rows of
+candidates that are scored and discarded. Anyone returning to this should start
+there and not here.
+
+The flag stays. It is cheap, it is tested, and it is the instrument that will
+answer the same question at a scale where the footprint might matter.

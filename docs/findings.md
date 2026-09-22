@@ -29,24 +29,7 @@ in-edge in `linkBack`.
 
 ### P2. Engine work with a named lever
 
-**3. Measure the visited set, then pick one (findings 28).** The traffic
-decomposition stands: at `ef` 128 the quantized row's 538 KiB per query is 12%
-rescore pool, 20% quantized codes and **68% walk overhead**, and the same
-overhead is 47% of the fp32 row's. V holds at 354 to 457 B per scored node
-across a sixteen-fold change in `ef`, which is roughly six cache lines, and
-§6.5's visited set is a 4 MB generation-stamped array taking one random line per
-neighbour probed.
-
-Both implementations now build: `-Dvisited=generation|bitmap` selects at
-comptime, the arm is in the banner and on every row, and a randomised
-differential test pins that they are indistinguishable through the interface
-search uses. What is left is the measurement, and it is scripted:
-`bench/harness/visited_ab.sh` builds both, alternates them A/B/A/B over W4,
-W10-ef128 and W6-ef128, and folds. **Needs a quiet host.** The bitmap trades 4 MB
-of footprint for a reset proportional to what the query touched, and nothing has
-priced the reset.
-
-**4. Gather exact queries across concurrent requests (findings 45).** W9 is
+**3. Gather exact queries across concurrent requests (findings 45).** W9 is
 bandwidth-bound at 85% of the bus, so no kernel, ISA or prefetch work touches
 it; Qdrant scales 2.22x from `-p 1` to `-p 8` against strawmANN's 1.51x because
 it reads the corpus less than once per query.
@@ -65,7 +48,7 @@ and `bruteForceRangeMulti` is the scan it would gather into. Worth doing only
 with a measurement beside it, since the win is a slope (1.51x against Qdrant's
 2.22x) and not a row.
 
-**5. Incremental insertion for W11 (findings 31). The safety question is
+**4. Incremental insertion for W11 (findings 31). The safety question is
 answered; what is left is the trade.** Serving the old graph through a rebuild
 was worth 5x on the slowest queries and moved the median the wrong way, because
 every query pays the tail scan for as long as the rebuild takes. The fix is not
@@ -115,7 +98,7 @@ node is fully linked, and the measurement that decides it: whether a transient
 recall dip during writes beats the tail scan it replaces, on W11's search rate
 and on the recall of queries served during the append window.
 
-**6. W3's deficit is memory-level parallelism, not a wake cost, so the lever is
+**5. W3's deficit is memory-level parallelism, not a wake cost, so the lever is
 intra-query parallelism (findings 50).** strawmANN spends 972k cycles per query
 at `-p 1` against 650k at saturation, and W3 is the one search row it loses
 (0.85x). This entry used to guess that the 322k of overhead was "a wake or spin
