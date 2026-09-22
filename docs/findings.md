@@ -104,10 +104,13 @@ So live insertion needs that bound, and the bound costs a predicate on the
 traversal's hot path unless it is hoisted behind `graph.count <= covered`, which
 is true on every query today.
 
-The other preconditions are better than findings 31 assumed: `Graph` is already
-`capacity`-sized rather than `count`-sized, `upper_offsets` already carries a CSR
-cursor for appending, and `quantized_search` already reads `g.count` with an
-acquire load. What is left is the bounded traversal, publishing `count` after a
+The other preconditions are better than findings 31 assumed, and all three are
+checked rather than assumed: `buildIndex` calls
+`hnsw.Graph.init(..., coll.config.capacity)` (`collection.zig:1839`), so the
+published graph has slots up to `--capacity` and not merely to the built count;
+`upper_offsets` already carries a CSR cursor for appending; and
+`quantized_search` already reads `g.count` with an acquire load, as does the
+search path itself. What is left is the bounded traversal, publishing `count` after a
 node is fully linked, and the measurement that decides it: whether a transient
 recall dip during writes beats the tail scan it replaces, on W11's search rate
 and on the recall of queries served during the append window.
