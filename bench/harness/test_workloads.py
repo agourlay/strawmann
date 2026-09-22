@@ -2452,3 +2452,75 @@ class NightrunReferenceTests(unittest.TestCase):
         self._labels("sm-sift-perf-rel-0921")
         self._prev("2026-09-23", "sift1m")
         self.assertFalse((self.root / "bench/results/night-20260923").exists())
+
+
+class OversamplingPolicyTests(unittest.TestCase):
+    """The two quantized experiments, and the refusal that keeps them apart.
+
+    Qdrant's SQ8 rescore pool is `limit`-sized and strawmANN's is
+    `max(asked, ef)`, so §7.4 refuses the quantized rows a ratio at defaults.
+    Findings 42 measured that the gap is the pool and nothing else, and that
+    `oversampling 2` closes it. Tuning the knob is a different experiment from
+    the default one, so both exist and neither may be ratioed against the other.
+    """
+
+    def setUp(self):
+        self.w = importlib.reload(workloads)
+        self.addCleanup(os.environ.pop, "OVERSAMPLING_POLICY", None)
+
+    def _over(self, policy: str) -> dict:
+        self.w.use_oversampling_policy(policy)
+        return {x.id: self.w.quant_of(x)["quantization_oversampling"]
+                for x in self.w.table()}
+
+    def test_defaults_leaves_every_engine_on_its_own_pool(self):
+        o = self._over("defaults")
+        self.assertIsNone(o["W6"])
+        self.assertIsNone(o["W8"])
+        self.assertIsNone(o["W6-ef128"])
+
+    def test_matched_asks_the_quantized_search_rows_for_two(self):
+        o = self._over("matched")
+        self.assertEqual(o["W6"], float(self.w.MATCHED_OVERSAMPLING))
+        self.assertEqual(o["W8"], float(self.w.MATCHED_OVERSAMPLING))
+        self.assertEqual(o["W6-ef128"], float(self.w.MATCHED_OVERSAMPLING))
+
+    def test_a_row_that_names_its_own_is_left_alone(self):
+        """W7 sends 4 because binary is inert without it; the policy must not
+        overwrite a row's own choice, or it changes two things at once."""
+        self.assertEqual(self._over("matched")["W7"], 4.0)
+        self.assertEqual(self._over("defaults")["W7"], 4.0)
+
+    def test_the_fp32_rows_are_untouched(self):
+        """It is a quantized experiment, so W3, W4 and the W10 ladder must read
+        identically under both policies or the run is measuring two changes."""
+        d, m = self._over("defaults"), self._over("matched")
+        for wid in ("W3", "W4", "W10-ef128", "W10-ef512", "W9", "W13"):
+            with self.subTest(row=wid):
+                self.assertIsNone(d[wid])
+                self.assertIsNone(m[wid])
+
+    def test_upload_rows_never_carry_a_search_flag(self):
+        m = self._over("matched")
+        for wid in ("W6-upload", "W7-upload", "W8-upload"):
+            self.assertIsNone(m[wid], wid)
+
+    def test_the_policy_is_stamped_and_therefore_hashed(self):
+        self.w.use_oversampling_policy("matched")
+        self.assertEqual(self.w.harness_stamp()["oversampling_policy"], "matched")
+        self.assertIn("oversampling_policy", self.w.STAMP_KEYS)
+
+    def test_two_policies_do_not_share_a_stamp_hash(self):
+        """The refusal that makes them two experiments rather than one table."""
+        self.w.use_oversampling_policy("defaults")
+        a = self.w.stamp_hash(self.w.harness_stamp())
+        self.w.use_oversampling_policy("matched")
+        self.assertNotEqual(a, self.w.stamp_hash(self.w.harness_stamp()))
+
+    def test_it_survives_the_subprocess_boundary(self):
+        """`fullrun.py` binds it once and each arm is a separate process."""
+        self.w.use_oversampling_policy("matched")
+        self.assertEqual(os.environ["OVERSAMPLING_POLICY"], "matched")
+        reloaded = importlib.reload(workloads)
+        self.assertIs(reloaded.OVERSAMPLING_POLICY,
+                      reloaded.OversamplingPolicy.matched)

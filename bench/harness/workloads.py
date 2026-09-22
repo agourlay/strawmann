@@ -120,6 +120,21 @@ def use_dataset(name: str) -> str:
     return name
 
 
+def use_oversampling_policy(name: str) -> str:
+    """Bind the oversampling policy for this process and everything it spawns.
+
+    The same two-part move as `use_segment_policy`, and for the same reason:
+    the global covers this process and `$OVERSAMPLING_POLICY` covers the
+    `workloads.py` subprocesses `fullrun.py` starts per arm. Two arms that
+    disagreed here would be caught as STALE rather than as a wrong answer,
+    which is a correct refusal of a run that should never have happened.
+    """
+    global OVERSAMPLING_POLICY
+    OVERSAMPLING_POLICY = OversamplingPolicy(name)
+    os.environ["OVERSAMPLING_POLICY"] = str(OVERSAMPLING_POLICY)
+    return str(OVERSAMPLING_POLICY)
+
+
 def use_segment_policy(name: str) -> str:
     """Bind the segment policy for this process and everything it spawns.
 
@@ -662,6 +677,8 @@ def harness_stamp() -> dict:
         "filtered_queries": FILTERED_QUERIES,
         "bfb_pin": BFB_PIN, "bfb_timeout_s": BFB_TIMEOUT_S,
         "collection": collection_settings(),
+        # Hashed, so the two quantized experiments can never share a table.
+        "oversampling_policy": str(OVERSAMPLING_POLICY),
         "ef": {w.id: ef_of(w) for w in table() if not w.upload_only},
         "qps_definition": "n_queries / duration_secs from bfb's JSON (qps_bfb_median kept beside it)",
     }
@@ -684,7 +701,8 @@ def harness_stamp() -> dict:
 #: the affected row carries no local signal, so without it `regression.py`
 #: serves a 28.16% floor over rows whose spread is 0.66%.
 STAMP_KEYS = ["metric", "query_source", "upload_n", "w11_n", "queries",
-              "exact_queries", "collection", "ef", "bfb_pin", "engine_settle"]
+              "exact_queries", "collection", "ef", "bfb_pin", "engine_settle",
+              "oversampling_policy"]
 
 
 def stamp_hash(stamp: dict) -> str:
@@ -775,6 +793,40 @@ class Placement(StrEnum):
     cold = "cold"
     cached = "cached"
     pinned = "pinned"
+
+
+class OversamplingPolicy(StrEnum):
+    """Which of the two quantized experiments a run is.
+
+    Qdrant's SQ8 rescore pool is `limit`-sized and strawmANN's is
+    `max(asked, ef)` (decisions.md §5), so at `limit` 10 and `ef` 128 Qdrant
+    rescores ten nodes of a 128-node walk and strawmANN rescores all of them.
+    That is why §7.4 refuses the three quantized rows a ratio: the engines are
+    not at equal recall. Measured (findings 42), the gap is the pool and nothing
+    else, and `oversampling 2` recovers ~90% of it, at which point Qdrant
+    reaches 0.9888 against strawmANN's 0.9891.
+
+    So the refusal at defaults is measuring a *default*, and a run that tunes
+    the knob is measuring something else. Both are worth having and they are not
+    one table, which is the same answer `SegmentPolicy` gives to the same
+    question (findings 39, decisions.md). The policy is stamped into every row,
+    so `compare.py` refuses a ratio across the two as STALE.
+
+    `defaults`  each engine's own pool. What a user gets, and the state §7.4's
+                equal-recall rule correctly refuses to ratio.
+    `matched`   `--quantization-oversampling 2` on the quantized search rows
+                that do not already name one.
+
+    The flag is sent to **both** engines and moves only one, which is the
+    finding rather than an asymmetry in the harness: strawmANN's stage 1 is
+    already `max(asked, ef)`, so at `ef` 128 an `asked` of 20 changes nothing,
+    while Qdrant's pool goes from 10 to 20. A policy that sent it to Qdrant
+    alone would be the harness choosing sides; this sends one request to both
+    and records what each did with it.
+    """
+
+    defaults = "defaults"
+    matched = "matched"
 
 
 class SegmentPolicy(StrEnum):
@@ -950,6 +1002,11 @@ QDRANT_MIN_FULL_SCAN_KB = 10
 #: Which experiment this run is. `equal-work` is the default because it is
 #: what §8's comparative licensing needs; `as-deployed` is the one a reader
 #: asks about and the one no ratio at equal `ef` is available for.
+#: Read from the environment so a `workloads.py` subprocess inherits what
+#: `fullrun.py` bound, exactly as the segment policy does.
+OVERSAMPLING_POLICY = OversamplingPolicy(
+    os.environ.get("OVERSAMPLING_POLICY", OversamplingPolicy.defaults))
+
 SEGMENT_POLICY = SegmentPolicy(os.environ.get("SEGMENT_POLICY",
                                               SegmentPolicy.equal_work))
 
@@ -1426,6 +1483,9 @@ def table() -> list[Workload]:
                                   "-T", w11_throttle(w11_n(), W11_SPAN_S),
                                   "--skip-create", "--skip-wait-index")),
     ]
+
+    if OVERSAMPLING_POLICY is OversamplingPolicy.matched:
+        rows = [_matched_oversampling(w) for w in rows]
 
     # The ordering is load-bearing, so assert it rather than trusting the next
     # reader to notice the comment.
@@ -2008,6 +2068,31 @@ def n_of(w: Workload) -> int | None:
         return int(w.args[w.args.index("-n") + 1])
     except (IndexError, ValueError):
         return None
+
+
+#: What `OversamplingPolicy.matched` asks for. Two, because findings 42 swept
+#: none/2/4/8 and measured `oversampling 2` taking ~90% of the total gain with 4
+#: and 8 adding almost nothing above `ef` 64: the pool stops binding at roughly
+#: twice `limit`. A larger number would buy nothing and cost rescore.
+MATCHED_OVERSAMPLING = 2
+
+
+def _matched_oversampling(w: Workload) -> Workload:
+    """`--quantization-oversampling 2` on a quantized search row that names none.
+
+    Upload rows are left alone (the flag is a search parameter), as are rows on
+    the fp32 collections, and as is any row that already names an oversampling:
+    W7 sends 4 because binary quantization is inert without it, and a policy
+    that overwrote a row's own choice would be changing two things at once.
+    """
+    if w.upload_only or "--search" not in [str(a) for a in w.args]:
+        return w
+    if collection_of(w) not in {f"{C}6", f"{C}7", f"{C}8"}:
+        return w
+    if "--quantization-oversampling" in [str(a) for a in w.args]:
+        return w
+    return dataclasses.replace(
+        w, args=[*w.args, "--quantization-oversampling", str(MATCHED_OVERSAMPLING)])
 
 
 def quant_of(w: Workload) -> dict:

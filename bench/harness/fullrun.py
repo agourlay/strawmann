@@ -1801,6 +1801,22 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--skip", action="append", default=[],
                     choices=["build", "strawmann", "qdrant", "conformance", "render"],
                     help="phases to leave alone (repeatable)")
+    ap.add_argument("--oversampling-policy", default="defaults",
+                    choices=tuple(workloads.OversamplingPolicy),
+                    help="which of the two quantized experiments this run is. "
+                         "`defaults` (default) leaves each engine on its own "
+                         "rescore pool, which is `limit`-sized for Qdrant and "
+                         "`max(asked, ef)` for strawmANN, so §7.4 refuses the "
+                         "quantized rows a ratio: the engines are not at equal "
+                         "recall. `matched` sends "
+                         "`--quantization-oversampling 2` to BOTH engines on the "
+                         "quantized search rows that do not already name one, "
+                         "which moves only Qdrant (strawmANN's pool is already "
+                         "ef-sized) and takes its SQ8 recall@10 from 0.8929 to "
+                         "0.9888 against strawmANN's 0.9891 (findings 42). The "
+                         "two are different experiments and never one table, so "
+                         "the choice is hashed into every row and `compare.py` "
+                         "refuses a ratio across them as STALE")
     ap.add_argument("--segment-policy", default="equal-work",
                     choices=tuple(workloads.SegmentPolicy),
                     help="which of the two Qdrant experiments this run is. "
@@ -1834,6 +1850,7 @@ def main(argv: list[str]) -> int:
     # this spawns — read the same root without being passed the flag again.
     paths.use_data_dir(args.data_dir)
     global RPS_REFERENCE, DATASET, PERF_SET, QDRANT_BINARY, SEGMENT_POLICY
+    global OVERSAMPLING_POLICY
     PERF_SET = args.perf
     if args.qdrant_binary:
         QDRANT_BINARY = Path(args.qdrant_binary).expanduser().resolve()
@@ -1911,6 +1928,14 @@ def main(argv: list[str]) -> int:
     # rebinds `workloads`' globals here and exports `$SEGMENT_POLICY` for the
     # per-arm subprocesses, so both arms cannot be handed different ones.
     SEGMENT_POLICY = workloads.use_segment_policy(args.segment_policy)
+    # Same mechanism, same reason: bound here for this process and exported for
+    # the per-arm subprocesses, so the two arms cannot be handed different ones.
+    OVERSAMPLING_POLICY = workloads.use_oversampling_policy(args.oversampling_policy)
+    if str(workloads.OversamplingPolicy.defaults) != OVERSAMPLING_POLICY:
+        print(f"oversampling {OVERSAMPLING_POLICY}: the quantized search rows carry "
+              f"--quantization-oversampling {workloads.MATCHED_OVERSAMPLING} on both "
+              f"engines, which moves Qdrant's rescore pool and not strawmANN's. "
+              f"These rows may not be ratioed against a `defaults` run (§8, STALE).")
     # Both arms are given this set — `--pin --cpus` for strawmANN and
     # `--cpuset-cpus` for the container — and until now it survived only in
     # this script's own output. The engine's observed affinity cannot stand in
