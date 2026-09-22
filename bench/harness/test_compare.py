@@ -16,7 +16,18 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from harness_fixtures import CONF_T2, CONF_T3, Fixture, N, _reload, _row, _sweep, good_stamp
+from harness_fixtures import (
+    CONF_T1_FAILED,
+    CONF_T2,
+    CONF_T3,
+    CONF_T3_FAILED,
+    Fixture,
+    N,
+    _reload,
+    _row,
+    _sweep,
+    good_stamp,
+)
 
 from workloads import stamp_hash
 
@@ -1828,6 +1839,11 @@ class MatchedLineTests(unittest.TestCase):
 
     def test_it_states_the_best_and_the_top_of_the_curve(self):
         cmp = self.m["compare"]
+        # A licensed pair on disk: `matched_line` checks the licence before it
+        # asks `report_data` for anything, so a mock alone cannot exercise it.
+        fx = Fixture(Path(self.tmp.name))
+        for lab in ("a", "b"):
+            fx.label(lab, [_row("W10-ef128", 1.0)], good_stamp(), CONF_T3)
         anchors = [{"recall": 0.9075, "ratio": 2.04}, {"recall": 0.9626, "ratio": 2.12},
                    {"recall": 0.9980, "ratio": 1.48}]
 
@@ -1885,3 +1901,64 @@ class MatchedLineTests(unittest.TestCase):
 
         with mock.patch.dict("sys.modules", {"report_data": Boom}):
             self.assertIsNone(cmp.matched_line("a", "b"))
+
+
+class MatchedRecallGateTests(unittest.TestCase):
+    """What a T3 failure does to the matched-recall table.
+
+    T3 says the two engines' ANN recall differs at a fixed `ef`. That is the
+    condition the matched-recall table corrects for: it does not assume equal
+    recall, it constructs it at each recall one engine actually reached. Gating
+    the table on T3 withheld it exactly when it was the only comparison left,
+    and dbpedia-openai-1m published nothing while 2.14x, 2.03x and 1.80x sat
+    computable on disk.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(Path(self.tmp.name))
+        self.m = _reload(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _runs(self, conf):
+        sw = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.98))]
+        rows = [_row("W10-ef128", 20000.0), _row("W4", 22000.0)]
+        for lab in ("a", "b"):
+            self.fx.label(lab, rows, good_stamp(), conf, sw)
+        rd = self.m["report_data"]
+        return [rd.load_run("a"), rd.load_run("b")]
+
+    def test_a_licensed_pair_is_shown_with_no_banner(self):
+        rd = self.m["report_data"]
+        runs = self._runs(CONF_T3)
+        self.assertEqual(rd.matched_recall_refusal(runs), "")
+        self.assertEqual(rd.matched_recall_caveat(runs), "")
+
+    def test_a_t3_failure_alone_is_shown_under_a_banner(self):
+        rd = self.m["report_data"]
+        runs = self._runs(CONF_T3_FAILED)
+        self.assertEqual(rd.matched_recall_refusal(runs), "")
+        caveat = rd.matched_recall_caveat(runs)
+        self.assertIn("NOT A LICENSED COMPARATIVE CLAIM", caveat)
+        self.assertIn("constructs it", caveat)
+
+    def test_scores_disagreeing_still_withholds(self):
+        """T1 failed: no interpolation of either curve means anything."""
+        rd = self.m["report_data"]
+        runs = self._runs(CONF_T1_FAILED)
+        self.assertNotEqual(rd.matched_recall_refusal(runs), "")
+        self.assertEqual(rd.matched_recall_caveat(runs), "")
+
+    def test_a_conformance_row_without_tiers_keeps_the_old_refusal(self):
+        """Rows measured before the differ recorded per-tier verdicts cannot
+        claim T1 and T2 passed, so they keep the conservative behaviour."""
+        rd = self.m["report_data"]
+        runs = self._runs(CONF_T2)
+        self.assertNotEqual(rd.matched_recall_refusal(runs), "")
+
+    def test_the_front_page_line_never_carries_an_unlicensed_frontier(self):
+        """The page shows it under a banner; README and the docs do not show it."""
+        self._runs(CONF_T3_FAILED)
+        self.assertIsNone(self.m["compare"].matched_line("a", "b"))

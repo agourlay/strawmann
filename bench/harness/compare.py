@@ -360,7 +360,7 @@ def licence(a_label: str, b_label: str) -> dict:
     out = {"present": bool(conf), "perf": bool(conf.get("licenses_perf")),
            "comparative": bool(conf.get("licenses_comparative")),
            "tier": conf.get("tier_reached"), "hash": conf.get("hash"),
-           "banner": ""}
+           "banner": "", "caveat": "", "scores_agree": False}
     if not conf:
         out["banner"] = ("UNLICENSED: no conformance row (bench/results/<label>/"
                          "conformance.json). §8: no performance number is publishable "
@@ -378,6 +378,37 @@ def licence(a_label: str, b_label: str) -> dict:
                          + ("" if out["perf"] else " -- and not even that: licenses_perf is false")
                          + "; the ratios between them are not a result."
                          + segment_confound(a_label, b_label))
+
+    # T1 and T2 passing is a different statement from T3 passing, and the
+    # matched-recall table turns on the difference. T1 is exact-search value
+    # equality and T2 is rank agreement under ties: together they say the two
+    # engines compute and order the same scores. T3 says their *ANN recall* at
+    # one `ef` is equal, which is the thing matched recall constructs rather
+    # than assumes. So a pair that fails only T3 is one the frontier can still
+    # compare, and a pair that fails T1 or T2 is not.
+    #
+    # Computed after the chain above and never touching `banner`: an earlier
+    # version made this a second `if` and overwrote the "no conformance row"
+    # and hash-mismatch banners with a T3 message describing neither.
+    #
+    # A conformance row with no `tiers` list predates the differ recording them
+    # and cannot claim T1 and T2 passed, so it keeps the conservative refusal.
+    mismatch = bool(ca and cb and ca.get("hash") != cb.get("hash"))
+    passed = {t.get("tier", "").split()[0]: bool(t.get("passed"))
+              for t in (conf.get("tiers") or []) if t.get("tier")}
+    out["scores_agree"] = (bool(conf) and not mismatch
+                           and bool(passed.get("T1")) and bool(passed.get("T2")))
+    if out["scores_agree"] and not out["comparative"]:
+        out["caveat"] = (
+            f"NOT A LICENSED COMPARATIVE CLAIM, and shown anyway: the differ "
+            f"reached {out['tier'] or 'an unknown tier'} and set "
+            f"licenses_comparative=false, so the two engines are not at verified "
+            f"equal recall at a fixed ef (§8.5 T3). T1 and T2 did pass, so they "
+            f"compute and order the same scores, and this table does not assume "
+            f"equal recall: it constructs it, at each recall one engine actually "
+            f"reached. Read it as the comparison §7.4 asks for on a pair §8 has "
+            f"not licensed, which is why no generated table in README.md or the "
+            f"comparison documents carries it.")
     return out
 
 
@@ -1677,6 +1708,12 @@ def matched_line(a_label: str, b_label: str) -> str | None:
     `Exception` let it out and failed the build on a line whose whole contract
     is to be optional.
     """
+    # The generated blocks take only licensed numbers. Without this the line
+    # would put a frontier from a T3-failed pair on the front page, which is
+    # precisely what the report page shows *under a banner* and the documents
+    # do not show at all.
+    if not licence(a_label, b_label).get("comparative"):
+        return None
     try:
         import report_data as rd
         a, b = rd.load_run(a_label), rd.load_run(b_label)

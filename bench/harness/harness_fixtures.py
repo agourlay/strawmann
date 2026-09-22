@@ -131,6 +131,28 @@ CONF_T3 = {"hash": "h1", "tier_reached": "T3", "licenses_perf": True,
 CONF_T2 = {"hash": "h1", "tier_reached": "T2", "licenses_perf": True,
            "licenses_comparative": False}
 
+#: The state item 7 turns on: the engines compute and order the same scores
+#: (T1, T2 pass) and their ANN recall at a fixed `ef` does not match (T3 fails).
+#: `licenses_comparative` is false, and the matched-recall table is still
+#: meaningful, because it constructs equal recall rather than assuming it.
+CONF_T3_FAILED = {
+    "hash": "h1", "tier_reached": "T2", "licenses_perf": True,
+    "licenses_comparative": False,
+    "tiers": [{"tier": "T0 wire conformance", "passed": True},
+              {"tier": "T1 exact-search value equality", "passed": True},
+              {"tier": "T2 rank agreement under ties", "passed": True},
+              {"tier": "T3 ANN statistical equivalence", "passed": False}],
+}
+
+#: Scores themselves disagree, so no interpolation of either curve means
+#: anything and the table stays withheld.
+CONF_T1_FAILED = {
+    "hash": "h1", "tier_reached": "T0", "licenses_perf": False,
+    "licenses_comparative": False,
+    "tiers": [{"tier": "T0 wire conformance", "passed": True},
+              {"tier": "T1 exact-search value equality", "passed": False}],
+}
+
 #: A stand-in bfb, used by the workload tests and by anything that needs a
 #: row to have taken measurable time. It sat between two test classes in the
 #: single-file suite; it is a fixture, so it lives with the fixtures.

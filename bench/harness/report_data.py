@@ -697,7 +697,16 @@ def matched_recall_refusal(runs: list[Run], row_prefix: str = "W10-ef") -> str:
     if stale:
         return "STALE: " + "; ".join(stale)
     lic = compare.licence(a.label, b.label)
-    if not lic.get("comparative"):
+    # A T3 failure alone no longer withholds the table. T3 says the two engines
+    # differ in ANN recall at a fixed `ef`, which is the condition this table
+    # exists to correct: it does not assume equal recall, it constructs it at
+    # each recall one engine actually reached. Withholding it there meant the
+    # dbpedia-openai-1m tier published no comparison at all while 2.14x, 2.03x
+    # and 1.80x sat computable on disk. What still withholds is a pair whose
+    # scores do not agree (T1 or T2 failed, or no conformance row at all),
+    # because then no interpolation of either curve means anything.
+    # `matched_recall_caveat` supplies the banner the table is shown under.
+    if not lic.get("comparative") and not lic.get("scores_agree"):
         return lic.get("banner") or "licenses_comparative is false"
     for jr in compare.joined(a.label, b.label, a.by_id(), b.by_id(), stale=False):
         if jr.id.startswith(row_prefix) and jr.refusal:
@@ -710,6 +719,22 @@ def matched_recall_refusal(runs: list[Run], row_prefix: str = "W10-ef") -> str:
                     f"binary's single-client smoke rate; no ratio is formed across "
                     f"different instruments")
     return ""
+
+
+def matched_recall_caveat(runs: list[Run]) -> str:
+    """The banner a shown-but-unlicensed matched-recall table carries, or "".
+
+    Empty when the pair is licensed, which is the ordinary case and prints
+    nothing. Non-empty only in the state `matched_recall_refusal` now lets
+    through: T1 and T2 passed, T3 did not, so the table is computable and
+    honest and §8 has not licensed a comparative claim from it.
+    """
+    if len(runs) != 2:
+        return ""
+    lic = compare.licence(runs[0].label, runs[1].label)
+    if lic.get("comparative") or not lic.get("scores_agree"):
+        return ""
+    return lic.get("caveat") or ""
 
 
 # --------------------------------------------------------------------------

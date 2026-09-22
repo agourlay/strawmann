@@ -36,6 +36,7 @@ from report_data import (
     describe,
     frontier_points,
     matched_ratios,
+    matched_recall_caveat,
     matched_recall_refusal,
     ratio_value,
     run_colour,
@@ -1001,7 +1002,11 @@ def matched_recall_table(runs: list[Run]) -> str:
     pa, pb = frontier_points(a, bfb_only=True), frontier_points(b, bfb_only=True)
     if not pa or not pb:
         return ""
-    return (_matched_table(a, b, pa, pb)
+    # Shown under a banner rather than withheld when only T3 failed; empty on a
+    # licensed pair, which is most of them.
+    caveat = matched_recall_caveat(runs)
+    head = (f'<div class="banner soft">{html.escape(caveat)}</div>' if caveat else "")
+    return (head + _matched_table(a, b, pa, pb)
             + sq8_matched_recall_table(runs)
             + filtered_matched_recall_table(runs))
 

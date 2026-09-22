@@ -85,15 +85,16 @@ a wake or spin cost.
 
 ### P3. Decisions and hygiene
 
-**7. Whether T3 should gate the matched-recall table (findings 40).** Matched
-recall does not assume equal recall, it constructs it, so gating it on T3
-withholds the one comparison that survives exactly when it is needed. Left
-deliberately unchanged, because loosening a licence gate because a banner is
-inconvenient is the pressure this project exists to resist. It needs a spec
-answer, not a patch.
-
-**8. The matched-oversampling experiment (findings 42, `validation.md` item 6).**
-Qdrant's SQ8 plateau is entirely recoverable at `oversampling 2`, at which point
-it matches strawmANN. Whether equalising with a knob one engine did not need is
-the same experiment is the open question.
+**7. Oversampling as a second policy, never mixed (findings 42, `validation.md`
+item 6).** Qdrant's SQ8 plateau is its default `limit`-sized rescore pool, and
+`oversampling 2` recovers ~90% of it, at which point Qdrant reaches 0.9888
+against strawmANN's 0.9891. Decided 2026-09-22: this is the segment-policy
+dilemma again, Qdrant's own default against a setting chosen to make the
+comparison meaningful, and it takes the same answer. A run-level oversampling
+policy stamped into the row hash, so a defaults run and a matched-oversampling
+run both exist and `compare.py` refuses a ratio across them as STALE. §7.4's
+refusal of the quantized rows at defaults stays correct, and the tuned run
+answers what a user tuning Qdrant would ask. Wants a flag through `workloads`
+and `fullrun`, plus a measurement run per corpus, and is worth doing after the
+dbpedia re-run rather than before.
 
