@@ -238,8 +238,8 @@ class Corpus(NamedTuple):
     fixed order, unpacked by convention at every call site and indexed `[0]` at
     one. Transposing two is silent, and the wrong one of these is not a crash:
     scoring against `queries` as if it were `base`, or against another
-    dataset's ground truth, produces a plausible recall number. `docs/bugs.md`
-    is largely a record of that class of mistake.
+    dataset's ground truth, produces a plausible recall number, which is the
+    class of mistake this project has made most often.
 
     Still a tuple, so `base, queries, gt = paths.dataset(x)` and `[0]` keep
     working exactly as they did.

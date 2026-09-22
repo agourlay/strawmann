@@ -9,8 +9,8 @@
 //! ## The semantics are Qdrant's, and they were read rather than assumed
 //!
 //! Verified against a `dev` checkout at `0e3397469`, because this is exactly
-//! the kind of thing this project has invented before (`docs/bugs.md`: "8 to 13
-//! segments", cited in six files after being inferred from behaviour).
+//! the kind of thing this project has invented before: "8 to 13 segments" was
+//! inferred from behaviour and then cited in six files as though it were read.
 //!
 //! | | ingest | dot | euclid | manhattan | cosine |
 //! |---|---|---|---|---|---|
