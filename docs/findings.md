@@ -85,12 +85,30 @@ vacuously. Zero bad results, and green four times in a row. So a concurrent
 reader gets a *worse* answer and never a wrong one, and the hazard is recall,
 not safety. That is the test that gates the change, written before the change.
 
-What remains is the implementation and the trade it makes. The preconditions are
-better than findings 31 assumed: `Graph` is already `capacity`-sized rather than
-`count`-sized, `upper_offsets` already carries a CSR cursor for appending, and
-`quantized_search` already reads `g.count` with an acquire load. The work is to
-publish `count` after a node is fully linked and to run the builder's insert
-against the published graph, and the question it answers is whether a transient
+**The hard part is visibility, not safety or recall.** A query answers from two
+regions, the traversal over the graph and `scanPendingTail` over
+`[covered, total)`, and `covered` is one snapshot taken before the traversal.
+The search path already anticipates one failure: a node "linked into the graph
+after this query traversed, counted before this query scanned the tail, and
+therefore in neither", which its comment calls "a no-op that stops being one the
+moment anything inserts into a live graph". The mirror case is not recorded
+anywhere and is worse, because it is silent: a node whose edges exist while the
+reader's snapshot is behind is reached by the traversal *and* scored by the tail,
+and `heap.TopK.push` does not deduplicate, so the client gets one point twice.
+
+Pinned by "a graph covering more than the reader's snapshot returns a point
+twice", which constructs the window directly rather than racing for it, asserts
+the duplicate, and then shows the fix's shape: bounding the traversal to the
+reader's own snapshot puts every node in exactly one region and nothing repeats.
+So live insertion needs that bound, and the bound costs a predicate on the
+traversal's hot path unless it is hoisted behind `graph.count <= covered`, which
+is true on every query today.
+
+The other preconditions are better than findings 31 assumed: `Graph` is already
+`capacity`-sized rather than `count`-sized, `upper_offsets` already carries a CSR
+cursor for appending, and `quantized_search` already reads `g.count` with an
+acquire load. What is left is the bounded traversal, publishing `count` after a
+node is fully linked, and the measurement that decides it: whether a transient
 recall dip during writes beats the tail scan it replaces, on W11's search rate
 and on the recall of queries served during the append window.
 

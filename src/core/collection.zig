@@ -3844,3 +3844,91 @@ test "a gathered scan honours a filter the same way one query at a time does" {
         for (tops[i].finish()) |g| try testing.expect(g.id % 2 == 0);
     }
 }
+
+test "a graph covering more than the reader's snapshot returns a point twice" {
+    // The hazard P2 item 5 has to close, and the half the search path does not
+    // already anticipate. Its comment names the *invisible* case: a node
+    // "linked into the graph after this query traversed, counted before this
+    // query scanned the tail, and therefore in neither". The mirror case is a
+    // node in *both*: the reader's `covered` snapshot is behind, so the tail
+    // scan covers `[covered, total)` while the traversal reaches the same node
+    // through edges that already exist. `heap.TopK.push` does not deduplicate,
+    // so the client gets one point twice.
+    //
+    // Today this cannot happen, because a rebuild publishes a whole new graph
+    // and `count` never moves under a reader. It becomes reachable the moment
+    // anything inserts into a live graph, which is what item 5 proposes. The
+    // requirement it implies is that the traversal be bounded by the reader's
+    // own snapshot, so every node belongs to exactly one of the two regions.
+    //
+    // This test constructs the window directly rather than racing for it, by
+    // searching with a `covered` behind what the graph holds.
+    const dim = 8;
+    var c = try makeCollection(dim, .euclid, 512);
+    defer c.deinit();
+    var prng = std.Random.DefaultPrng.init(0xD0B1E);
+    const rnd = prng.random();
+    const n = 200;
+    for (0..n) |i| {
+        var v: [dim]f32 = undefined;
+        for (&v) |*x| x.* = rnd.floatNorm(f32);
+        _ = try c.upsert(.{ .num = i }, &v);
+    }
+    try buildIndex(&c, .serial, 1);
+
+    var scratch = try hnsw.Index.Scratch.init(testing.allocator, 512, 64);
+    defer scratch.deinit(testing.allocator);
+
+    var q: [dim]f32 = undefined;
+    for (&q) |*x| x.* = rnd.floatNorm(f32);
+
+    // The graph covers all 200. A reader whose snapshot says 100 scans
+    // [100, 200) exhaustively *and* traverses a graph that holds them.
+    const covered: u32 = 100;
+    var store: [32]Candidate = undefined;
+    var out = heap.TopK.init(&store, 32);
+    {
+        var buf: [Probe.max_buffer]u8 align(Probe.buffer_align) = undefined;
+        const probe = Probe.init(&c, &q, &buf);
+        const idx = hnsw.Index{ .graph = c.graph.?, .scorer = .of(&probe) };
+        idx.searchFiltered(64, &scratch, &out, null);
+        scanPendingTail(&c, &q, covered, &out);
+    }
+
+    // At least one id appears twice, which is the defect this pins.
+    const got = out.finish();
+    var seen = std.AutoHashMap(u32, void).init(testing.allocator);
+    defer seen.deinit();
+    var dupes: usize = 0;
+    for (got) |cand| {
+        const e = try seen.getOrPut(cand.id);
+        if (e.found_existing) dupes += 1;
+    }
+    try testing.expect(dupes > 0);
+
+    // And the shape of the fix: bounding the traversal to the reader's own
+    // snapshot puts every node in exactly one region, so nothing repeats.
+    var bounded_store: [32]Candidate = undefined;
+    var bounded = heap.TopK.init(&bounded_store, 32);
+    {
+        const Bound = struct {
+            limit: u32,
+            fn pred(ctx: *const anyopaque, node: u32) bool {
+                const self: *const @This() = @ptrCast(@alignCast(ctx));
+                return node < self.limit;
+            }
+        };
+        const b = Bound{ .limit = covered };
+        var buf: [Probe.max_buffer]u8 align(Probe.buffer_align) = undefined;
+        const probe = Probe.init(&c, &q, &buf);
+        const idx = hnsw.Index{ .graph = c.graph.?, .scorer = .of(&probe) };
+        idx.searchFiltered(64, &scratch, &bounded, .{ .ctx = @ptrCast(&b), .pred = Bound.pred });
+        scanPendingTail(&c, &q, covered, &bounded);
+    }
+    var seen2 = std.AutoHashMap(u32, void).init(testing.allocator);
+    defer seen2.deinit();
+    for (bounded.finish()) |cand| {
+        const e = try seen2.getOrPut(cand.id);
+        try testing.expect(!e.found_existing);
+    }
+}
