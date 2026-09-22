@@ -26,11 +26,16 @@ log() { echo "$(date '+%F %T') $*" | tee -a "$OUT/profile.log"; }
 pkill -x strawmann 2>/dev/null; sleep 2
 zig build -Doptimize=ReleaseFast >> "$OUT/profile.log" 2>&1 || exit 1
 CAPACITY=${CAPACITY:-$(python3 -c "import sys; sys.path.insert(0, 'bench/harness'); import workloads; print(workloads.required_capacity())")}
-rm -rf "${STRAWMANN_CACHE:-$HOME/.cache/strawmann}/strawmann-storage"
+# Only the arena files, and the directory stays: `fullrun.wipe_strawmann_storage`
+# unlinks `*.vectors.bin` rather than removing the tree, and the engine does not
+# create the directory itself. `rm -rf` on it made every upload fail with
+# "could not create or map the arena file for this placement".
+STORE="${STRAWMANN_CACHE:-$HOME/.cache/strawmann}/strawmann-storage"
+mkdir -p "$STORE" && rm -f "$STORE"/*.vectors.bin
 taskset -c 4-11 ./zig-out/bin/strawmann --port 6334 \
     --capacity "$CAPACITY" --connections 64 --workers 7 --io-threads 1 \
     --pin --cpus 4-11 \
-    --data-dir "${STRAWMANN_CACHE:-$HOME/.cache/strawmann}/strawmann-storage" \
+    --data-dir "$STORE" \
     --default-placement cached > "$OUT/server.log" 2>&1 &
 SRV=$!
 sleep 3
