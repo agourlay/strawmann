@@ -826,7 +826,10 @@ class WorkloadTests(unittest.TestCase):
               "isa_build": "avx512", "gate": "pass", "profile": "isolated"}
         self.assertEqual(w.build_identity(sm), {
             "gate": "pass", "profile": "isolated", "engine_build": "abc-dirty",
-            "engine_binary": "1111", "isa_build": "avx512", "optimize": "ReleaseFast"})
+            "engine_binary": "1111", "isa_build": "avx512", "optimize": "ReleaseFast",
+            # A binary built before `-Dvisited` existed says nothing about it,
+            # which is the honest value rather than the default's name.
+            "visited_set": None})
         qd = {"qdrant": {"version": "1.19.0", "digest": "sha256:ff"}, "gate": "FAIL",
               "profile": "as-deployed"}
         self.assertEqual(w.build_identity(qd)["engine_build"], "1.19.0")
@@ -2524,3 +2527,41 @@ class OversamplingPolicyTests(unittest.TestCase):
         reloaded = importlib.reload(workloads)
         self.assertIs(reloaded.OVERSAMPLING_POLICY,
                       reloaded.OversamplingPolicy.matched)
+
+
+class VisitedSetProvenanceTests(unittest.TestCase):
+    """Which visited set served a row, recorded rather than inferred.
+
+    `-Dvisited` makes §11's open question 3 measurable, and the measurement is
+    worthless if a row does not say which arm produced it: the two binaries
+    answer identically, so nothing else in the record distinguishes them.
+    """
+
+    def setUp(self):
+        self.w = importlib.reload(workloads)
+
+    def test_the_arm_reaches_the_row(self):
+        ident = self.w.build_identity(
+            {"strawmann": {"commit": "abc123", "binary_sha256": "d00d",
+                           "optimize": "ReleaseFast", "visited_set": "bitmap"},
+             "isa_build": "native", "gate": "pass", "profile": "as-deployed"})
+        self.assertEqual(ident["visited_set"], "bitmap")
+        self.assertIn("visited_set", self.w.BUILD_KEYS)
+
+    def test_a_qdrant_row_says_nothing_about_it(self):
+        """Qdrant has no such knob, so `None` is the honest value."""
+        ident = self.w.build_identity(
+            {"qdrant": {"version": "1.19.2-dev", "binary_sha256": "beef"},
+             "gate": "pass"})
+        self.assertIsNone(ident["visited_set"])
+
+    def test_two_arms_are_a_mixed_build(self):
+        """The refusal this exists for: one label, rows from both binaries."""
+        import compare
+        rows = {"W3": {"engine_build": "abc", "engine_binary": "d0",
+                       "isa_build": "native", "optimize": "ReleaseFast",
+                       "profile": "as-deployed", "visited_set": "generation"},
+                "W4": {"engine_build": "abc", "engine_binary": "d0",
+                       "isa_build": "native", "optimize": "ReleaseFast",
+                       "profile": "as-deployed", "visited_set": "bitmap"}}
+        self.assertEqual(len(compare.build_identities(rows)), 2)

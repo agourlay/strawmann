@@ -588,6 +588,13 @@ DISPATCH_TIER_RE = re.compile(r"dispatch tier\s*:\s*(\S+)")
 #: `vnni (u8xi8) : true` in the banner, `compiled vnni (u8xi8) : true` in
 #: `--probe`; one pattern reads both.
 VNNI_RE = re.compile(r"vnni \(u8xi8\)\s*:\s*(true|false)")
+#: `visited set : generation`. Two binaries that differ only in `-Dvisited`
+#: answer identically and move different amounts of memory, so a row measured by
+#: one may not be read as a row measured by the other: §11's open question 3 is
+#: what the flag exists to answer, and the answer is worthless if the rows do
+#: not say which arm produced them. Absent on a binary built before the flag,
+#: which reads as "this run does not say" rather than as the default.
+VISITED_SET_RE = re.compile(r"visited set\s*:\s*(\S+)")
 
 
 def parse_isa_build(text: str) -> str | None:
@@ -604,7 +611,8 @@ def parse_build_flags(text: str) -> dict:
     """
     out: dict = {}
     for key, rx in (("optimize", BUILD_MODE_RE),
-                    ("dispatch_tier", DISPATCH_TIER_RE)):
+                    ("dispatch_tier", DISPATCH_TIER_RE),
+                    ("visited_set", VISITED_SET_RE)):
         m = rx.search(text)
         if m:
             out[key] = m.group(1)

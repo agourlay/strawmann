@@ -1921,6 +1921,10 @@ class Result:
     engine_binary: str | None = None
     isa_build: str | None = None
     optimize: str | None = None
+    #: Which visited set this row's engine was built with (`-Dvisited`), from
+    #: the banner. `None` for Qdrant, which has no such knob, and for a
+    #: strawmANN built before the flag existed.
+    visited_set: str | None = None
     #: The `-n` this row was invoked with (after `--n-factor` /
     #: `--min-duration` scaling) and `stamp_hash` of the harness stamp it ran
     #: under. `rows.json` merges rows in place, so this is what says which rows
@@ -1969,7 +1973,12 @@ W11_MIN_OVERLAP = 0.9
 #: The `Result` fields that together name the build a row was measured on.
 #: `compare.stale_reasons` refuses a label whose rows carry more than one
 #: value of this tuple; the gate is flagged separately (`compare.gate_of`).
-BUILD_KEYS = ("engine_build", "engine_binary", "isa_build", "optimize", "profile")
+#: `visited_set` sits here for the same reason `isa_build` and `optimize` do:
+#: two binaries that differ only in `-Dvisited` answer identically and move
+#: different amounts of memory, so a label whose rows came from both is a mixed
+#: build and `compare.mixed_build_reasons` says so rather than averaging them.
+BUILD_KEYS = ("engine_build", "engine_binary", "isa_build", "optimize", "profile",
+              "visited_set")
 
 
 def build_identity(run_meta: dict) -> dict:
@@ -1995,7 +2004,10 @@ def build_identity(run_meta: dict) -> dict:
     return {"gate": run_meta.get("gate"), "profile": run_meta.get("profile"),
             "engine_build": build, "engine_binary": binary,
             "isa_build": run_meta.get("isa_build"),
-            "optimize": sm.get("optimize") if sm else None}
+            "optimize": sm.get("optimize") if sm else None,
+            # strawmANN's alone: Qdrant has no such build knob, and a `None`
+            # beside its rows reads correctly as "not a thing this engine has".
+            "visited_set": sm.get("visited_set") if sm else None}
 
 
 #: A row that finished faster than this measured bfb's startup and the ramp as

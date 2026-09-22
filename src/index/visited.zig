@@ -38,6 +38,31 @@
 
 const std = @import("std");
 
+const build_options = @import("build_options");
+
+/// Which implementation the search path compiles against, from `-Dvisited`.
+///
+/// Comptime, so the probe in the traversal's inner loop keeps no branch it did
+/// not have before. §6.5 makes `Generation` the default and §11's open question
+/// 3 asks where the two cross; this is what lets a run answer it with two
+/// binaries instead of an argument.
+pub const Selected = if (std.mem.eql(u8, build_options.visited_set, "bitmap"))
+    Bitmap
+else
+    Generation;
+
+/// How the two are constructed differs (the bitmap needs a bound on its dirty
+/// list), so the search path asks here rather than knowing which it got.
+///
+/// The dirty list is sized to hold every word of the bitmap, which makes
+/// overflow impossible and the full-clear fallback dead: at 1M points that is
+/// 15,625 words, 62 KB, beside the bitmap's own 128 KB. Against the stamped
+/// array's 4 MB per worker that is still 21x smaller.
+pub fn initSelected(alloc: std.mem.Allocator, capacity: usize) !Selected {
+    if (Selected == Bitmap) return Bitmap.init(alloc, capacity, (capacity + 63) / 64);
+    return Generation.init(alloc, capacity);
+}
+
 /// §6.5's default: a generation-stamped u32 array.
 pub const Generation = struct {
     stamps: []u32,
@@ -146,6 +171,14 @@ pub const Bitmap = struct {
         }
         self.bits[word] = was | bit;
         return true;
+    }
+
+    /// Bring `id`'s word towards the cache ahead of `testAndSet`, as
+    /// `Generation.prefetch` does for its stamp. Write intent, since the common
+    /// outcome is to set the bit. The two implementations are interchangeable
+    /// only if the search path can call this on either.
+    pub inline fn prefetch(self: *const Bitmap, id: u32) void {
+        @prefetch(&self.bits[id / 64], .{ .rw = .write, .locality = 3, .cache = .data });
     }
 
     pub fn isVisited(self: *const Bitmap, id: u32) bool {
@@ -283,4 +316,80 @@ test "§11 open question 3: the footprints the comparison is about" {
     try testing.expectEqual(@as(usize, 4_000_000), gen);
     // The bitmap is ~32x smaller even counting a generous dirty list.
     try testing.expect(bmp * 20 < gen);
+}
+
+test "the two implementations are indistinguishable through the interface search uses" {
+    // The point of `-Dvisited`: two binaries that differ in footprint and reset
+    // cost and in nothing a query can observe. A randomised probe sequence is
+    // the check, because the failure this guards against is not a wrong answer
+    // on a crafted input, it is a disagreement on one arrival order in a
+    // million that would read as a recall difference.
+    const n = 4096;
+    var gen = try Generation.init(testing.allocator, n);
+    defer gen.deinit(testing.allocator);
+    var bmp = try Bitmap.init(testing.allocator, n, (n + 63) / 64);
+    defer bmp.deinit(testing.allocator);
+
+    var prng = std.Random.DefaultPrng.init(0x5EED);
+    const rand = prng.random();
+
+    for (0..200) |_| {
+        gen.beginQuery();
+        bmp.beginQuery();
+        // A query visits a few thousand of a million points (§5.3), so probe a
+        // similar fraction here, with repeats: `testAndSet` returning false the
+        // second time is the contract the traversal relies on.
+        for (0..600) |_| {
+            const id = rand.uintLessThan(u32, n);
+            const g = gen.testAndSet(id);
+            const b = bmp.testAndSet(id);
+            try testing.expectEqual(g, b);
+            try testing.expectEqual(gen.isVisited(id), bmp.isVisited(id));
+        }
+        // And every id agrees at the end of the query, not only the probed ones.
+        for (0..n) |i| {
+            try testing.expectEqual(gen.isVisited(@intCast(i)), bmp.isVisited(@intCast(i)));
+        }
+    }
+}
+
+test "a query sees nothing the previous query marked" {
+    // Both resets, against the same sequence. `Generation` bumps an epoch and
+    // `Bitmap` walks its dirty list, and a reset that missed a word would show
+    // up as a node the traversal refuses to revisit in the *next* query.
+    const n = 512;
+    var gen = try Generation.init(testing.allocator, n);
+    defer gen.deinit(testing.allocator);
+    var bmp = try Bitmap.init(testing.allocator, n, (n + 63) / 64);
+    defer bmp.deinit(testing.allocator);
+
+    var prng = std.Random.DefaultPrng.init(0xC0FFEE);
+    const rand = prng.random();
+    for (0..50) |_| {
+        gen.beginQuery();
+        bmp.beginQuery();
+        for (0..n) |i| {
+            try testing.expect(!gen.isVisited(@intCast(i)));
+            try testing.expect(!bmp.isVisited(@intCast(i)));
+        }
+        for (0..100) |_| {
+            const id = rand.uintLessThan(u32, n);
+            _ = gen.testAndSet(id);
+            _ = bmp.testAndSet(id);
+        }
+    }
+}
+
+test "initSelected sizes the dirty list so it cannot overflow" {
+    // The full-clear fallback is a safety valve, and at this sizing it is dead
+    // code: a query cannot dirty more words than the bitmap has.
+    const n = 10_000;
+    var v = try initSelected(testing.allocator, n);
+    defer v.deinit(testing.allocator);
+    v.beginQuery();
+    for (0..n) |i| _ = v.testAndSet(@intCast(i));
+    if (Selected == Bitmap) try testing.expect(!v.overflowed);
+    for (0..n) |i| try testing.expect(v.isVisited(@intCast(i)));
+    v.beginQuery();
+    for (0..n) |i| try testing.expect(!v.isVisited(@intCast(i)));
 }

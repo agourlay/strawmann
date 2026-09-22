@@ -113,6 +113,7 @@ const BuildOptions = struct {
     qdrant_version: []const u8,
     force_isa: []const u8,
     isa_build_name: []const u8,
+    visited_set: []const u8,
     optimize: std.builtin.OptimizeMode,
 };
 
@@ -121,6 +122,15 @@ fn buildOptions(b: *std.Build, o: BuildOptions) *std.Build.Module {
     opts.addOption([]const u8, "qdrant_version", o.qdrant_version);
     opts.addOption([]const u8, "force_isa", o.force_isa);
     opts.addOption([]const u8, "isa_build_name", o.isa_build_name);
+    // §11 open question 3, made measurable rather than argued: the visited set
+    // is 4 MB per worker at 1M points as a generation-stamped u32 array, and
+    // 190 KB as a bitmap plus a dirty list, at the cost of a reset proportional
+    // to what the query touched. Which wins is a measurement, and it is worth
+    // having: a traffic decomposition of `rel-0921` puts the per-node walk
+    // overhead the visited set dominates at 68% of a quantized row's DRAM
+    // traffic and 47% of an fp32 one's. Comptime, so the hot path keeps no
+    // branch it did not have before.
+    opts.addOption([]const u8, "visited_set", o.visited_set);
     // §9: "results are only ever quoted from ReleaseFast." The banner said which
     // ISA a binary carried but never which optimize mode built it, so a Debug
     // binary left at `zig-out/bin/strawmann` served a whole run while every row
@@ -164,10 +174,17 @@ pub fn build(b: *std.Build) void {
         "Name of this ISA build arm, recorded in run metadata",
     ) orelse "native";
 
+    const visited_set = b.option(
+        []const u8,
+        "visited",
+        "Which visited set the search path uses (generation|bitmap). §6.5's default is generation, a stamped u32 array at 4 MB/worker per 1M points; bitmap is 1 bit/point plus a dirty list, 21x smaller and paying a reset proportional to what was visited. §11 open question 3 asks where they cross",
+    ) orelse "generation";
+
     const options_mod = buildOptions(b, .{
         .qdrant_version = qdrant_version,
         .force_isa = force_isa,
         .isa_build_name = isa_build_name,
+        .visited_set = visited_set,
         .optimize = optimize,
     });
 
@@ -317,6 +334,10 @@ pub fn build(b: *std.Build) void {
             .qdrant_version = qdrant_version,
             .force_isa = "auto",
             .isa_build_name = isa.name,
+            // The ISA arms vary one thing, the instruction set. They take the
+            // run's visited set so a kernel matrix is not also a data-structure
+            // matrix.
+            .visited_set = visited_set,
             .optimize = .ReleaseFast,
         });
 

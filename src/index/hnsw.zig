@@ -290,7 +290,7 @@ pub const Index = struct {
 
     /// Per-worker scratch. §6.3: "No allocation on the query path."
     pub const Scratch = struct {
-        vis: visited.Generation,
+        vis: visited.Selected,
         frontier: []Candidate,
         results: []Candidate,
 
@@ -303,7 +303,10 @@ pub const Index = struct {
             // returns before the struct exists and the first two are already
             // allocated and unreachable: a leak whose only trigger is the
             // allocation failure it is trying to report.
-            var vis = try visited.Generation.init(alloc, capacity);
+            // `initSelected` rather than a type name: the two implementations
+            // are constructed differently and the search path does not need to
+            // know which `-Dvisited` gave it.
+            var vis = try visited.initSelected(alloc, capacity);
             errdefer vis.deinit(alloc);
             const frontier = try alloc.alloc(Candidate, max_ef * 2);
             errdefer alloc.free(frontier);

@@ -434,6 +434,7 @@ pub fn main(init: std.process.Init) !void {
     if (opts.probe_only) {
         try w.print("build mode             : {s}\n", .{build_options.optimize_mode});
         try w.print("isa build              : {s}\n", .{build_options.isa_build_name});
+        try w.print("visited set            : {s}\n", .{build_options.visited_set});
         try w.print("f32 lanes / accumulators: {d} / {d}\n", .{ dist.native.lanes, dist.native.accumulators });
         // The query path scores through `dist.native` (the kernels compiled
         // for this build's target, `isa build` above); `dispatch.active` is
@@ -552,6 +553,11 @@ pub fn main(init: std.process.Init) !void {
     try w.print("  reports qdrant version : {s}\n", .{build_options.qdrant_version});
     try w.print("  build mode             : {s}\n", .{build_options.optimize_mode});
     try w.print("  isa build              : {s}\n", .{build_options.isa_build_name});
+    // Two binaries that differ only here answer identically and cost different
+    // amounts of memory traffic, so a row measured by one may not be read as a
+    // row measured by the other. The banner is where the harness learns it,
+    // exactly as it learns the ISA arm and the optimize mode.
+    try w.print("  visited set            : {s}\n", .{build_options.visited_set});
     try w.print("  f32 lanes / accumulators: {d} / {d}\n", .{ dist.native.lanes, dist.native.accumulators });
     try w.print("  dispatch table         : {s} (bench and --probe; queries use the isa build's kernels)\n", .{dist.dispatch.active.label()});
     try w.print("  vnni (u8xi8)           : {}\n", .{dist.dot_i8.u8i8_native.uses_vnni});
