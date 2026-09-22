@@ -1051,3 +1051,46 @@ So the cross-request gather is dropped rather than deferred. What remains true
 from findings 45 is narrower than it looked: the exact path is bandwidth-bound,
 and the lever is reading less per query, which batching achieves when the client
 offers batches and a scheduler cannot conjure.
+
+---
+
+## Intra-query parallelism is not worth §6.3's discipline, measured
+
+findings 50 profiled W3's unsaturated cost (972k cycles per query at `-p 1`
+against 650k saturated) and found unhidden memory latency rather than a wake
+cost: 6.5% kernel against 5.3%, `Probe.prefetch` 17.1% of samples against 9.9%.
+The lever it named was intra-query parallelism, expanding one query's frontier
+across workers so its misses overlap. That means giving up §6.3's
+one-thread-per-core pinning for the single-query case, which is the discipline
+that holds every other row's tail (findings 36, 41: zero migrations against
+Qdrant's tens of thousands, and W4-sat90 p99 1.47 ms against 4.02 ms).
+
+Measured 2026-09-22 before building it. The same row at rising concurrency, on
+the theory that concurrency buys for free the overlap intra-query parallelism
+would buy with threads:
+
+| | qps | cycles/query (whole engine) | server p50 |
+|---|--:|--:|--:|
+| `-p 1` | 1,323 | 1,310,640 | 640 µs |
+| `-p 2` | 3,392 | 1,012,563 | 480 µs |
+| `-p 4` | 8,093 | 862,530 | **398 µs** |
+| `-p 8` | 15,023 | 913,887 | 438 µs |
+| `-p 16` | 16,208 | 905,231 | 893 µs |
+
+**A single query's own latency falls 38% as others arrive**, bottoming at 398 µs
+before queueing takes over. That floor is what the traversal costs when the
+memory system is well used, and it is the ceiling any amount of overlap can
+reach. Qdrant's W3 is 411 µs.
+
+So the arithmetic against the change is: the next-candidate prefetch already
+took W3's server p50 from 488 to 459 µs, the floor is ~398 µs, and the remaining
+headroom is therefore about 60 µs, 13% of one row. Against that, the discipline
+being given up is worth 2.7x on W4-sat90's p99 across every row. The trade is
+not close, and intra-query parallelism is dropped rather than deferred.
+
+*Caveat on the table.* `cycles/query` here is the whole engine process over the
+row's queries, so idle workers are in it and the absolute figures are not the
+harness's per-row counters; the shape and the server-side p50s are what this
+reads. And part of the fall from `-p 1` to `-p 4` is inter-query cache sharing
+rather than intra-query overlap, which a threaded single query would not get.
+Both caveats push the same way: the real headroom is at most the 60 µs above.
