@@ -1860,6 +1860,20 @@ class MatchedLineTests(unittest.TestCase):
         with mock.patch.dict("sys.modules", {"report_data": Empty}):
             self.assertIsNone(cmp.matched_line("a", "b"))
 
+    def test_a_label_with_no_rows_is_not_an_error(self):
+        """CI's case, and it failed the build once.
+
+        `report_data.load_run` raises `SystemExit` for a label with no
+        `rows.json`, which is a CLI saying "run the benchmark first" and is not
+        an `Exception` subclass, so `except Exception` let it out. CI has no
+        results at all, `--check-readme` runs there against the default labels,
+        and an optional line took the build down with it.
+        """
+        cmp = self.m["compare"]
+        # The real loader against the real empty temp root, not a mock: the
+        # mock is what would have missed this.
+        self.assertIsNone(cmp.matched_line("strawmann", "qdrant"))
+
     def test_an_import_failure_is_not_an_error(self):
         """`report_data` imports compare, so this import is deferred; a stdlib
         caller without pandas still gets its block."""

@@ -1668,13 +1668,21 @@ def matched_line(a_label: str, b_label: str) -> str | None:
     `report_data` imports this module, so the import is deferred rather than
     circular, and the line is dropped rather than raised when the pair cannot
     produce a frontier -- one arm without a sweep, or a T3 refusal.
+
+    `SystemExit` is caught explicitly beside `Exception`, and it is the case
+    that matters rather than a defensive flourish: `report_data.load_run` raises
+    it for a label with no `rows.json`, which is a CLI's way of saying "run the
+    benchmark first" and is *not* an `Exception` subclass. CI has no results at
+    all, so `--check-readme` there hits exactly that path, and catching only
+    `Exception` let it out and failed the build on a line whose whole contract
+    is to be optional.
     """
     try:
         import report_data as rd
         a, b = rd.load_run(a_label), rd.load_run(b_label)
         rows = rd.matched_ratios(rd.frontier_points(a, bfb_only=True),
                                  rd.frontier_points(b, bfb_only=True))
-    except Exception:
+    except (Exception, SystemExit):
         return None
     if len(rows) < 2:
         return None
