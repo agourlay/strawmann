@@ -2758,7 +2758,14 @@ range of `ef`, recall 1.0 from `ef=64` and nothing bought above it. Qdrant's is
 
 So the gap narrows monotonically as the recall requirement tightens (0.21x at
 ~0.99, 0.44x at ~0.99996) and `ef=128`, the single point `rel-0908` published,
-is close to the worst point on the curve for strawmANN. The dash was hiding a
+is close to the worst point on the curve for strawmANN.
+
+> **Re-measured inside a publication run, `rel-0921` (findings 51).** Three
+> passes with `--perf`, where the ladders here are one pass without it: the
+> anchors come back **0.17x to 0.36x** against the 0.21x to 0.66x below. The
+> shape reproduces, as this entry says it would, and the top anchor has now
+> moved by a third on two consecutive re-measurements, which is this entry's own
+> warning holding. `rel-0921`'s are the anchors to quote. The dash was hiding a
 comparison that is bad for strawmANN at every recall *and* getting better as
 the bar rises, which is more informative than either the 7.5x the raw rates
 suggested or the refusal that replaced it.
@@ -2841,9 +2848,16 @@ backwards and the other as a dash.
 correction.** `rel-0908`'s 0.67x is three passes with `--perf` attached; the
 ladder is one pass without it, and its `ef=128` strawmANN rung is 3,442 qps
 against the published row's 2,571. What is compared here is the *direction* two
-methods report over one grade, not one number against another. A ladder
-measured inside a `--perf` publication run is what would settle the magnitude,
-and the rows are in the table now, so the next one does it.
+methods report over one grade, not one number against another.
+
+> **`rel-0921` is that run, and the magnitude is smaller (findings 51).** Three
+> passes, `--perf`, both grades' ladders and the recall they join against out of
+> one licensed run. At the first width where Qdrant actually reaches 1.000000
+> (`ef=256`, 2,617 qps) strawmANN serves 2,562, so **0.98x**, rising to 1.50x at
+> `ef=512`, against the 1.92x to 3.32x below. The sign of this entry survives
+> and its numbers do not: the published 0.67x still understates strawmANN, which
+> ties rather than loses at matched recall. Quote `rel-0921`'s anchors, not
+> these.
 
 **Single pass, and the neighbouring grade's spread moved 30% on re-measurement**
 (findings 48). These anchors are not banded either. The inversion is not a
@@ -3053,12 +3067,3 @@ Qdrant's SQ8 plateau is entirely recoverable at `oversampling 2`, at which point
 it matches strawmANN. Whether equalising with a knob one engine did not need is
 the same experiment is the open question.
 
-**10. Fold the W12 result into the entries it settles (findings 51).** Findings
-48 and 49 each name an open item that `rel-0921` answers, and the file holds
-three sets of anchors with no statement of which run is authoritative.
-
-**11. Annotate the two rows that measure the harness (findings 50).** W13's
-server-side p50 is 11 µs against a 137 µs client p50, so 92% of it is the load
-generator and the socket. W11 climbs 1,475 to 1,794 to 1,847 qps monotonically
-across three passes, so its median is a warm-up average rather than a steady
-state.

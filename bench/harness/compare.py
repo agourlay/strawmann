@@ -561,28 +561,37 @@ class Row:
         no_index = self._unindexed_filter()
         if no_index:
             return self._refuse(no_index)
+        # How much of the measured latency the engine did not spend, on any row
+        # rather than only the open-loop ones. W13 is the case this was missing:
+        # 137 µs client against an 11 µs server p50, so 92% of the number a
+        # reader takes for scroll throughput is the load generator and the
+        # socket, and the row published a bare 1.18x for three runs. The *gap*
+        # leads, not the ratio: `c / srv` divides by a number that is small
+        # precisely because the engine is fast, so the better an engine gets the
+        # more alarming its own flag looks.
+        self._unaccounted_notes(ra, rb)
+        # Both said before the gates below, not after them. `rep_drift` lived
+        # under the recall checks, so a row that gets no ratio got no drift
+        # warning either -- and those are the rows most likely to drift. W11
+        # mutates its collection, so it can never have a recall join, returns
+        # early on that, and moved +25% one way across three passes of
+        # `rel-0921` while publishing a median with nothing to say the passes
+        # were a warm-up.
+        if self._drifted(ra, rb):
+            self.notes.append(
+                f"[{', '.join(self._drifted(ra, rb))} across its passes, "
+                f"monotonically: the spread on this row is drift rather than "
+                f"noise, so the median is a trend's midpoint and not a "
+                f"repeatable measurement]")
         if ra.get("load_mode") == "open-loop" or wid.startswith("W4-sat"):
             # The number is the offered rate; a ratio would read as a speed
             # comparison when it means "both kept up". Unless one did not:
             # a client p50 past a second is a queue, not a served rate.
             sat = []
             for lbl, r in ((self.a_label, ra), (self.b_label, rb)):
-                lat = r.get("latency") or {}
-                c, srv = lat.get("client_p50_us"), lat.get("server_p50_us")
+                c = (r.get("latency") or {}).get("client_p50_us")
                 if c is not None and c > SATURATED_P50_US:
                     sat.append(lbl)
-                # The *gap* leads, not the ratio. `c / srv` divides by a number
-                # that is small precisely because the engine is fast, so the
-                # better an engine gets the more alarming its own flag looks:
-                # W13 read "23x" for strawmANN against "5x" for Qdrant while
-                # strawmANN's absolute client latency was lower (0.13 ms vs
-                # 0.21 ms), because its server p50 was 6 µs. What a reader needs
-                # is how much time is unaccounted for by the server.
-                if c and srv and srv > 0 and c / srv >= 5:
-                    self.notes.append(
-                        f"[{lbl}: {(c - srv) / 1000:,.1f} ms of the client's "
-                        f"{c / 1000:,.1f} ms p50 is not server time "
-                        f"({c / srv:,.0f}x)]")
             # Whether the offered rate was actually served, measured rather
             # than inferred. `client p50 > 1 s` catches a queue that has run
             # away; it does not catch a row that quietly delivered 93% of what
@@ -675,9 +684,7 @@ class Row:
         # band, and the ratio then published as "parity: no measured
         # difference". The difference was real; the arm was drifting. Saying so
         # beats calling it either parity or a clean ratio.
-        drifted = [f"{lbl} {r['rep_drift']:+.0%}"
-                   for lbl, r in ((self.a_label, ra), (self.b_label, rb))
-                   if r.get("rep_drift") is not None]
+        drifted = self._drifted(ra, rb)
         # This string is also the matched-recall frontier's explanation when a
         # W10-ef row carries it (`report_data.matched_recall_refusal`), so it
         # names the arm and the size of the move rather than saying only that
@@ -686,10 +693,9 @@ class Row:
         # refusal reaches that chart at all.
         band = parity_band(self.id, self.a_label, self.b_label)
         if drifted:
-            self.notes.append(
-                f"[{', '.join(drifted)} across its passes, monotonically: the "
-                f"spread on this row is drift rather than noise, so it is not a "
-                f"noise band and the ratio is not a repeatable measurement]")
+            # The note is already on the row, said above where every row reaches
+            # it; what is left here is the refusal, which only a row that got
+            # this far could have earned.
             return self._refuse(f"drifted across passes ({', '.join(drifted)})")
         if band is not None and abs(self.qa / self.qb - 1.0) <= band:
             self.notes.append(
@@ -697,6 +703,29 @@ class Row:
                 f"puts on {self.id}: no measured difference, not a small one]")
             return "parity"
         return f"{self.qa / self.qb:.2f}x"
+
+    #: How far apart the client's and the server's p50 must be before the row
+    #: is measuring the harness more than the engine. Five is where W13 sits at
+    #: its narrowest (Qdrant 4.97x) and strawmANN's 12.5x is not close to it.
+    UNACCOUNTED_RATIO = 5
+
+    def _unaccounted_notes(self, ra: dict, rb: dict) -> None:
+        """Say how much of each arm's latency the server did not spend."""
+        for lbl, r in ((self.a_label, ra), (self.b_label, rb)):
+            lat = r.get("latency") or {}
+            c, srv = lat.get("client_p50_us"), lat.get("server_p50_us")
+            if c and srv and srv > 0 and c / srv >= self.UNACCOUNTED_RATIO:
+                self.notes.append(
+                    f"[{lbl}: {(c - srv) / 1000:,.2f} ms of the client's "
+                    f"{c / 1000:,.2f} ms p50 is not server time ({c / srv:,.0f}x), "
+                    f"so {100 * (c - srv) / c:.0f}% of this row is the load "
+                    f"generator and the socket]")
+
+    def _drifted(self, ra: dict, rb: dict) -> list[str]:
+        """Arms whose passes moved one way only (`aggregate._rep_drift`)."""
+        return [f"{lbl} {r['rep_drift']:+.0%}"
+                for lbl, r in ((self.a_label, ra), (self.b_label, rb))
+                if r.get("rep_drift") is not None]
 
     @staticmethod
     def _row_flag(r: dict, key: str, table_default: bool) -> bool:

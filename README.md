@@ -40,7 +40,7 @@
 
   sift1m, d=128, euclid — these ratios are this dimension's. Also measured: dbpedia-openai-100K-1536-angular
 
-  mixed read/write: [append 3,300 points/s] [search-during-write; no recall join]
+  mixed read/write: [append 3,300 points/s] [strawmann +25% across its passes, monotonically: the spread on this row is drift rather than noise, so the median is a trend's midpoint and not a repeatable measurement] [search-during-write; no recall join]
 ```
 <!-- END compare-table -->
 

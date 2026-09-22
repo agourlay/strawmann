@@ -11,6 +11,7 @@ import json
 import os
 import re
 import tempfile
+import typing
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -287,7 +288,10 @@ class CompareTests(unittest.TestCase):
         # two, purely because its server p50 was 6 µs.
         note = rows["W4-rps2000"].note_text
         self.assertIn("not server time", note)
-        self.assertIn("1,099.7 ms", note)
+        # Two decimals, because the note now fires on closed-loop rows too and
+        # W13's are sub-millisecond: at one decimal it read "0.1 ms of the
+        # client's 0.1 ms p50", which says nothing.
+        self.assertIn("1,099.70 ms", note)
         rows, _ = self._joined([_row("W4-rps500", 500, load_mode="open-loop", latency=lat_ok)],
                                [_row("W4-rps500", 500, load_mode="open-loop", latency=lat_ok)],
                                good_stamp(), good_stamp())
@@ -1662,3 +1666,68 @@ class EnvironmentFloorTests(unittest.TestCase):
         self.assertTrue(any("environment" in w for w in why), why)
         clean = reg.Noise({"W4": 0.01}, {"W4": 3}, "src", [], env_hash="smt-on")
         self.assertEqual(reg.floor_refusals(clean, ["a", "b"]), [])
+
+
+class HarnessBoundRowTests(unittest.TestCase):
+    """The two rows whose numbers are mostly not the engine.
+
+    Both notes existed and neither reached the row that needed it: the
+    unaccounted-time note fired only inside the open-loop branch, and the drift
+    note sat below the early returns, so a row with no ratio got no warning.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(Path(self.tmp.name))
+        self.m = _reload(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _joined(self, a_rows, b_rows):
+        self.fx.label("a", a_rows, good_stamp(), CONF_T3)
+        self.fx.label("b", b_rows, good_stamp(), CONF_T3)
+        cmp = self.m["compare"]
+        cmp._RECALL_CACHE.clear()
+        return {r.id: r for r in cmp.joined("a", "b", cmp.load("a"), cmp.load("b"))}
+
+    #: W13 as `rel-0921` measured it: 137 µs client against an 11 µs server p50.
+    W13_LAT: typing.ClassVar[dict] = {"client_p50_us": 136.5, "server_p50_us": 10.9,
+                                      "client_p99_us": 230.0}
+
+    def test_a_closed_loop_row_says_how_little_of_it_is_the_engine(self):
+        rows = self._joined(
+            [_row("W13", 51106.0, ef=None, latency=self.W13_LAT)],
+            [_row("W13", 43241.0, ef=None, latency={"client_p50_us": 168.2,
+                                                    "server_p50_us": 33.8})])
+        note = rows["W13"].note_text
+        self.assertIn("not server time", note)
+        self.assertIn("92% of this row is the load generator", note)
+
+    def test_a_row_whose_latencies_are_close_says_nothing(self):
+        """The note is for rows the harness dominates, not every row."""
+        rows = self._joined(
+            [_row("W3", 1673.0, latency={"client_p50_us": 613.0, "server_p50_us": 506.0})],
+            [_row("W3", 1977.0, latency={"client_p50_us": 511.0, "server_p50_us": 411.0})])
+        self.assertNotIn("not server time", rows["W3"].note_text)
+
+    def test_a_row_with_no_ratio_still_reports_drift(self):
+        """W11 cannot have a recall join, and drifted +25% across three passes."""
+        rows = self._joined(
+            [_row("W11", 1794.0, ef=None, rep_drift=0.252, recall_joinable=False)],
+            [_row("W11", 1773.0, ef=None, recall_joinable=False)])
+        note = rows["W11"].note_text
+        self.assertIn("+25%", note)
+        self.assertIn("monotonically", note)
+        self.assertIn("median is a trend's midpoint", note)
+
+    def test_drift_still_refuses_a_ratio_it_would_have_banded(self):
+        """The refusal survives the note moving above the early returns."""
+        rows = self._joined([_row("W4", 1000.0, rep_drift=0.30)], [_row("W4", 900.0)])
+        self.assertIn("monotonically", rows["W4"].note_text)
+        self.assertIsNone(re.fullmatch(r"[\d.]+x", rows["W4"].ratio or ""),
+                          f"drifted row published a ratio: {rows['W4'].ratio!r}")
+
+    def test_a_steady_row_is_not_called_drifted(self):
+        rows = self._joined([_row("W4", 1000.0)], [_row("W4", 900.0)])
+        self.assertNotIn("monotonically", rows["W4"].note_text)

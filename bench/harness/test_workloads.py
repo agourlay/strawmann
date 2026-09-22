@@ -2385,3 +2385,70 @@ class ClientConcurrencyTests(unittest.TestCase):
         d = asdict(r)
         self.assertEqual(d["client_parallel"], 2)
         self.assertIn("-p", d["client_defaults"])
+
+
+class NightrunReferenceTests(unittest.TestCase):
+    """Which previous pair a scheduled run takes its `--rps-reference` from.
+
+    Getting this wrong is silent: `auto` finds nothing, both engines run their
+    open-loop arms at their own saturation, and the report refuses the
+    cross-engine latency read hours later. The script is driven directly through
+    `--print-prev`, from a temp tree, so the test reads the real shell rather
+    than a copy of its logic.
+    """
+
+    SCRIPT = Path(__file__).resolve().parent / "nightrun.sh"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / "bench/harness").mkdir(parents=True)
+        (self.root / "bench/results").mkdir(parents=True)
+        (self.root / "bench/harness/nightrun.sh").write_text(self.SCRIPT.read_text())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _labels(self, *names: str):
+        for n in names:
+            (self.root / "bench/results" / n).mkdir(parents=True, exist_ok=True)
+
+    def _prev(self, date: str, dataset: str) -> str:
+        r = subprocess.run(
+            ["bash", str(self.root / "bench/harness/nightrun.sh"),
+             "--print-prev", date, dataset],
+            capture_output=True, text=True, env={**os.environ, "HOME": str(self.root)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return Path(r.stdout.strip()).name if r.stdout.strip() else ""
+
+    def test_a_rel_label_is_found(self):
+        """The regression: every published label carries `rel-` before the date,
+        and the old glob required the date to follow the family directly."""
+        self._labels("sm-dbp1m-perf-rel-0903", "qd-dbp1m-perf-rel-0903")
+        self.assertEqual(self._prev("2026-09-23", "dbpedia-openai-1m"),
+                         "sm-dbp1m-perf-rel-0903")
+
+    def test_newest_by_date_across_both_spellings(self):
+        """`sort` was lexicographic, so `rel-0903` beat `0910` on `r` > `0`."""
+        self._labels("sm-dbp1m-perf-rel-0903", "sm-dbp1m-perf-0910")
+        self.assertEqual(self._prev("2026-09-23", "dbpedia-openai-1m"),
+                         "sm-dbp1m-perf-0910")
+
+    def test_the_runs_own_label_is_not_its_own_reference(self):
+        self._labels("sm-sift-perf-0923", "sm-sift-perf-rel-0921")
+        self.assertEqual(self._prev("2026-09-23", "sift1m"), "sm-sift-perf-rel-0921")
+
+    def test_nothing_when_the_family_has_no_previous_pair(self):
+        self._labels("sm-dbp100k-perf-rel-0903")
+        self.assertEqual(self._prev("2026-09-23", "dbpedia-openai-1m"), "")
+
+    def test_a_rep_directory_is_not_a_pair(self):
+        """`-rep1` does not end in four digits and must not win the pick."""
+        self._labels("sm-sift-perf-rel-0921", "sm-sift-perf-rel-0921-rep1")
+        self.assertEqual(self._prev("2026-09-23", "sift1m"), "sm-sift-perf-rel-0921")
+
+    def test_print_prev_writes_nothing(self):
+        """It has to be safe to ask before a run: no log, no night directory."""
+        self._labels("sm-sift-perf-rel-0921")
+        self._prev("2026-09-23", "sift1m")
+        self.assertFalse((self.root / "bench/results/night-20260923").exists())

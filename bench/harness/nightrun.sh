@@ -25,7 +25,14 @@ set -u
 : "${HOME:?HOME must be set (systemd --user sets it)}"
 export PATH=$HOME/.local/bin:$HOME/.pyenv/shims:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 
-DATE=${1:?usage: nightrun.sh YYYY-MM-DD [dataset]}
+# `--print-prev` answers "which pair would this run take its reference from?"
+# and exits, touching nothing. A scheduled run that silently found no previous
+# pair loses its cross-engine latency read and says so only in the report, hours
+# later; this is how to ask beforehand, and it is what the test drives.
+PRINT_PREV=0
+if [ "${1:-}" = "--print-prev" ]; then PRINT_PREV=1; shift; fi
+
+DATE=${1:?usage: nightrun.sh [--print-prev] YYYY-MM-DD [dataset]}
 DATASET=${2:-sift1m}
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 D=$ROOT/bench/results/night-${DATE//-/}
@@ -45,6 +52,25 @@ SM=sm-$FAM-$TAG
 QDL=qd-$FAM-$TAG
 MAX_TRIES=${MAX_TRIES:-24}   # x ~5 min: two hours of asking the gate
 
+# The previous pair of this family, for the open-loop reference: the slower
+# engine's W4, as `fullrun.resolve_rps_reference` picks it.
+#
+# Two bugs in one line, both silent. The glob was `sm-$FAM-[0-9][0-9][0-9][0-9]`
+# and every label this project has published carries a `rel-` before the date
+# (`sm-dbp1m-perf-rel-0903`), so it matched nothing, `auto` had nothing to read,
+# and the run's open-loop arms each used their own engine's saturation, which
+# makes the report refuse the cross-engine latency read. And `sort` was
+# lexicographic, so once a bare-date label existed beside a `rel-` one,
+# `sm-dbp1m-perf-rel-0903` sorted *after* `sm-dbp1m-perf-0910` because `r` > `0`
+# and the older pair won. Ordered by the trailing MMDD instead.
+prev_pair() {
+  ls -d "$ROOT"/bench/results/sm-"$FAM"-*[0-9][0-9][0-9][0-9] 2>/dev/null \
+    | grep -v "/$SM\$" \
+    | awk -F- '{print $NF, $0}' | sort -n | tail -1 | cut -d" " -f2-
+}
+
+if [ "$PRINT_PREV" = 1 ]; then prev_pair; exit 0; fi
+
 mkdir -p "$D"
 cd "$ROOT" || exit 1
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
@@ -54,9 +80,7 @@ log "strawmann $(git rev-parse --short HEAD) dirty=$(git status --short | wc -l)
 if [ ! -x "$QD" ]; then log "EXIT=97 (no Qdrant binary at $QD; set QDRANT_BINARY)"; exit 97; fi
 log "qdrant binary $QD sha256=$(sha256sum "$QD" | cut -c1-16) commit=$(git -C "$(dirname "$QD")" rev-parse --short HEAD 2>/dev/null || echo '?')"
 
-# The previous pair of this family, for the open-loop reference: the slower
-# engine's W4, as `fullrun.resolve_rps_reference` picks it.
-PREV=$(ls -d "$ROOT"/bench/results/sm-$FAM-[0-9][0-9][0-9][0-9] 2>/dev/null | grep -v "$SM" | sort | tail -1)
+PREV=$(prev_pair)
 REF_ARGS=()
 if [ -n "$PREV" ]; then
   P=$(basename "$PREV"); PQ=qd-${P#sm-}
