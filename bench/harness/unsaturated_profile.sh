@@ -25,8 +25,13 @@ log() { echo "$(date '+%F %T') $*" | tee -a "$OUT/profile.log"; }
 
 pkill -x strawmann 2>/dev/null; sleep 2
 zig build -Doptimize=ReleaseFast >> "$OUT/profile.log" 2>&1 || exit 1
-taskset -c 4-11 ./zig-out/bin/strawmann --port 6334 --pin --cpus 4-11 \
-    --capacity 1250000 --connections 32 > "$OUT/server.log" 2>&1 &
+CAPACITY=${CAPACITY:-$(python3 -c "import sys; sys.path.insert(0, 'bench/harness'); import workloads; print(workloads.required_capacity())")}
+rm -rf "${STRAWMANN_CACHE:-$HOME/.cache/strawmann}/strawmann-storage"
+taskset -c 4-11 ./zig-out/bin/strawmann --port 6334 \
+    --capacity "$CAPACITY" --connections 64 --workers 7 --io-threads 1 \
+    --pin --cpus 4-11 \
+    --data-dir "${STRAWMANN_CACHE:-$HOME/.cache/strawmann}/strawmann-storage" \
+    --default-placement cached > "$OUT/server.log" 2>&1 &
 SRV=$!
 sleep 3
 PID=$(pgrep -x strawmann | head -1)

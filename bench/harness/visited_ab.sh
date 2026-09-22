@@ -23,6 +23,9 @@ cd "$ROOT" || exit 1
 OUT=${OUT:-$ROOT/bench/results/visited-ab-$(date +%Y%m%d-%H%M)}
 ROWS=${ROWS:-"W2 W4 W10-ef128 W6-upload W6-ef128"}
 REPS=${REPS:-3}
+# What the largest collection needs, from the workload table rather than a
+# constant that drifts from it.
+CAPACITY=${CAPACITY:-$(python3 -c "import sys; sys.path.insert(0, 'bench/harness'); import workloads; print(workloads.required_capacity())")}
 URI=http://localhost:6334
 mkdir -p "$OUT"
 
@@ -38,8 +41,17 @@ for rep in $(seq 1 "$REPS"); do
   for arm in generation bitmap; do
     log "=== pass $rep, $arm ==="
     pkill -x strawmann 2>/dev/null; sleep 2
-    taskset -c 4-11 "$OUT/strawmann-$arm" --port 6334 --pin --cpus 4-11 \
-        --capacity 1250000 --connections 32 > "$OUT/server-$arm-$rep.log" 2>&1 &
+    # The same flags `fullrun.start_strawmann` uses, so these rows are
+    # comparable with a published run rather than only with each other:
+    # 64 connections (bfb opens threads x connections and a short server closes
+    # the excess before the preface), one io thread, seven workers on the pin,
+    # and the storage dir wiped so the run maps its own arenas.
+    rm -rf "${STRAWMANN_CACHE:-$HOME/.cache/strawmann}/strawmann-storage"
+    taskset -c 4-11 "$OUT/strawmann-$arm" --port 6334 \
+        --capacity "$CAPACITY" --connections 64 --workers 7 --io-threads 1 \
+        --pin --cpus 4-11 \
+        --data-dir "${STRAWMANN_CACHE:-$HOME/.cache/strawmann}/strawmann-storage" \
+        --default-placement cached > "$OUT/server-$arm-$rep.log" 2>&1 &
     SRV=$!
     sleep 3
     # The banner is what says which arm served, and the row records it.
