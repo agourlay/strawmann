@@ -1037,6 +1037,79 @@ pub fn bruteForceRangeFiltered(
     }
 }
 
+/// The most queries one pass of the arena may carry.
+///
+/// A gathered scan reads each row once for K queries instead of K times, so the
+/// arena's bytes cross the bus once rather than K times. K is bounded because
+/// the probes are per-query state and §6.3 forbids allocating on the query
+/// path: the caller hands over scratch, and at d=1536 sixteen probes are 48 KiB
+/// of it.
+pub const max_gather = 16;
+
+/// Bytes of scratch one probe needs for this collection, at its alignment.
+///
+/// `Probe.max_buffer` is the worst case over every dimension this server
+/// accepts (16,384 elements at f16, so 32 KiB) and is what a *stack* buffer has
+/// to declare. A gathered scan sizes from the collection instead, because K of
+/// the worst case is not a stack, and at d=128 this is 256 bytes.
+pub fn probeScratchStride(coll: *const Collection) usize {
+    const bytes = coll.config.dim * @sizeOf(f16);
+    return std.mem.alignForward(usize, bytes, Probe.buffer_align);
+}
+
+/// `bruteForceRangeFiltered` for several queries in one pass of the arena.
+///
+/// findings 45: W9 is bandwidth-bound at 85% of the bus, so nothing about the
+/// kernel, the ISA or prefetching moves it. The engine ahead is the one that
+/// *reads less*, and Qdrant's plain index scores a whole batch per walk
+/// (`BatchFilteredSearcher`), which is why it scales 2.22x from `-p 1` to `-p 8`
+/// against strawmANN's 1.51x. `handlers.BatchJob` established that a request's
+/// queries can be fanned across workers; this is the inverse, and for an exact
+/// search the inverse is the right direction: fanning K exact queries out costs
+/// K passes over the same bytes.
+///
+/// The row is read once and scored K times, so the tombstone and filter tests
+/// are paid once too. `outs[i]` receives query `i`'s candidates; the results are
+/// identical to calling `bruteForceRangeFiltered` per query, which is what the
+/// differential test asserts.
+pub fn bruteForceRangeMulti(
+    coll: *const Collection,
+    queries: []const []const f32,
+    from: u32,
+    to: u32,
+    filter: ?hnsw.Index.Filter,
+    scratch: []u8,
+    outs: []*heap.TopK,
+) void {
+    std.debug.assert(from <= to);
+    std.debug.assert(to <= coll.id_space.count());
+    std.debug.assert(queries.len == outs.len);
+    std.debug.assert(queries.len <= max_gather);
+    const stride = probeScratchStride(coll);
+    std.debug.assert(scratch.len >= queries.len * stride);
+    std.debug.assert(@intFromPtr(scratch.ptr) % Probe.buffer_align == 0);
+
+    // Converted once each, for the whole range, exactly as the single-query
+    // scan converts once: a per-row conversion would make the narrow datatypes
+    // slower than the wide one, which is the opposite of why they exist.
+    var probes: [max_gather]Probe = undefined;
+    for (queries, 0..) |q, i| {
+        std.debug.assert(q.len == coll.config.dim);
+        probes[i] = Probe.init(coll, q, scratch[i * stride ..][0..stride]);
+    }
+
+    var off = from;
+    while (off < to) : (off += 1) {
+        if (coll.deleted.isSet(off)) continue;
+        if (filter) |f| if (!f.admits(off)) continue;
+        // The row's bytes are in cache now, which is the whole point: every
+        // query pays the distance and none of them pays the fetch again.
+        for (probes[0..queries.len], outs) |*probe, out| {
+            out.push(.{ .id = off, .score = probe.scoreNode(off) });
+        }
+    }
+}
+
 /// Score exactly the points whose bit is set in `bits` (`payload.Store.select`
 /// wrote them), skipping tombstones. This is the plain path for a selective
 /// filter: when the index says the matching set is small, walking it is both
@@ -3658,5 +3731,116 @@ test "tombstones among the nearest do not shorten the page when ef equals limit"
         search(&c, &q, k, .approximate, &scratch, &got);
         try testing.expectEqual(@as(usize, k), got.len);
         for (got.items[0..got.len]) |cand| try testing.expect(!c.deleted.isSet(cand.id));
+    }
+}
+
+test "a gathered scan returns exactly what the same queries return one at a time" {
+    // The property the gather rests on: reading a row once for K queries must
+    // not change any of their answers. Randomised rather than crafted, because
+    // the failure mode is an indexing slip that shows on one arrival order.
+    const dim = 16;
+    var c = try makeCollection(dim, .euclid, 2048);
+    defer c.deinit();
+    var prng = std.Random.DefaultPrng.init(0x9A7E);
+    const rnd = prng.random();
+    const n = 700;
+    for (0..n) |i| {
+        var v: [dim]f32 = undefined;
+        for (&v) |*x| x.* = rnd.floatNorm(f32);
+        _ = try c.upsert(.{ .num = i }, &v);
+    }
+    // A tombstone among the data, since the gather skips them once per row and
+    // the single-query scan skips them per query: the two must still agree.
+    _ = c.delete(.{ .num = 3 });
+    _ = c.delete(.{ .num = 404 });
+
+    const stride = probeScratchStride(&c);
+    const scratch = try testing.allocator.alignedAlloc(u8, .fromByteUnits(Probe.buffer_align), max_gather * stride);
+    defer testing.allocator.free(scratch);
+
+    const k = 10;
+    for (1..max_gather + 1) |batch| {
+        var qs: [max_gather][dim]f32 = undefined;
+        var q_slices: [max_gather][]const f32 = undefined;
+        for (0..batch) |i| {
+            for (&qs[i]) |*x| x.* = rnd.floatNorm(f32);
+            q_slices[i] = &qs[i];
+        }
+
+        var gathered_store: [max_gather][k]Candidate = undefined;
+        var gathered: [max_gather]heap.TopK = undefined;
+        var gathered_ptrs: [max_gather]*heap.TopK = undefined;
+        for (0..batch) |i| {
+            gathered[i] = heap.TopK.init(&gathered_store[i], k);
+            gathered_ptrs[i] = &gathered[i];
+        }
+        bruteForceRangeMulti(&c, q_slices[0..batch], 0, @intCast(c.id_space.count()), null, scratch, gathered_ptrs[0..batch]);
+
+        for (0..batch) |i| {
+            var one_store: [k]Candidate = undefined;
+            var one = heap.TopK.init(&one_store, k);
+            bruteForce(&c, q_slices[i], &one);
+            const want = one.finish();
+            const got = gathered[i].finish();
+            try testing.expectEqual(want.len, got.len);
+            for (want, got) |w, g| {
+                try testing.expectEqual(w.id, g.id);
+                try testing.expectEqual(w.score, g.score);
+            }
+        }
+    }
+}
+
+test "a gathered scan honours a filter the same way one query at a time does" {
+    const dim = 8;
+    var c = try makeCollection(dim, .euclid, 1024);
+    defer c.deinit();
+    var prng = std.Random.DefaultPrng.init(0x1234);
+    const rnd = prng.random();
+    for (0..300) |i| {
+        var v: [dim]f32 = undefined;
+        for (&v) |*x| x.* = rnd.floatNorm(f32);
+        _ = try c.upsert(.{ .num = i }, &v);
+    }
+
+    // Admit the even offsets only, which is the shape a payload index gives.
+    const Even = struct {
+        fn pred(_: *const anyopaque, id: u32) bool {
+            return id % 2 == 0;
+        }
+    };
+    const sentinel: u8 = 0;
+    const filter: hnsw.Index.Filter = .{ .ctx = &sentinel, .pred = Even.pred };
+
+    const stride = probeScratchStride(&c);
+    const scratch = try testing.allocator.alignedAlloc(u8, .fromByteUnits(Probe.buffer_align), 4 * stride);
+    defer testing.allocator.free(scratch);
+
+    var qs: [4][dim]f32 = undefined;
+    var q_slices: [4][]const f32 = undefined;
+    for (0..4) |i| {
+        for (&qs[i]) |*x| x.* = rnd.floatNorm(f32);
+        q_slices[i] = &qs[i];
+    }
+    const k = 5;
+    var store: [4][k]Candidate = undefined;
+    var tops: [4]heap.TopK = undefined;
+    var ptrs: [4]*heap.TopK = undefined;
+    for (0..4) |i| {
+        tops[i] = heap.TopK.init(&store[i], k);
+        ptrs[i] = &tops[i];
+    }
+    bruteForceRangeMulti(&c, &q_slices, 0, @intCast(c.id_space.count()), filter, scratch, &ptrs);
+
+    for (0..4) |i| {
+        var one_store: [k]Candidate = undefined;
+        var one = heap.TopK.init(&one_store, k);
+        bruteForceRangeFiltered(&c, q_slices[i], 0, @intCast(c.id_space.count()), filter, &one);
+        for (one.finish(), tops[i].finish()) |w, g| {
+            try testing.expectEqual(w.id, g.id);
+            try testing.expectEqual(w.score, g.score);
+        }
+        // And the filter actually bit.
+        for (tops[i].finish()) |g| try testing.expect(g.id % 2 == 0);
     }
 }
