@@ -1167,7 +1167,7 @@ class ReportHostTests(unittest.TestCase):
         self.assertIn("1,050,000 of them indexed", html)
         # The nested capture is a second look at bench2, not a second
         # collection, and not a metric row.
-        self.assertEqual(html.count("bench2</span>"), 1)
+        self.assertEqual(html.count('<td class="wid">bench2</td>'), 1)
         self.assertNotIn("after_mutating_rows", html)
         # A run measured before the pre-mutation capture existed still gets the
         # banner, because for it the late read-back is all there is.
@@ -1329,6 +1329,27 @@ class ReportHostTests(unittest.TestCase):
             meta={"engine_affinity": raw, "server_cpus_requested": "4-11"}))
         self.assertIn("observed on 8 threads", cell)
         self.assertNotIn("x1", cell)
+
+    def test_collections_share_one_table_and_mark_a_disagreement(self):
+        """One table per collection, seven on sift1m, made the one field that
+        differs (Qdrant's segment count) something to find seven times."""
+        report = self.report
+
+        def run(label, segs):
+            return report.Run(label, [], "", True, "h", meta={"upload_n": 1000},
+                              collections={"collections": [
+                                  {"collection": c, "points_count": 1000,
+                                   "segments_count": segs, "hnsw_m": 16}
+                                  for c in ("bench2", "bench6")]})
+
+        html = report.collection_table([run("sm", 1), run("qd", 2)])
+        self.assertEqual(html.count("<table"), 1)
+        self.assertEqual(html.count("<tr>"), 3)             # header and two rows
+        self.assertEqual(html.count('<td class="num differs">1 / 2</td>'), 2)
+        self.assertEqual(html.count('<td class="num">1,000</td>'), 2)   # agreed
+        self.assertIn("cell reads sm / qd", html)
+        # A field no collection reports gets no column at all.
+        self.assertNotIn("quantization", html)
 
     def test_capture_after_the_mutating_rows_is_flagged(self):
         """`collections.json` is read back last, so for a collection W11

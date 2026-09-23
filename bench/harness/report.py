@@ -777,36 +777,52 @@ def collection_table(runs: list[Run]) -> str:
     behind is `after_mutating_rows` on the same record, and is W11's own subject
     rather than the search rows'. A run measured before the pre-mutation capture
     existed has only the late one, and `_capture_lag` says so.
+
+    One table, a collection per row and a field per column. It was one table
+    per collection, seven on sift1m, each eleven rows of mostly the same two
+    numbers, so the one field that differs (Qdrant's segment count) had to be
+    found seven times over. A cell holds one value where the engines agree and
+    `a / b` where they do not, and a disagreement is marked (`differs`).
     """
     caps = [(r, (r.collections or {}).get("collections") or []) for r in runs]
     if not any(c for _, c in caps):
         return ""
     names = list(dict.fromkeys(c.get("collection") for _, cs in caps for c in cs))
-    out = []
+
+    def fmt(v) -> str:
+        return f"{v:,}" if isinstance(v, int) and not isinstance(v, bool) else str(v)
+
+    grid = {name: [next((x for x in cs if x.get("collection") == name), None) or {}
+                   for _, cs in caps] for name in names}
+    fields = [(label, key) for label, key in COLLECTION_FIELDS
+              if any(c.get(key) is not None for cs in grid.values() for c in cs)]
+    if not fields:
+        return ""
+    body = []
     for name in names:
-        rows = []
-        for label, key in COLLECTION_FIELDS:
-            cells, seen = [], False
-            for _, cs in caps:
-                c = next((x for x in cs if x.get("collection") == name), None)
-                v = c.get(key) if c else None
-                if v is None:
-                    cells.append('<td class="num muted">-</td>')
-                else:
-                    seen = True
-                    cells.append(f'<td class="num">{v:,}</td>' if isinstance(v, int)
-                                 else f'<td class="num">{v}</td>')
-            if seen:
-                rows.append(f'<tr><td class="desc">{label}</td>{"".join(cells)}</tr>')
-        if not rows:
-            continue
-        head = "<th>metric</th>" + "".join(f'<th class="num">{r.label}</th>' for r, _ in caps)
-        out.append(f'<section class="wl"><h3><span class="wl-id">{name}</span></h3>'
-                   f'{_capture_lag(runs, caps, name)}'
-                   f'{_after_mutation_note(caps, name)}'
-                   f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
-                   f'<tbody>{"".join(rows)}</tbody></table></div></section>')
-    return "".join(out)
+        cells = []
+        for _, key in fields:
+            vals = [c.get(key) for c in grid[name]]
+            present = [v for v in vals if v is not None]
+            if not present:
+                cells.append('<td class="num muted">-</td>')
+            elif len(vals) == len(present) and len(set(map(str, present))) == 1:
+                cells.append(f'<td class="num">{fmt(present[0])}</td>')
+            else:
+                text = " / ".join("-" if v is None else fmt(v) for v in vals)
+                differs = len(set(map(str, present))) > 1
+                cells.append(f'<td class="num{" differs" if differs else ""}">{text}</td>')
+        body.append(f'<tr><td class="wid">{html.escape(str(name))}</td>{"".join(cells)}</tr>')
+    head = "<th>collection</th>" + "".join(f'<th class="num">{label}</th>'
+                                            for label, _ in fields)
+    key = ""
+    if len(runs) > 1:
+        key = (f'<p class="note">Where the engines disagree a cell reads '
+               f'{" / ".join(html.escape(r.label) for r in runs)}, and is marked.</p>')
+    notes = "".join(_capture_lag(runs, caps, name) + _after_mutation_note(caps, name)
+                    for name in names)
+    return (f'{key}<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div>{notes}')
 
 
 def _after_mutation_note(caps: list, name: str) -> str:
@@ -831,9 +847,9 @@ def _after_mutation_note(caps: list, name: str) -> str:
         cells.append(f"{run.label} {pts:,}{grew}{tail}")
     if not cells:
         return ""
-    return (f'<p class="note"><b>After the mutating rows</b> this collection held '
+    return (f'<p class="note"><b>After the mutating rows</b> {html.escape(str(name))} held '
             f'{"; ".join(cells)}. The table above is the state the throughput, '
-            f'latency and recall rows searched; this one is what W11 left, and is '
+            f'latency and recall rows searched; this is what W11 left, and is '
             f'that row\'s subject rather than theirs.</p>')
 
 
@@ -870,7 +886,7 @@ def _capture_lag(runs: list[Run], caps: list, name: str) -> str:
            if w11 and all(d == w11 for _, _, _, d in over) else "")
     per = "; ".join(f"{lab} {got:,} against {want:,} uploaded" for lab, got, want, _ in over)
     return (f'<div class="banner soft"><b>Captured after the mutating rows.</b> '
-            f'{per}{who}. The read-back happens at the end of the run, so this '
+            f'{html.escape(str(name))}: {per}{who}. The read-back happens at the end of the run, so this '
             f'describes a state no search row was measured in: the throughput, '
             f'latency and recall figures for this collection were taken at the '
             f'uploaded size.</div>')
@@ -3188,6 +3204,9 @@ table.grouped th.eng{text-align:center;color:var(--ink);border-left:1px solid va
 border-bottom:1px solid var(--line)}
 table.grouped th[rowspan]{vertical-align:bottom}
 table.grouped .grp{border-left:1px solid var(--line)}
+/* A collection field on which the engines disagree. */
+td.differs{color:var(--ink);font-weight:600;
+background:color-mix(in srgb,var(--accent) 14%,var(--card))}
 tbody tr:hover td{background:color-mix(in srgb,var(--accent) 7%,var(--card))}
 .wid{font:600 12.5px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
 .desc{color:var(--muted)}
