@@ -1364,6 +1364,25 @@ class PlacementInvariantTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_qdrant_segments_are_read_one_by_one_from_telemetry(self):
+        """gRPC gives `segments_count` only, so "2 segments" could not say
+        whether the second was a graph. The shape is Qdrant 1.19's
+        `/telemetry?details_level=10`, trimmed to the fields read."""
+        f = self.f
+        seg = lambda n, kind, app: {"info": {"num_points": n, "num_indexed_vectors": n,
+                                             "segment_type": kind, "is_appendable": app}}
+        doc = {"result": {"collections": {"collections": [
+            {"id": "bench2", "shards": [{"local": {"segments": [
+                seg(1_000_000, "indexed", False), seg(0, "plain", True)]}}]},
+            {"id": "bench6", "shards": [{"local": None}]}]}}}
+        got = f.parse_segment_telemetry(doc)
+        self.assertEqual([s["points"] for s in got["bench2"]], [1_000_000, 0])
+        self.assertEqual(got["bench2"][1]["appendable"], True)
+        self.assertEqual(got["bench6"], [])    # a remote shard lists nothing here
+        self.assertEqual(f.parse_segment_telemetry({}), {})
+        # strawmANN is addressed on its own port and is never asked.
+        self.assertEqual(f.qdrant_segments(f"http://localhost:{f.STRAWMANN_PORT}"), {})
+
     def test_a_residency_one_engine_cannot_serve_is_refused_before_the_run(self):
         f, P = self.f, self.w.Placement
         # Qdrant v1.19.0: "`pinned` memory placement is not supported for dense

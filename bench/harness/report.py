@@ -95,6 +95,7 @@ from report_data import (  # noqa: F401
     load_run,
     matched_ratios,
     matched_recall_refusal,
+    populated_of,
     purposes,
     ratio_value,
     recall_band,
@@ -633,6 +634,10 @@ def workload_sections(runs: list[Run], df: pd.DataFrame) -> str:
 #: nothing ever recorded the answer.
 COLLECTION_FIELDS = [
     ("segments", "segments_count"),
+    # Qdrant only, and only on runs captured since `fullrun.qdrant_segments`:
+    # how many of those segments hold points, which is how many graphs a
+    # search visits. An empty appendable is the usual difference.
+    ("populated segments", "populated_segments_count"),
     ("requested segments", "default_segment_number"),
     ("points", "points_count"),
     ("indexed vectors", "indexed_vectors_count"),

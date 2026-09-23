@@ -41,6 +41,27 @@ class CompareTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_segment_confound_counts_graphs_where_it_can(self):
+        """"Held 2 segments" against 1 was a caveat about nothing when the
+        second was the empty appendable; read back per segment, it says so."""
+        cmp = self.m["compare"]
+
+        def pair(qd):
+            self.fx.label("a", [], good_stamp(),
+                          collections=[{"collection": "bench2", "segments_count": 1}])
+            self.fx.label("b", [], good_stamp(),
+                          collections=[{"collection": "bench2", **qd}])
+            return cmp.segment_confound("a", "b")
+
+        self.assertEqual(pair({"segments_count": 2, "populated_segments_count": 1}), "")
+        four = pair({"segments_count": 5, "populated_segments_count": 4})
+        self.assertIn("b held 5 segments (4 populated)", four)
+        self.assertIn("read back per segment", four)
+        # Captured before the per-segment read-back: the old upper-bound caveat.
+        old = pair({"segments_count": 2})
+        self.assertIn("b held 2 segments", old)
+        self.assertIn("upper bound", old)
+
     def _joined(self, a_rows, b_rows, stamp_a, stamp_b, conf_a=CONF_T3, conf_b=CONF_T3,
                 sweeps_a=(), sweeps_b=(), colls_a=None, colls_b=None):
         self.fx.label("a", a_rows, stamp_a, conf_a, sweeps_a, collections=colls_a)

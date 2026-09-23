@@ -431,21 +431,37 @@ def segment_confound(a_label: str, b_label: str) -> str:
     Said only when the counts differ, so a run that does reach equal segments gets
     the plain refusal.
     """
-    counts = {}
+    counts, populated = {}, {}
     for label in (a_label, b_label):
         doc = read_json(label, "collections.json")
         for c in doc.get("collections") or []:
             if c.get("collection") == "bench2" and c.get("segments_count"):
                 counts[label] = int(c["segments_count"])
+                if c.get("populated_segments_count") is not None:
+                    populated[label] = int(c["populated_segments_count"])
     if len(counts) < 2 or len(set(counts.values())) < 2:
         return ""
-    said = ", ".join(f"{k} held {v} segment{'' if v == 1 else 's'}"
-                     for k, v in counts.items())
+    # Graphs, where the per-segment read-back says how many: a pair whose
+    # extra segments are all empty searched the same number of graphs, and
+    # the sentence below would be a caveat about nothing.
+    graphs = {k: populated.get(k, v) for k, v in counts.items()}
+    if (all(k in populated for k, v in counts.items() if v > 1)
+            and len(set(graphs.values())) == 1):
+        return ""
+    said = ", ".join(
+        f"{k} held {v} segment{'' if v == 1 else 's'}"
+        + (f" ({populated[k]} populated)" if k in populated and v > 1 else "")
+        for k, v in counts.items())
+    if populated:
+        why = ("the populated counts are read back per segment, so they are the "
+               "graphs each engine searched.")
+    else:
+        why = ("one of its segments is an empty appendable that contributes nothing, "
+               "so the count is an upper bound on the graphs.")
     return (f" The two engines did not search the same number of graphs: {said}. "
             f"Qdrant searches every populated segment at the full ef and merges, so "
             f"more segments explore more graphs and its recall at a fixed ef rises; "
-            f"one of its segments is an empty appendable that contributes nothing, so "
-            f"the count is an upper bound on the graphs. Set --max-segment-size above "
+            f"{why} Set --max-segment-size above "
             f"the corpus and its optimizer merges to one, which is what the harness "
             f"now asks for.")
 

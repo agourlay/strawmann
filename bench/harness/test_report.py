@@ -1143,6 +1143,33 @@ class ReportHostTests(unittest.TestCase):
         one = [run("strawmann", 1), run("qdrant", 1)]
         self.assertNotIn("node visits", report.segment_note(one))
 
+    def test_an_empty_appendable_is_a_segment_and_not_a_graph(self):
+        """sift1m's Qdrant "held 2 segments": one graph over every point and the
+        empty appendable it keeps for writes. The note had to call the count an
+        upper bound; read back per segment, it can say which."""
+        report = self.report
+
+        def run(label, n, populated=None):
+            c = {"collection": "bench2", "segments_count": n}
+            if populated is not None:
+                c["populated_segments_count"] = populated
+            return report.Run(label, [], "", True, "h",
+                              collections={"collections": [c]})
+
+        equal = [run("strawmann", 1), run("qdrant", 2, populated=1)]
+        self.assertEqual(report.populated_of(equal), {"qdrant": 1})
+        note = report.segment_note(equal)
+        self.assertIn("ef is the same unit here", note)
+        self.assertIn("one populated and 1 empty", note)
+        self.assertNotIn("node visits", note)
+        # Four graphs and an empty one multiply by four, not five.
+        four = report.segment_note([run("strawmann", 1), run("qdrant", 5, populated=4)])
+        self.assertIn("5 segments, 4 of them populated", four)
+        self.assertIn("up to 512 node visits", four)
+        # A run captured before the per-segment read-back reads as it did.
+        self.assertIn("up to 256 node visits",
+                      report.segment_note([run("strawmann", 1), run("qdrant", 2)]))
+
     def test_the_state_the_search_rows_saw_is_the_one_the_table_shows(self):
         """The survivor read-back happened once, at the end of the arm, after
         W11 had appended into bench2 -- so the record said 1,250,000 points

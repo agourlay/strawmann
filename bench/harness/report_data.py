@@ -615,6 +615,24 @@ def segments_of(runs: list[Run], collection: str = "bench2") -> dict[str, int]:
                 out[r.label] = int(c["segments_count"])
     return out
 
+
+def populated_of(runs: list[Run], collection: str = "bench2") -> dict[str, int]:
+    """How many of those segments held any points, where it was read back.
+
+    Recorded from Qdrant's per-segment telemetry (`fullrun.qdrant_segments`),
+    so only its arm has it, and only on runs captured since. An empty
+    appendable is a segment and not a graph: `held 2 segments` on sift1m was
+    one graph over every point plus that, and the note called the count an
+    upper bound because nothing on disk said which.
+    """
+    out: dict[str, int] = {}
+    for r in runs:
+        for c in (r.collections or {}).get("collections") or []:
+            if (c.get("collection") == collection
+                    and c.get("populated_segments_count") is not None):
+                out[r.label] = int(c["populated_segments_count"])
+    return out
+
 def _arms(runs: list[Run]) -> tuple[Run | None, Run | None]:
     """The strawmANN run and the Qdrant run, by engine rather than by label.
 
@@ -643,9 +661,20 @@ def _arms(runs: list[Run]) -> tuple[Run | None, Run | None]:
 def segment_note(runs: list[Run]) -> str:
     """One sentence on what `ef` bought each engine, from the measured counts."""
     seg = segments_of(runs)
+    pop = populated_of(runs)
     sm_run, qd_run = _arms(runs)
     qd = qd_run.label if qd_run else None
     sm = sm_run.label if sm_run else None
+    # More segments than graphs, measured: the rest are empty appendables,
+    # which a search visits and finds nothing in. One populated segment on
+    # each side is equal work, whatever the raw count says.
+    if qd and sm and seg.get(sm) == 1 and pop.get(qd) == 1 and seg.get(qd, 0) > 1:
+        n = seg[qd]
+        return (f"ef is the same unit here: {qd} held {n} segments for this run, one "
+                f"populated and {n - 1} empty (read back per segment from the engine), "
+                f"and strawmANN held one graph, so equal ef is equal traversal width "
+                f"and the curves may be read at equal x. That is a property of this "
+                f"run, not of the engines.")
     # `seg.get(sm, 1)` defaulted a *missing* capture to one segment, which
     # asserts a measurement that was never taken. Both counts have to be on
     # disk before this branch may say the confound does not apply.
@@ -663,13 +692,18 @@ def segment_note(runs: list[Run]) -> str:
         mine = seg.get(sm) if sm else None
         mine_txt = (f"strawmANN held {mine} and searches it once"
                     if mine else "strawmANN searches one graph once")
+        # Where the populated count is known it is the multiplier: an empty
+        # segment adds no node visits.
+        graphs = pop.get(qd)
+        held = (f"{n} segments, {graphs} of them populated," if graphs is not None
+                else f"{n} segments")
         # Plain text: the template renders a chart note through Jinja's
         # autoescape, so markup here would arrive as visible angle brackets.
-        return (f"ef is not the same unit in both engines. {qd} held {n} segments "
+        return (f"ef is not the same unit in both engines. {qd} held {held} "
                 f"for this run — read back from the engine, since `--segments 1` "
                 f"sets a target its optimizer missed — and searches ef candidates "
-                f"in each, so its nominal 128 is up to {128 * n:,} node visits "
-                f"while {mine_txt}. Reading the curves at equal x overstates "
+                f"in each, so its nominal 128 is up to {128 * (graphs or n):,} node "
+                f"visits while {mine_txt}. Reading the curves at equal x overstates "
                 f"strawmANN.")
     return ("ef is not the same unit in both engines. Qdrant searches ef candidates "
             "in each segment and the default segment count is capped at 8, so its "

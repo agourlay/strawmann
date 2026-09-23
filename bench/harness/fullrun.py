@@ -1210,6 +1210,51 @@ def settle(what: str) -> None:
 NESTED_CAPTURES = ("after_mutating_rows",)
 
 
+def parse_segment_telemetry(doc: dict) -> dict[str, list[dict]]:
+    """Per collection, what each of Qdrant's segments holds, from `/telemetry`.
+
+    gRPC's `CollectionInfo` gives `segments_count` and nothing per segment, so
+    "held 2 segments" could not say whether the second was a graph or the empty
+    appendable Qdrant keeps for writes: `indexed_vectors_count ==
+    points_count` made it likely, the files did not prove it, and the
+    equal-work note had to call the count an upper bound. REST telemetry lists
+    every segment with its points, which is the fact the note needs.
+    """
+    out: dict[str, list[dict]] = {}
+    colls = ((doc.get("result") or {}).get("collections") or {}).get("collections") or []
+    for c in colls:
+        if not isinstance(c, dict) or not c.get("id"):
+            continue
+        segs = []
+        for shard in c.get("shards") or []:
+            for seg in ((shard or {}).get("local") or {}).get("segments") or []:
+                info = (seg or {}).get("info") or {}
+                segs.append({"points": info.get("num_points"),
+                             "indexed": info.get("num_indexed_vectors"),
+                             "type": info.get("segment_type"),
+                             "appendable": info.get("is_appendable")})
+        out[c["id"]] = segs
+    return out
+
+
+def qdrant_segments(uri: str) -> dict[str, list[dict]]:
+    """`parse_segment_telemetry` for the engine at `uri`, or {} when it is not
+    Qdrant or the REST port does not answer. The arm is addressed on its gRPC
+    port; telemetry is on the REST one beside it."""
+    import urllib.parse
+    import urllib.request
+    u = urllib.parse.urlparse(uri)
+    if u.port != QDRANT_GRPC:
+        return {}
+    try:
+        with urllib.request.urlopen(
+                f"http://{u.hostname}:{QDRANT_REST}/telemetry?details_level=10",
+                timeout=30) as r:
+            return parse_segment_telemetry(json.loads(r.read()))
+    except (OSError, ValueError):
+        return {}
+
+
 def capture_collections(uri: str, label: str, client_cpus: str,
                         names: list[str] | None = None,
                         into: str | None = None) -> int:
@@ -1245,6 +1290,20 @@ def capture_collections(uri: str, label: str, client_cpus: str,
               f"say so rather than assume the requested settings held", flush=True)
         tmp.unlink(missing_ok=True)
         return 0
+    # Qdrant's segments, one by one, beside the count gRPC gives. Absent for
+    # strawmANN, which holds one graph per collection by construction.
+    segs = qdrant_segments(uri)
+    if segs:
+        try:
+            doc = json.loads(tmp.read_text())
+            for c in doc.get("collections", []):
+                got = segs.get((c or {}).get("collection"))
+                if got is not None:
+                    c["segments"] = got
+                    c["populated_segments_count"] = sum(1 for g in got if g.get("points"))
+            tmp.write_text(json.dumps(doc, indent=2) + "\n")
+        except (OSError, json.JSONDecodeError):
+            pass
     # Merged by collection name, because this now runs more than once: a
     # collection is read back immediately before it is dropped, so the record
     # describes it while it existed rather than reporting it absent. Without
