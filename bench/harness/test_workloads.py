@@ -1626,7 +1626,7 @@ class FullrunPreflightTests(unittest.TestCase):
         self.assertIn("pinned", err)
 
     def test_the_refusal_is_not_worded_as_the_gate_refuses(self):
-        """`nightrun.sh` retries "refusing to run" every five minutes for two
+        """`nightrun.py` retries "refusing to run" every five minutes for two
         hours, because that is the §7.1 gate's phrase and a busy host goes
         quiet. A checkout on the wrong commit does not, so borrowing the
         wording here would turn a one-second failure into a two-hour one."""
@@ -2409,24 +2409,20 @@ class ClientConcurrencyTests(unittest.TestCase):
         self.assertIn("-p", d["client_defaults"])
 
 
-class NightrunReferenceTests(unittest.TestCase):
-    """Which previous pair a scheduled run takes its `--rps-reference` from.
+class NightrunTests(unittest.TestCase):
+    """`nightrun.py`: the unattended publication run's own logic.
 
-    Getting this wrong is silent: `auto` finds nothing, both engines run their
-    open-loop arms at their own saturation, and the report refuses the
-    cross-engine latency read hours later. The script is driven directly through
-    `--print-prev`, from a temp tree, so the test reads the real shell rather
-    than a copy of its logic.
+    It was `nightrun.sh`, tested only through two read-only flags, and every bug
+    it had was in the logic those flags did not reach. Each step is a function
+    now, and each is driven here from a temp tree.
     """
-
-    SCRIPT = Path(__file__).resolve().parent / "nightrun.sh"
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        (self.root / "bench/harness").mkdir(parents=True)
         (self.root / "bench/results").mkdir(parents=True)
-        (self.root / "bench/harness/nightrun.sh").write_text(self.SCRIPT.read_text())
+        import nightrun
+        self.n = importlib.reload(nightrun)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -2435,13 +2431,16 @@ class NightrunReferenceTests(unittest.TestCase):
         for n in names:
             (self.root / "bench/results" / n).mkdir(parents=True, exist_ok=True)
 
-    def _prev(self, date: str, dataset: str) -> str:
-        r = subprocess.run(
-            ["bash", str(self.root / "bench/harness/nightrun.sh"),
-             "--print-prev", date, dataset],
-            capture_output=True, text=True, env={**os.environ, "HOME": str(self.root)})
-        self.assertEqual(r.returncode, 0, r.stderr)
-        return Path(r.stdout.strip()).name if r.stdout.strip() else ""
+    def _prev(self, date: str, dataset: str) -> str | None:
+        sm, _ = self.n.labels(date, dataset)
+        return self.n.prev_pair(self.root / "bench/results", dataset, sm)
+
+    def test_labels_are_stamped_with_the_date(self):
+        self.assertEqual(self.n.labels("2026-09-23", "sift1m"),
+                         ("sm-sift-perf-0923", "qd-sift-perf-0923"))
+        self.assertEqual(self.n.labels("2026-10-01", "dbpedia-openai-1m"),
+                         ("sm-dbp1m-perf-1001", "qd-dbp1m-perf-1001"))
+        self.assertEqual(self.n.family("glove-100"), "glove-100-perf")
 
     def test_a_rel_label_is_found(self):
         """The regression: every published label carries `rel-` before the date,
@@ -2462,7 +2461,7 @@ class NightrunReferenceTests(unittest.TestCase):
 
     def test_nothing_when_the_family_has_no_previous_pair(self):
         self._labels("sm-dbp100k-perf-rel-0903")
-        self.assertEqual(self._prev("2026-09-23", "dbpedia-openai-1m"), "")
+        self.assertIsNone(self._prev("2026-09-23", "dbpedia-openai-1m"))
 
     def test_a_rep_directory_is_not_a_pair(self):
         """`-rep1` does not end in four digits and must not win the pick."""
@@ -2472,91 +2471,184 @@ class NightrunReferenceTests(unittest.TestCase):
     def test_print_prev_writes_nothing(self):
         """It has to be safe to ask before a run: no log, no night directory."""
         self._labels("sm-sift-perf-rel-0921")
-        self._prev("2026-09-23", "sift1m")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.n.main(["--print-prev", "2026-09-23"], root=self.root), 0)
+        self.assertTrue(out.getvalue().strip().endswith("sm-sift-perf-rel-0921"))
         self.assertFalse((self.root / "bench/results/night-20260923").exists())
 
-    def _stub_fullrun(self, body: str) -> None:
-        """A `fullrun` the script's helper will import, with one function in it.
+    def test_a_resolved_reference_is_rounded(self):
+        self.assertEqual(self.n.resolve_ref("sm-x-0921", lambda a, l: 10350.985), 10351)
 
-        The real resolver needs two published runs' `rows.json` and `run.json`
-        to say anything; what this tests is the *shell's* handling of what it
-        says, which is where the failure was.
-        """
-        (self.root / "bench/harness/fullrun.py").write_text(body)
-
-    def _ref(self, date: str = "2026-09-23", dataset: str = "sift1m") -> str:
-        r = subprocess.run(
-            ["bash", str(self.root / "bench/harness/nightrun.sh"),
-             "--print-ref", date, dataset],
-            capture_output=True, text=True, cwd=self.root,
-            env={**os.environ, "HOME": str(self.root)})
-        self.assertEqual(r.returncode, 0, r.stderr)
-        return r.stdout.strip()
-
-    def test_a_resolved_reference_is_passed_through(self):
-        self._labels("sm-sift-perf-rel-0921", "qd-sift-perf-rel-0921")
-        self._stub_fullrun("PERF_SET = None\n"
-                           "def resolve_rps_reference(arg, labels):\n"
-                           "    return 10350.985\n")
-        self.assertEqual(self._ref(), "10351")
+    def test_the_resolver_is_asked_about_both_arms(self):
+        seen = []
+        self.n.resolve_ref("sm-sift-perf-rel-0921", lambda a, l: seen.append((a, l)))
+        self.assertEqual(seen, [("auto", ["sm-sift-perf-rel-0921", "qd-sift-perf-rel-0921"])])
 
     def test_a_printed_refusal_is_not_a_reference(self):
-        """The regression, and it cost a launch.
-
-        `resolve_rps_reference` prints "!! ignoring ... for --rps-reference: ..."
-        on *stdout* and returns None. The helper took `tail -1` of that and
-        handed the sentence to `--rps-reference`, which `fullrun.py` rejected
-        with exit 2 before the first row ran.
-        """
-        self._labels("sm-sift-perf-rel-0921", "qd-sift-perf-rel-0921")
-        self._stub_fullrun(
-            "PERF_SET = None\n"
-            "def resolve_rps_reference(arg, labels):\n"
-            "    print('!! ignoring qd-x W4 of 10,351 qps for --rps-reference: "
-            "it was measured with perf default')\n"
-            "    return None\n")
-        self.assertEqual(self._ref(), "")
+        """The regression, and it cost a launch: the resolver printed its
+        refusal on stdout and returned None, and the bash helper took the last
+        line of stdout as the number. In-process there is only the return."""
+        def refuses(arg, labels):
+            print("!! ignoring qd-x W4 of 10,351 qps for --rps-reference")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(self.n.resolve_ref("sm-x-0921", refuses))
 
     def test_a_raising_resolver_is_not_a_reference(self):
-        """`auto` with nothing to read raises rather than returning None, and
-        an unhandled traceback would leave the flag unset *and* the reason
-        invisible."""
-        self._labels("sm-sift-perf-rel-0921", "qd-sift-perf-rel-0921")
-        self._stub_fullrun("PERF_SET = None\n"
-                           "def resolve_rps_reference(arg, labels):\n"
-                           "    raise ValueError('nothing to read')\n")
-        self.assertEqual(self._ref(), "")
+        def raises(arg, labels):
+            raise ValueError("nothing to read")
+        self.assertIsNone(self.n.resolve_ref("sm-x-0921", raises))
+
+    def test_the_real_resolver_is_told_which_instrument_this_run_uses(self):
+        """It compares a candidate's `perf_set` against its own module global,
+        which is None until `fullrun` parses arguments."""
+        import fullrun
+        was = fullrun.PERF_SET
+        try:
+            fullrun.PERF_SET = None
+            with mock.patch.object(fullrun, "resolve_rps_reference",
+                                   lambda a, l: 1 if fullrun.PERF_SET == "default" else None):
+                self.assertEqual(self.n.resolve_ref("sm-x-0921"), 1)
+        finally:
+            fullrun.PERF_SET = was
 
     def test_a_second_run_of_one_night_refuses_rather_than_sharing_a_log(self):
-        """The regression, and it confused the run's own analysis.
-
-        A failed launch's `claude -p` was still running when its directory was
+        """A failed launch's analysis was still running when its directory was
         removed and a second launch recreated it, so a stray "analysis exited 0"
-        from the dead run landed in the middle of the live one's log. `$D` comes
-        from the date alone, so nothing else keeps two instances apart.
-        """
+        from the dead run landed in the middle of the live one's log."""
         night = self.root / "bench/results/night-20260923"
         night.mkdir(parents=True)
         (night / "night.log").write_text("2026-09-23 03:51:37 night run starting\n")
-        r = subprocess.run(
-            ["bash", str(self.root / "bench/harness/nightrun.sh"), "2026-09-23", "sift1m"],
-            capture_output=True, text=True, cwd=self.root,
-            env={**os.environ, "HOME": str(self.root)})
-        self.assertEqual(r.returncode, 96, r.stdout + r.stderr)
-        self.assertIn("exists", r.stderr)
-        # And it left the existing log alone rather than appending to it.
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = self.n.main(["2026-09-23", "sift1m"], root=self.root)
+        self.assertEqual(rc, self.n.EXIT_LOG_EXISTS)
+        self.assertIn("exists", err.getvalue())
         self.assertEqual((night / "night.log").read_text().count("\n"), 1)
 
-    def test_the_helper_says_which_instrument_this_run_uses(self):
-        """The other half: the resolver compares a candidate's `perf_set`
-        against its own module global, which is `None` in a bare interpreter,
-        so a helper that did not set it was told every perf-measured reference
-        was measured with the wrong instrument."""
-        self._labels("sm-sift-perf-rel-0921", "qd-sift-perf-rel-0921")
-        self._stub_fullrun("PERF_SET = None\n"
-                           "def resolve_rps_reference(arg, labels):\n"
-                           "    return 1 if PERF_SET == 'default' else None\n")
-        self.assertEqual(self._ref(), "1")
+    def test_no_qdrant_binary_stops_before_anything_runs(self):
+        with mock.patch.dict(os.environ, {"QDRANT_BINARY": str(self.root / "absent")}):
+            rc = self.n.main(["2026-09-23", "sift1m"], root=self.root)
+        self.assertEqual(rc, self.n.EXIT_NO_QDRANT)
+        self.assertIn("EXIT=97", (self.root / "bench/results/night-20260923/night.log")
+                      .read_text())
+
+    def _loop(self, outputs, busy=None, max_tries=5):
+        """`run_until_admitted` over canned `fullrun.py` outputs, never sleeping."""
+        night = self.root / "night"
+        night.mkdir(exist_ok=True)
+        log = self.n.Log(night / "night.log")
+        runs, sleeps = [], []
+        busy = list(busy or [])
+
+        def run(cmd, out):
+            rc, text = outputs[len(runs)]
+            runs.append(cmd)
+            out.write_text(text)
+            return rc
+
+        rc = self.n.run_until_admitted(["fullrun"], night, log, max_tries=max_tries,
+                                       ports_busy=lambda: busy.pop(0) if busy else False,
+                                       run=run, sleep=sleeps.append)
+        return rc, len(runs), len(sleeps), (night / "night.log").read_text()
+
+    def test_a_gate_refusal_is_asked_again(self):
+        refused = (1, "§7.1 gate: refusing to run: load 4.0")
+        rc, runs, sleeps, log = self._loop([refused, refused, (0, "done")])
+        self.assertEqual((rc, runs, sleeps), (0, 3, 2))
+        self.assertIn("gate refused (attempt 2)", log)
+        self.assertIn("EXIT=0", log)
+
+    def test_any_other_failure_is_read_not_repeated(self):
+        rc, runs, sleeps, log = self._loop([(3, "Traceback: engine died")])
+        self.assertEqual((rc, runs, sleeps), (3, 1, 0))
+        self.assertIn("not a gate refusal; not retried", log)
+
+    def test_a_refusal_after_pass_one_began_is_not_the_gate(self):
+        """The phrase can appear later in a run that did start measuring."""
+        rc, runs, _, _ = self._loop([(2, "=== pass 1 of 3 ===\n... refusing to run ...")])
+        self.assertEqual((rc, runs), (2, 1))
+
+    def test_asking_gives_up_after_max_tries(self):
+        refused = (1, "refusing to run")
+        rc, runs, sleeps, log = self._loop([refused] * 3, max_tries=3)
+        self.assertEqual((rc, runs, sleeps), (1, 3, 2))
+        self.assertIn("gave up after 3 refusals", log)
+
+    def test_a_held_engine_port_waits_without_running(self):
+        rc, runs, sleeps, log = self._loop([(0, "done")], busy=[True, True])
+        self.assertEqual((rc, runs, sleeps), (0, 1, 2))
+        self.assertIn("already bound", log)
+        rc, runs, _, log = self._loop([], busy=[True] * 5, max_tries=2)
+        self.assertEqual((rc, runs), (self.n.EXIT_PORTS_BUSY, 0))
+
+    def test_the_run_keeps_a_copy_of_its_report(self):
+        """A later re-render of the same pair writes the same file name, and
+        on 2026-09-23 one replaced the run's own render."""
+        results = self.root / "bench/results"
+        page = results / "report-sift1m-sm-a-vs-qd-a-2026-09-23-0230.html"
+        page.write_text("the run's render")
+        night = results / "night-20260923"
+        night.mkdir()
+        got = self.n.keep_report(self.root, night, "sift1m", "sm-a", "qd-a",
+                                 self.n.Log(night / "night.log"))
+        self.assertEqual(got, page)
+        page.write_text("a later re-render")
+        self.assertEqual((night / page.name).read_text(), "the run's render")
+        self.assertEqual((night / "report.path").read_text().strip(), str(page))
+
+    def test_no_report_is_recorded_as_none(self):
+        night = self.root / "bench/results/night-20260923"
+        night.mkdir()
+        self.assertIsNone(self.n.keep_report(self.root, night, "sift1m", "sm-a", "qd-a",
+                                             self.n.Log(night / "night.log")))
+        self.assertEqual((night / "report.path").read_text().strip(), "none")
+
+    def test_a_whole_night_end_to_end_with_a_stub_fullrun(self):
+        """Every step once, in order, from a temp tree: provenance, the
+        admitted attempt, the report copy, and the log's closing line."""
+        results = self.root / "bench/results"
+        (self.root / "bench/harness").mkdir(parents=True, exist_ok=True)
+        (self.root / "bench/harness/fullrun.py").write_text(
+            "import sys, pathlib\n"
+            "a = sys.argv\n"
+            "sm, qd = a[a.index('--strawmann-label') + 1], a[a.index('--qdrant-label') + 1]\n"
+            "pathlib.Path('bench/results/report-sift1m-' + sm + '-vs-' + qd + "
+            "'-2026-09-24-0230.html').write_text('page')\n"
+            "print('args', ' '.join(a[1:]))\n")
+        binary = self.root / "qdrant"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        env = {"QDRANT_BINARY": str(binary), "HOME": str(self.root)}   # no claude here
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(self.n, "port_bound", lambda port: False):
+            rc = self.n.main(["2026-09-24", "sift1m"], root=self.root)
+        self.assertEqual(rc, 0)
+        night = results / "night-20260924"
+        log = (night / "night.log").read_text()
+        for line in ("labels sm-sift-perf-0924 / qd-sift-perf-0924", "qdrant binary",
+                     "no previous sift-perf pair", "=== attempt 1 ===", "EXIT=0",
+                     "report copied", "no claude on PATH", "ALL_DONE"):
+            self.assertIn(line, log)
+        out = (night / "fullrun_attempt1.out").read_text()
+        self.assertIn("--segment-policy equal-work --perf", out)
+        self.assertNotIn("--rps-reference", out)
+        self.assertTrue((night / "report-sift1m-sm-sift-perf-0924-vs-qd-sift-perf-0924-"
+                                  "2026-09-24-0230.html").exists())
+
+    def test_the_provenance_line_says_when_the_binary_predates_its_commit(self):
+        repo = self.root / "qdrant"
+        (repo / "target/release").mkdir(parents=True)
+        binary = repo / "target/release/qdrant"
+        binary.write_bytes(b"\x7fELF")
+        os.utime(binary, (1_000_000_000, 1_000_000_000))   # 2001, before any commit
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "x"]):
+            subprocess.run(["git", *cmd], cwd=repo, env=env, check=True)
+        line = self.n.qdrant_provenance(binary)
+        self.assertIn("BINARY PREDATES THIS COMMIT", line)
+        self.assertIn("sha256=", line)
+        os.utime(binary)   # now: built after the commit
+        self.assertNotIn("PREDATES", self.n.qdrant_provenance(binary))
 
 
 class OversamplingPolicyTests(unittest.TestCase):

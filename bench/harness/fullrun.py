@@ -1969,7 +1969,7 @@ def main(argv: list[str]) -> int:
     # and only the accumulated return code is read at the end:
     # that cost twelve refused invocations, three empty passes and a traceback
     # 500 lines from the cause. Not worded "refusing to run" — that is the gate's
-    # phrase, which `nightrun.sh` retries for two hours, and a pin never clears.
+    # phrase, which `nightrun.py` retries for two hours, and a pin never clears.
     if engines and (why := workloads.check_bfb_pin()):
         print(f"the load generator is not the pinned one:\n  {why}", file=sys.stderr)
         return 1

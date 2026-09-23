@@ -77,7 +77,7 @@ Qdrant's source rather than guessing at it. Nothing here is a Qdrant position
 and nobody at Qdrant has reviewed it.
 
 And most of this was written with Claude: the harness, the analysis, these
-documents. [`bench/harness/nightrun.sh`](bench/harness/nightrun.sh) runs a
+documents. [`bench/harness/nightrun.py`](bench/harness/nightrun.py) runs a
 headless `claude -p` to draft each night's write-up. The numbers themselves come
 from the gate and the load generator either way.
 

@@ -1,6 +1,6 @@
 You are analyzing a strawmANN benchmark run that finished overnight on this machine. Repository: the strawmann checkout you are started in (the current working directory). Do not modify any file; your written answer is the deliverable and is being saved to a Markdown file verbatim, so write GitHub-flavored Markdown with no preamble.
 
-The run: `fullrun.py --dataset @DATASET@ --reps 3 --segment-policy equal-work --perf --qdrant-binary ...` into labels @SM@ / @QD@, launched by bench/harness/nightrun.sh; the exact command line is in @DIR@/night.log and the first lines of the fullrun output.
+The run: `fullrun.py --dataset @DATASET@ --reps 3 --segment-policy equal-work --perf --qdrant-binary ...` into labels @SM@ / @QD@, launched by bench/harness/nightrun.py; the exact command line is in @DIR@/night.log and the first lines of the fullrun output.
 
 Inputs to read:
 - @DIR@/night.log: the waiter's log (attempts, gate refusals, exit codes, timings).
