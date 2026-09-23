@@ -2508,6 +2508,26 @@ class NightrunReferenceTests(unittest.TestCase):
                            "    raise ValueError('nothing to read')\n")
         self.assertEqual(self._ref(), "")
 
+    def test_a_second_run_of_one_night_refuses_rather_than_sharing_a_log(self):
+        """The regression, and it confused the run's own analysis.
+
+        A failed launch's `claude -p` was still running when its directory was
+        removed and a second launch recreated it, so a stray "analysis exited 0"
+        from the dead run landed in the middle of the live one's log. `$D` comes
+        from the date alone, so nothing else keeps two instances apart.
+        """
+        night = self.root / "bench/results/night-20260923"
+        night.mkdir(parents=True)
+        (night / "night.log").write_text("2026-09-23 03:51:37 night run starting\n")
+        r = subprocess.run(
+            ["bash", str(self.root / "bench/harness/nightrun.sh"), "2026-09-23", "sift1m"],
+            capture_output=True, text=True, cwd=self.root,
+            env={**os.environ, "HOME": str(self.root)})
+        self.assertEqual(r.returncode, 96, r.stdout + r.stderr)
+        self.assertIn("exists", r.stderr)
+        # And it left the existing log alone rather than appending to it.
+        self.assertEqual((night / "night.log").read_text().count("\n"), 1)
+
     def test_the_helper_says_which_instrument_this_run_uses(self):
         """The other half: the resolver compares a candidate's `perf_set`
         against its own module global, which is `None` in a bare interpreter,

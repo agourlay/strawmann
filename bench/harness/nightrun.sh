@@ -100,6 +100,20 @@ if [ "$PRINT_REF" = 1 ]; then
   P=$(basename "$PREV"); resolve_ref "$P" "qd-${P#sm-}"; exit 0
 fi
 
+# One run per night directory. Two instances sharing `$D` share `night.log`,
+# `analysis.md` and `report.path`, and on 2026-09-23 that is exactly what
+# happened: a failed 03:51 launch had its analysis still running when the
+# directory was removed and a second launch recreated it, so a stray
+# "analysis exited 0" from the dead run landed in the middle of the live one's
+# log and its own analysis could only call the line unexplained. A run that
+# finds a log already there stops rather than interleaving with whatever wrote
+# it; `$D` is derived from the date alone, so a second run of one night needs
+# its own directory (or the first one moved aside).
+if [ -e "$LOG" ]; then
+  echo "nightrun: $LOG exists; another run of $DATE has used this directory." >&2
+  echo "  move it aside, or pass a different date, rather than sharing a log." >&2
+  exit 96
+fi
 mkdir -p "$D"
 cd "$ROOT" || exit 1
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
@@ -107,7 +121,20 @@ log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 log "night run starting: $DATASET, labels $SM / $QDL, reps $REPS"
 log "strawmann $(git rev-parse --short HEAD) dirty=$(git status --short | wc -l)"
 if [ ! -x "$QD" ]; then log "EXIT=97 (no Qdrant binary at $QD; set QDRANT_BINARY)"; exit 97; fi
-log "qdrant binary $QD sha256=$(sha256sum "$QD" | cut -c1-16) commit=$(git -C "$(dirname "$QD")" rev-parse --short HEAD 2>/dev/null || echo '?')"
+# The checkout's HEAD is not evidence about the binary, and saying it alone
+# asserts a commit that may not have produced it: on 2026-09-23 this line read
+# `commit=63c6a797d` for a binary built at an earlier one, and `run.json`
+# carried the same claim. `fullrun.py` already computes the verdict; the log
+# says it too, because the log is what a reader reaches for first.
+QD_DIR=$(dirname "$QD")
+QD_COMMIT=$(git -C "$QD_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')
+QD_PREDATES=""
+if [ "$QD_COMMIT" != "?" ]; then
+  QD_HEAD_TS=$(git -C "$QD_DIR" log -1 --format=%ct 2>/dev/null || echo 0)
+  QD_BIN_TS=$(stat -c %Y "$QD" 2>/dev/null || echo 0)
+  [ "$QD_BIN_TS" -lt "$QD_HEAD_TS" ] 2>/dev/null &&     QD_PREDATES=" (BINARY PREDATES THIS COMMIT; sha256 is the identity that holds)"
+fi
+log "qdrant binary $QD sha256=$(sha256sum "$QD" | cut -c1-16) commit=$QD_COMMIT$QD_PREDATES"
 
 PREV=$(prev_pair)
 REF_ARGS=()
@@ -170,6 +197,15 @@ fi
 log "report: ${REPORT:-none}"
 echo "${REPORT:-none}" > "$D/report.path"
 
+# A copy, not just the path. The stamped name comes from the newest arm's
+# `started` (`report.run_stamp`), so any later re-render of the same pair
+# writes the same file: on 2026-09-23 a session re-rendered at 07:04 and the
+# 07:00 artifact was gone, with only `report.path` pointing at what was now a
+# different file. The copy beside the log is what the run actually produced.
+if [ -n "$REPORT" ] && [ -f "$REPORT" ]; then
+  cp -p "$REPORT" "$D/$(basename "$REPORT")" && log "report copied into $D"
+fi
+
 if command -v claude >/dev/null; then
   log "analysis starting"
   PROMPT=$(sed -e "s|@SM@|$SM|g; s|@QD@|$QDL|g; s|@DIR@|bench/results/night-${DATE//-/}|g; s|@DATASET@|$DATASET|g; s|@PREV@|${PREV:+$(basename "$PREV")}|g" \
@@ -177,7 +213,10 @@ if command -v claude >/dev/null; then
   claude -p "$PROMPT" --output-format text \
     --allowedTools "Read,Grep,Glob,Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(ls:*),Bash(wc:*),Bash(sed -n:*),Bash(python3:*),Bash(uv run:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(jq:*),Bash(ps:*),Bash(pgrep:*)" \
     > "$D/analysis.md" 2> "$D/analysis.err"
-  log "analysis exited $? ($(wc -l < "$D/analysis.md") lines in $D/analysis.md)"
+  # `wc -l` on its own would print an error and an empty count if the file
+  # were gone, which is how a stray line from a dead run reads.
+  AN_RC=$?
+  log "analysis exited $AN_RC ($(wc -l < "$D/analysis.md" 2>/dev/null || echo '?') lines in $D/analysis.md)"
 else
   log "no claude on PATH; analysis skipped"
 fi

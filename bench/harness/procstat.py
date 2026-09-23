@@ -132,6 +132,16 @@ def parse_io_stat(text: str) -> dict[str, int] | None:
     One line per device, `major:minor key=value ...`. Summing over devices is
     right here: a container's storage volume and its image layers can sit on
     different block devices, and the question is what the engine did in total.
+
+    An *empty* file is zero, not unmeasured, and the difference cost a published
+    figure: a scope the harness has just created lists no device until its first
+    block I/O completes, so W0-upload's first pass returned `None` for
+    `disk_read_ops` and `disk_write_ops` while its byte counters were present,
+    and `aggregate` then refused the median with "measured in 2 of 3 passes".
+    The very next row in that pass read 0 and 987. A file with content that
+    parses to nothing is still unmeasured: that is a format this does not
+    understand, and guessing zero there would turn a parser failure into a
+    measurement.
     """
     total = {"disk_read_ops": 0, "disk_write_ops": 0,
              "disk_read_bytes": 0, "disk_write_bytes": 0}
@@ -147,7 +157,9 @@ def parse_io_stat(text: str) -> dict[str, int] | None:
                     seen = True
                 except ValueError:
                     pass
-    return total if seen else None
+    if seen:
+        return total
+    return total if not text.strip() else None
 
 
 def _cgroup_io(pid: int) -> dict[str, int] | None:
@@ -1188,8 +1200,17 @@ def _self_test() -> int:
     got = parse_io_stat(two_devices)
     assert got == {"disk_read_ops": 15, "disk_write_ops": 23,
                    "disk_read_bytes": 1500, "disk_write_bytes": 2250}, got
-    assert parse_io_stat("") is None
+    # Empty is zero: a freshly created scope lists no device until its first
+    # block I/O completes, and reading that as "unmeasured" lost W0-upload's
+    # ops column to `aggregate`'s "measured in 2 of 3 passes" refusal.
+    assert parse_io_stat("") == {"disk_read_ops": 0, "disk_write_ops": 0,
+                                 "disk_read_bytes": 0, "disk_write_bytes": 0}
+    assert parse_io_stat("   \n\n") == {"disk_read_ops": 0, "disk_write_ops": 0,
+                                        "disk_read_bytes": 0, "disk_write_bytes": 0}
+    # Content this does not understand stays unmeasured: guessing zero for a
+    # format change would turn a parser failure into a measurement.
     assert parse_io_stat("garbage\n") is None
+    assert parse_io_stat("252:0 nothing=1\n") is None
 
     # A real one, when the host has it, so a kernel that changes the format
     # fails here rather than silently in a results table.
