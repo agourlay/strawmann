@@ -1717,31 +1717,23 @@ def scheduler_rows_table(runs: list[Run]) -> str:
             cpu = (row.get("cpu_user_s") or 0) + (row.get("cpu_system_s") or 0)
             wall = row.get("wall_s") or row.get("duration_s")
             busy = (f"{cpu / wall * 100:,.0f}%" if cpu and wall else "-")
-            for text, present in (
+            for i, (text, present) in enumerate((
                     (f"{cpu:,.1f} s" if cpu else "-", bool(cpu)),
                     (busy, busy != "-"),
                     _cell(row, "runqueue_wait_s", 1000, " ms", 1),
                     _switches_cell(row),
                     _cell(row, "migrations"),
                     _faults_cell(row),
-                    _threads_cell(row)):
+                    _threads_cell(row))):
                 any_value = any_value or present
-                cells.append(f'<td class="num">{text}</td>')
+                cells.append(f'<td class="num{" grp" if i == 0 else ""}">{text}</td>')
         if any_value:
             body.append(f'<tr><td class="wid" title="{describe(wid)}">{wid}</td>'
                         f'{"".join(cells)}</tr>')
     if not body:
         return ""
-    head = "<th>workload</th>" + "".join(
-        f'<th class="num">{r.label} cpu</th><th class="num">{r.label} of wall</th>'
-        f'<th class="num">{r.label} waiting</th>'
-        f'<th class="num">{r.label} switches vol/invol</th>'
-        f'<th class="num">{r.label} migrations</th>'
-        f'<th class="num">{r.label} faults min/maj</th>'
-        f'<th class="num">{r.label} threads</th>'
-        for r in runs)
-    return (f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
+    return _engine_grouped(runs, ["cpu", "of wall", "waiting", "switches vol/invol",
+                                  "migrations", "faults min/maj", "threads"], body)
 
 
 def _psi_pair_cell(row: dict, prefix: str) -> tuple[str, bool]:
@@ -1794,7 +1786,8 @@ def psi_scopes(runs: list[Run]) -> dict[str, str]:
 
 
 def _engine_grouped(runs: list[Run], cols: list[str], body: list[str]) -> str:
-    """A per-row table whose columns repeat once per engine, headed that way.
+    """A per-row table whose columns repeat once per engine, headed that way:
+    the scheduler, stalls, hardware and cache-line sharing tables.
 
     The label was in every header, so the stalls table read "sm-sift-perf-0923
     waiting, sm-sift-perf-0923 blocked on disk, ..." five times per engine and
@@ -2043,22 +2036,17 @@ def sharing_rows_table(runs: list[Run]) -> str:
             c2c, allf = _c2c_fills(row), row.get("perf_fills_all")
             per_q = perfstat.per_query(c2c, row.get("n_queries"))
             share = (c2c / allf * 100) if (c2c is not None and allf) else None
-            for text, present in (
+            for i, (text, present) in enumerate((
                     ("-" if per_q is None else f"{per_q:,.1f}", per_q is not None),
-                    ("-" if share is None else f"{share:.1f}%", share is not None)):
+                    ("-" if share is None else f"{share:.1f}%", share is not None))):
                 any_value = any_value or present
-                cells.append(f'<td class="num">{text}</td>')
+                cells.append(f'<td class="num{" grp" if i == 0 else ""}">{text}</td>')
         if any_value:
             body.append(f'<tr><td class="wid" title="{describe(wid)}">{wid}</td>'
                         f'{"".join(cells)}</tr>')
     if not body:
         return ""
-    head = "<th>workload</th>" + "".join(
-        f'<th class="num">{r.label} cache-to-cache fills/query</th>'
-        f'<th class="num">{r.label} of all fills</th>'
-        for r in runs)
-    return (f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
+    return _engine_grouped(runs, ["cache-to-cache fills/query", "of all fills"], body)
 
 
 def perf_crosscheck(runs: list[Run]) -> list[str]:

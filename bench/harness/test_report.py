@@ -2047,16 +2047,21 @@ class InstrumentTests(unittest.TestCase):
         # recomputed from the CPU time sitting right there.
         self.assertNotIn("nominal", html)
 
-    def test_stall_and_hardware_headers_name_each_engine_once(self):
-        """Every column header repeated the label, five times per engine in the
-        stalls table and six in the hardware table."""
+    def test_per_engine_tables_name_each_engine_once(self):
+        """Every column header repeated the label: seven times per engine in the
+        scheduler table, five in stalls, six in hardware, two in sharing."""
         report = self.report
         stall = _row("W3", 1.0, runqueue_wait_s=0.01)
         perf = _row("W3", 1.0, n_queries=1000, perf_set="default",
                     perf_cycles=1e9, perf_instructions=2e9, perf_task_clock_s=1.0)
+        sched = _row("W3", 1.0, cpu_user_s=1.0, wall_s=2.0)
+        share = _row("W3", 1.0, n_queries=1000, perf_fills_local_ccx=10.0,
+                     perf_fills_all=100.0)
         for table, rows, cols in (
+                (report.scheduler_rows_table, [sched], 7),
                 (report.stalls_rows_table, [stall], 5),
-                (report.hardware_rows_table, [perf], 6)):
+                (report.hardware_rows_table, [perf], 6),
+                (report.sharing_rows_table, [share], 2)):
             html = table(self._runs(rows, rows))
             head = html.split("</thead>", 1)[0]
             for label in ("e0", "e1"):
