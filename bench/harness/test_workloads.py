@@ -2456,6 +2456,69 @@ class NightrunReferenceTests(unittest.TestCase):
         self._prev("2026-09-23", "sift1m")
         self.assertFalse((self.root / "bench/results/night-20260923").exists())
 
+    def _stub_fullrun(self, body: str) -> None:
+        """A `fullrun` the script's helper will import, with one function in it.
+
+        The real resolver needs two published runs' `rows.json` and `run.json`
+        to say anything; what this tests is the *shell's* handling of what it
+        says, which is where the failure was.
+        """
+        (self.root / "bench/harness/fullrun.py").write_text(body)
+
+    def _ref(self, date: str = "2026-09-23", dataset: str = "sift1m") -> str:
+        r = subprocess.run(
+            ["bash", str(self.root / "bench/harness/nightrun.sh"),
+             "--print-ref", date, dataset],
+            capture_output=True, text=True, cwd=self.root,
+            env={**os.environ, "HOME": str(self.root)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def test_a_resolved_reference_is_passed_through(self):
+        self._labels("sm-sift-perf-rel-0921", "qd-sift-perf-rel-0921")
+        self._stub_fullrun("PERF_SET = None\n"
+                           "def resolve_rps_reference(arg, labels):\n"
+                           "    return 10350.985\n")
+        self.assertEqual(self._ref(), "10351")
+
+    def test_a_printed_refusal_is_not_a_reference(self):
+        """The regression, and it cost a launch.
+
+        `resolve_rps_reference` prints "!! ignoring ... for --rps-reference: ..."
+        on *stdout* and returns None. The helper took `tail -1` of that and
+        handed the sentence to `--rps-reference`, which `fullrun.py` rejected
+        with exit 2 before the first row ran.
+        """
+        self._labels("sm-sift-perf-rel-0921", "qd-sift-perf-rel-0921")
+        self._stub_fullrun(
+            "PERF_SET = None\n"
+            "def resolve_rps_reference(arg, labels):\n"
+            "    print('!! ignoring qd-x W4 of 10,351 qps for --rps-reference: "
+            "it was measured with perf default')\n"
+            "    return None\n")
+        self.assertEqual(self._ref(), "")
+
+    def test_a_raising_resolver_is_not_a_reference(self):
+        """`auto` with nothing to read raises rather than returning None, and
+        an unhandled traceback would leave the flag unset *and* the reason
+        invisible."""
+        self._labels("sm-sift-perf-rel-0921", "qd-sift-perf-rel-0921")
+        self._stub_fullrun("PERF_SET = None\n"
+                           "def resolve_rps_reference(arg, labels):\n"
+                           "    raise ValueError('nothing to read')\n")
+        self.assertEqual(self._ref(), "")
+
+    def test_the_helper_says_which_instrument_this_run_uses(self):
+        """The other half: the resolver compares a candidate's `perf_set`
+        against its own module global, which is `None` in a bare interpreter,
+        so a helper that did not set it was told every perf-measured reference
+        was measured with the wrong instrument."""
+        self._labels("sm-sift-perf-rel-0921", "qd-sift-perf-rel-0921")
+        self._stub_fullrun("PERF_SET = None\n"
+                           "def resolve_rps_reference(arg, labels):\n"
+                           "    return 1 if PERF_SET == 'default' else None\n")
+        self.assertEqual(self._ref(), "1")
+
 
 class OversamplingPolicyTests(unittest.TestCase):
     """The two quantized experiments, and the refusal that keeps them apart.

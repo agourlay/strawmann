@@ -30,7 +30,14 @@ export PATH=$HOME/.local/bin:$HOME/.pyenv/shims:$HOME/.cargo/bin:/usr/local/bin:
 # pair loses its cross-engine latency read and says so only in the report, hours
 # later; this is how to ask beforehand, and it is what the test drives.
 PRINT_PREV=0
+PRINT_REF=0
 if [ "${1:-}" = "--print-prev" ]; then PRINT_PREV=1; shift; fi
+# `--print-ref` answers "and what reference would it take from that pair?",
+# which is the other half of the same question and was the other half of the
+# same class of bug: the resolver prints its refusal on stdout, the helper
+# captured that sentence as a number, and `fullrun.py` rejected the flag and
+# exited 2 before the run began. Asking costs nothing and writes nothing.
+if [ "${1:-}" = "--print-ref" ]; then PRINT_REF=1; shift; fi
 
 DATE=${1:?usage: nightrun.sh [--print-prev] YYYY-MM-DD [dataset]}
 DATASET=${2:-sift1m}
@@ -69,7 +76,29 @@ prev_pair() {
     | awk -F- '{print $NF, $0}' | sort -n | tail -1 | cut -d" " -f2-
 }
 
+# A number or nothing. Both guards matter and both were learned here: set
+# `PERF_SET` to what this run will pass, because the resolver compares a
+# candidate against *its own module global* and a bare interpreter has `None`;
+# and filter to digits, because a refusal is printed rather than raised.
+resolve_ref() {
+  local p=$1 pq=$2
+  python3 -c "
+import sys; sys.path.insert(0, 'bench/harness'); import fullrun
+fullrun.PERF_SET = 'default'
+try:
+    v = fullrun.resolve_rps_reference('auto', ['$p', '$pq'])
+except ValueError:
+    v = None
+print(int(round(v)) if v else '')" 2>/dev/null | grep -Ex '[0-9]+' | tail -1
+}
+
 if [ "$PRINT_PREV" = 1 ]; then prev_pair; exit 0; fi
+if [ "$PRINT_REF" = 1 ]; then
+  PREV=$(prev_pair)
+  [ -z "$PREV" ] && exit 0
+  cd "$ROOT" || exit 1
+  P=$(basename "$PREV"); resolve_ref "$P" "qd-${P#sm-}"; exit 0
+fi
 
 mkdir -p "$D"
 cd "$ROOT" || exit 1
@@ -84,10 +113,9 @@ PREV=$(prev_pair)
 REF_ARGS=()
 if [ -n "$PREV" ]; then
   P=$(basename "$PREV"); PQ=qd-${P#sm-}
-  REF=$(python3 -c "
-import sys; sys.path.insert(0, 'bench/harness'); import fullrun
-print(int(round(fullrun.resolve_rps_reference('auto', ['$P', '$PQ']))))" 2>/dev/null | tail -1)
-  if [ -n "$REF" ]; then REF_ARGS=(--rps-reference "$REF"); log "rps reference $REF from $P / $PQ"; fi
+  REF=$(resolve_ref "$P" "$PQ")
+  if [ -n "$REF" ]; then REF_ARGS=(--rps-reference "$REF"); log "rps reference $REF from $P / $PQ"
+  else log "no usable rps reference from $P / $PQ (see the resolver's refusal); each engine uses its own saturation"; fi
 fi
 [ ${#REF_ARGS[@]} -eq 0 ] && log "no previous $FAM pair: each engine uses its own saturation (report refuses the cross-engine latency read)"
 
