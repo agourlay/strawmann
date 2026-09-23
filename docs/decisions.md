@@ -1156,6 +1156,20 @@ bimodality is what rel-0921 (0.99957, 0.99789, 0.99796) and rel-0908 (0.99951,
 0.99951, 0.99631) both show, and it is why a single pass could report either
 engine ahead at high recall.
 
+The isolated arm still fell short of the published 0.00168, and the missing
+piece is the rest of the run. W1 ingests `bench1` with `--skip-wait-index`, so
+the server is still building that graph on its eight workers when W2 creates
+`bench2` and uploads it. Adding exactly that to the A/B, three more passes:
+
+| arm | ef 128 | ef 256 | ef 512 |
+|---|--:|--:|--:|
+| concurrent, `bench2` alone | 0.00111 | 0.00114 | 0.00120 |
+| concurrent, `bench1` building alongside | 0.00208 | 0.00224 | **0.00227** |
+
+which is the published magnitude (0.00180 and 0.00168 in rel-0921, 0.00330 and
+0.00320 in rel-0908), with the same shape again: 0.99949, 0.99956, 0.99729.
+Competing for the workers does not change *what* varies, it widens it.
+
 The spread is also flat across `ef` in both the published runs and the
 concurrent arm, which is the tell that was there all along: a graph that is
 merely *worse built* loses less as the search widens, and these do not.

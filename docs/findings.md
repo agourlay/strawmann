@@ -21,8 +21,11 @@ claim this project wants to make is unmeasured.
 The per-pass draw is the upload's arrival order, demonstrated in the real path:
 a serial upload returns the same recall three times over and a concurrent one
 spreads 0.00120 at `ef` 512 ([`decisions.md`](decisions.md)). What is not
-settled is *why*, and neither half of a reordered arrival is separately
-fixable. Stabilising the level draw changes nothing, stabilising the insertion
+settled is *why*. It survives the whole harness path, and widens there: with
+`bench1`'s index still building alongside, as W1 leaves it, three passes spread
+0.00227, which is the published magnitude. Neither half of a reordered arrival
+is separately
+fixable: stabilising the level draw changes nothing, stabilising the insertion
 sequence multiplies the spread tenfold, and stabilising both builds a graph
 0.0029 below what file order builds.
 
