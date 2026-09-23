@@ -1515,12 +1515,12 @@ def _graph_quality_note(have: list[Run]) -> str:
 def _seed_note(have: list[Run]) -> str:
     """Which level seed the graphs above were drawn at.
 
-    Not provenance trivia. Four seeds over one corpus, in one insertion order,
-    two builds each, returned 0.99955 / 0.99955 / 0.99739 / 0.99794 of recall@10
-    at `ef` 512 (`decisions.md`): the choice is worth 0.00216, wider than the
-    pass-to-pass spread this note sits under and wider than the gap between the
-    two engines there. A page that reports the spread and not the seed reports
-    the smaller of the two numbers.
+    Provenance, §8.7, and no more than that. The page used to add that four
+    seeds span 0.00216 of recall@10 at `ef` 512, from a `decisions.md` table
+    that did not reproduce: re-measured with `graph-diff --seeds`, six builds
+    at four seeds sit within 0.00003 under the engine's own level draw. The
+    0.0023 spread is real only under `assignLevelKey`, which nothing in the
+    engine uses.
 
     Qdrant draws every point's level from a thread-local RNG seeded by the OS
     (`segment_builder.rs`, `rand::rng()`), so it has no seed to name and this
@@ -1539,10 +1539,9 @@ def _seed_note(have: list[Run]) -> str:
                        + ", ".join(f"0x{x}" for x in seeds))
     if not out:
         return ""
-    return (f" Level seed: {'; '.join(out)}. Four seeds over one corpus in one "
-            f"insertion order span 0.00216 of recall@10 at ef 512, wider than "
-            f"the spread above, so the seed is part of the number rather than "
-            f"a detail of how it was produced.")
+    return (f" Level seed: {'; '.join(out)}. Recorded as provenance: under this "
+            f"engine's level draw, six builds at four seeds sit within 0.00003 of "
+            f"recall@10 at ef 512, well inside the spread above.")
 
 
 def storage_rows_table(runs: list[Run]) -> str:

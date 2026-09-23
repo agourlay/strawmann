@@ -983,10 +983,8 @@ if __name__ == "__main__":
 class GraphSeedProvenanceTests(unittest.TestCase):
     """The level seed reaches `run.json`, and an older log still parses.
 
-    `decisions.md` measures four seeds over one corpus in one insertion order
-    at 0.99955 / 0.99955 / 0.99739 / 0.99794 of recall@10 at `ef` 512. The
-    choice is therefore worth 0.00216, wider than the pass-to-pass spread the
-    harness bands, and until now no part of a run recorded which one was used.
+    §8.7 asks for the seed as provenance, and until then no part of a run
+    recorded which one was used.
     """
 
     GRAPH_LINE = ("index: graph checksum=abc123 nodes=1000000 unreachable=0 "

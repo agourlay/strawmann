@@ -1229,23 +1229,36 @@ is larger than the 0.00168 this entry is about. Two equally valid pseudo-random
 level assignments over one corpus, in one insertion order, build graphs that
 differ by more than the published pass-to-pass draw.
 
-And it is not an artifact of that one hash. The same build at four level seeds,
-file order, two builds each, recall@10:
+### The seed, re-measured
 
-| seed | ef 128 | ef 512 |
-|---|--:|--:|
-| `0x57ea3111` (the engine's default) | 0.98871 / 0.98872 | 0.99955 / 0.99955 |
-| `0x1` | 0.98883 / 0.98884 | 0.99955 / 0.99955 |
-| `0x2` | 0.98665 / 0.98663 | 0.99739 / 0.99738 |
-| `0x3` | 0.98739 / 0.98740 | 0.99794 / 0.99794 |
+A four-seed table first recorded here (0.99955, 0.99955, 0.99739, 0.99794 at
+`ef` 512, spanning 0.00216) **did not reproduce**. `graph-diff --seeds`, one run
+and one ground truth per row, 2026-09-23, file order, recall@10 at `ef` 512 over
+all 10,000 queries:
 
-Each seed reproduces itself to 0.00001 and the four span **0.00216**. §8.7
-records the seed in `meta.json` as provenance; what it does not record is that
-the choice is worth more than the pass-to-pass draw this entry set out to
-explain, and that two of these four sit at what looks like a ceiling while two
-do not. Nothing in the comparison is wrong because of it, since both engines are
-measured as configured, but a recall figure quoted without its seed is quoted
-without 0.002 of its own uncertainty.
+| level drawn from | threads | `0x57ea3111` | `0x1` | `0x2` | `0x3` |
+|---|--:|--:|--:|--:|--:|
+| `assignLevel(node)`, what the engine uses | 24 | 0.99954 | 0.99954 | 0.99954 | 0.99952 |
+| `assignLevel(node)` | 8 | 0.99955 | | 0.99955 | |
+| `assignLevelKey(node)`, the instrument | 24 | 0.99726 | 0.99846 | 0.99953 | 0.99958 |
+
+Under the engine's own draw, six builds at four seeds sit within 0.00003: the
+seed is not a measurable source of uncertainty in a published recall figure,
+and §8.7 records it as provenance and nothing more. Under the keyed draw the
+same four seeds span 0.00232, and `0x57ea3111` there is the 0.99727 of the table
+above. Which configuration produced the original table is not recoverable; it
+matches neither.
+
+The keyed sensitivity is real and unexplained, and `--per-query` and
+`--oracle-entry` narrow it. The worst keyed build loses 236 neighbours over 94
+queries, 19 of which lose four or more: regions, not scattered misses. Seeds
+lose different queries (the bad builds' losses overlap 0.03 to 0.14). Searching
+level 0 from each query's true nearest neighbour recovers about 27% of the
+worst build's extra misses, so most of the loss is in level 0 itself rather
+than in the descent. The likely mechanism, not yet shown, is that a poor
+upper-level assignment steers the construction's own searches and leaves some
+level-0 neighbourhoods under-linked. It matters before anything keys levels on
+external ids; nothing in the engine does.
 
 That is where this stops, because it changes the question. The upload's arrival
 order is demonstrated as *what varies between passes*, the serial arm being

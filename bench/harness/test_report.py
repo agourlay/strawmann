@@ -1721,10 +1721,9 @@ class ReportHostTests(unittest.TestCase):
 class LevelSeedNoteTests(unittest.TestCase):
     """The page names the seed its graphs were drawn at.
 
-    Four seeds over one corpus in one insertion order span 0.00216 of recall@10
-    at `ef` 512 (`decisions.md`), which is wider than the pass-to-pass spread
-    the note sits under. A report that gives the spread and withholds the seed
-    gives the smaller of the two numbers.
+    §8.7 provenance. The note once claimed the seed was worth 0.00216 of
+    recall@10, from a table that did not reproduce; it now says what was
+    re-measured, and must not repeat the old figure.
     """
 
     @classmethod
@@ -1747,7 +1746,8 @@ class LevelSeedNoteTests(unittest.TestCase):
                                {"nodes": 10, "unreachable": 1, "seed": "57ea3111"}])
         note = self.report._graph_quality_note([r])
         self.assertIn("Level seed: sm-x 0x57ea3111", note)
-        self.assertIn("0.00216", note)
+        self.assertIn("within 0.00003", note)
+        self.assertNotIn("0.00216", note)
 
     def test_an_engine_that_records_no_seed_is_not_described(self):
         """Qdrant draws levels from a thread-local RNG seeded by the OS, so it

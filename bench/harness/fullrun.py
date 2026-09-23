@@ -632,9 +632,9 @@ def record_graph_quality(label: str) -> None:
         return
     worst = max(builds, key=lambda b: b["unreachable"])
     seeds = {b["seed"] for b in builds if b.get("seed")}
-    # Named in the line because the seed is worth 0.00216 of recall@10 at
-    # `ef` 512 over four of them (`decisions.md`), which is wider than the
-    # spread this run will band. More than one means two collections were
+    # Named in the line because §8.7 asks for the seed as provenance (six
+    # builds at four seeds sit within 0.00003 of recall@10 under the engine's
+    # draw, `decisions.md`). More than one means two collections were
     # built at different seeds, which no current path does and which would
     # make their recall curves incomparable.
     seed = f", seed 0x{seeds.pop()}" if len(seeds) == 1 else (
