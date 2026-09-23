@@ -514,6 +514,26 @@ pub const Index = struct {
         self.searchFiltered(ef, scratch, out, null);
     }
 
+    /// The level-0 search alone, from `entry`, with no descent.
+    ///
+    /// An instrument, and nothing in the engine calls it. findings 34's seed
+    /// loss is flat across `ef`, which says some true neighbours cannot be
+    /// reached at any beam width, and there are two places that can happen:
+    /// the descent through the upper levels lands somewhere the neighbours are
+    /// not reachable from, or level 0 itself does not link them. Started at a
+    /// query's true nearest neighbour, the first cannot happen, so the recall
+    /// that comes back is the part the upper levels were costing
+    /// (`bench/graphdiff`, `--oracle-entry`).
+    pub fn searchFrom(self: *const Index, entry: u32, ef: usize, scratch: *Scratch, out: *heap.TopK) void {
+        std.debug.assert(ef <= scratch.results.len);
+        std.debug.assert(entry < self.graph.count);
+        scratch.vis.beginQuery();
+        var results = heap.TopK.init(scratch.results, ef);
+        const entries = [_]Candidate{.{ .id = entry, .score = self.scorer.call(self.scorer.ctx, entry) }};
+        self.searchLayer(&entries, 0, ef, scratch, &results, null);
+        for (results.items[0..results.len]) |c| out.push(c);
+    }
+
     pub fn searchFiltered(
         self: *const Index,
         ef: usize,
@@ -923,4 +943,38 @@ test "searchLayer at ef = 1 returns the single best neighbour of a tiny graph" {
     const got = out.finish();
     try testing.expectEqual(@as(usize, 1), got.len);
     try testing.expectEqual(@as(u32, 2), got[0].id);
+}
+
+test "searchFrom starts where it is told and ignores the entry point" {
+    // Two islands on level 0: {0, 1} and {2, 3}, with nothing between them.
+    // From the entry point (0) the best node (3) is unreachable; started on
+    // the other island it is found. That is the whole difference between
+    // what the descent cost and what level 0 cost.
+    const Ctx = struct {
+        pub fn score(_: *const anyopaque, node: u32) f32 {
+            return @floatFromInt(node);
+        }
+    };
+    var g = try Graph.init(testing.allocator, Params.fromM(4, 8, 1), 4);
+    defer g.deinit();
+    g.count = 4;
+    g.entry_point = 0;
+    g.level0Slice(0)[0] = 1;
+    g.level0Slice(1)[0] = 0;
+    g.level0Slice(2)[0] = 3;
+    g.level0Slice(3)[0] = 2;
+
+    const ctx: u8 = 0;
+    const idx = Index{ .graph = &g, .scorer = .{ .ctx = @ptrCast(&ctx), .call = Ctx.score } };
+    var scratch = try Index.Scratch.init(testing.allocator, 4, 8);
+    defer scratch.deinit(testing.allocator);
+    var buf: [1]Candidate = undefined;
+
+    var out = heap.TopK.init(&buf, 1);
+    idx.search(4, &scratch, &out);
+    try testing.expectEqual(@as(u32, 1), out.finish()[0].id);
+
+    out = heap.TopK.init(&buf, 1);
+    idx.searchFrom(2, 4, &scratch, &out);
+    try testing.expectEqual(@as(u32, 3), out.finish()[0].id);
 }

@@ -24,6 +24,13 @@
 //!   --m N, --ef-construct N, --seed N
 //!   --metric euclid|dot
 //!   --histogram       per-node edge-difference histogram
+//!   --seeds A,B,...   one build per level seed (up to 8), instead of --builds
+//!                     builds at --seed: the seed-to-seed comparison of
+//!                     findings 34 in one run
+//!   --per-query       which queries each build loses, against the best build,
+//!                     and whether the builds lose the same ones
+//!   --oracle-entry    also search level 0 from each query's true nearest
+//!                     neighbour, skipping the descent (implies --per-query)
 //!
 //! Structure, not timing, so this needs no quiet host: every number below is
 //! exact, and a contaminated run is a *better* input, because foreign load
@@ -299,6 +306,9 @@ pub const Report = struct {
     /// under two it is the *first* thing that differs and the reason the rest
     /// does.
     same_node_space: bool = true,
+    /// Whether the two builds drew levels from the same seed. Set by the
+    /// caller, which knows; two seeds are two level assignments by design.
+    same_seed: bool = true,
 
     pub fn deinit(self: *Report, alloc: std.mem.Allocator) void {
         alloc.free(self.levels);
@@ -515,6 +525,7 @@ pub fn recall(
     nq: usize,
     k: usize,
     ef: usize,
+    hits_out: ?[]u8,
 ) !f64 {
     var scratch = try hnsw.Index.Scratch.init(alloc, c.count, ef);
     defer scratch.deinit(alloc);
@@ -527,20 +538,109 @@ pub fn recall(
         const index = hnsw.Index{ .graph = g, .scorer = hnsw.Scorer.of(&probe) };
         var top = heap.TopK.init(out, k);
         index.search(ef, &scratch, &top);
-        const want = gt[qi * k ..][0..k];
-        for (top.items[0..top.len]) |cand| {
-            // The search answers in node ids and the ground truth is in vector
-            // ids. Identical until `--shuffle`, and silently wrong after it.
-            const got = c.vectorOf(cand.id);
-            for (want) |w| {
-                if (w == got) {
-                    hits += 1;
-                    break;
-                }
+        const h = hitsOf(c, top.items[0..top.len], gt[qi * k ..][0..k]);
+        if (hits_out) |ho| ho[qi] = h;
+        hits += h;
+    }
+    return @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(nq * k));
+}
+
+/// How many of `want` a result set holds.
+fn hitsOf(c: *const Corpus, got: []const Candidate, want: []const u32) u8 {
+    var h: u8 = 0;
+    for (got) |cand| {
+        // The search answers in node ids and the ground truth is in vector
+        // ids. Identical until `--shuffle`, and silently wrong after it.
+        const v = c.vectorOf(cand.id);
+        for (want) |w| {
+            if (w == v) {
+                h += 1;
+                break;
             }
         }
     }
-    return @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(nq * k));
+    return h;
+}
+
+/// Per-query hits with the descent skipped: level 0 searched from each query's
+/// true nearest neighbour (`hnsw.Index.searchFrom`).
+///
+/// The seed loss of findings 34 is flat across `ef`, so some true neighbours
+/// are out of reach at any beam width, and there are two places that can
+/// happen. If the descent lands where they cannot be reached from, starting at
+/// the answer recovers them; if level 0 does not link them, it does not.
+/// `inv` maps a vector to the node holding it, null in file order.
+pub fn oracleHits(
+    alloc: std.mem.Allocator,
+    g: *Graph,
+    c: *const Corpus,
+    queries: *const Corpus,
+    gt: []const u32,
+    nq: usize,
+    k: usize,
+    ef: usize,
+    inv: ?[]const u32,
+    out_hits: []u8,
+) !void {
+    var scratch = try hnsw.Index.Scratch.init(alloc, c.count, ef);
+    defer scratch.deinit(alloc);
+    const out = try alloc.alloc(Candidate, k);
+    defer alloc.free(out);
+    for (0..nq) |qi| {
+        const want = gt[qi * k ..][0..k];
+        var probe = Corpus.Probe{ .corpus = c, .query = queries.row(@intCast(qi)) };
+        const index = hnsw.Index{ .graph = g, .scorer = hnsw.Scorer.of(&probe) };
+        var top = heap.TopK.init(out, k);
+        const entry = if (inv) |iv| iv[want[0]] else want[0];
+        index.searchFrom(entry, ef, &scratch, &top);
+        out_hits[qi] = hitsOf(c, top.items[0..top.len], want);
+    }
+}
+
+/// One build's per-query hits against the best build's.
+pub const Loss = struct {
+    /// Queries this build answered worse and better than the best build did.
+    worse: usize = 0,
+    better: usize = 0,
+    /// Neighbours lost and gained across those queries.
+    lost: usize = 0,
+    gained: usize = 0,
+    /// Of the worse queries, how many lost 1, 2, 3 and 4 or more neighbours.
+    by_size: [4]usize = @splat(0),
+    /// Queries that miss at least one neighbour, whatever the best build did.
+    imperfect: usize = 0,
+
+    pub fn of(best: []const u8, this: []const u8, k: usize) Loss {
+        var l: Loss = .{};
+        for (best, this) |b, t| {
+            if (t < k) l.imperfect += 1;
+            if (t < b) {
+                l.worse += 1;
+                l.lost += b - t;
+                l.by_size[@min(b - t, 4) - 1] += 1;
+            } else if (t > b) {
+                l.better += 1;
+                l.gained += t - b;
+            }
+        }
+        return l;
+    }
+};
+
+/// |A & B| / |A | B| over the queries two builds answer worse than `best`.
+/// Near 1 says the loss is a fixed set of queries whatever the seed; near 0
+/// says each seed loses its own.
+pub fn worseOverlap(best: []const u8, a: []const u8, b: []const u8) f64 {
+    var both: usize = 0;
+    var either: usize = 0;
+    for (best, a, b) |x, y, z| {
+        const in_a = y < x;
+        const in_b = z < x;
+        if (in_a and in_b) both += 1;
+        if (in_a or in_b) either += 1;
+    }
+    if (either == 0) return 1;
+    return @as(f64, @floatFromInt(both)) / @as(f64, @floatFromInt(either));
 }
 
 // ---------------------------------------------------------------------------
@@ -555,6 +655,11 @@ fn pct(part: u64, whole: u64) f64 {
 pub fn write(w: *Io.Writer, r: Report, histogram: bool) !void {
     if (r.level_mismatches == 0) {
         try w.print("level assignment identical ({d} nodes)\n", .{r.count});
+    } else if (!r.same_seed) {
+        try w.print("level assignment: {d} of {d} points ({d:.1}%) sit at a different " ++
+            "level,\n                  which is what a different seed does\n", .{
+            r.level_mismatches, r.count, pct(r.level_mismatches, r.count),
+        });
     } else if (r.same_node_space) {
         try w.print("level assignment: {d} nodes DIFFER, expected 0 " ++
             "(`assignLevel` is pure in (seed, node))\n", .{r.level_mismatches});
@@ -614,6 +719,50 @@ pub fn write(w: *Io.Writer, r: Report, histogram: bool) !void {
     }
 }
 
+/// Which queries each build loses against the best, and whether they are the
+/// same queries. With `--oracle-entry`, the same counts with the descent
+/// skipped: what comes back there is what the upper levels were costing.
+fn writePerQuery(w: *Io.Writer, builds: []const Build, best: usize, k: usize, ef: usize) !void {
+    const ref = builds[best].hits.?;
+    try w.print("\n=== per query at ef {d}, against build {d} (seed 0x{x})\n\n", .{ ef, best, builds[best].seed });
+    try w.print("{s:<7} {s:>12} {s:>10} {s:>7} {s:>7} {s:>8} {s:>8}   {s}\n", .{
+        "build", "seed", "imperfect", "worse", "better", "lost", "gained", "worse by 1/2/3/4+",
+    });
+    for (builds, 0..) |b, i| {
+        const l = Loss.of(ref, b.hits.?, k);
+        try w.print("{d:<7} {s:>2}{x:>10} {d:>10} {d:>7} {d:>7} {d:>8} {d:>8}   {d}/{d}/{d}/{d}\n", .{
+            i,            "0x",         b.seed,       l.imperfect,  l.worse, l.better, l.lost, l.gained,
+            l.by_size[0], l.by_size[1], l.by_size[2], l.by_size[3],
+        });
+    }
+
+    try w.print("\nworse-than-best overlap (1 is the same queries, 0 is disjoint)\n", .{});
+    for (builds, 0..) |a, i| {
+        if (i == best) continue;
+        for (builds[i + 1 ..], i + 1..) |b, j| {
+            if (j == best) continue;
+            try w.print("  {d} & {d}  {d:.3}\n", .{ i, j, worseOverlap(ref, a.hits.?, b.hits.?) });
+        }
+    }
+
+    if (builds[best].oracle == null) return;
+    try w.print("\nlevel 0 from the true nearest neighbour, descent skipped\n", .{});
+    try w.print("{s:<7} {s:>12} {s:>18} {s:>18} {s:>12}\n", .{
+        "build", "seed", "missed, descent", "missed, oracle", "recovered",
+    });
+    for (builds, 0..) |b, i| {
+        var desc: usize = 0;
+        var orc: usize = 0;
+        for (b.hits.?, b.oracle.?) |h, o| {
+            desc += k - h;
+            orc += k - o;
+        }
+        const rec: f64 = if (desc == 0) 0 else 100.0 * (@as(f64, @floatFromInt(desc)) -
+            @as(f64, @floatFromInt(orc))) / @as(f64, @floatFromInt(desc));
+        try w.print("{d:<7} {s:>2}{x:>10} {d:>18} {d:>18} {d:>11.1}%\n", .{ i, "0x", b.seed, desc, orc, rec });
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Driver
 // ---------------------------------------------------------------------------
@@ -662,6 +811,15 @@ const Args = struct {
     /// findings 34 ends at. With `--shuffle`, a spread that survives this is a
     /// spread the insertion sequence does not explain.
     stable_order: bool = false,
+    /// One build per seed, in place of `builds` at `seed`.
+    seeds: [8]u64 = @splat(0),
+    n_seeds: usize = 0,
+    per_query: bool = false,
+    oracle_entry: bool = false,
+
+    fn seedOf(self: Args, i: usize) u64 {
+        return if (self.n_seeds != 0) self.seeds[i] else self.seed;
+    }
 };
 
 fn parseArgs(argv: []const []const u8) !Args {
@@ -682,6 +840,19 @@ fn parseArgs(argv: []const []const u8) !Args {
             a.stable_levels = true;
         } else if (std.mem.eql(u8, arg, "--stable-order")) {
             a.stable_order = true;
+        } else if (std.mem.eql(u8, arg, "--per-query")) {
+            a.per_query = true;
+        } else if (std.mem.eql(u8, arg, "--oracle-entry")) {
+            a.oracle_entry = true;
+            a.per_query = true;
+        } else if (std.mem.eql(u8, arg, "--seeds")) {
+            var it = std.mem.splitScalar(u8, try val(argv, &i), ',');
+            a.n_seeds = 0;
+            while (it.next()) |tok| {
+                if (a.n_seeds == a.seeds.len) return error.TooManySeeds;
+                a.seeds[a.n_seeds] = try std.fmt.parseInt(u64, tok, 0);
+                a.n_seeds += 1;
+            }
         } else if (std.mem.eql(u8, arg, "--shuffle")) {
             a.shuffle = try std.fmt.parseInt(usize, try val(argv, &i), 10);
             if (a.shuffle == 0) return error.ShuffleBatchZero;
@@ -723,6 +894,7 @@ fn parseArgs(argv: []const []const u8) !Args {
         }
     }
     if (a.vectors.len == 0) return error.NeedVectorFile;
+    if (a.n_seeds != 0) a.builds = a.n_seeds;
     if (a.builds < 2) return error.NeedTwoBuilds;
     for (a.ef[0..a.n_ef]) |e| if (a.k > e) return error.KAboveEf;
     return a;
@@ -737,6 +909,11 @@ const Build = struct {
     seconds: f64,
     repaired: usize,
     checksum: u64,
+    seed: u64,
+    /// Per-query hits at the last `--ef`, under `--per-query`, and the same
+    /// with the descent skipped, under `--oracle-entry`.
+    hits: ?[]u8 = null,
+    oracle: ?[]u8 = null,
     /// One per `--ef`, in the order given. `rank` is the last, which is the
     /// operating point findings 34 is about.
     recall: [4]f64 = @splat(-1),
@@ -846,7 +1023,8 @@ pub fn main(init: std.process.Init) !void {
 
     const builds = try alloc.alloc(Build, args.builds);
     defer alloc.free(builds);
-    try w.print("\n{s:<7} {s:>9} {s:>9} {s:>20}", .{ "build", "seconds", "repaired", "checksum" });
+    if (args.per_query and args.queries.len == 0) return error.PerQueryNeedsQueries;
+    try w.print("\n{s:<7} {s:>12} {s:>9} {s:>9} {s:>20}", .{ "build", "seed", "seconds", "repaired", "checksum" });
     for (args.ef[0..args.n_ef]) |e| try w.print("  {s:>5}{d:<5}", .{ "ef ", e });
     try w.print("\n", .{});
     for (builds, 0..) |*b, i| {
@@ -862,7 +1040,7 @@ pub fn main(init: std.process.Init) !void {
         corpus.order = order;
 
         const g = try alloc.create(Graph);
-        g.* = try Graph.init(alloc, hnsw.Params.fromM(args.m, args.ef_construct, args.seed), corpus.count);
+        g.* = try Graph.init(alloc, hnsw.Params.fromM(args.m, args.ef_construct, args.seedOf(i)), corpus.count);
         // The level key is the vector id, which is the stand-in here for the
         // external point id the engine would use: both are stable across
         // ingests, and only stability matters to the draw.
@@ -891,11 +1069,18 @@ pub fn main(init: std.process.Init) !void {
             .seconds = seconds,
             .repaired = stats.repaired,
             .checksum = g.checksum(),
+            .seed = args.seedOf(i),
         };
-        try w.print("{d:<7} {d:>9.2} {d:>9} {x:>20}", .{ i, b.seconds, b.repaired, b.checksum });
+        if (args.per_query) b.hits = try alloc.alloc(u8, nq);
+        try w.print("{d:<7} {s:>2}{x:>10} {d:>9.2} {d:>9} {x:>20}", .{ i, "0x", b.seed, b.seconds, b.repaired, b.checksum });
         for (args.ef[0..args.n_ef], 0..) |e, j| {
-            if (nq != 0) b.recall[j] = try recall(alloc, g, &corpus, &queries.?, gt, nq, args.k, e);
+            const last = j + 1 == args.n_ef;
+            if (nq != 0) b.recall[j] = try recall(alloc, g, &corpus, &queries.?, gt, nq, args.k, e, if (last) b.hits else null);
             try w.print("  {d:>10.5}", .{b.recall[j]});
+        }
+        if (args.oracle_entry) {
+            b.oracle = try alloc.alloc(u8, nq);
+            try oracleHits(alloc, g, &corpus, &queries.?, gt, nq, args.k, args.ef[args.n_ef - 1], inv, b.oracle.?);
         }
         try w.print("\n", .{});
         try w.flush();
@@ -906,6 +1091,8 @@ pub fn main(init: std.process.Init) !void {
         alloc.destroy(b.graph);
         if (b.order) |o| alloc.free(o);
         if (b.inv) |iv| alloc.free(iv);
+        if (b.hits) |h| alloc.free(h);
+        if (b.oracle) |o| alloc.free(o);
     };
 
     // Which pair to diff. With recall, the best against the worst is the pair
@@ -924,11 +1111,17 @@ pub fn main(init: std.process.Init) !void {
         worst = 1;
     }
 
+    if (args.per_query) {
+        try writePerQuery(w, builds, best, args.k, args.ef[args.n_ef - 1]);
+        try w.flush();
+    }
+
     try w.print("\n=== best (build {d}, {d:.5}) against worst (build {d}, {d:.5}) at ef {d}\n\n", .{
         best, builds[best].rank(args.n_ef), worst, builds[worst].rank(args.n_ef), args.ef[args.n_ef - 1],
     });
     var r = try diff(alloc, builds[best].view(), builds[worst].view(), &corpus);
     defer r.deinit(alloc);
+    r.same_seed = builds[best].seed == builds[worst].seed;
     try write(w, r, args.histogram);
     try w.flush();
 
@@ -955,6 +1148,7 @@ pub fn main(init: std.process.Init) !void {
         });
         var cr = try diff(alloc, builds[ca].view(), builds[cb].view(), &corpus);
         defer cr.deinit(alloc);
+        cr.same_seed = builds[ca].seed == builds[cb].seed;
         try write(w, cr, args.histogram);
         try w.flush();
     }
@@ -1139,4 +1333,36 @@ test "batches survive the reordering intact" {
     const ok = try parseArgs(&.{ "g", "v.fbin", "--builds", "4", "--metric", "dot" });
     try testing.expectEqual(@as(usize, 4), ok.builds);
     try testing.expectEqual(dist.Kernel.dot, ok.kernel);
+}
+
+test "--seeds sets one build per seed, and --oracle-entry implies --per-query" {
+    const a = try parseArgs(&.{ "g", "v.fbin", "--seeds", "0x57ea3111,1,2,3", "--oracle-entry" });
+    try testing.expectEqual(@as(usize, 4), a.builds);
+    try testing.expectEqual(@as(u64, 0x57ea3111), a.seedOf(0));
+    try testing.expectEqual(@as(u64, 3), a.seedOf(3));
+    try testing.expect(a.per_query and a.oracle_entry);
+    // Without --seeds every build is at --seed.
+    const b = try parseArgs(&.{ "g", "v.fbin", "--seed", "7" });
+    try testing.expectEqual(@as(u64, 7), b.seedOf(2));
+    try testing.expectError(error.TooManySeeds, parseArgs(&.{ "g", "v.fbin", "--seeds", "1,2,3,4,5,6,7,8,9" }));
+}
+
+test "a loss is counted against the best build, by size" {
+    const best = [_]u8{ 10, 10, 10, 9, 10 };
+    const this = [_]u8{ 10, 9, 6, 10, 10 };
+    const l = Loss.of(&best, &this, 10);
+    try testing.expectEqual(@as(usize, 2), l.worse);
+    try testing.expectEqual(@as(usize, 5), l.lost);
+    try testing.expectEqual(@as(usize, 1), l.better);
+    try testing.expectEqual(@as(usize, 1), l.gained);
+    try testing.expectEqual([4]usize{ 1, 0, 0, 1 }, l.by_size);
+    try testing.expectEqual(@as(usize, 2), l.imperfect);
+}
+
+test "two builds that lose the same queries overlap fully, disjoint ones not at all" {
+    const best = [_]u8{ 10, 10, 10, 10 };
+    const a = [_]u8{ 9, 10, 8, 10 };
+    try testing.expectEqual(@as(f64, 1), worseOverlap(&best, &a, &a));
+    const b = [_]u8{ 10, 9, 10, 9 };
+    try testing.expectEqual(@as(f64, 0), worseOverlap(&best, &a, &b));
 }
