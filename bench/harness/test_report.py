@@ -502,6 +502,49 @@ class ReportHostTests(unittest.TestCase):
                                           conf_a=calibrated, conf_b=calibrated)
             self.assertRegex(report.build(runs, "t"), r"calibrated relative \u03b5")
 
+    def test_a_licensed_verdict_is_green_and_a_refused_one_red(self):
+        """The passing verdict was drawn in the caveat amber, so the one piece of
+        good news on the page looked like the warnings under it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
+            # The fixture's env.txt fails §7.1, which is red on its own account.
+            self.assertIn('class="banner " id="verdict"', report.build(runs, "t"))
+            for r in runs:
+                r.gate_pass = True
+            self.assertIn('class="banner ok" id="verdict"', report.build(runs, "t"))
+            self.assertIn(".banner.ok{", report.CSS)
+            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)],
+                                          conf_a=CONF_T2, conf_b=CONF_T2)
+            for r in runs:
+                r.gate_pass = True
+            self.assertIn('class="banner " id="verdict"', report.build(runs, "t"))
+
+    def test_every_chart_frame_the_template_uses_is_styled(self):
+        """Four sections framed their charts in `.card`, which nothing defined."""
+        tpl = (Path(self.report.__file__).parent / "templates" / self.report.TEMPLATE).read_text()
+        for klass in set(re.findall(r'<(?:div|figure) class="(card|chart)"', tpl)):
+            self.assertRegex(self.report.CSS, rf"(^|[,}}\s])(figure)?\.{klass}[,{{]", klass)
+
+    def test_throughput_table_wraps_its_descriptions(self):
+        """Held to one line, W11-steady's description pushed the ratio column past
+        the card's edge and crushed the notes to one word wide."""
+        with tempfile.TemporaryDirectory() as tmp:
+            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
+            self.assertIn('<table class="throughput">', report.throughput_table(runs, df))
+            self.assertIn("table.throughput td.desc{white-space:normal", report.CSS)
+
+    def test_the_ingest_wait_is_hatched_in_the_engine_colour(self):
+        """A page-coloured hatch drew near-white lines on a transparent fill:
+        the wait-for-Green bars and their legend swatches were invisible."""
+        with tempfile.TemporaryDirectory() as tmp:
+            report, runs, df = self._pair(
+                Path(tmp), [_row("W1", None, upload_s=1.0, index_wait_s=0.5)],
+                [_row("W1", None, upload_s=10.0, index_wait_s=2.0)])
+            chart = report.chart_build(runs, df)
+            self.assertIsNotNone(chart)
+            self.assertIn('"pattern":{"shape"', chart["html"])
+            self.assertNotIn('"fgcolor"', chart["html"])
+
     def test_a_folded_label_measures_over_all_its_passes(self):
         """The fold copied pass 1's run.json, so the page's "measured" window
         was a third of the run and the record introduced itself as -rep1."""

@@ -53,7 +53,7 @@
       and §8's licence below the table of contents — which the summary called
       "the banner above". A reader had to assemble the one answer they need
       first out of three separated claims, one of which pointed the wrong way. -#}
-  <div class="banner {{ '' if ungated or not licence.comparative else 'soft' }}" id="verdict">
+  <div class="banner {{ '' if ungated or not licence.comparative else 'ok' }}" id="verdict">
     {%- if ungated %}
     <b>Development-grade. Not publishable.</b> The §7.1 gate fails for
     {{ ungated | join(' and ') }}, so these numbers describe this machine in its current

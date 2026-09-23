@@ -433,8 +433,12 @@ def chart_build(runs: list[Run], df: pd.DataFrame) -> dict | None:
                 y=[label[w] for w in present], x=xs,
                 offsetgroup=run.label, legendgroup=run.label,
                 marker=dict(color=col,
-                            pattern=dict(shape=hatch, solidity=0.35,
-                                         fgcolor="#fbfbfa") if hatch else None,
+                            # The hatch in the engine's own colour. A page-
+                            # coloured one drew near-white lines on a
+                            # transparent fill: the wait bars, and their
+                            # legend swatches, did not show.
+                            pattern=dict(shape=hatch, solidity=0.35)
+                            if hatch else None,
                             # A 2px surface gap so the two phases read as two
                             # segments rather than one bar with a texture.
                             line=dict(color="#fbfbfa", width=2)),

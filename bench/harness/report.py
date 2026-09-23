@@ -279,7 +279,7 @@ def throughput_table(runs: list[Run], df: pd.DataFrame) -> str:
         body.append("<tr>" + "".join(cells) + "</tr>")
 
     top = "".join(f'<div class="banner"><b>{html.escape(bnr)}</b></div>' for bnr in banners)
-    return (f'{top}<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
+    return (f'{top}<div class="tablewrap"><table class="throughput"><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
@@ -3113,14 +3113,18 @@ def build_figures(runs: list[Run], df: pd.DataFrame) -> list[dict]:
 
 CSS = """
 :root{--bg:#fbfbfa;--card:#fff;--ink:#1a1a19;--muted:#6b6b66;--line:#e6e4df;
---accent:#F7A41D;--ok:#2EA44F;--bad:#DC244B;--code:#f4f2ee}
+--accent:#F7A41D;--ok:#2EA44F;--bad:#DC244B;--code:#f4f2ee;--link:#A85A00}
 @media(prefers-color-scheme:dark){:root:not([data-theme=light]){
---bg:#131312;--card:#1b1b1a;--ink:#e9e7e2;--muted:#9a978f;--line:#2c2b28;--code:#232220}}
+--bg:#131312;--card:#1b1b1a;--ink:#e9e7e2;--muted:#9a978f;--line:#2c2b28;--code:#232220;
+--link:#FFB547}}
 :root[data-theme=dark]{--bg:#131312;--card:#1b1b1a;--ink:#e9e7e2;--muted:#9a978f;
---line:#2c2b28;--code:#232220}
+--line:#2c2b28;--code:#232220;--link:#FFB547}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
 font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+/* The browser's own #00e link blue, on a page that otherwise has no blue, and
+   about 2:1 on the dark card. */
+a{color:var(--link);text-underline-offset:2px}
 /* The page is mostly tables and charts, and 960px left half a wide screen
    empty while twelve-column latency tables scrolled inside it. Prose is the
    only thing that suffers from a long line, so the container is wide and the
@@ -3161,18 +3165,36 @@ border-radius:9px;padding:13px 15px;margin:18px 0;font-size:13.5px}
 .banner.soft{background:color-mix(in srgb,var(--accent) 10%,var(--card));
 border-color:color-mix(in srgb,var(--accent) 38%,transparent)}
 .banner b{color:var(--bad)}.banner.soft b{color:var(--accent)}
+/* A passing verdict was drawn in the amber the page uses for a caveat, so the
+   good news and the warnings below it looked alike. */
+.banner.ok{background:color-mix(in srgb,var(--ok) 8%,var(--card));
+border-color:color-mix(in srgb,var(--ok) 35%,transparent)}
+.banner.ok b{color:var(--ok)}
 .wl{margin:0 0 22px;padding:0 0 4px;border-bottom:1px solid var(--line)}.wl:last-child{border-bottom:0}.wl-index{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 18px}.wl-index a{display:inline-flex;gap:5px;align-items:baseline;text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:11.5px;font-family:ui-monospace,monospace;color:var(--ink)}.wl-index a:hover{border-color:var(--accent)}.wl-ix-r{font-weight:700}.wl-cfg{font-family:ui-monospace,monospace;font-size:11px;color:var(--muted);margin:-4px 0 8px}.wl h3{margin:0 0 8px;font-size:14px;display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}.wl-id{font-family:ui-monospace,monospace;font-weight:700}.wl-desc{color:var(--muted);font-weight:400}.wl-ratio{font-family:ui-monospace,monospace;font-weight:700;margin-left:auto}.wl table td.desc{color:var(--muted);white-space:nowrap}.wl table{font-size:13px}.wl .notes{margin-top:6px}.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:9px;background:var(--card)}
 td.desc{white-space:nowrap}
+/* In the throughput table descriptions and verdicts wrap. With both held to
+   one line its widest row (W11-steady's description, "clears the ±17%
+   measured noise floor") outgrew the page: the ratio column was clipped at
+   the card's edge and the notes column shrank to one word wide, every row
+   hundreds of pixels tall. */
+table.throughput td.desc{white-space:normal;min-width:22ch}
+table.throughput td.notes{min-width:34ch}
 table{border-collapse:collapse;width:100%;font-size:13.5px}
 th{text-align:left;font-weight:600;color:var(--muted);font-size:11.5px;
 text-transform:uppercase;letter-spacing:.05em;padding:11px 13px;
 border-bottom:1px solid var(--line);white-space:nowrap}
 td{padding:9px 13px;border-bottom:1px solid var(--line);vertical-align:top}
 tr:last-child td{border-bottom:0}
+/* The hardware and stall tables scroll sideways, and past the first screen of
+   columns nothing said which row a number was on. The row id stays put. */
+.tablewrap th:first-child,.tablewrap td:first-child{position:sticky;left:0;z-index:1;
+background:var(--card)}
+tbody tr:hover td{background:color-mix(in srgb,var(--accent) 7%,var(--card))}
 .wid{font:600 12.5px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
 .desc{color:var(--muted)}
 .num{text-align:right;font:13px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
 .num .sub{display:block;font-size:10.5px;color:var(--muted);margin-top:2px}
+table.throughput .num .sub{white-space:normal;min-width:16ch;max-width:24ch;margin-left:auto}
 
 .up{color:var(--ok);font-weight:600}.down{color:var(--bad);font-weight:600}
 .muted,.na{color:var(--muted)}.bad{color:var(--bad)}
@@ -3192,7 +3214,10 @@ display:flex;gap:8px}
 .chk span{font-weight:700;flex:none;width:32px}
 .chk.pass span{color:var(--ok)}.chk.fail span{color:var(--bad)}
 .chk.cont{color:var(--muted);padding-left:40px;display:block}
-figure.chart{margin:0 0 26px;background:var(--card);border:1px solid var(--line);
+/* `.card` is the same frame. The ingest, scheduler, stall and hardware charts
+   used it and nothing defined it, so they sat unframed on the page while the
+   throughput, recall and latency charts had a card. */
+figure.chart,.card{margin:0 0 26px;background:var(--card);border:1px solid var(--line);
 border-radius:9px;padding:16px 17px 13px}
 .note{font-size:11.5px;color:var(--muted);margin-top:9px;line-height:1.5}
 /* A long page with no way through it is a page nobody reads past the first
@@ -3202,7 +3227,16 @@ border-radius:9px;background:var(--card);padding:16px 20px;margin:24px 0 4px}
 .summary h2{margin:0 0 10px;border:0;padding:0;font-size:13px;text-transform:uppercase;
 letter-spacing:.08em;color:var(--muted)}
 .summary p{margin:0 0 9px;font-size:14px}
-.toc{display:flex;flex-wrap:wrap;gap:6px;margin:26px 0 4px}
+/* Sticky: sixteen sections below it and the links were only on the first
+   screen. Wrapped where there is room for two lines of it; one line scrolling
+   sideways on a phone, where two would be five. */
+.toc{display:flex;flex-wrap:wrap;gap:6px;margin:26px -26px 4px;padding:8px 26px;
+position:sticky;top:0;z-index:5;background:var(--bg);
+border-bottom:1px solid var(--line)}
+.toc a{flex:none}
+h2,h3,#bandwidth{scroll-margin-top:96px}
+@media(max-width:900px){.toc{flex-wrap:nowrap;overflow-x:auto}
+h2,h3,#bandwidth{scroll-margin-top:60px}}
 .toc a{font:600 11px ui-monospace,SFMono-Regular,Menlo,monospace;padding:5px 10px;
 border-radius:7px;border:1px solid var(--line);background:var(--card);
 color:var(--muted);text-decoration:none}
