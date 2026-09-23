@@ -1793,6 +1793,25 @@ def psi_scopes(runs: list[Run]) -> dict[str, str]:
     return out
 
 
+def _engine_grouped(runs: list[Run], cols: list[str], body: list[str]) -> str:
+    """A per-row table whose columns repeat once per engine, headed that way.
+
+    The label was in every header, so the stalls table read "sm-sift-perf-0923
+    waiting, sm-sift-perf-0923 blocked on disk, ..." five times per engine and
+    the hardware table six: the metric was the tail of a long string, and with
+    the table scrolled sideways nothing said where one engine's columns ended.
+    The label now spans its group once, the metrics sit under it, and each
+    group opens with a rule (`grp`) that the body rows repeat.
+    """
+    top = ('<tr><th rowspan="2">workload</th>'
+           + "".join(f'<th class="eng" colspan="{len(cols)}">{html.escape(r.label)}</th>'
+                     for r in runs) + "</tr>")
+    sub = "<tr>" + "".join(f'<th class="num{" grp" if i == 0 else ""}">{c}</th>'
+                           for _ in runs for i, c in enumerate(cols)) + "</tr>"
+    return (f'<div class="tablewrap"><table class="grouped"><thead>{top}{sub}</thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div>')
+
+
 def stalls_rows_table(runs: list[Run]) -> str:
     """Where a row's wall clock went when it was not running.
 
@@ -1820,28 +1839,21 @@ def stalls_rows_table(runs: list[Run]) -> str:
         cells, any_value = [], False
         for run in runs:
             row = run.by_id().get(wid, {})
-            for text, present in (
+            for i, (text, present) in enumerate((
                     _cell(row, "runqueue_wait_s", 1000, " ms", 1),
                     _cell(row, "blkio_delay_s", 1000, " ms", 0),
                     _psi_pair_cell(row, "psi_cpu"),
                     _psi_pair_cell(row, "psi_io"),
-                    _psi_pair_cell(row, "psi_mem")):
+                    _psi_pair_cell(row, "psi_mem"))):
                 any_value = any_value or present
-                cells.append(f'<td class="num">{text}</td>')
+                cells.append(f'<td class="num{" grp" if i == 0 else ""}">{text}</td>')
         if any_value:
             body.append(f'<tr><td class="wid" title="{describe(wid)}">{wid}</td>'
                         f'{"".join(cells)}</tr>')
     if not body:
         return ""
-    head = "<th>workload</th>" + "".join(
-        f'<th class="num">{r.label} waiting</th>'
-        f'<th class="num">{r.label} blocked on disk</th>'
-        f'<th class="num">{r.label} cpu some/full</th>'
-        f'<th class="num">{r.label} io some/full</th>'
-        f'<th class="num">{r.label} memory some/full</th>'
-        for r in runs)
-    return (f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
+    return _engine_grouped(runs, ["waiting", "blocked on disk", "cpu some/full",
+                                  "io some/full", "memory some/full"], body)
 
 
 def perf_arms(runs: list[Run]) -> dict[str, str]:
@@ -1966,7 +1978,7 @@ def hardware_rows_table(runs: list[Run]) -> str:
         cells, any_value = [], False
         for run in runs:
             row = run.by_id().get(wid, {})
-            for text, present in (
+            for i, (text, present) in enumerate((
                     _perf_cell(row, "ipc", 2),
                     _freq_cell(row),
                     _perf_cell(row, "branch_mpki", 2),
@@ -1976,23 +1988,16 @@ def hardware_rows_table(runs: list[Run]) -> str:
                     # assumed to be 64.
                     _per_query_cell(row, "perf_dram_fills", 1,
                                     perfstat.line_bytes() / 1024, " KiB"),
-                    _per_query_cell(row, "perf_dtlb_walks", 1)):
+                    _per_query_cell(row, "perf_dtlb_walks", 1))):
                 any_value = any_value or present
-                cells.append(f'<td class="num">{text}</td>')
+                cells.append(f'<td class="num{" grp" if i == 0 else ""}">{text}</td>')
         if any_value:
             body.append(f'<tr><td class="wid" title="{describe(wid)}">{wid}</td>'
                         f'{"".join(cells)}</tr>')
     if not body:
         return ""
-    head = "<th>workload</th>" + "".join(
-        f'<th class="num">{r.label} IPC</th><th class="num">{r.label} GHz</th>'
-        f'<th class="num">{r.label} branch MPKI</th>'
-        f'<th class="num">{r.label} cycles/query</th>'
-        f'<th class="num">{r.label} demand DRAM/query</th>'
-        f'<th class="num">{r.label} TLB walks/query</th>'
-        for r in runs)
-    return (f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
+    return _engine_grouped(runs, ["IPC", "GHz", "branch MPKI", "cycles/query",
+                                  "demand DRAM/query", "TLB walks/query"], body)
 
 
 def _c2c_fills(row: dict) -> float | None:
@@ -3187,8 +3192,14 @@ td{padding:9px 13px;border-bottom:1px solid var(--line);vertical-align:top}
 tr:last-child td{border-bottom:0}
 /* The hardware and stall tables scroll sideways, and past the first screen of
    columns nothing said which row a number was on. The row id stays put. */
-.tablewrap th:first-child,.tablewrap td:first-child{position:sticky;left:0;z-index:1;
-background:var(--card)}
+.tablewrap thead tr:first-child th:first-child,.tablewrap td:first-child{position:sticky;
+left:0;z-index:1;background:var(--card)}
+/* Engine-grouped tables: the label once over its columns, and a rule where
+   one engine's group ends and the next begins. */
+table.grouped th.eng{text-align:center;color:var(--ink);border-left:1px solid var(--line);
+border-bottom:1px solid var(--line)}
+table.grouped th[rowspan]{vertical-align:bottom}
+table.grouped .grp{border-left:1px solid var(--line)}
 tbody tr:hover td{background:color-mix(in srgb,var(--accent) 7%,var(--card))}
 .wid{font:600 12.5px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
 .desc{color:var(--muted)}

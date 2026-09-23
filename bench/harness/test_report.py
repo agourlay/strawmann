@@ -2047,6 +2047,27 @@ class InstrumentTests(unittest.TestCase):
         # recomputed from the CPU time sitting right there.
         self.assertNotIn("nominal", html)
 
+    def test_stall_and_hardware_headers_name_each_engine_once(self):
+        """Every column header repeated the label, five times per engine in the
+        stalls table and six in the hardware table."""
+        report = self.report
+        stall = _row("W3", 1.0, runqueue_wait_s=0.01)
+        perf = _row("W3", 1.0, n_queries=1000, perf_set="default",
+                    perf_cycles=1e9, perf_instructions=2e9, perf_task_clock_s=1.0)
+        for table, rows, cols in (
+                (report.stalls_rows_table, [stall], 5),
+                (report.hardware_rows_table, [perf], 6)):
+            html = table(self._runs(rows, rows))
+            head = html.split("</thead>", 1)[0]
+            for label in ("e0", "e1"):
+                self.assertEqual(head.count(f">{label}<"), 1, label)
+                self.assertIn(f'colspan="{cols}">{label}</th>', head)
+            self.assertNotIn("e0 ", head)
+            # A rule opens each engine's group, in the header and on every row.
+            self.assertEqual(head.count('class="num grp"'), 2)
+            body = html.split("<tbody>", 1)[1]
+            self.assertEqual(body.count('class="num grp"'), 2)
+
     def test_arms_measured_with_different_instruments_are_named(self):
         report = self.report
         runs = self._runs([_row("W3", 1.0, perf_set="default", perf_cycles=1e9)],
