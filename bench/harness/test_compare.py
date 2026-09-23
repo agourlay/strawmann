@@ -41,6 +41,19 @@ class CompareTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_the_share_of_the_append_the_search_covered_survives_the_trim(self):
+        """Stripped whole as the complement of `write overlap`, which it is not:
+        the front page read "[append 2,000 points/s]" for a search that was
+        there for 11% of the write."""
+        trim = self.m["compare"].trim_row_note
+        note = ("concurrent append of synthetic vectors; recall not measured; search "
+                "finished 22.2 s before the append did (11% of the append was covered); "
+                "append 2,000 points/s")
+        self.assertEqual(trim(note), "search covered 11% of the append; append 2,000 points/s")
+        # A note from before the percentage was recorded loses the seconds as before.
+        self.assertEqual(trim("search finished 13.9 s before the append did; "
+                              "append 2,000 points/s"), "append 2,000 points/s")
+
     def test_segment_confound_counts_graphs_where_it_can(self):
         """"Held 2 segments" against 1 was a caveat about nothing when the
         second was the empty appendable; read back per segment, it says so."""

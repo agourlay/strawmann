@@ -1487,8 +1487,6 @@ _REDUNDANT_CLAUSES = (
     # policy note now carries.
     re.compile(r";?\s*append finished [\d.]+ s before the search did"
                r"(\s*\([^)]*\))?"),
-    re.compile(r";?\s*search finished [\d.]+ s before the append did"
-               r"(\s*\([^)]*\))?"),
     # "no recall join" says this in the policy note.
     re.compile(r";?\s*recall not measured"),
     # The policy note names the workload; the per-engine bracket carries numbers.
@@ -1496,8 +1494,23 @@ _REDUNDANT_CLAUSES = (
 )
 
 
+#: The one part of "search finished N s before the append did (P% of the
+#: append was covered)" that nothing else says. It was stripped whole as the
+#: complement of `write overlap`, which it is not: overlap is the share of the
+#: *search* that ran under the writer, 100% on every W11 row, and this is the
+#: share of the *write* the search was there for, 11% on strawmANN's
+#: W11-steady. The front page read "mixed read/write: [append 2,000 points/s]"
+#: with nothing saying most of the append landed after the search ended.
+_COVERAGE = re.compile(r"(;?\s*)search finished [\d.]+ s before the append did"
+                       r"\s*\((\d+)% of the append was covered\)")
+_COVERAGE_ANY = re.compile(r";?\s*search finished [\d.]+ s before the append did"
+                           r"(\s*\([^)]*\))?")
+
+
 def trim_row_note(note: str) -> str:
     """A stored row note with the clauses the policy note repeats removed."""
+    note = _COVERAGE.sub(r"\1search covered \2% of the append", note)
+    note = _COVERAGE_ANY.sub("", note)
     for pat in _REDUNDANT_CLAUSES:
         note = pat.sub("", note)
     return note.strip().strip(";").strip()
