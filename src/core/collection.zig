@@ -2165,10 +2165,21 @@ pub fn quantizeWith(coll: *Collection, mode: quant_mod.Mode, threads: usize) !vo
 /// nothing and returns.
 fn logGraphQuality(alloc: std.mem.Allocator, graph: *const hnsw.Graph) void {
     const r = build_hnsw.reachability(alloc, graph) catch return;
+    // `seed` is on this line because nothing else in a run records it, and it
+    // is not decoration: `decisions.md` measures four seeds over one corpus in
+    // one insertion order at 0.99955 / 0.99955 / 0.99739 / 0.99794 of recall@10
+    // at `ef` 512, a spread of 0.00216. That is wider than the pass-to-pass
+    // draw the harness bands, so a recall figure whose seed is not recorded is
+    // a figure missing 0.002 of its own uncertainty. §8.7 asks for the seed in
+    // `meta.json`; this is what lets a *run* carry it too.
     std.debug.print(
         "index: graph checksum={x} nodes={d} unreachable={d} in_degree_zero={d} " ++
-            "unreachable_with_out_edges={d}\n",
-        .{ graph.checksum(), graph.count, graph.count -| r.reachable, r.in_degree_zero, r.unreachable_with_out_edges },
+            "unreachable_with_out_edges={d} seed=0x{x}\n",
+        .{
+            graph.checksum(),             graph.count,
+            graph.count -| r.reachable,   r.in_degree_zero,
+            r.unreachable_with_out_edges, graph.params.seed,
+        },
     );
 }
 

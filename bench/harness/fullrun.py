@@ -506,10 +506,23 @@ def start_strawmann(server_cpus: str, port: int, log: Path,
 #: `collection.logGraphQuality`'s line, which the engine prints after every
 #: build publishes. Parsed rather than re-derived: the alternative is a second
 #: implementation of reachability in Python over a graph the harness cannot see.
+#: `seed` is optional so a log written before the engine printed it still
+#: parses: an older arm reads as "not recorded" rather than failing to load.
 _GRAPH_LINE = re.compile(
     r"index: graph checksum=(?P<checksum>[0-9a-f]+) nodes=(?P<nodes>\d+) "
     r"unreachable=(?P<unreachable>\d+) in_degree_zero=(?P<in_degree_zero>\d+) "
-    r"unreachable_with_out_edges=(?P<unreachable_with_out_edges>\d+)")
+    r"unreachable_with_out_edges=(?P<unreachable_with_out_edges>\d+)"
+    r"(?: seed=0x(?P<seed>[0-9a-f]+))?")
+
+
+def _graph_field(key: str, value: str) -> object:
+    """One field of a graph line, typed.
+
+    `checksum` and `seed` stay hex strings: both are identities rather than
+    quantities, and an int would print the seed in a base nobody configured it
+    in. Everything else is a count.
+    """
+    return value if key in ("checksum", "seed") else int(value)
 
 
 def record_graph_quality(label: str) -> None:
@@ -531,7 +544,7 @@ def record_graph_quality(label: str) -> None:
         return
     try:
         builds = [
-            {k: (v if k == "checksum" else int(v)) for k, v in m.groupdict().items()}
+            {k: _graph_field(k, v) for k, v in m.groupdict().items() if v is not None}
             for m in _GRAPH_LINE.finditer(log.read_text(errors="replace"))
         ]
         if not builds:
@@ -542,8 +555,16 @@ def record_graph_quality(label: str) -> None:
     except (OSError, ValueError):
         return
     worst = max(builds, key=lambda b: b["unreachable"])
+    seeds = {b["seed"] for b in builds if b.get("seed")}
+    # Named in the line because the seed is worth 0.00216 of recall@10 at
+    # `ef` 512 over four of them (`decisions.md`), which is wider than the
+    # spread this run will band. More than one means two collections were
+    # built at different seeds, which no current path does and which would
+    # make their recall curves incomparable.
+    seed = f", seed 0x{seeds.pop()}" if len(seeds) == 1 else (
+        f", {len(seeds)} DIFFERENT SEEDS" if seeds else ", seed not recorded")
     print(f"  graph: {len(builds)} build(s) published, worst "
-          f"{worst['unreachable']:,} of {worst['nodes']:,} unreachable", flush=True)
+          f"{worst['unreachable']:,} of {worst['nodes']:,} unreachable{seed}", flush=True)
 
 
 def stop_strawmann(p: subprocess.Popen | None) -> None:

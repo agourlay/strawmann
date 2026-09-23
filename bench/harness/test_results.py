@@ -978,3 +978,56 @@ class ResultsSinkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GraphSeedProvenanceTests(unittest.TestCase):
+    """The level seed reaches `run.json`, and an older log still parses.
+
+    `decisions.md` measures four seeds over one corpus in one insertion order
+    at 0.99955 / 0.99955 / 0.99739 / 0.99794 of recall@10 at `ef` 512. The
+    choice is therefore worth 0.00216, wider than the pass-to-pass spread the
+    harness bands, and until now no part of a run recorded which one was used.
+    """
+
+    GRAPH_LINE = ("index: graph checksum=abc123 nodes=1000000 unreachable=0 "
+                  "in_degree_zero=0 unreachable_with_out_edges=0 seed=0x57ea3111\n")
+    #: What the engine printed before the seed was on the line.
+    OLD_LINE = ("index: graph checksum=def456 nodes=1000 unreachable=2 "
+                "in_degree_zero=1 unreachable_with_out_edges=0\n")
+
+    def _record(self, log_text):
+        import fullrun
+        with tempfile.TemporaryDirectory() as d:
+            label = "seed-arm"
+            arm = Path(d) / label
+            arm.mkdir()
+            (arm / "server.log").write_text(log_text)
+            (arm / "run.json").write_text(json.dumps({"label": label}))
+            with mock.patch.object(fullrun, "RESULTS", Path(d)), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                fullrun.record_graph_quality(label)
+            return json.loads((arm / "run.json").read_text()), out.getvalue()
+
+    def test_seed_is_carried_into_the_run_record(self):
+        doc, printed = self._record(self.GRAPH_LINE)
+        self.assertEqual(doc["graph_builds"][0]["seed"], "57ea3111")
+        # Hex, not an int: the seed is an identity, and 1475248401 is not the
+        # number anyone configured.
+        self.assertIsInstance(doc["graph_builds"][0]["seed"], str)
+        self.assertIn("seed 0x57ea3111", printed)
+
+    def test_a_log_without_a_seed_still_loads(self):
+        # The field is optional so an arm measured before this existed reads as
+        # "not recorded" rather than failing to parse and losing the rest.
+        doc, printed = self._record(self.OLD_LINE)
+        self.assertEqual(doc["graph_builds"][0]["nodes"], 1000)
+        self.assertNotIn("seed", doc["graph_builds"][0])
+        self.assertIn("seed not recorded", printed)
+
+    def test_two_seeds_in_one_arm_are_called_out(self):
+        # No current path builds two collections at different seeds, and if one
+        # ever does their recall curves are not comparable.
+        doc, printed = self._record(self.GRAPH_LINE + self.GRAPH_LINE.replace(
+            "seed=0x57ea3111", "seed=0x1"))
+        self.assertEqual(len(doc["graph_builds"]), 2)
+        self.assertIn("2 DIFFERENT SEEDS", printed)
