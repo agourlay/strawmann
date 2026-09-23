@@ -1521,6 +1521,111 @@ class FullrunRowInvocationTests(unittest.TestCase):
             self.assertEqual(
                 self.f.resolve_rps_reference("auto", ["prev-sm", "prev-qd"]), 3484.0)
 
+    def _dirs(self, *names):
+        for n in names:
+            (self.f.ROOT / "bench/results" / n).mkdir(parents=True, exist_ok=True)
+
+    def test_the_previous_pair_is_found_across_both_spellings(self):
+        """Every published label carries `rel-` before the date, and `sort` was
+        lexicographic, so `rel-0903` beat `0910` on `r` > `0`."""
+        f = self.f
+        self._dirs("sm-dbp1m-perf-rel-0903", "qd-dbp1m-perf-rel-0903")
+        self.assertEqual(f.previous_pair(["sm-dbp1m-perf-0924", "qd-dbp1m-perf-0924"]),
+                         ["sm-dbp1m-perf-rel-0903", "qd-dbp1m-perf-rel-0903"])
+        self._dirs("sm-dbp1m-perf-0910")
+        self.assertEqual(f.previous_pair(["sm-dbp1m-perf-0924", "qd-dbp1m-perf-0924"])[0],
+                         "sm-dbp1m-perf-0910")
+
+    def test_a_pair_is_not_its_own_previous_and_a_rep_is_not_a_pair(self):
+        f = self.f
+        self._dirs("sm-sift-perf-0923", "sm-sift-perf-rel-0921", "sm-sift-perf-rel-0921-rep1")
+        self.assertEqual(f.previous_pair(["sm-sift-perf-0923", "qd-sift-perf-0923"])[0],
+                         "sm-sift-perf-rel-0921")
+
+    def test_labels_off_the_convention_have_no_previous_pair(self):
+        f = self.f
+        self._dirs("sm-sift-perf-rel-0921")
+        for pair in (["strawmann", "qdrant"], ["sm-sift-perf-0924", "qd-dbp1m-perf-0924"],
+                     ["sm-sift-perf-0924"], ["sm-dbp100k-perf-0924", "qd-dbp100k-perf-0924"]):
+            self.assertIsNone(f.previous_pair(pair), pair)
+
+    def test_auto_on_a_fresh_pair_reads_the_previous_one(self):
+        """A night's labels are new, so `auto` had nothing to read and the
+        open-loop arms each used their own engine's saturation."""
+        f = self.f
+        for lbl, qps in (("sm-sift-perf-rel-0921", 22_000), ("qd-sift-perf-rel-0921", 10_351)):
+            d = f.ROOT / "bench/results" / lbl
+            d.mkdir(parents=True)
+            (d / "rows.json").write_text(json.dumps(
+                [{"id": f.workloads.SATURATION_ROW, "qps": qps}]))
+            (d / "run.json").write_text(json.dumps({"perf_set": "default"}))
+        with mock.patch.object(f, "PERF_SET", "default"), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            got = f.resolve_rps_reference("auto", ["sm-sift-perf-0924", "qd-sift-perf-0924"])
+        self.assertEqual(got, 10_351.0)
+        self.assertIn("reading the previous pair", out.getvalue())
+        # A pair with rows of its own reads them, as before.
+        with mock.patch.object(f, "PERF_SET", "default"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(f.resolve_rps_reference(
+                "auto", ["sm-sift-perf-rel-0921", "qd-sift-perf-rel-0921"]), 10_351.0)
+
+    def _admit(self, asks, wait_min=30, lax=False):
+        """`wait_until_admitted` over canned answers, on a fake clock.
+
+        Each ask is "ports" (a port is held), False (the gate refuses) or True.
+        """
+        f, asks, slept, now = self.f, list(asks), [], [0.0]
+        state = {}
+
+        def ports():
+            state["ask"] = asks.pop(0)
+            return ["6334 qdrant"] if state["ask"] == "ports" else []
+
+        def gate(_lax):
+            return f.Gate(proceed=state["ask"] is True, failed=state["ask"] is not True)
+
+        def sleep(s):
+            slept.append(s)
+            now[0] += s
+
+        with mock.patch.object(f, "ports_in_use", ports), \
+                mock.patch.object(f, "gate", gate), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            ok = f.wait_until_admitted(lax, wait_min, sleep=sleep, clock=lambda: now[0])
+        return bool(ok), len(slept), err.getvalue()
+
+    def test_without_waiting_a_refusal_is_final(self):
+        self.assertEqual(self._admit([False], wait_min=0)[:2], (False, 0))
+        ok, sleeps, err = self._admit(["ports"], wait_min=0)
+        self.assertEqual((ok, sleeps), (False, 0))
+        self.assertIn("port(s) already in use", err)
+        self.assertNotIn("gave up", err)
+
+    def test_a_busy_host_is_asked_again_until_admitted(self):
+        """`nightrun` did this by relaunching the process and grepping its
+        output for "refusing to run"; asked before anything is built there is
+        nothing to tell apart."""
+        self.assertEqual(self._admit([False, "ports", True])[:2], (True, 2))
+
+    def test_a_lax_admission_keeps_the_failed_gate(self):
+        """`--lax` proceeds on a failed gate, and the render is told so from
+        this verdict: a bare True lost it."""
+        f = self.f
+        with mock.patch.object(f, "ports_in_use", lambda: []), \
+                mock.patch.object(f, "gate", lambda lax: f.Gate(proceed=True, failed=True)):
+            v = f.wait_until_admitted(True, 0)
+        self.assertTrue(v)
+        self.assertTrue(v.failed)
+
+    def test_waiting_gives_up_at_the_deadline(self):
+        # 30 min at 5 min per ask: asks at 0, 5, ... 30, and the one at the
+        # deadline is the last.
+        ok, sleeps, err = self._admit([False] * 10, wait_min=30)
+        self.assertEqual((ok, sleeps), (False, 6))
+        self.assertIn("gave up after 7 ask(s)", err)
+
     def test_every_pass_of_an_arm_is_given_the_same_n_pin(self):
         # Keyed on the arm's base label, so rep1/rep2/rep3 share one verdict and
         # the two engines keep their own: the slower engine's rows are already
@@ -1626,10 +1731,10 @@ class FullrunPreflightTests(unittest.TestCase):
         self.assertIn("pinned", err)
 
     def test_the_refusal_is_not_worded_as_the_gate_refuses(self):
-        """`nightrun.py` retries "refusing to run" every five minutes for two
-        hours, because that is the §7.1 gate's phrase and a busy host goes
-        quiet. A checkout on the wrong commit does not, so borrowing the
-        wording here would turn a one-second failure into a two-hour one."""
+        """"refusing to run" is the §7.1 gate's phrase, and a busy host goes
+        quiet, so `--wait-for-gate` asks again. A checkout on the wrong commit
+        does not, and a refusal worded like the gate's reads as a busy host to
+        whoever, or whatever analysis, counts the gate's refusals."""
         _, err = self._main(pin="bfb is not the pin")
         self.assertNotIn("refusing to run", err)
 
@@ -2410,12 +2515,7 @@ class ClientConcurrencyTests(unittest.TestCase):
 
 
 class NightrunTests(unittest.TestCase):
-    """`nightrun.py`: the unattended publication run's own logic.
-
-    It was `nightrun.sh`, tested only through two read-only flags, and every bug
-    it had was in the logic those flags did not reach. Each step is a function
-    now, and each is driven here from a temp tree.
-    """
+    """`nightrun.py`: what an unattended night adds around `fullrun.py`."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -2427,89 +2527,12 @@ class NightrunTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _labels(self, *names: str):
-        for n in names:
-            (self.root / "bench/results" / n).mkdir(parents=True, exist_ok=True)
-
-    def _prev(self, date: str, dataset: str) -> str | None:
-        sm, _ = self.n.labels(date, dataset)
-        return self.n.prev_pair(self.root / "bench/results", dataset, sm)
-
     def test_labels_are_stamped_with_the_date(self):
         self.assertEqual(self.n.labels("2026-09-23", "sift1m"),
                          ("sm-sift-perf-0923", "qd-sift-perf-0923"))
         self.assertEqual(self.n.labels("2026-10-01", "dbpedia-openai-1m"),
                          ("sm-dbp1m-perf-1001", "qd-dbp1m-perf-1001"))
         self.assertEqual(self.n.family("glove-100"), "glove-100-perf")
-
-    def test_a_rel_label_is_found(self):
-        """The regression: every published label carries `rel-` before the date,
-        and the old glob required the date to follow the family directly."""
-        self._labels("sm-dbp1m-perf-rel-0903", "qd-dbp1m-perf-rel-0903")
-        self.assertEqual(self._prev("2026-09-23", "dbpedia-openai-1m"),
-                         "sm-dbp1m-perf-rel-0903")
-
-    def test_newest_by_date_across_both_spellings(self):
-        """`sort` was lexicographic, so `rel-0903` beat `0910` on `r` > `0`."""
-        self._labels("sm-dbp1m-perf-rel-0903", "sm-dbp1m-perf-0910")
-        self.assertEqual(self._prev("2026-09-23", "dbpedia-openai-1m"),
-                         "sm-dbp1m-perf-0910")
-
-    def test_the_runs_own_label_is_not_its_own_reference(self):
-        self._labels("sm-sift-perf-0923", "sm-sift-perf-rel-0921")
-        self.assertEqual(self._prev("2026-09-23", "sift1m"), "sm-sift-perf-rel-0921")
-
-    def test_nothing_when_the_family_has_no_previous_pair(self):
-        self._labels("sm-dbp100k-perf-rel-0903")
-        self.assertIsNone(self._prev("2026-09-23", "dbpedia-openai-1m"))
-
-    def test_a_rep_directory_is_not_a_pair(self):
-        """`-rep1` does not end in four digits and must not win the pick."""
-        self._labels("sm-sift-perf-rel-0921", "sm-sift-perf-rel-0921-rep1")
-        self.assertEqual(self._prev("2026-09-23", "sift1m"), "sm-sift-perf-rel-0921")
-
-    def test_print_prev_writes_nothing(self):
-        """It has to be safe to ask before a run: no log, no night directory."""
-        self._labels("sm-sift-perf-rel-0921")
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(self.n.main(["--print-prev", "2026-09-23"], root=self.root), 0)
-        self.assertTrue(out.getvalue().strip().endswith("sm-sift-perf-rel-0921"))
-        self.assertFalse((self.root / "bench/results/night-20260923").exists())
-
-    def test_a_resolved_reference_is_rounded(self):
-        self.assertEqual(self.n.resolve_ref("sm-x-0921", lambda a, l: 10350.985), 10351)
-
-    def test_the_resolver_is_asked_about_both_arms(self):
-        seen = []
-        self.n.resolve_ref("sm-sift-perf-rel-0921", lambda a, l: seen.append((a, l)))
-        self.assertEqual(seen, [("auto", ["sm-sift-perf-rel-0921", "qd-sift-perf-rel-0921"])])
-
-    def test_a_printed_refusal_is_not_a_reference(self):
-        """The regression, and it cost a launch: the resolver printed its
-        refusal on stdout and returned None, and the bash helper took the last
-        line of stdout as the number. In-process there is only the return."""
-        def refuses(arg, labels):
-            print("!! ignoring qd-x W4 of 10,351 qps for --rps-reference")
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertIsNone(self.n.resolve_ref("sm-x-0921", refuses))
-
-    def test_a_raising_resolver_is_not_a_reference(self):
-        def raises(arg, labels):
-            raise ValueError("nothing to read")
-        self.assertIsNone(self.n.resolve_ref("sm-x-0921", raises))
-
-    def test_the_real_resolver_is_told_which_instrument_this_run_uses(self):
-        """It compares a candidate's `perf_set` against its own module global,
-        which is None until `fullrun` parses arguments."""
-        import fullrun
-        was = fullrun.PERF_SET
-        try:
-            fullrun.PERF_SET = None
-            with mock.patch.object(fullrun, "resolve_rps_reference",
-                                   lambda a, l: 1 if fullrun.PERF_SET == "default" else None):
-                self.assertEqual(self.n.resolve_ref("sm-x-0921"), 1)
-        finally:
-            fullrun.PERF_SET = was
 
     def test_a_second_run_of_one_night_refuses_rather_than_sharing_a_log(self):
         """A failed launch's analysis was still running when its directory was
@@ -2530,55 +2553,6 @@ class NightrunTests(unittest.TestCase):
         self.assertEqual(rc, self.n.EXIT_NO_QDRANT)
         self.assertIn("EXIT=97", (self.root / "bench/results/night-20260923/night.log")
                       .read_text())
-
-    def _loop(self, outputs, busy=None, max_tries=5):
-        """`run_until_admitted` over canned `fullrun.py` outputs, never sleeping."""
-        night = self.root / "night"
-        night.mkdir(exist_ok=True)
-        log = self.n.Log(night / "night.log")
-        runs, sleeps = [], []
-        busy = list(busy or [])
-
-        def run(cmd, out):
-            rc, text = outputs[len(runs)]
-            runs.append(cmd)
-            out.write_text(text)
-            return rc
-
-        rc = self.n.run_until_admitted(["fullrun"], night, log, max_tries=max_tries,
-                                       ports_busy=lambda: busy.pop(0) if busy else False,
-                                       run=run, sleep=sleeps.append)
-        return rc, len(runs), len(sleeps), (night / "night.log").read_text()
-
-    def test_a_gate_refusal_is_asked_again(self):
-        refused = (1, "§7.1 gate: refusing to run: load 4.0")
-        rc, runs, sleeps, log = self._loop([refused, refused, (0, "done")])
-        self.assertEqual((rc, runs, sleeps), (0, 3, 2))
-        self.assertIn("gate refused (attempt 2)", log)
-        self.assertIn("EXIT=0", log)
-
-    def test_any_other_failure_is_read_not_repeated(self):
-        rc, runs, sleeps, log = self._loop([(3, "Traceback: engine died")])
-        self.assertEqual((rc, runs, sleeps), (3, 1, 0))
-        self.assertIn("not a gate refusal; not retried", log)
-
-    def test_a_refusal_after_pass_one_began_is_not_the_gate(self):
-        """The phrase can appear later in a run that did start measuring."""
-        rc, runs, _, _ = self._loop([(2, "=== pass 1 of 3 ===\n... refusing to run ...")])
-        self.assertEqual((rc, runs), (2, 1))
-
-    def test_asking_gives_up_after_max_tries(self):
-        refused = (1, "refusing to run")
-        rc, runs, sleeps, log = self._loop([refused] * 3, max_tries=3)
-        self.assertEqual((rc, runs, sleeps), (1, 3, 2))
-        self.assertIn("gave up after 3 refusals", log)
-
-    def test_a_held_engine_port_waits_without_running(self):
-        rc, runs, sleeps, log = self._loop([(0, "done")], busy=[True, True])
-        self.assertEqual((rc, runs, sleeps), (0, 1, 2))
-        self.assertIn("already bound", log)
-        rc, runs, _, log = self._loop([], busy=[True] * 5, max_tries=2)
-        self.assertEqual((rc, runs), (self.n.EXIT_PORTS_BUSY, 0))
 
     def test_the_run_keeps_a_copy_of_its_report(self):
         """A later re-render of the same pair writes the same file name, and
@@ -2602,38 +2576,6 @@ class NightrunTests(unittest.TestCase):
                                              self.n.Log(night / "night.log")))
         self.assertEqual((night / "report.path").read_text().strip(), "none")
 
-    def test_a_whole_night_end_to_end_with_a_stub_fullrun(self):
-        """Every step once, in order, from a temp tree: provenance, the
-        admitted attempt, the report copy, and the log's closing line."""
-        results = self.root / "bench/results"
-        (self.root / "bench/harness").mkdir(parents=True, exist_ok=True)
-        (self.root / "bench/harness/fullrun.py").write_text(
-            "import sys, pathlib\n"
-            "a = sys.argv\n"
-            "sm, qd = a[a.index('--strawmann-label') + 1], a[a.index('--qdrant-label') + 1]\n"
-            "pathlib.Path('bench/results/report-sift1m-' + sm + '-vs-' + qd + "
-            "'-2026-09-24-0230.html').write_text('page')\n"
-            "print('args', ' '.join(a[1:]))\n")
-        binary = self.root / "qdrant"
-        binary.write_text("#!/bin/sh\n")
-        binary.chmod(0o755)
-        env = {"QDRANT_BINARY": str(binary), "HOME": str(self.root)}   # no claude here
-        with mock.patch.dict(os.environ, env), \
-                mock.patch.object(self.n, "port_bound", lambda port: False):
-            rc = self.n.main(["2026-09-24", "sift1m"], root=self.root)
-        self.assertEqual(rc, 0)
-        night = results / "night-20260924"
-        log = (night / "night.log").read_text()
-        for line in ("labels sm-sift-perf-0924 / qd-sift-perf-0924", "qdrant binary",
-                     "no previous sift-perf pair", "=== attempt 1 ===", "EXIT=0",
-                     "report copied", "no claude on PATH", "ALL_DONE"):
-            self.assertIn(line, log)
-        out = (night / "fullrun_attempt1.out").read_text()
-        self.assertIn("--segment-policy equal-work --perf", out)
-        self.assertNotIn("--rps-reference", out)
-        self.assertTrue((night / "report-sift1m-sm-sift-perf-0924-vs-qd-sift-perf-0924-"
-                                  "2026-09-24-0230.html").exists())
-
     def test_the_provenance_line_says_when_the_binary_predates_its_commit(self):
         repo = self.root / "qdrant"
         (repo / "target/release").mkdir(parents=True)
@@ -2649,6 +2591,41 @@ class NightrunTests(unittest.TestCase):
         self.assertIn("sha256=", line)
         os.utime(binary)   # now: built after the commit
         self.assertNotIn("PREDATES", self.n.qdrant_provenance(binary))
+
+    def test_a_whole_night_end_to_end_with_a_stub_fullrun(self):
+        """Every step once, in order, from a temp tree: provenance, the one
+        `fullrun.py` call and its flags, the report copy, the closing line."""
+        results = self.root / "bench/results"
+        (self.root / "bench/harness").mkdir(parents=True, exist_ok=True)
+        (self.root / "bench/harness/fullrun.py").write_text(
+            "import sys, pathlib\n"
+            "a = sys.argv\n"
+            "sm, qd = a[a.index('--strawmann-label') + 1], a[a.index('--qdrant-label') + 1]\n"
+            "pathlib.Path('bench/results/report-sift1m-' + sm + '-vs-' + qd + "
+            "'-2026-09-24-0230.html').write_text('page')\n"
+            "print('args', ' '.join(a[1:]))\n")
+        binary = self.root / "qdrant"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        env = {"QDRANT_BINARY": str(binary), "HOME": str(self.root)}   # no claude here
+        import fullrun
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(fullrun, "previous_pair", lambda labels: None):
+            rc = self.n.main(["2026-09-24", "sift1m"], root=self.root)
+        self.assertEqual(rc, 0)
+        night = results / "night-20260924"
+        log = (night / "night.log").read_text()
+        for line in ("labels sm-sift-perf-0924 / qd-sift-perf-0924", "qdrant binary",
+                     "no previous sift-perf pair", "fullrun.py exited 0",
+                     "report copied", "no claude on PATH", "ALL_DONE"):
+            self.assertIn(line, log)
+        out = (night / "fullrun.out").read_text()
+        self.assertIn("--segment-policy equal-work --perf", out)
+        self.assertIn("--wait-for-gate 120", out)
+        # The reference is `fullrun`'s `auto`, not a number decided here.
+        self.assertNotIn("--rps-reference", out)
+        self.assertTrue((night / "report-sift1m-sm-sift-perf-0924-vs-qd-sift-perf-0924-"
+                                  "2026-09-24-0230.html").exists())
 
 
 class OversamplingPolicyTests(unittest.TestCase):

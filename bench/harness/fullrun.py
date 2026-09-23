@@ -232,6 +232,14 @@ def resolve_rps_reference(arg: str | None, labels: list[str]) -> float | None:
         except (OSError, json.JSONDecodeError):
             return False, None
 
+    # A fresh pair (a night's date-stamped labels) has no W4 of its own to
+    # read, so `auto` reads the previous pair of the same family instead.
+    if not any((ROOT / "bench/results" / x / "rows.json").is_file() for x in labels):
+        prev = previous_pair(labels)
+        if prev is not None:
+            print(f"--rps-reference auto: {', '.join(labels)} have no rows yet; "
+                  f"reading the previous pair, {', '.join(prev)}", flush=True)
+            labels = prev
     seen, wrong_instrument = {}, {}
     for label in labels:
         rows = ROOT / "bench/results" / label / "rows.json"
@@ -273,6 +281,74 @@ def resolve_rps_reference(arg: str | None, labels: list[str]) -> float | None:
           f"{workloads.SATURATION_ROW} — the slower of "
           + ", ".join(f"{k} {v:,.0f}" for k, v in seen.items()), flush=True)
     return seen[slower]
+
+
+def previous_pair(labels: list[str]) -> list[str] | None:
+    """The newest earlier `sm-`/`qd-` pair of the family these labels belong to.
+
+    A family is a label with its date taken off: `sm-sift-perf-0924` and
+    `sm-sift-perf-rel-0921` are both `sm-sift-perf`, and `-rel-` is how every
+    published pair is spelled, so it is part of the date suffix and not of the
+    family. Ordered by the trailing MMDD, not lexicographically: `rel-0903`
+    sorted after `0910` on `r` > `0`, and the older pair won. A `-repN` pass
+    directory does not end in a date and is not a pair. None for labels that
+    do not follow the convention, or a family with no earlier pair.
+    """
+    dated = [re.fullmatch(r"(sm|qd)-(.+?)(?:-rel)?-\d{4}", x) for x in labels]
+    if len(labels) != 2 or not all(dated):
+        return None
+    if {m.group(1) for m in dated} != {"sm", "qd"} or len({m.group(2) for m in dated}) != 1:
+        return None
+    stem = "sm-" + dated[0].group(2)
+    found = []
+    for d in (ROOT / "bench/results").glob(f"{stem}-*"):
+        m = re.fullmatch(re.escape(stem) + r"(-rel)?-(\d{4})", d.name)
+        if m and d.is_dir() and d.name not in labels:
+            found.append((int(m.group(2)), d.name))
+    if not found:
+        return None
+    prev = max(found)[1]
+    return [prev, "qd-" + prev.removeprefix("sm-")]
+
+
+#: Between asks of a busy host, under `--wait-for-gate`.
+GATE_RETRY_S = 300
+
+
+def wait_until_admitted(lax: bool, wait_min: float,
+                        sleep=time.sleep, clock=time.monotonic) -> Gate:
+    """Ask the ports and the §7.1 gate, and under `--wait-for-gate` ask again.
+
+    An unattended run on a laptop that also builds things meets a busy host
+    more often than not, and asking every five minutes is what gets it
+    admitted. This was `nightrun`'s loop, which relaunched this whole process
+    per ask and grepped its output for "refusing to run" to tell a gate
+    refusal from any other failure. Asked here, before anything is built,
+    there is nothing to tell apart. Every other failure still stops the run at
+    once: a run that died mid-corpus must be read, not repeated.
+
+    Returns the gate's own verdict, since `failed` outlives admission: under
+    `--lax` a run proceeds on a failed gate and its render must say so.
+    """
+    deadline = clock() + wait_min * 60
+    ask = 0
+    while True:
+        ask += 1
+        if busy := ports_in_use():
+            print(f"port(s) already in use: {', '.join(busy)}\n"
+                  f"  the engine would bind, fail and be reported as "
+                  f"`exited immediately`, which names neither the port nor the "
+                  f"process. Free them and re-run.", file=sys.stderr)
+        elif verdict := gate(lax):
+            return verdict
+        if clock() + GATE_RETRY_S > deadline:
+            if wait_min:
+                print(f"!! --wait-for-gate {wait_min:g}: gave up after {ask} ask(s)",
+                      file=sys.stderr)
+            return Gate(proceed=False, failed=True)
+        print(f"--wait-for-gate: asking again in {GATE_RETRY_S // 60} min "
+              f"(ask {ask})", flush=True)
+        sleep(GATE_RETRY_S)
 
 
 def iso(stamp: str) -> dt.datetime:
@@ -1920,6 +1996,10 @@ def main(argv: list[str]) -> int:
                          "collection a row creates and the ground truth it is "
                          "scored against cannot disagree. Entries fetched but "
                          "not converted to fbin are absent from this list")
+    ap.add_argument("--wait-for-gate", type=float, default=0, metavar="MINUTES",
+                    help="when the engine ports are held or the §7.1 gate refuses, ask "
+                         "again every 5 min for up to this long instead of exiting; "
+                         "for unattended runs (default 0: refuse at once)")
     ap.add_argument("--lax", action="store_true",
                     help="run on a host that failed §7.1; unpublishable")
     ap.add_argument("--storage", default=os.environ.get("STORAGE_DIR"),
@@ -1968,8 +2048,10 @@ def main(argv: list[str]) -> int:
     # `workloads.py` refuses a row whose bfb is off the pin, but per invocation,
     # and only the accumulated return code is read at the end:
     # that cost twelve refused invocations, three empty passes and a traceback
-    # 500 lines from the cause. Not worded "refusing to run" — that is the gate's
-    # phrase, which `nightrun.py` retries for two hours, and a pin never clears.
+    # 500 lines from the cause. Checked before `wait_until_admitted`, which asks
+    # a busy host again for up to two hours: a pin never clears, so waiting on it
+    # would turn a one-second failure into a two-hour one. Not worded "refusing
+    # to run" either, which is the gate's phrase and reads as a busy host.
     if engines and (why := workloads.check_bfb_pin()):
         print(f"the load generator is not the pinned one:\n  {why}", file=sys.stderr)
         return 1
@@ -2059,13 +2141,6 @@ def main(argv: list[str]) -> int:
     print(f"placement   {PLACEMENT} (both engines; §7.4 compares at one residency)",
           flush=True)
 
-    if busy := ports_in_use():
-        print(f"port(s) already in use: {', '.join(busy)}\n"
-              f"  the engine would bind, fail and be reported as "
-              f"`exited immediately`, which names neither the port nor the "
-              f"process. Free them and re-run.", file=sys.stderr)
-        return 1
-
     # Said before the gate rather than after it: the gate settles for a minute
     # and then starts the run, and an operator who learns the cost afterwards
     # has already committed. dbpedia-openai-1m at --reps 3 is nine and a half
@@ -2095,7 +2170,7 @@ def main(argv: list[str]) -> int:
         print(f"estimate    unknown -- no previous {DATASET} run on this machine "
               f"to measure against", flush=True)
 
-    verdict = gate(args.lax)
+    verdict = wait_until_admitted(args.lax, args.wait_for_gate)
     if not verdict:
         return 1
 
