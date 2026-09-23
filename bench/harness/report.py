@@ -1488,7 +1488,40 @@ def _graph_quality_note(have: list[Run]) -> str:
     return (f" Over the same builds the engine reported unreachable nodes: "
             f"{'; '.join(out)} — a node nothing points at is invisible at any "
             f"ef, so that is where a graph-quality difference shows rather than "
-            f"being inferred from the recall beside it.")
+            f"being inferred from the recall beside it." + _seed_note(have))
+
+
+def _seed_note(have: list[Run]) -> str:
+    """Which level seed the graphs above were drawn at.
+
+    Not provenance trivia. Four seeds over one corpus, in one insertion order,
+    two builds each, returned 0.99955 / 0.99955 / 0.99739 / 0.99794 of recall@10
+    at `ef` 512 (`decisions.md`): the choice is worth 0.00216, wider than the
+    pass-to-pass spread this note sits under and wider than the gap between the
+    two engines there. A page that reports the spread and not the seed reports
+    the smaller of the two numbers.
+
+    Qdrant draws every point's level from a thread-local RNG seeded by the OS
+    (`segment_builder.rs`, `rand::rng()`), so it has no seed to name and this
+    says nothing for it.
+    """
+    out = []
+    for r in have:
+        seeds = sorted({b.get("seed") for b in ((r.meta or {}).get("graph_builds") or [])
+                        if b.get("seed")})
+        if len(seeds) == 1:
+            out.append(f"{r.label} 0x{seeds[0]}")
+        elif seeds:
+            # Two collections at two seeds is not a thing any path does, and
+            # their recall curves would not be comparable if it were.
+            out.append(f"{r.label} {len(seeds)} DIFFERENT SEEDS: "
+                       + ", ".join(f"0x{x}" for x in seeds))
+    if not out:
+        return ""
+    return (f" Level seed: {'; '.join(out)}. Four seeds over one corpus in one "
+            f"insertion order span 0.00216 of recall@10 at ef 512, wider than "
+            f"the spread above, so the seed is part of the number rather than "
+            f"a detail of how it was produced.")
 
 
 def storage_rows_table(runs: list[Run]) -> str:

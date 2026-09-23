@@ -1627,6 +1627,52 @@ class ReportHostTests(unittest.TestCase):
             self.assertNotIn("2.00x", html)
 
 
+class LevelSeedNoteTests(unittest.TestCase):
+    """The page names the seed its graphs were drawn at.
+
+    Four seeds over one corpus in one insertion order span 0.00216 of recall@10
+    at `ef` 512 (`decisions.md`), which is wider than the pass-to-pass spread
+    the note sits under. A report that gives the spread and withholds the seed
+    gives the smaller of the two numbers.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import jinja2  # noqa: F401
+            import pandas  # noqa: F401
+            import plotly  # noqa: F401
+        except ImportError as e:
+            raise unittest.SkipTest(
+                "report.py needs the uv project (jinja2/pandas/plotly)") from e
+        cls.report = importlib.import_module("report")
+
+    def _run(self, label, builds):
+        return self.report.Run(label, [], "", False, "h",
+                               meta={"graph_builds": builds})
+
+    def test_the_seed_is_named(self):
+        r = self._run("sm-x", [{"nodes": 10, "unreachable": 0, "seed": "57ea3111"},
+                               {"nodes": 10, "unreachable": 1, "seed": "57ea3111"}])
+        note = self.report._graph_quality_note([r])
+        self.assertIn("Level seed: sm-x 0x57ea3111", note)
+        self.assertIn("0.00216", note)
+
+    def test_an_engine_that_records_no_seed_is_not_described(self):
+        """Qdrant draws levels from a thread-local RNG seeded by the OS, so it
+        has no seed to name and the note must not invent one."""
+        r = self._run("qd-x", [{"nodes": 10, "unreachable": 0}])
+        note = self.report._graph_quality_note([r])
+        self.assertIn("unreachable nodes", note)
+        self.assertNotIn("Level seed", note)
+
+    def test_two_seeds_in_one_arm_are_called_out(self):
+        r = self._run("sm-x", [{"nodes": 10, "unreachable": 0, "seed": "1"},
+                               {"nodes": 10, "unreachable": 0, "seed": "2"}])
+        note = self.report._graph_quality_note([r])
+        self.assertIn("2 DIFFERENT SEEDS", note)
+
+
 class ReportNamingTests(unittest.TestCase):
     """One page per (dataset, labels), and no page across two datasets.
 
