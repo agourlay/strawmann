@@ -58,9 +58,18 @@
 
   <ul>
     <li>
-      <div class="name"><a href="report-sift1m-sm-sift-perf-rel-0921-vs-qd-sift-perf-rel-0921-2026-09-21-1916.html">sift1m, 2026-09-21</a></div>
+      <div class="name"><a href="report-sift1m-sm-sift-perf-0923-vs-qd-sift-perf-0923-2026-09-23-0230.html">sift1m, 2026-09-23</a></div>
       <div class="what">The current sift1m comparison, and the source of the tables in
       <code>README.md</code> and <code>comparison-sift1m.md</code>. T4, gate <code>pass</code>
+      both arms, 3 passes, equal-work, <code>--perf</code>, against the same Qdrant binary as
+      the 09-21 page. One row was re-measured after a contamination and came back clean, so no
+      folded row carries foreign load, and the drift that left three rows unbanded on 09-21
+      did not recur. It records the oversampling policy and 09-21 does not, so no ratio
+      crosses them.</div>
+    </li>
+    <li>
+      <div class="name"><a href="report-sift1m-sm-sift-perf-rel-0921-vs-qd-sift-perf-rel-0921-2026-09-21-1916.html">sift1m, 2026-09-21</a></div>
+      <div class="what">The pair the front page quoted until 2026-09-23. T4, gate <code>pass</code>
       both arms, 3 passes, equal-work, <code>--perf</code>, and no contaminated row in any
       pass. Measured against a rebuilt Qdrant (1.19.2-dev, a different sha256 from the 09-08
       page), which reproduced that page's saturating ratio of 2.20x and its other headline
@@ -103,7 +112,8 @@
     The pages are not a series. Between 09-07 and 09-08 the bfb pin moved, W12 became two
     rows, its query count went from 5,000 to 50,000, W11's append became throttled, and
     Qdrant was rebuilt twice, so <code>compare.py</code> refuses ratios across them as
-    STALE. Read each page against itself.
+    STALE. Between 09-21 and 09-23 only the strawmANN build and the recorded oversampling
+    policy changed, and the refusal holds there too. Read each page against itself.
     <br><br>
     Source: <a href="https://github.com/agourlay/strawmann">github.com/agourlay/strawmann</a>
   </footer>
