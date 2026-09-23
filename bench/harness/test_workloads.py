@@ -2620,12 +2620,21 @@ class NightrunTests(unittest.TestCase):
                      "report copied", "no claude on PATH", "ALL_DONE"):
             self.assertIn(line, log)
         out = (night / "fullrun.out").read_text()
-        self.assertIn("--segment-policy equal-work --perf", out)
+        self.assertIn("--segment-policy equal-work --oversampling-policy defaults --perf", out)
         self.assertIn("--wait-for-gate 120", out)
+        self.assertIn("oversampling defaults", log)
         # The reference is `fullrun`'s `auto`, not a number decided here.
         self.assertNotIn("--rps-reference", out)
         self.assertTrue((night / "report-sift1m-sm-sift-perf-0924-vs-qd-sift-perf-0924-"
                                   "2026-09-24-0230.html").exists())
+        # The quantized experiment is chosen per night, from the environment
+        # the timer sets, and forwarded as the flag rather than assumed.
+        with mock.patch.dict(os.environ, {**env, "OVERSAMPLING_POLICY": "matched"}), \
+                mock.patch.object(fullrun, "previous_pair", lambda labels: None):
+            self.assertEqual(self.n.main(["2026-09-25", "sift1m"], root=self.root), 0)
+        night = results / "night-20260925"
+        self.assertIn("--oversampling-policy matched", (night / "fullrun.out").read_text())
+        self.assertIn("oversampling matched", (night / "night.log").read_text())
 
 
 class OversamplingPolicyTests(unittest.TestCase):

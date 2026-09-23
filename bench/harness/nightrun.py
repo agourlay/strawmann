@@ -2,6 +2,7 @@
 """An unattended publication run, scheduled for a quiet hour.
 
     python3 bench/harness/nightrun.py 2026-09-10 sift1m
+    OVERSAMPLING_POLICY=matched python3 bench/harness/nightrun.py 2026-09-24 dbpedia-openai-1m
     systemd-run --user --on-calendar='2026-09-10 04:00:00' \\
         --unit=strawmann-night-20260910 -p WorkingDirectory=$PWD \\
         /usr/bin/python3 bench/harness/nightrun.py 2026-09-10 sift1m
@@ -225,7 +226,11 @@ def main(argv: list[str], root: Path = ROOT) -> int:
     log = Log(night / "night.log")
 
     reps = os.environ.get("REPS", "3")
-    log(f"night run starting: {args.dataset}, labels {sm} / {qd}, reps {reps}")
+    # `defaults` is `fullrun.py`'s own default. The two quantized experiments
+    # hash apart, so a night at `matched` cannot merge into a `defaults` page.
+    oversampling = os.environ.get("OVERSAMPLING_POLICY", "defaults")
+    log(f"night run starting: {args.dataset}, labels {sm} / {qd}, reps {reps}, "
+        f"oversampling {oversampling}")
     dirty = len((git(["status", "--short"], root) or "").splitlines())
     log(f"strawmann {git(['rev-parse', '--short', 'HEAD'], root)} dirty={dirty}")
     binary = Path(os.environ.get("QDRANT_BINARY",
@@ -250,6 +255,7 @@ def main(argv: list[str], root: Path = ROOT) -> int:
            "--server-cpus", os.environ.get("SERVER_CPUS", "4-11"),
            "--client-cpus", os.environ.get("CLIENT_CPUS", "0-3"),
            "--dataset", args.dataset, "--reps", reps, "--segment-policy", "equal-work",
+           "--oversampling-policy", oversampling,
            "--perf", "--qdrant-binary", str(binary),
            "--wait-for-gate", f"{WAIT_FOR_GATE_MIN:g}",
            "--strawmann-label", sm, "--qdrant-label", qd]
