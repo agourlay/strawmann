@@ -2603,6 +2603,24 @@ class OversamplingPolicyTests(unittest.TestCase):
         self.w.use_oversampling_policy("matched")
         self.assertNotEqual(a, self.w.stamp_hash(self.w.harness_stamp()))
 
+    def test_a_stamp_from_before_the_policy_hashes_as_its_rows_were(self):
+        """19b1761 added the key and every earlier run's rows stopped matching
+        their own `run.json`: the 0921 and 0908 sift1m pages lost every ratio."""
+        import hashlib
+        self.w.use_oversampling_policy("defaults")
+        stamp = self.w.harness_stamp()
+        legacy = {k: v for k, v in stamp.items() if k != "oversampling_policy"}
+        before = [k for k in self.w.STAMP_KEYS if k != "oversampling_policy"]
+        as_measured = hashlib.sha256(json.dumps({k: legacy.get(k) for k in before},
+                                                sort_keys=True, default=str)
+                                     .encode()).hexdigest()[:12]
+        self.assertEqual(self.w.stamp_hash(legacy), as_measured)
+        # A run that records the policy is still a different harness from one
+        # that predates it; only its absence is forgiven, and only for this key.
+        self.assertNotEqual(self.w.stamp_hash(stamp), self.w.stamp_hash(legacy))
+        no_settle = {k: v for k, v in legacy.items() if k != "engine_settle"}
+        self.assertNotEqual(self.w.stamp_hash(no_settle), self.w.stamp_hash(legacy))
+
     def test_it_survives_the_subprocess_boundary(self):
         """`fullrun.py` binds it once and each arm is a separate process."""
         self.w.use_oversampling_policy("matched")

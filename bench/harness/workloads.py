@@ -704,6 +704,16 @@ STAMP_KEYS = ["metric", "query_source", "upload_n", "w11_n", "queries",
               "exact_queries", "collection", "ef", "bfb_pin", "engine_settle",
               "oversampling_policy"]
 
+#: Keys that did *not* earn the invalidation above, so a stamp from before one
+#: of them hashes exactly as its rows were hashed when they were measured.
+#: `oversampling_policy` (19b1761) names a knob that did not exist before it:
+#: every earlier run measured Qdrant's defaults, and nothing about those rows
+#: changed. Hashed as `None`, it turned every pre-19b1761 run's own rows into
+#: "re-run under a different harness" against its own `run.json`, and the
+#: 0921 and 0908 sift1m pages lost every ratio on re-render. Across eras the
+#: label-level check still refuses: `None` against `defaults` is STALE.
+STAMP_KEYS_SINCE = ("oversampling_policy",)
+
 
 def stamp_hash(stamp: dict) -> str:
     """One row's identity under the harness: `STAMP_KEYS`, hashed.
@@ -719,7 +729,8 @@ def stamp_hash(stamp: dict) -> str:
     row (`n_requested`) and noted when it differs from the table's.
     """
     import hashlib
-    key = {k: stamp.get(k) for k in STAMP_KEYS}
+    key = {k: stamp.get(k) for k in STAMP_KEYS
+           if k in stamp or k not in STAMP_KEYS_SINCE}
     return hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
