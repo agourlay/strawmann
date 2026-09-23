@@ -78,8 +78,9 @@ pub const Status = enum {
 /// §2: "We can accept upserts into a flat unindexed buffer, report `Yellow`,
 /// run a fully parallel bulk HNSW build, then flip to `Green`."
 pub const IndexState = enum(u8) {
-    /// No *fresh* graph: `indexed_vectors_count` is 0 and the collection is
-    /// Yellow. `graph` may still be non-null here, when `invalidateIndex`
+    /// No *fresh* graph, and the collection is Yellow. `indexed_vectors_count`
+    /// is what the graph searches traverse still covers: 0 when there is none,
+    /// its count when there is. `graph` may still be non-null here, when `invalidateIndex`
     /// stepped aside from a published graph for a rebuild, and searches keep
     /// traversing it (`choosePath`): it is still correct for the rows it
     /// covers, only behind on the tail, which `scanPendingTail` serves. Before
@@ -2255,9 +2256,14 @@ pub fn invalidateIndex(coll: *Collection) void {
             // Keep serving from the graph; `search` scans whatever is past
             // `graph.count`. Only step aside for a rebuild when the tail has
             // grown past `rebuild_ratio`.
+            // `indexed_count` is left alone. The graph is still traversed
+            // (`choosePath`) and still covers its rows, so they are indexed;
+            // zeroing it reported W11's bench2 as 0 of 1,250,000 indexed
+            // while 1,000,000 were being answered from the graph, and Qdrant
+            // in the same state reported 1,220,500. The rebuild's publish
+            // stores the new count.
             if (needsRebuild(coll)) {
                 coll.index_state.store(.absent, .release);
-                coll.indexed_count = 0;
             }
         },
         // Points that arrive *during* a build are not in the graph it will
@@ -3250,6 +3256,9 @@ test "the previous graph is served while the collection has stepped aside and wh
     invalidateIndex(&c);
     try testing.expectEqual(IndexState.absent, c.index_state.load(.acquire));
     try testing.expectEqual(Status.yellow, c.status());
+    // The rows the graph covers are still indexed, and the count says so
+    // rather than dropping to zero.
+    try testing.expectEqual(@as(usize, n), c.indexed_count);
     // ...and still traverses the graph it had, rather than brute-forcing.
     try testing.expectEqual(SearchPath.graph, choosePath(&c, .approximate, .use));
     var scratch = try hnsw.Index.Scratch.init(testing.allocator, 4096, 128);
