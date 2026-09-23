@@ -1281,3 +1281,30 @@ the wrong magnitude.
 The remaining candidates from findings 34's list are retired with it. A
 deterministic insertion order and refusing to prune a last in-edge were both
 answers to a question whose premise was wrong.
+
+### Closed as a property, 2026-09-23
+
+findings 34 left the open list with the mechanism known and the sensitivity
+behind it not explained. What is accepted:
+
+- **The pass-to-pass spread is a measured property of concurrent ingest.** An
+  upload over `-t 8 -p 8` gives strawmANN a different graph each pass, worth
+  0.0017 to 0.0033 of recall@10 at `ef` 512 against Qdrant's 0.00004, and every
+  page reports it per build (the recall section's build spread). It is not
+  removed in the harness because the only harness fix, a serial upload of
+  `bench2`, changes W2: that upload is the row's time-to-Green, and Qdrant
+  indexes during ingest, so it would move more.
+- **The keyed level draw is fragile and unused.** `assignLevelKey` spans 0.99726
+  to 0.99958 over four seeds where the engine's `assignLevel` spans 0.00003
+  over six builds. Nothing in the engine sets `level_keys`, so no published
+  number goes through it, and the open list ranks by what a wrong number costs.
+
+The two are linked, and that is what would reopen it. An order-independent
+build, linking in external-id order (`insert_order`) with levels drawn from the
+key (`level_keys`), is the engine-side fix for the spread; it measured 0.0029
+worse, at the default seed, which under the keyed draw is the bad mode. So the
+spread's fix runs through the keyed draw's fragility, and choosing a keyed seed
+that happens to score well would be selecting on the outcome. The first
+measurement if this is picked up again: that build over several keyed seeds,
+`graph-diff --shuffle 100 --stable-levels --stable-order --seeds ...`, and how
+often it reaches file order's 0.9995.

@@ -266,6 +266,12 @@ pub fn assignLevel(params: Params, node: u32) u8 {
 ///
 /// Kept because the question recurs: anything that changes the insertion
 /// sequence will want this column beside it again.
+///
+/// **Measured fragile; do not key the engine's levels on it without
+/// re-measuring.** In file order at SIFT1M, four seeds of this draw span 0.99726
+/// to 0.99958 of recall@10 at `ef` 512, where `assignLevel` over the same four
+/// sits within 0.00003 (`graph-diff --seeds`, `decisions.md`, "Closed as a
+/// property"). Why is not known.
 pub fn assignLevelKey(params: Params, key: u64) u8 {
     return levelFromHash(params, std.hash.Wyhash.hash(params.seed, std.mem.asBytes(&key)));
 }
