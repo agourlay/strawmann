@@ -3106,12 +3106,14 @@ test "e2e: W12's shape: CreateFieldIndex, keyword payloads, filtered QueryBatch 
     var truth: [16]u64 = undefined;
     var pts: [16]PointPayload = undefined;
 
-    // An indexed keyword, 120 of 600 admitted. Scored directly: at n=600 the
-    // dispatch crossover (`plainFilteredSearch`, sqrt(ef*m0*n)) is past the
-    // collection itself, so every filter on a collection this small scores
-    // its matching set rather than traversing. Exact either way, which is
-    // what this asserts; which arm runs is pinned by that function's own
-    // test, and the traversal arm is exercised at the end of this test.
+    // An indexed keyword, 120 of 600 admitted. Scored directly: at n=600 both
+    // of the dispatch's crossovers (`filteredPlan`: the two-hop walk's
+    // 1.5·ef·m0 rows, the plain walk's sqrt(ef*m0*n)) are past the collection
+    // itself, so every filter on a collection this small scores its matching
+    // set rather than traversing. Exact either way, which is what this
+    // asserts; which arm runs is pinned by that function's own test, the
+    // two-hop walk by `collection.zig`'s, and the plain traversal arm is
+    // exercised at the end of this test.
     {
         const tn = filteredTruth(stored, q, &Tags.isK1, 10, &truth);
         try testing.expectEqual(@as(usize, 10), tn);

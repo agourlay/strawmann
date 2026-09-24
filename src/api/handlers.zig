@@ -1266,22 +1266,27 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
     const ef = effectiveEf(q.params.hnsw_ef, coll.config.hnsw_ef_construct, want);
     var top = index.TopK.init(ctx.workspace.results, want);
 
-    // The filter, as the traversal's admission predicate — or, when scoring
+    // The filter, as the traversal's admission predicate, or, when scoring
     // the matching set outright is cheaper, as the whole search
-    // (`plainFilteredSearch`). `select` verified every admitted point
-    // against its blob, so the plain path is exact over the set.
+    // (`filteredPlan`). `select` verified every admitted point against its
+    // blob, so the plain path is exact over the set.
     var pred_state: PredicateState = undefined;
     var pred: ?index.hnsw.Index.Filter = null;
     if (filter_opt) |*f| {
         const prepared = preparePredicate(ctx, coll, f, &pred_state);
+        pred = prepared.filter;
         if (prepared.selected) |n| {
             const m0 = coll.config.hnsw_m * 2;
-            if (exact or plainFilteredSearch(n, prepared.bound, ef, m0)) {
-                core.collection.searchSelected(coll, raw, ctx.workspace.filter_bits, @intCast(prepared.bound), &top);
-                return top.finish();
+            const plan: FilteredPlan = if (exact) .scan else filteredPlan(n, prepared.bound, ef, m0);
+            switch (plan) {
+                .scan => {
+                    core.collection.searchSelected(coll, raw, ctx.workspace.filter_bits, @intCast(prepared.bound), &top);
+                    return top.finish();
+                },
+                .two_hop => pred.?.two_hop = true,
+                .walk => {},
             }
         }
-        pred = prepared.filter;
     }
 
     if (coll.quant.load(.acquire) != null and !exact) {
@@ -1805,6 +1810,45 @@ fn fullScanPreferred(coll: *const core.Collection) bool {
 /// returns null) and is evaluated against the blobs during a traversal; a
 /// selective one degenerates there exactly as this fixes for the indexed
 /// case, which is the cost `docs/spec.md` records for an unindexed filter.
+/// How an indexed filter's query is answered: score the matching set, walk the
+/// graph ACORN-1 style (`hnsw.Index.expandTwoHop`), or walk it scoring every
+/// neighbour.
+const FilteredPlan = enum { scan, two_hop, walk };
+
+/// The plan for a filter the index counted exactly.
+///
+/// The two-hop walk scores only admitted points, so its cost does not grow as
+/// the filter tightens the way the plain walk's does (`plainFilteredSearch`).
+/// What it needs is enough admitted points within two hops to fill each
+/// expansion's `m0`: `m0²` two-hop neighbours at selectivity `s` hold
+/// `s · m0²` of them, so below `s = 1 / m0` the expansions run short and the
+/// walk strands. Measured in-process on 200,000 dbpedia-openai-1m vectors
+/// (m=16, so m0=32), 300 held-out queries:
+///
+///                      recall@10 at ef 128    ms/query
+///     1%, two-hop            0.8877             0.91   (s < 1/m0: strands)
+///     1%, scan               1.0000             0.45
+///     10%, two-hop           0.9900             1.57
+///     10%, plain walk        0.9973             4.32
+///     10%, scan              1.0000             4.87
+///
+/// Above that floor the two-hop walk scored about `1.5 · ef · m0` rows per
+/// query (1.57 ms at ef 128 is ~6,500 rows at the scan's 0.24 µs each; 5.2 ms
+/// at ef 512 is ~21,600), so the scan wins while the matching set is smaller
+/// than that. Below the floor the choice is the one it always was, between
+/// the scan and the plain walk.
+fn filteredPlan(selected: usize, bound: usize, ef: usize, m0: usize) FilteredPlan {
+    const reach = std.math.mul(usize, selected, @max(m0, 1)) catch std.math.maxInt(usize);
+    if (reach >= bound) {
+        const walk = blk: {
+            const a = std.math.mul(usize, @max(ef, 1), @max(m0, 1)) catch break :blk std.math.maxInt(usize);
+            break :blk (std.math.mul(usize, a, 3) catch std.math.maxInt(usize)) / 2;
+        };
+        return if (selected < walk) .scan else .two_hop;
+    }
+    return if (plainFilteredSearch(selected, bound, ef, m0)) .scan else .walk;
+}
+
 fn plainFilteredSearch(selected: usize, bound: usize, ef: usize, m0: usize) bool {
     // Saturating, because all four come from a request or a collection and
     // the products are large: at the clamps `ef · m0 · n` is ~10^12.
@@ -1867,6 +1911,29 @@ test "a selective filter scores its matching set; a permissive one traverses" {
     try testing.expect(plainFilteredSearch(0, 0, 0, 0));
     try testing.expect(!plainFilteredSearch(std.math.maxInt(usize), 1, 1, 1));
     try testing.expect(plainFilteredSearch(1, std.math.maxInt(usize), std.math.maxInt(usize), 2));
+}
+
+test "an indexed filter scans below 1/m0, walks two-hop above it, and scans again at a wide ef" {
+    // W12's two grades on bench12 (n = 200,000, m0 = 32).
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(2_000, 200_000, 128, 32));
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(20_000, 200_000, 128, 32));
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(20_000, 200_000, 256, 32));
+    // At ef 512 the walk's ~24,600 rows cost more than scoring the 20,000.
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(20_000, 200_000, 512, 32));
+    // A permissive filter walks two-hop too; it used to walk scoring everything.
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(100_000, 200_000, 128, 32));
+    // The floor is `selected · m0 >= n`: either side of 6,250.
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(6_250, 200_000, 32, 32));
+    try testing.expect(filteredPlan(6_249, 200_000, 32, 32) != .two_hop);
+    // Below the floor, the old rule: a large sparse set on a huge collection
+    // at a narrow ef still walks rather than scanning millions.
+    try testing.expectEqual(FilteredPlan.walk, filteredPlan(100_000, 10_000_000, 16, 32));
+    // A small collection scores every filter directly.
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(590, 600, 600, 32));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(120, 600, 16, 32));
+    // Degenerate inputs answer rather than overflow or divide by zero.
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(0, 0, 0, 0));
+    _ = filteredPlan(std.math.maxInt(usize), std.math.maxInt(usize), std.math.maxInt(usize), std.math.maxInt(usize));
 }
 
 test "hnsw_ef defaults to the collection's ef_construct, then max(ef, top), then the clamp" {

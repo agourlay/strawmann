@@ -434,6 +434,7 @@ pub const Index = struct {
         std.debug.assert(ef >= 1);
         var frontier = heap.Frontier.init(scratch.frontier);
         out.reset(ef);
+        const hop = filter != null and filter.?.two_hop;
 
         for (entries) |e| {
             if (!scratch.vis.testAndSet(e.id)) continue;
@@ -477,6 +478,10 @@ pub const Index = struct {
                     pf(self.scorer.ctx, n);
                 }
             }
+            if (hop) {
+                self.expandTwoHop(ns, level, scratch, &frontier, out, filter.?);
+                continue;
+            }
             for (ns) |n| {
                 if (n == empty_neighbour) break;
                 if (!scratch.vis.testAndSet(n)) continue;
@@ -487,6 +492,82 @@ pub const Index = struct {
                     if (filter == null or filter.?.admits(n)) out.push(c);
                 }
             }
+        }
+    }
+
+    /// One expansion under a selective filter, ACORN-1 (Patel et al., SIGMOD
+    /// 2024): an admitted neighbour is scored as usual; a rejected one is
+    /// never scored, and its own neighbours stand in for it, admitted ones
+    /// only. So the frontier holds only points the caller can keep and no
+    /// distance is spent on one it cannot.
+    ///
+    /// The plain rule scores every neighbour and expands rejected ones too,
+    /// which at 10% selectivity is nine distances in ten on points that can
+    /// never be returned: W12-sel10's walk at `ef` 32 ran at 284 qps on
+    /// dbpedia-openai-1m, and Qdrant, which does not score what its filter
+    /// rejects, at 2,226.
+    ///
+    /// Each expansion scores at most the list's width (`m0` at level 0), as
+    /// ACORN-1 truncates its compressed neighbourhood to `M`: the two-hop
+    /// fan-out is `m0²`, and uncapped at a loose filter it would score far
+    /// more per step than the plain walk does. A rejected neighbour is marked
+    /// visited only once its hop is taken, so one skipped for the cap can
+    /// still be hopped through from another node.
+    fn expandTwoHop(
+        self: *const Index,
+        ns: []const u32,
+        level: u8,
+        scratch: *Scratch,
+        frontier: *heap.Frontier,
+        out: *heap.TopK,
+        filter: Filter,
+    ) void {
+        // First pass: the row of each admitted neighbour, and the neighbour
+        // list of each rejected one, which is what the second pass reads.
+        if (self.scorer.prefetch) |pf| {
+            for (ns) |n| {
+                if (n == empty_neighbour) break;
+                if (filter.admits(n)) {
+                    scratch.vis.prefetch(n);
+                    pf(self.scorer.ctx, n);
+                } else {
+                    const row = self.graph.neighbours(n, level);
+                    if (row.len > 0) @prefetch(&row[0], .{ .rw = .read, .locality = 3, .cache = .data });
+                }
+            }
+        }
+        const budget = ns.len;
+        var scored: usize = 0;
+        for (ns) |n| {
+            if (n == empty_neighbour) break;
+            if (filter.admits(n)) {
+                if (!scratch.vis.testAndSet(n)) continue;
+                scored += 1;
+                self.consider(n, frontier, out);
+                continue;
+            }
+            if (scored >= budget) continue;
+            if (!scratch.vis.testAndSet(n)) continue;
+            for (self.graph.neighbours(n, level)) |n2| {
+                if (n2 == empty_neighbour) break;
+                if (scored >= budget) break;
+                // Tested before the visited stamp: a rejected two-hop node is
+                // not taken here, and stamping it would stop a later hop
+                // through it.
+                if (!filter.admits(n2)) continue;
+                if (!scratch.vis.testAndSet(n2)) continue;
+                scored += 1;
+                self.consider(n2, frontier, out);
+            }
+        }
+    }
+
+    /// Score an admitted node and keep it if it can still matter.
+    fn consider(self: *const Index, n: u32, frontier: *heap.Frontier, out: *heap.TopK) void {
+        const c = Candidate{ .id = n, .score = self.scorer.call(self.scorer.ctx, n) };
+        if (!out.isFull() or c.better(out.peekWorst())) {
+            frontier.push(c);
+            out.push(c);
         }
     }
 
@@ -510,6 +591,11 @@ pub const Index = struct {
     pub const Filter = struct {
         pred: *const fn (ctx: *const anyopaque, node: u32) bool,
         ctx: *const anyopaque,
+        /// Traverse ACORN-1 style (`searchLayer`): a rejected node is not
+        /// scored but hopped through to its neighbours. For a predicate that
+        /// is a bit test; one that reads a payload blob would pay it for every
+        /// two-hop neighbour, so it stays off there, and for tombstones.
+        two_hop: bool = false,
 
         pub fn admits(self: Filter, node: u32) bool {
             return self.pred(self.ctx, node);

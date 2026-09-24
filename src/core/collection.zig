@@ -2431,13 +2431,13 @@ pub const Bounded = struct {
 pub fn bounded(inner: ?hnsw.Index.Filter, bound: u32, graph_count: usize, storage_: *Bounded) ?hnsw.Index.Filter {
     if (graph_count <= bound) return inner;
     storage_.* = .{ .bound = bound, .inner = inner };
-    return .{ .pred = Bounded.pred, .ctx = storage_ };
+    return .{ .pred = Bounded.pred, .ctx = storage_, .two_hop = if (inner) |f| f.two_hop else false };
 }
 
 pub fn admission(coll: *const Collection, extra: ?hnsw.Index.Filter, storage_: *Admission) ?hnsw.Index.Filter {
     if (extra) |e| {
         storage_.* = .{ .coll = coll, .extra = e };
-        return .{ .pred = Admission.pred, .ctx = storage_ };
+        return .{ .pred = Admission.pred, .ctx = storage_, .two_hop = e.two_hop };
     }
     if (coll.deleted_count > 0) return .{ .pred = notDeleted, .ctx = coll };
     return null;
@@ -2745,6 +2745,73 @@ test "a write keeps the graph and the pending tail is searched exhaustively" {
     const ranked = got.finish();
     try testing.expect(ranked.len > 0);
     try testing.expectEqual(answer, ranked[0].id);
+}
+
+test "a two-hop filtered walk returns only admitted, live points and keeps recall" {
+    // ACORN-1 against the exact answer over the same bits, at two
+    // selectivities, with tombstones among the admitted points: rejected
+    // nodes are hopped through rather than scored, so a result the filter or
+    // a tombstone rejects would mean the hop leaked one into the heap.
+    const dim = 32;
+    const n = 4000;
+    var c = try makeCollection(dim, .euclid, n);
+    defer c.deinit();
+    var prng = std.Random.DefaultPrng.init(0xac0e1);
+    const rnd = prng.random();
+    var v: [dim]f32 = undefined;
+    for (0..n) |i| {
+        for (&v) |*x| x.* = rnd.floatNorm(f32);
+        _ = try c.upsert(.{ .num = i }, &v);
+    }
+    try buildIndex(&c, .serial, 1);
+    for (0..n) |i| if (i % 97 == 0) {
+        _ = c.delete(.{ .num = i });
+    };
+
+    var scratch = try hnsw.Index.Scratch.init(testing.allocator, n, 256);
+    defer scratch.deinit(testing.allocator);
+    var bits = [_]u64{0} ** ((n + 63) / 64);
+    for ([_]u32{ 10, 50 }) |every| {
+        @memset(&bits, 0);
+        for (0..n) |i| if (rnd.uintLessThan(u32, every) == 0) {
+            bits[i / 64] |= @as(u64, 1) << @intCast(i % 64);
+        };
+        const bctx = payload_mod.BitsCtx{ .bits = &bits, .bound = n };
+        const k = 10;
+        const queries = 60;
+        var hits: usize = 0;
+        var total: usize = 0;
+        for (0..queries) |_| {
+            for (&v) |*x| x.* = rnd.floatNorm(f32);
+            var tb: [k]Candidate = undefined;
+            var truth = heap.TopK.init(&tb, k);
+            searchSelected(&c, &v, &bits, n, &truth);
+            const t = truth.finish();
+
+            var gb: [k]Candidate = undefined;
+            var got = heap.TopK.init(&gb, k);
+            searchFiltered(&c, &v, 128, .approximate, &scratch, .{
+                .pred = payload_mod.BitsCtx.pred,
+                .ctx = &bctx,
+                .two_hop = true,
+            }, &got);
+            const g = got.finish();
+            try testing.expectEqual(t.len, g.len);
+            for (g) |gc| {
+                try testing.expect(payload_mod.testBit(&bits, gc.id));
+                try testing.expect(!c.deleted.isSet(gc.id));
+                for (t) |tc| {
+                    if (tc.id == gc.id) {
+                        hits += 1;
+                        break;
+                    }
+                }
+            }
+            total += t.len;
+        }
+        const recall = @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(total));
+        try testing.expect(recall >= 0.9);
+    }
 }
 
 test "the graph is only dropped once the tail is worth rebuilding for" {
