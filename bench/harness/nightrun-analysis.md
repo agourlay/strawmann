@@ -19,6 +19,14 @@ Deliver, in this order:
 
 3. **Headline numbers.** A short table of the per-workload medians with spread for both engines, the ratios, recall at the sweep points, the conformance tier reached, and the perf counters summary (IPC, frequency, MPKI, DRAM per query) per engine. Note anything that moved materially against the previous run of the same pair and whether a difference in the Qdrant binary (commit, or cargo profile as run.json records it) plausibly explains it.
 
-4. **Things to fix or decide**, as a prioritized list, each pointing at the file and line that would change.
+4. **What the changes since the previous pair predicted, against what happened.** Take the commits between the previous pair's harness commit and this run's (each label's `run.json` records it as `harness.head`, bench/results/@PREV@/run.json for the previous pair; `git log --format='%h %s%n%n%b' <prev>..<this>`). Engine and harness commit messages here state what they expect a run to show, often as numbers. For each commit that makes such a claim, quote the claim, give the figure this run measured in its place, and say whether it held, missed, or cannot be read from this run (and why). If several commits touch the same row, say that the row cannot attribute a change to any one of them.
+
+5. **Proposed fixes.** For every item from sections 2 and 4 whose cause is a harness defect, an engine behavior, or a prediction that missed, a prioritized list. Each entry gives:
+   - the problem in one sentence, with the evidence (file and quoted line);
+   - the file and function that would change, and the change itself, concrete enough to review: a short diff sketch or the exact rule to replace;
+   - the test that would hold it (the test file, and what it asserts);
+   - what it costs to verify: a unit test alone, an in-process measurement, or a night run;
+   - whether it changes `harness_stamp` or the row set, and so makes the next pair STALE against this one.
+   Propose; do not apply. Where the right fix is a decision for the operator (a semantic choice, a policy, a trade-off between rows), name the options and the evidence for each rather than picking one.
 
 Quote lines verbatim; be concrete; do not speculate beyond what the code and files show, and say when something is unknown.
