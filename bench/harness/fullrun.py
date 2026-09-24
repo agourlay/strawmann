@@ -1442,6 +1442,23 @@ def drop_collections(uri: str, client_cpus: str, names: list[str]) -> None:
               "memory it would have released", flush=True)
 
 
+def split_after_dead_writers(stable: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """`stable` cut after the last row whose collection nothing reads again.
+
+    Returns the rows up to and including it, the rows after, and the
+    collections to drop in between. With no such row, everything is in the
+    first part and nothing is dropped early. A dead writer the run does not
+    include (`--only` without W1) drops nothing either.
+    """
+    writers = [r for r in workloads.rows_writing_dead_collections() if r in stable]
+    if not writers:
+        return list(stable), [], []
+    cut = max(stable.index(r) for r in writers) + 1
+    by_id = {w.id: w for w in workloads.table()}
+    early = [c for r in writers if (c := workloads.collection_of(by_id[r]))]
+    return stable[:cut], stable[cut:], early
+
+
 def measure(uri: str, label: str, client_cpus: str, storage: str | None,
             placement: str | None = None) -> int:
     """Every row, the recall sweeps, then the rows that would invalidate them."""
@@ -1451,12 +1468,21 @@ def measure(uri: str, label: str, client_cpus: str, storage: str | None,
     mutating = [r for r in rows if r in mutators]
 
     say(f"{label}: §4's rows, except {', '.join(mutating)}")
-    rc = run_workloads(uri, label, client_cpus, storage, only=stable, placement=placement)
+    # In two parts when a row writes a collection nothing reads again: that
+    # collection goes the moment its row returns, before the next row shares
+    # the engine with its background index build (`split_after_dead_writers`).
+    first, rest, early = split_after_dead_writers(stable)
+    rc = run_workloads(uri, label, client_cpus, storage, only=first, placement=placement)
+    if early:
+        capture_collections(uri, label, client_cpus, names=early)
+        drop_collections(uri, client_cpus, early)
+    if rest:
+        rc |= run_workloads(uri, label, client_cpus, storage, only=rest, placement=placement)
 
     # Read back, *then* drop: `collections.json` is provenance and
     # `unindexed_remainders` reads `indexed_vectors_count` out of it, so a
     # collection has to be recorded while it still exists.
-    dead = workloads.collections_droppable_after_rows()
+    dead = [c for c in workloads.collections_droppable_after_rows() if c not in early]
     capture_collections(uri, label, client_cpus, names=dead)
     drop_collections(uri, client_cpus, dead)
 
@@ -1472,7 +1498,7 @@ def measure(uri: str, label: str, client_cpus: str, storage: str | None,
     # Only the survivors: the rest were read back before they were dropped,
     # and the merge above keeps all of it in one file.
     survivors = [c for c in workloads.upload_collections()
-                 if c not in set(dead) | set(swept)]
+                 if c not in set(early) | set(dead) | set(swept)]
 
     # Before the mutating rows, not only after them. The survivor read-back
     # used to happen once, at the end of the arm, and the mutating rows append

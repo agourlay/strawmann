@@ -154,6 +154,27 @@ class WorkloadTests(unittest.TestCase):
         survivors = created - after_rows - after_sweeps
         self.assertEqual(survivors, {"bench2"})
 
+    def test_w1s_collection_is_dropped_before_w2_rather_than_waited_on(self):
+        """Qdrant indexes `bench1` in the background after W1's
+        `--skip-wait-index` upload. The settle waited 180 s, gave up on 7.0
+        cores, and W2's Time-to-Green shared the engine with that build. Nothing
+        reads `bench1` again, so it is dropped between W1 and W2 instead.
+        """
+        import fullrun
+        w = self.w
+        self.assertEqual(w.rows_writing_dead_collections(), ["W1"])
+        # Part of the settle discipline, so part of every row's stamp.
+        self.assertEqual(w.harness_stamp()["engine_settle"]["dropped_not_settled"], ["W1"])
+
+        stable = [x.id for x in w.table() if x.id not in fullrun.mutating_rows()]
+        first, rest, early = fullrun.split_after_dead_writers(stable)
+        self.assertEqual(first[-1], "W1")
+        self.assertEqual(rest[0], "W2")
+        self.assertEqual(first + rest, stable)
+        self.assertEqual(early, ["bench1"])
+        # A run that does not include W1 drops nothing early.
+        self.assertEqual(fullrun.split_after_dead_writers(["W2", "W3"]), (["W2", "W3"], [], []))
+
     def test_w5_uses_distinct_dataset_queries(self):
         w5 = {x.id: x for x in self.w.table()}["W5"]
         self.assertEqual(w5.query_strategy, "random-sample")

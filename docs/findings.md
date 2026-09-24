@@ -125,11 +125,15 @@ insertion on exactly this ground. Live insertion exists behind `-Dlive-insert`
 `W11-steady` at d=1536 with it on, once item 3 makes the row measure a
 concurrent write.
 
-**9. Qdrant's `W1` settle hits its 180 s timeout on every pass.** `W1`
-uploads with `--skip-wait-index`; Qdrant indexes in the background and
-`settle_engine` waits for it, nine minutes per Qdrant arm on a row that does
-not measure the index. Skip the settle for `--skip-wait-index` rows, or accept
-it and say so in the row.
+**9. Qdrant's published `W2` was measured beside `bench1`'s index build.**
+The settle after `W1` timed out at 180 s on every pass with Qdrant still on
+7.0 cores, building the index of a collection nothing reads again, and `W2`
+started under it: Qdrant's 657.7 s Time-to-Green and the 2.63x upload-and-index
+ratio include that. `fullrun` now drops `bench1` between `W1` and `W2` instead
+of settling (`workloads.rows_writing_dead_collections`), and the settle stamp
+records it, so the next pair is STALE against 0924 by design. That pair's `W2`
+is the clean figure; until then read 657.7 s as an upper bound on Qdrant's
+build and the 2.63x as an upper bound on strawmANN's lead.
 
 **10. The pre-run estimate was three hours short.** `estimated_minutes` prices
 the passes from the previous run's rows, and the table grew from 32 to 43 rows

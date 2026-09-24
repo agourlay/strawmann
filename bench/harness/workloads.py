@@ -393,6 +393,34 @@ def collections_droppable_after_rows() -> list[str]:
     return [c for c in upload_collections() if c not in live]
 
 
+def rows_writing_dead_collections() -> list[str]:
+    """Upload rows whose collection nothing reads once the row is done.
+
+    W1: it uploads `bench1` with `--skip-wait-index` and no later row, sweep
+    or phase reads `bench1`. Qdrant indexes it in the background regardless,
+    so the settle after W1 waited its full `ENGINE_IDLE_TIMEOUT_S` and gave
+    up with the engine still on 7.0 of 8 cores (qd-dbp1m-perf-0924, every
+    pass), and W2's Time-to-Green was measured while Qdrant was still building
+    `bench1`'s index beside it. Nothing about that background work is W2's.
+
+    So no settle follows these rows (`run_one`): `fullrun` drops the
+    collection as soon as the row returns, which ends the work instead of
+    waiting it out. A hand run of `workloads.py` that goes on to W2 should
+    drop it first.
+    """
+    rows = table()
+    late = collections_read_after_rows()
+    out = []
+    for i, w in enumerate(rows):
+        c = collection_of(w)
+        if not w.upload_only or c is None or c in late:
+            continue
+        if any(collection_of(x) == c for x in rows[i + 1:]):
+            continue
+        out.append(w.id)
+    return out
+
+
 def collections_droppable_after_sweeps() -> list[str]:
     """Swept collections nothing reads once their sweep is done.
 
@@ -673,7 +701,12 @@ def harness_stamp() -> dict:
         "engine_settle": {"cores": ENGINE_IDLE_CORES,
                           "window_s": ENGINE_IDLE_WINDOW_S,
                           "stable": ENGINE_IDLE_STABLE,
-                          "timeout_s": ENGINE_IDLE_TIMEOUT_S},
+                          "timeout_s": ENGINE_IDLE_TIMEOUT_S,
+                          # Rows followed by a drop rather than a settle. It
+                          # moves the row after them (W2 no longer shares the
+                          # engine with W1's background index build), so it
+                          # is part of what a settle *is*.
+                          "dropped_not_settled": rows_writing_dead_collections()},
         "filtered_queries": FILTERED_QUERIES,
         "bfb_pin": BFB_PIN, "bfb_timeout_s": BFB_TIMEOUT_S,
         "collection": collection_settings(),
@@ -2908,8 +2941,15 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
     foreign = foreign_between(cpu0, cpu1)
     # Now that nothing is left to measure, wait for the engine's own
     # background work. This protects the *next* row and cannot touch this one.
+    # Not after a row whose collection is never read again: the caller drops
+    # it, which ends the background work a settle would only have waited on
+    # (`rows_writing_dead_collections`).
+    dead_writer = w.id in rows_writing_dead_collections()
+    if dead_writer:
+        print(f"    no settle: nothing reads {collection_of(w)} again, and fullrun drops "
+              f"it now; a hand run should drop it before the next row", flush=True)
     settled = (settle_engine(io0.pid if io0 is not None else None, w.id)
-               if w.upload_only else
+               if w.upload_only and not dead_writer else
                {"engine_settle_s": None, "engine_settle_cores": None})
 
     text = proc.stdout + proc.stderr
