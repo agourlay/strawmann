@@ -178,13 +178,15 @@ def chart_throughput(runs: list[Run], df: pd.DataFrame) -> dict:
                               margin=dict(l=min(30 + 7 * widest, _LABEL_PX), r=24, t=10, b=52),
                               xaxis_title="queries per second"))
     fig.update_yaxes(autorange="reversed")
-    note = ("Higher is better. bfb's rps counts batch requests; where it differs "
-            "from qps the table shows both.")
+    note = "Higher is better."
     shown = [w for w in present if w in refused]
     if shown:
-        note += (" Hatched bars are rows the comparison refuses, so the two bars beside "
-                 "each other are not a result: "
-                 + "; ".join(f"{w} — {html.escape(refused[w])}" for w in shown) + ".")
+        # The reasons are the table's notes column; repeating them here put the
+        # same three sentences on the page twice, a screen apart.
+        why = html.escape("; ".join(f"{w}: {refused[w]}" for w in shown))
+        note += (f' Hatched bars are rows the table does not compare (<span title="{why}">'
+                 + ", ".join(shown) + "</span>): each bar is that engine's own rate, and "
+                 "the pair is not a result.")
     return dict(section="throughput", title="Throughput by workload", html=fig_html(fig),
                 note=note)
 
@@ -209,7 +211,7 @@ def chart_ef_sweep(runs: list[Run], df: pd.DataFrame) -> dict | None:
     fig.update_xaxes(type="log")
     fig.update_yaxes(type="log", tickformat=SI_TICKS)
     return dict(
-        section="throughput", title="W10: throughput against ef",
+        section="throughput-more", title="W10: throughput against ef",
         html=fig_html(fig),
         note=segment_note(runs))
 
@@ -520,11 +522,9 @@ def chart_runqueue(runs: list[Run], df: pd.DataFrame) -> dict | None:
     fig.update_xaxes(type="log", tickformat=SI_TICKS)
     fig.update_yaxes(autorange="reversed")
     missing = [w for w in dict.fromkeys(df["id"]) if w not in ms]
-    note = ("Lower is better; the bar between a pair is the gap. Log scale, because the "
-            "values span five orders of magnitude — read positions, not distances.")
+    note = "Lower is better; the bar between a pair is the gap."
     if missing:
-        note += (" Absent, because neither engine recorded a wait above zero for them: "
-                 + ", ".join(missing) + ".")
+        note += _absent_note(missing, "waited for a core")
     return dict(section="scheduler", title="Time spent waiting for a core",
                 html=fig_html(fig), note=note)
 
@@ -590,8 +590,21 @@ def _worth_plotting(values: dict[str, dict[str, float]]) -> bool:
 #: axis makes the *distance* between two marks meaningless while leaving their
 #: order and position honest, and a reader who does not know which axis they
 #: are looking at will read a gap as a difference.
-LOG_NOTE = ("Log scale, because the values span more than a decade — read "
-            "positions, not distances. ")
+#: Now said once, in the appendix's lede, and on the axis title of every
+#: chart it applies to: repeated under each chart it was the same sentence
+#: eight times.
+LOG_NOTE = ""
+
+
+def _absent_note(missing: list[str], what: str) -> str:
+    """The rows a chart leaves out because they had nothing to draw.
+
+    Counted, with the ids on hover: listing forty ids to say "these were zero"
+    was a paragraph of row names under a chart of six rows.
+    """
+    ids = html.escape(", ".join(missing))
+    return (f' <span title="{ids}">{len(missing)} row{"" if len(missing) == 1 else "s"} '
+            f'never {what} and {"is" if len(missing) == 1 else "are"} not drawn.</span>')
 
 #: Below this ratio between the largest and smallest value, a log axis is the
 #: wrong choice: plotly labels its minor decades, and over a narrow range those
@@ -900,12 +913,9 @@ def _pressure_chart(runs: list[Run], df: pd.DataFrame, resource: str,
     fig, log = _dumbbell(runs, ms, order, f"time fully stalled on {what} (ms)", "ms")
     missing = [w for w in dict.fromkeys(df["id"]) if w not in ms]
     note = (f"Time every task in the engine's cgroup was stalled on {what}. Lower "
-            f"is better. " + (LOG_NOTE if log else "")
-            + "Only rows that stalled at all appear; a row that never stalled has "
-              "nothing to plot and is named below rather than drawn at zero.")
+            f"is better. " + (LOG_NOTE if log else ""))
     if missing:
-        note += (" Absent, because no engine recorded a stall above zero for them: "
-                 + ", ".join(missing) + ".")
+        note += _absent_note(missing, f"stalled on {what}")
     return dict(section="stalls", title=title, html=fig_html(fig), note=note)
 
 
@@ -1150,9 +1160,13 @@ def _matched_table(a: Run, b: Run, pa: list, pb: list, encoding: str = "fp32",
     head = (f"<th>recall@10</th><th>measured at</th>"
             f'<th class="num">{a.label} q/s</th><th class="num">{b.label} q/s</th>'
             f'<th class="num">{a.label} / {b.label}</th>'
-            f'<th class="num">same, over the recall CI</th>')
+            f'<th class="num" title="the ratio with the anchor recall moved across its '
+            f'95% interval">range over recall CI</th>')
+    # The method under a disclosure: the table is four columns a reader needs
+    # and two paragraphs a reviewer does.
     return (f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
             f'<tbody>{rows}</tbody></table></div>'
+            f'<details class="more"><summary>How this is computed</summary>'
             f'<p class="note">Interpolated linear in log(q/s) between the two '
             f'bracketing measurements, nothing extrapolated past the measured range. '
             f'Throughput is bfb\'s {"W6" if encoding == "SQ8" else "W10"} sweep, recall '
@@ -1168,7 +1182,7 @@ def _matched_table(a: Run, b: Run, pa: list, pb: list, encoding: str = "fp32",
             f'segments, and the throughputs behind it are '
             f'{behind}.</p>' if caveat else
                '<p class="note">The last column reads as it does in the fp32 table '
-               'above.</p>'))
+               'above.</p>') + '</details>')
 
 def chart_frontier(runs: list[Run]) -> dict | None:
     """Throughput against recall: the only comparison `ef` does not distort.
@@ -1210,13 +1224,12 @@ def chart_frontier(runs: list[Run]) -> dict | None:
                                yaxis_title="queries per second (log)"))
     fig.update_yaxes(type="log", tickformat=SI_TICKS)
     return dict(
-        section="recall",
-        title="Recall against throughput, the frontier",
+        section="summary",
+        title="Throughput against recall",
         html=fig_html(fig),
-        note="Throughput from " + " and ".join(sorted(sources)) +
-             ", recall from the conformance sweep against the fp64 oracle, joined on "
-             "ef. Read it vertically, at a recall both engines reach: equal ef is not "
-             "equal work. " + segment_note(runs))
+        note="Read it vertically: at any recall both engines reach, the higher curve "
+             "is faster. Throughput from " + " and ".join(sorted(sources)) +
+             ", recall from the conformance sweep, joined on ef. " + segment_note(runs))
 
 def bfb_commit(runs: list[Run] | None = None) -> str:
     """Which load generator produced these rows, from the rows.

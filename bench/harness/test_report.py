@@ -624,7 +624,8 @@ class ReportHostTests(unittest.TestCase):
                                       "limit": 10, "epsilon": 1e-7})
 
         html = report.recall_table([run("strawmann", 0.0028), run("qdrant", 0.00007)])
-        self.assertIn("±0.0014 over 3 builds", html)
+        # On hover, beside the figure it qualifies.
+        self.assertIn('title="95% CI [0.9955, 0.9998]; ±0.0014 over 3 builds"', html)
         self.assertIn("at ef=512 spread by: strawmann 0.00280; qdrant 0.00007", html)
         # The asymmetry is the finding, and it is only claimed when it is one.
         self.assertIn("40x as much", html)
@@ -635,7 +636,8 @@ class ReportHostTests(unittest.TestCase):
         one = report.Run("solo", [], "", True, "h", recall={
             "points": [{"ef": 512, "recall_at_10": 0.998}], "queries": 10000})
         self.assertNotIn("independent builds", report.recall_table([one]))
-        self.assertNotIn("builds</span>", report.recall_table([one]))
+        self.assertNotIn("over 0 builds", report.recall_table([one]))
+        self.assertNotIn("title=", report.recall_table([one]))
 
     def test_the_fold_medians_every_measured_column_not_just_throughput(self):
         """`fold` copies pass 1 wholesale and medians only what `NUMERIC` names.
@@ -2424,8 +2426,6 @@ class SegmentPolicyReportTests(unittest.TestCase):
         self.assertEqual(self.report.segments_requested([bare]), "?")
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class RowConfigAndStorageTests(unittest.TestCase):
@@ -2491,3 +2491,129 @@ class RowConfigAndStorageTests(unittest.TestCase):
         self.assertIn("before W11", html)
         # The peak is still the peak, so it keeps the mutating row.
         self.assertIn(rep.procstat.human_bytes(99), html)
+
+
+class ReportReadabilityTests(unittest.TestCase):
+    """The page a reader meets first: one row per question, engine names
+    rather than run labels, and everything else one disclosure down."""
+
+    setUpClass = ReportHostTests.__dict__["setUpClass"]
+    _pair = ReportHostTests._pair
+
+    def _sweep_pair(self, tmp: Path):
+        """W3, a three-point W10 sweep, the W0 floor and an open-loop row."""
+        sweep = _sweep("bench2", "sift1m", 0.98, points=[
+            {"ef": ef, "exact": False, "recall_at_1": r, "recall_at_10": r, "smoke_qps": 1.0}
+            for ef, r in ((32, 0.90), (64, 0.95), (128, 0.98))])
+        sw = [("recall.sift1m.bench2.json", sweep)]
+        rows = lambda k: [_row("W0", 500 * k), _row("W3", 4000 * k),
+                          _row("W4-sat50", 100, load_mode="open-loop"),
+                          _row("W10-ef32", 9000 * k, ef=32), _row("W10-ef64", 6000 * k, ef=64),
+                          _row("W10-ef128", 3000 * k, ef=128)]
+        return self._pair(tmp, rows(1), rows(0.5), sw_a=sw, sw_b=sw)
+
+    def test_a_sweep_is_one_row_and_the_floor_and_offers_are_left_to_the_full_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report, runs, df = self._sweep_pair(Path(tmp))
+            compact = report.compact_throughput_table(runs, df)
+            self.assertIn('W10 <span class="muted">ef 32 to 128</span>', compact)
+            self.assertIn("3,000 to 9,000", compact)
+            self.assertNotIn("W10-ef64", compact)
+            self.assertNotIn('<td class="wid">W0</td>', compact)
+            self.assertNotIn("W4-sat50", compact)
+            # Each point's ratio is on hover, not in the cell.
+            self.assertIn("ef=64 2.00x", compact)
+            full = report.throughput_table(runs, df)
+            for wid in ("W0", "W4-sat50", "W10-ef64"):
+                self.assertIn(f'<td class="wid">{wid}</td>', full)
+
+    def test_the_ratio_is_the_number_and_its_verdict_is_on_hover(self):
+        report = self.report
+        clear = report.ratio_cell("W3", "2.00x", {"W3": 0.01}, 3)
+        self.assertIn('class="num up"', clear)
+        self.assertIn('title="clears', clear)
+        self.assertTrue(clear.endswith(">2.00x</td>"), clear)
+        within = report.ratio_cell("W3", "1.01x", {"W3": 0.03}, 3)
+        self.assertIn('class="num muted"', within)
+        self.assertIn("≈1.01x</td>", within)
+        self.assertIn("inconclusive", within)
+        self.assertEqual(report.ratio_cell("W7", "-", {}, 3), '<td class="num muted">-</td>')
+
+    def test_the_request_rate_is_shown_only_where_it_is_a_different_number(self):
+        import pandas as pd
+        cell = self.report._num_cell
+        self.assertIn("222 requests/s", cell(pd.Series({"qps": 3522.0, "rps": 222.0,
+                                                        "status": "ok"})))
+        self.assertEqual(cell(pd.Series({"qps": 4562.0, "rps": 4542.0, "status": "ok"})),
+                         '<td class="num">4,562</td>')
+
+    def test_engine_names_replace_labels_except_where_the_label_is_the_point(self):
+        report = self.report
+        Run = report.Run
+        sm = Run("sm-x", [], "", True, "h", meta={"strawmann": {"commit": "c"}})
+        qd = Run("qd-x", [], "", True, "h", meta={"qdrant": {"version": "1"}})
+        names = report.display_names([sm, qd])
+        self.assertEqual(names, {"sm-x": "strawmANN", "qd-x": "Qdrant"})
+        # Two arms of one engine keep their labels: the name would not tell them apart.
+        self.assertEqual(report.display_names([sm, Run("sm-y", [], "", True, "h",
+                                                       meta={"strawmann": {}})]),
+                         {"sm-x": "sm-x", "sm-y": "sm-y"})
+        text = ("sm-x beat qd-x; <code>--strawmann-label sm-x</code> `fullrun.py sm-x` "
+                "bench/results/sm-x/rows.json sm-xy "
+                f"{report.KEEP_OPEN}sm-x{report.KEEP_CLOSE}")
+        got = report.renamed(text, names)
+        self.assertTrue(got.startswith("strawmANN beat Qdrant;"), got)
+        for kept in ("<code>--strawmann-label sm-x</code>", "`fullrun.py sm-x`",
+                     "bench/results/sm-x/", "sm-xy", f"{report.KEEP_OPEN}sm-x"):
+            self.assertIn(kept, got)
+
+    def test_losses_are_grouped_by_question(self):
+        got = self.report.grouped_losses([
+            {"id": "W9", "desc": "exact", "ratio": "0.80x"},
+            {"id": "W12-sel1", "desc": "filtered", "ratio": "0.73x"},
+            {"id": "W12-sel1-ef64", "desc": "filtered, ef=64", "ratio": "0.51x"}])
+        self.assertEqual([(g["id"], g["ratio"], g["points"]) for g in got],
+                         [("W9", "0.80x", 1), ("W12-sel1", "0.51 to 0.73x", 2)])
+
+    def test_the_summary_latency_table_keeps_the_rows_a_latency_claim_rests_on(self):
+        report = self.report
+        lat = {"client_p50_us": 900.0, "client_p95_us": 1000.0, "client_p99_us": 1200.0,
+               "client_p999_us": 1500.0, "client_max_us": 9000.0}
+        rows = [_row(w, 100, load_mode=m, latency=lat) for w, m in (
+            ("W3", "closed-loop"), ("W4", "closed-loop"), ("W4-sat50", "open-loop"),
+            ("W5", "closed-loop"))]
+        runs = [report.Run(x, rows, "", True, "h") for x in ("a", "b")]
+        html = report.compact_latency_table(runs)
+        for wid in ("W3", "W4-sat50", "W5"):
+            self.assertIn(f"<td class=\"wid\">{wid} ", html)
+        self.assertNotIn('<td class="wid">W4 ', html)
+        self.assertNotIn("p95", html)
+        self.assertNotIn("9.00 ms", html)            # max is the full table's
+        self.assertIn("p95", report.latency_table(runs))
+
+    def test_the_memory_card_is_four_rows_and_the_full_table_keeps_the_rest(self):
+        report = self.report
+        rows = [_row("W3", 100, rss_peak_bytes=2 << 30, disk_write_bytes=1 << 20,
+                     disk_read_bytes=0, syscall_reads=5, io_source="proc")]
+        runs = [report.Run(x, rows, "", True, "h") for x in ("a", "b")]
+        card = report.storage_table(runs, compact=True)
+        self.assertIn("peak memory (RSS)", card)
+        self.assertIn("written to disk", card)
+        self.assertNotIn("syscall", card)
+        self.assertIn("syscall reads", report.storage_table(runs))
+
+    def test_the_page_opens_on_the_summary_and_closes_the_appendix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report, runs, _ = self._sweep_pair(Path(tmp))
+            html = report.build(runs, "t")
+            order = [html.index(f'id="{s}"') for s in ("verdict", "summary", "throughput",
+                                                       "appendix", "all-throughput")]
+            self.assertEqual(order, sorted(order))
+            self.assertIn('<details class="sec" id="all-throughput">', html)
+            self.assertIn('<details class="glossary" id="glossary">', html)
+            # Said once, in the Host card, not again as a line under the summary.
+            self.assertNotIn('id="bandwidth"', html)
+
+
+if __name__ == "__main__":
+    unittest.main()

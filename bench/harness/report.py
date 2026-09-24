@@ -187,6 +187,63 @@ def frame(runs: list[Run]) -> pd.DataFrame:
 
 
 
+#: What a reader calls each engine. The run label (`sm-dbp1m-perf-0924`) is an
+#: identifier for the result directory, and as a column header it made every
+#: table read "sm-dbp1m-perf-0924 recall@100". The label stays where it
+#: identifies something: the provenance table and the regenerate command.
+ENGINE_NAMES = {"strawmann": "strawmANN", "qdrant": "Qdrant"}
+
+
+def display_names(runs: list[Run]) -> dict[str, str]:
+    """`{label: name}`: the engine's name where it tells the arms apart.
+
+    Two arms of one engine (an A/B of two commits) keep their labels, since
+    the engine name would then say the same thing twice.
+    """
+    engines = [engine_of(r) for r in runs]
+    if len(runs) == 2 and all(engines) and len(set(engines)) == 2:
+        return {r.label: ENGINE_NAMES.get(e, e) for r, e in zip(runs, engines)}
+    return {r.label: r.label for r in runs}
+
+
+#: A region `renamed` leaves alone: where the label *is* the information.
+KEEP_OPEN, KEEP_CLOSE = "<!--keep-labels-->", "<!--/keep-labels-->"
+
+
+def renamed(text: str, names: dict[str, str]) -> str:
+    """`text` with each run label replaced by its display name, outside
+    `KEEP_OPEN`/`KEEP_CLOSE` regions.
+
+    Done once over the rendered page rather than at each of the hundred sites
+    that print a label, because the labels also reach the page inside
+    `compare.py`'s notes and `report_data`'s sentences, which are shared with
+    renderers that have no display name to use. A label is matched only as a
+    whole token: never inside a path (`bench/results/<label>`) or a longer id.
+    """
+    subs = [(re.compile(rf"(?<![\w/.-]){re.escape(lab)}(?![\w-])"), name)
+            for lab, name in names.items() if lab != name]
+    if not subs:
+        return text
+    # `<code>` and backticked prose too: a label there is part of a command or
+    # a path a reader copies (`--strawmann-label sm-dbp1m`), and renaming it
+    # breaks the command.
+    parts = re.split(f"({re.escape(KEEP_OPEN)}.*?{re.escape(KEEP_CLOSE)}"
+                     r"|<code>.*?</code>|`[^`<>]*`)", text, flags=re.S)
+    out = []
+    for p in parts:
+        if not p.startswith((KEEP_OPEN, "<code>", "`")):
+            for rx, name in subs:
+                p = rx.sub(name, p)
+        out.append(p)
+    return "".join(out)
+
+
+#: Below this qps/rps ratio the two are the same number counted twice (bfb's
+#: rps is its own clock, a few requests off); above it the row is batched and
+#: the difference is the batch size, which is worth showing.
+RPS_SHOWN_ABOVE = 1.5
+
+
 def _num_cell(r: pd.Series | None) -> str:
     if r is None or r.empty:
         return '<td class="num muted">-</td>'
@@ -194,9 +251,215 @@ def _num_cell(r: pd.Series | None) -> str:
         klass = "na" if r["status"] == Status.not_applicable else "bad"
         return f'<td class="num {klass}">{r["status"]}</td>'
     sub = ""
-    if pd.notna(r["rps"]) and abs(r["rps"] - r["qps"]) > 1:
-        sub = f'<span class="sub">{r["rps"]:,.0f} rps</span>'
+    # `4,562` above `4,542 rps` read as one broken number, `4,5624,542`, and
+    # said nothing: the two differ only on a batched row.
+    if pd.notna(r["rps"]) and r["rps"] > 0 and r["qps"] / r["rps"] >= RPS_SHOWN_ABOVE:
+        sub = f'<span class="sub">{r["rps"]:,.0f} requests/s</span>'
     return f'<td class="num">{r["qps"]:,.0f}{sub}</td>'
+
+
+def ratio_cell(wid: str, rs: str, noise: dict[str, float], reps: int | None) -> str:
+    """One ratio, coloured by its verdict, with the verdict on hover.
+
+    The verdict ("clears the ±6% measured noise floor") was printed under every
+    ratio, so the column said the same sentence thirty times and the number was
+    the smaller text. A ratio the floor cannot tell from 1 is grey and marked
+    `≈`; the band is in the tooltip for a reader who wants it.
+    """
+    v = ratio_value(rs)
+    if v is None:
+        return f'<td class="num muted">{html.escape(rs or "-")}</td>'
+    verdict = ratio_verdict(wid, v, noise, reps)
+    tip = f' title="{html.escape(verdict)}"' if verdict else ""
+    if verdict.startswith(("inconclusive", "too noisy")):
+        return f'<td class="num muted"{tip}>≈{rs}</td>'
+    return f'<td class="num {"up" if v >= 1 else "down"}"{tip}>{rs}</td>'
+
+
+#: `compare.Row` notes a summary table keeps, condensed. Everything else a row
+#: carries (the work/occupancy decomposition, §4's caveats, the W11 overlap
+#: arithmetic) is in the full table and the row's own section.
+_RECALL_UNEQUAL = re.compile(r"recall unequal: ([\d.]+) vs ([\d.]+)")
+_NOT_SERVER = re.compile(r"^(.+?): .*?so (\d+)% of this row is the load generator")
+
+
+def short_notes(jr: compare.Row | None) -> tuple[list[str], bool]:
+    """The notes a summary row needs, as markup, and whether any row was
+    refused for the rescore-pool reason (said once, under the table)."""
+    if jr is None:
+        return [], False
+    out, rescore = [], False
+    for n in jr.notes:
+        t = n.strip("[]")
+        if "contaminated" in t:
+            out.append(f'<span class="warn">{html.escape(t)}</span>')
+        elif "FAILED" in t or "not measured" in t:
+            out.append(f'<span class="bad">{html.escape(t)}</span>')
+        elif "declined" in t:
+            out.append(f'<span class="na">{html.escape(t)}</span>')
+        elif m := _RECALL_UNEQUAL.match(t):
+            mark = ""
+            if "rescore pools differ" in t:
+                rescore, mark = True, "<sup>1</sup>"
+            out.append(f'<span class="caveat">recall differs: {m[1]} vs {m[2]}{mark}</span>')
+        elif t.startswith(("recall below", "recall missing", "saturated",
+                           "offered rate not served")):
+            out.append(f'<span class="caveat">{html.escape(t.split(". ")[0])}</span>')
+        elif m := _NOT_SERVER.match(t):
+            out.append(f'<span class="caveat">{html.escape(m[1])}: {m[2]}% is client '
+                       f'and socket, not server</span>')
+        elif "across its passes, monotonically" in t:
+            out.append(f'<span class="caveat">drifted: {html.escape(t.split(" across")[0])}'
+                       f' across passes</span>')
+        elif "payload index" in t or "harness" in t:
+            out.append(f'<span class="caveat">{html.escape(t.split(", so")[0])}</span>')
+    if jr.refusal and not out:
+        out.append(f'<span class="caveat">{html.escape(jr.refusal.split("; the writer")[0])}</span>')
+    return out, rescore
+
+
+#: One footnote for every rescoring row, in place of the sentence on each.
+RESCORE_FOOTNOTE = ("<sup>1</sup> Expected, not a defect: strawmANN rescores "
+                    "<code>max(asked, ef)</code> candidates and Qdrant rescores "
+                    "<code>limit</code>, so at equal settings the two are not answering "
+                    "the same question.")
+
+#: `W10-ef128` is one point of the W10 sweep; the family is what the summary
+#: table shows as one row.
+SWEEP_ID = re.compile(r"^(?P<fam>.+)-ef(?P<ef>\d+)$")
+
+#: Rows the summary table leaves to the full one. W0 is a diagnostic floor
+#: (`SUMMARY_EXCLUDES`), and the open-loop rows are latency measurements at an
+#: offered rate: their throughput column is the offer.
+COMPACT_SKIP = ("W0",)
+
+
+def _is_open_loop_id(wid: str) -> bool:
+    return wid.startswith(("W4-sat", "W4-rps"))
+
+
+def _qps_range(rows: list) -> str:
+    vals = [r["qps"] for r in rows if r is not None and pd.notna(r["qps"])]
+    if not vals:
+        return '<td class="num muted">-</td>'
+    lo, hi = min(vals), max(vals)
+    return f'<td class="num">{lo:,.0f} to {hi:,.0f}</td>'
+
+
+def _sweep_row(fam: str, members: list[str], a: str, b: str | None, df: pd.DataFrame,
+               joined_rows: dict, noise: dict, reps: int | None) -> tuple[str, bool]:
+    """A whole `ef` sweep as one row: the qps range per engine and the range of
+    the ratios that survived, with each point's ratio on hover."""
+    efs = [int(SWEEP_ID.match(w)["ef"]) for w in members]
+    desc = re.sub(r",? ef=\d+", "", describe(members[0]))
+
+    def rows_of(label: str) -> list:
+        return [next((r for _, r in df[(df["id"] == w) & (df["engine"] == label)].iterrows()),
+                     None) for w in members]
+
+    cells = [f'<td class="wid">{fam} <span class="muted">ef {min(efs)} to {max(efs)}</span></td>',
+             f'<td class="desc">{desc}</td>', _qps_range(rows_of(a))]
+    rescore, notes = False, []
+    if b:
+        cells.append(_qps_range(rows_of(b)))
+        got, tips, refused, reasons = [], [], 0, []
+        for w, ef in zip(members, efs):
+            jr = joined_rows.get(w)
+            v = ratio_value(jr.ratio) if jr is not None else None
+            if v is None:
+                refused += 1
+                tips.append(f"ef={ef} not compared")
+                sn, rs_ = short_notes(jr)
+                rescore |= rs_
+                # One of each kind: three points refused for unequal recall
+                # are one reason, and each point's figures are on hover.
+                sn = [re.sub(r": [\d.]+ vs [\d.]+", "", x) for x in sn]
+                reasons += [x for x in sn if x not in reasons]
+                continue
+            verdict = ratio_verdict(w, v, noise, reps)
+            got.append((v, verdict))
+            tips.append(f"ef={ef} {v:.2f}x" + (f" ({verdict})" if verdict else ""))
+        if got:
+            lo, hi = min(v for v, _ in got), max(v for v, _ in got)
+            text = f"{lo:.2f}x" if lo == hi else f"{lo:.2f} to {hi:.2f}x"
+            clear = all(vd.startswith("clears") for _, vd in got)
+            klass = ("up" if lo >= 1 else "down" if hi < 1 else "muted") if clear else "muted"
+            cells.append(f'<td class="num {klass}" title="{html.escape("; ".join(tips))}">'
+                         f'{text}</td>')
+        else:
+            cells.append('<td class="num muted">-</td>')
+        if refused:
+            notes.append(f'<span class="caveat">{refused} of {len(members)} points not '
+                         f'compared</span>')
+            notes += reasons
+    cells.append(f'<td class="notes">{" ".join(notes)}</td>')
+    return "<tr>" + "".join(cells) + "</tr>", rescore
+
+
+def compact_throughput_table(runs: list[Run], df: pd.DataFrame) -> str:
+    """The throughput table a reader needs: one row per question.
+
+    The full table (`throughput_table`) has a row per measurement, 36 of them,
+    of which 20 are points of four `ef` sweeps and three are open-loop latency
+    rows whose throughput is the rate they were offered. Here a sweep is one
+    row carrying its range, the open-loop rows and the W0 floor are left to the
+    full table, and the notes column keeps only what explains a missing ratio.
+    Same `compare.Row` behind every cell, so it cannot state a ratio the full
+    table refuses.
+    """
+    noise = load_noise(runs)
+    reps = reps_of(runs)
+    a = runs[0].label
+    b = runs[1].label if len(runs) > 1 else None
+    joined_rows = ({r.id: r for r in compare.joined(a, b, runs[0].by_id(), runs[1].by_id())}
+                   if b else {})
+    order = [w for w in dict.fromkeys(df["id"])
+             if w not in UPLOAD_ROWS and w not in COMPACT_SKIP and not _is_open_loop_id(w)]
+    families: dict[str, list[str]] = {}
+    for w in order:
+        if m := SWEEP_ID.match(w):
+            families.setdefault(m["fam"], []).append(w)
+    body, any_rescore, done = [], False, set()
+    for wid in order:
+        m = SWEEP_ID.match(wid)
+        if m and len(families[m["fam"]]) > 1:
+            fam = m["fam"]
+            if fam in done:
+                continue
+            done.add(fam)
+            row, rs_ = _sweep_row(fam, families[fam], a, b, df, joined_rows, noise, reps)
+            body.append(row)
+            any_rescore |= rs_
+            continue
+        sub = df[df["id"] == wid]
+        ra = sub[sub["engine"] == a]
+        rb = sub[sub["engine"] == b] if b else pd.DataFrame()
+        x = ra.iloc[0] if len(ra) else None
+        y = rb.iloc[0] if len(rb) else None
+        if x is None and y is None:
+            continue
+        cells = [f'<td class="wid">{wid}</td>', f'<td class="desc">{describe(wid)}</td>',
+                 _num_cell(x)]
+        jr = joined_rows.get(wid)
+        notes, rs_ = short_notes(jr)
+        any_rescore |= rs_
+        if b:
+            cells.append(_num_cell(y))
+            cells.append(ratio_cell(wid, jr.ratio if jr is not None else "-", noise, reps))
+        cells.append(f'<td class="notes">{" ".join(notes)}</td>')
+        body.append("<tr>" + "".join(cells) + "</tr>")
+    if not body:
+        return ""
+    head = f"<th>workload</th><th></th><th class=\"num\">{a}</th>"
+    if b:
+        head += (f'<th class="num">{b}</th>'
+                 f'<th class="num" title="{a} throughput divided by {b} throughput">ratio</th>')
+    head += "<th>notes</th>"
+    banners = compare.banners(a, b) if b else []
+    top = "".join(f'<div class="banner"><b>{html.escape(bnr)}</b></div>' for bnr in banners)
+    foot = (f'<p class="note">{RESCORE_FOOTNOTE}</p>' if any_rescore else "")
+    return (f'{top}<div class="tablewrap"><table class="throughput"><thead><tr>{head}</tr>'
+            f'</thead><tbody>{"".join(body)}</tbody></table></div>{foot}')
 
 
 def throughput_table(runs: list[Run], df: pd.DataFrame) -> str:
@@ -264,18 +527,10 @@ def throughput_table(runs: list[Run], df: pd.DataFrame) -> str:
         if b:
             cells.append(_num_cell(y))
             # `compare.Row.ratio` is "N.NNx", or a word saying why not.
-            rs = jr.ratio if jr is not None else "-"
-            if rs.endswith("x") and rs[:-1].replace(".", "", 1).isdigit():
-                ratio = float(rs[:-1])
-                verdict = ratio_verdict(wid, ratio, noise, reps_of(runs))
-                # A ratio inside the measured floor is not a small win, it is
-                # no measured difference, and the table has to say which.
-                klass = "muted" if verdict.startswith("inconclusive") else \
-                    ("up" if ratio >= 1 else "down")
-                sub = f'<span class="sub">{verdict}</span>' if verdict else ""
-                cells.append(f'<td class="num {klass}">{rs}{sub}</td>')
-            else:
-                cells.append(f'<td class="num muted">{rs}</td>')
+            # A ratio inside the measured floor is not a small win, it is no
+            # measured difference, and the cell says which (`ratio_cell`).
+            cells.append(ratio_cell(wid, jr.ratio if jr is not None else "-",
+                                    noise, reps_of(runs)))
         cells.append(f'<td class="notes">{" ".join(notes)}</td>')
         body.append("<tr>" + "".join(cells) + "</tr>")
 
@@ -511,10 +766,10 @@ def workload_sections(runs: list[Run], df: pd.DataFrame) -> str:
             rs = jr.ratio
             if ratio_value(rs) is not None:
                 v = ratio_verdict(wid, ratio_value(rs), noise, reps_of(runs))
-                klass = "muted" if v.startswith("inconclusive") else \
+                klass = "muted" if v.startswith(("inconclusive", "too noisy")) else \
                     ("up" if ratio_value(rs) >= 1 else "down")
-                verdict = (f'<span class="wl-ratio {klass}">{rs}</span>'
-                           + (f'<span class="sub">{v}</span>' if v else ""))
+                tip = f' title="{html.escape(v)}"' if v else ""
+                verdict = f'<span class="wl-ratio {klass}"{tip}>{rs}</span>'
                 index.append((wid, rs, klass))
             elif rs and rs != "-":
                 verdict = f'<span class="wl-ratio muted">{rs}</span>'
@@ -1354,6 +1609,51 @@ def latency_table(runs: list[Run], which: str = "client") -> str:
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
+#: The summary latency table's percentiles. p95 sits between two columns a
+#: reader already has, and `max` is one request.
+COMPACT_LAT_COLS = [("p50", "p50_us"), ("p99", "p99_us"), ("p99.9", "p999_us")]
+
+#: Closed-loop rows the summary latency table keeps beside the open-loop ones:
+#: one client at a time (W3) has no queue to understate, and W5 is the batched
+#: request. The rest of the closed-loop rows are in the full table.
+COMPACT_LAT_CLOSED = ("W3", "W5")
+
+
+def compact_latency_table(runs: list[Run]) -> str:
+    """Latency where it can be quoted: the open-loop rows, plus W3 and W5.
+
+    A closed-loop p99 understates the tail (a stalled server stops receiving
+    requests), so of the full table's thirty-odd rows only the fixed-rate ones
+    carry a latency claim. Three percentiles, each engine's once over its
+    columns, and the same banners the full table raises.
+    """
+    ids = list(dict.fromkeys(r["id"] for run in runs for r in run.rows))
+    mode = {r["id"]: r.get("load_mode") for run in runs for r in run.rows}
+    keep = ([w for w in ids if w in COMPACT_LAT_CLOSED[:1]]
+            + [w for w in ids if mode.get(w) == workloads.LoadMode.open_loop]
+            + [w for w in ids if w in COMPACT_LAT_CLOSED[1:]])
+    body = []
+    for wid in keep:
+        cells, any_value = [], False
+        for run in runs:
+            lat = run.by_id().get(wid, {}).get("latency") or {}
+            for i, (_, key) in enumerate(COMPACT_LAT_COLS):
+                v = lat.get(f"client_{key}")
+                any_value = any_value or v is not None
+                cells.append(f'<td class="num{" grp" if i == 0 else ""}">{_us(v)}</td>')
+        if any_value:
+            body.append(f'<tr><td class="wid">{wid} <span class="desc">{describe(wid)}'
+                        f'</span></td>{"".join(cells)}</tr>')
+    if not body:
+        return ""
+    warn = ""
+    if mismatch := open_loop_mismatch(runs):
+        warn = f'<div class="banner soft"><b>Not compared.</b> {mismatch}</div>'
+    if instrument := open_loop_is_instrument_limited(runs):
+        warn = f'<div class="banner">{instrument}</div>' + warn
+    return warn + _engine_grouped(runs, [n for n, _ in COMPACT_LAT_COLS], body)
+
+
 def recall_table(runs: list[Run]) -> str:
     """The conformance side of W10: recall against the fp64 oracle, by `ef`.
 
@@ -1388,7 +1688,9 @@ def recall_table(runs: list[Run]) -> str:
             # inside `build`, so one such point took down the whole report
             # rather than one cell of one table.
             lo, hi = p.get("recall_at_10_ci95_low"), p.get("recall_at_10_ci95_high")
-            ci = (f'<br><span class="muted">[{lo:.4f}, {hi:.4f}]</span>'
+            # On hover rather than as two more lines under every figure: the
+            # table is read for the numbers, and the interval is the method.
+            ci = (f"95% CI [{lo:.4f}, {hi:.4f}]"
                   if lo is not None and hi is not None else "")
             # The spread across the run's own repeated builds, where it has
             # them. On strawmANN it is the load-bearing number at the top of
@@ -1398,8 +1700,8 @@ def recall_table(runs: list[Run]) -> str:
             # a draw as a property.
             spread = p.get("rep_spread")
             if isinstance(spread, (int, float)) and spread > 0:
-                ci += (f'<br><span class="muted">±{spread / 2:.4f} over '
-                       f'{p.get("reps", 0)} builds</span>')
+                ci += (("; " if ci else "") + f"±{spread / 2:.4f} over "
+                       f'{p.get("reps", 0)} builds')
             num = lambda v, f: format(v, f) if isinstance(v, (int, float)) else "-"
             # §8.9's recall@100, from the limit-100 sweep, matched on the same
             # `ef`. Absent below ef=100 by construction, not by omission: that
@@ -1409,18 +1711,15 @@ def recall_table(runs: list[Run]) -> str:
             k = next((x for x in (r.recall_k100.get("points") or [])
                       if not x.get("exact") and x.get("ef") == ef), None)
             r100 = num((k or {}).get("recall_at_100"), ".4f")
-            cells.append(f'<td class="num">{num(p.get("recall_at_1"), ".4f")}</td>'
-                         f'<td class="num">{num(p.get("recall_at_10"), ".4f")}{ci}</td>'
+            tip = f' title="{ci}"' if ci else ""
+            cells.append(f'<td class="num grp">{num(p.get("recall_at_1"), ".4f")}</td>'
+                         f'<td class="num"{tip}>'
+                         f'{num(p.get("recall_at_10"), ".4f")}</td>'
                          f'<td class="num">{r100}</td>'
                          f'<td class="num">'
                          f'{num(p.get("mean_relative_distance_error"), ".2e")}</td>')
         body.append(f'<tr><td class="wid">{"exact" if ef == "exact" else f"ef={ef}"}</td>'
                     f'{"".join(cells)}</tr>')
-    head = "<th>ef</th>" + "".join(
-        f'<th class="num">{r.label} recall@1</th>'
-        f'<th class="num">{r.label} recall@10</th>'
-        f'<th class="num">{r.label} recall@100</th>'
-        f'<th class="num">{r.label} MRDE</th>' for r in have)
     note = ""
     first = have[0].recall
     if first.get("queries"):
@@ -1430,8 +1729,13 @@ def recall_table(runs: list[Run]) -> str:
                 f'<code>{first.get("base_checksum", "?")}</code>: the same corpus the '
                 f'latency rows were measured on.'
                 + _build_spread_note(have) + '</p>')
-    return (f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>{note}')
+    # The CI and the build spread are two more lines under every recall@10,
+    # and the sentence under the table is the method; both behind one
+    # disclosure, so the table reads as five rows of numbers.
+    more = (f'<details class="more"><summary>How recall was measured</summary>{note}'
+            f'</details>' if note else "")
+    return (_engine_grouped(have, ["recall@1", "recall@10", "recall@100", "MRDE"], body,
+                            first="ef") + more)
 
 
 def _build_spread_note(have: list[Run]) -> str:
@@ -1805,7 +2109,8 @@ def psi_scopes(runs: list[Run]) -> dict[str, str]:
     return out
 
 
-def _engine_grouped(runs: list[Run], cols: list[str], body: list[str]) -> str:
+def _engine_grouped(runs: list[Run], cols: list[str], body: list[str],
+                    first: str = "workload") -> str:
     """A per-row table whose columns repeat once per engine, headed that way:
     the scheduler, stalls, hardware and cache-line sharing tables.
 
@@ -1816,7 +2121,7 @@ def _engine_grouped(runs: list[Run], cols: list[str], body: list[str]) -> str:
     The label now spans its group once, the metrics sit under it, and each
     group opens with a rule (`grp`) that the body rows repeat.
     """
-    top = ('<tr><th rowspan="2">workload</th>'
+    top = (f'<tr><th rowspan="2">{first}</th>'
            + "".join(f'<th class="eng" colspan="{len(cols)}">{html.escape(r.label)}</th>'
                      for r in runs) + "</tr>")
     sub = "<tr>" + "".join(f'<th class="num{" grp" if i == 0 else ""}">{c}</th>'
@@ -2316,6 +2621,91 @@ def losses(runs: list[Run]) -> list[dict]:
     return out
 
 
+def grouped_losses(items: list[dict]) -> list[dict]:
+    """`losses`, one entry per question rather than per sweep point.
+
+    The summary listed six rows, four of them points of two filtered `ef`
+    sweeps, each under its full description: a paragraph where the finding is
+    "filtered search and exact search". A sweep point joins its base row
+    (`W12-sel1-ef64` joins `W12-sel1`) and the entry carries the ratio range.
+    """
+    out: dict[str, dict] = {}
+    for l in items:
+        m = SWEEP_ID.match(l["id"])
+        fam = m["fam"] if m else l["id"]
+        g = out.setdefault(fam, {"id": fam, "ids": [], "ratios": [],
+                                 "desc": describe(fam) or re.sub(r",? ef=\d+", "", l["desc"])})
+        g["ids"].append(l["id"])
+        g["ratios"].append(ratio_value(l["ratio"]))
+    for g in out.values():
+        lo, hi = min(g["ratios"]), max(g["ratios"])
+        g["ratio"] = f"{lo:.2f}x" if lo == hi else f"{lo:.2f} to {hi:.2f}x"
+        g["points"] = len(g["ids"])
+    return list(out.values())
+
+
+def _kpi(label: str, values: list[str], sub: str, raw: list[float]) -> dict:
+    """A two-engine tile; `better` is the index of the lower figure, if any."""
+    better = None if min(raw) == max(raw) else raw.index(min(raw))
+    return {"label": label, "cells": values, "sub": sub, "better": better}
+
+
+def kpis(runs: list[Run], df: pd.DataFrame, summ: dict) -> list[dict]:
+    """The summary's headline figures, each from the section that states it.
+
+    Throughput at matched recall (the page's conclusion), the open-loop tail at
+    the highest offered fraction, upload plus build, and the memory and disk
+    the run cost. A tile the data cannot support is left out rather than
+    drawn empty: no matched ratio, a latency the generator is known to have
+    distorted, or a residency split that refuses the storage rows.
+    """
+    if len(runs) != 2:
+        return []
+    a, b = runs
+    out = []
+    m = summ.get("matched")
+    if m:
+        rng = f'{m["lo"]:.2f}x' if m["lo"] == m["hi"] else f'{m["lo"]:.2f} to {m["hi"]:.2f}x'
+        out.append({"label": "throughput at equal recall", "headline": rng,
+                    "sub": f'{a.label} over {b.label}, recall@10 '
+                           f'{m["lo_recall"]:.3f} to {m["hi_recall"]:.3f}',
+                    "cells": [], "better": None})
+    if not open_loop_is_instrument_limited(runs):
+        opens = [r for r in a.rows if r.get("load_mode") == workloads.LoadMode.open_loop
+                 and r.get("rps_fraction")]
+        top = max(opens, key=lambda r: r["rps_fraction"], default=None)
+        if top is not None:
+            ps = [((run.by_id().get(top["id"]) or {}).get("latency") or {}).get("client_p99_us")
+                  for run in runs]
+            if all(p is not None for p in ps):
+                whose = "each engine's own" if open_loop_mismatch(runs) else "measured"
+                out.append(_kpi(f'p99 latency at {top["rps_fraction"]:.0%} load',
+                                [_us(p) for p in ps],
+                                f'{top["id"]}, open loop, {whose} saturation', ps))
+    totals = []
+    for run in runs:
+        by = run.by_id()
+        parts = [_seconds_of(by[w]) for w in INGEST_SUM if w in by]
+        totals.append(sum(parts) if parts and all(p is not None for p in parts) else None)
+    if all(t is not None for t in totals):
+        out.append(_kpi("upload and index build", [f"{t:,.0f} s" for t in totals],
+                        " + ".join(INGEST_SUM), totals))
+    if not placement_refusal(runs):
+        for label, key, agg in (("peak memory (RSS)", "rss_peak_bytes", max),
+                                ("written to disk", "disk_write_bytes", sum)):
+            vals = []
+            for run in runs:
+                got = [r.get(key) for r in run.rows if r.get(key) is not None]
+                vals.append(agg(got) if got else None)
+            if all(v is not None for v in vals):
+                out.append(_kpi(label, [procstat.human_bytes(v) for v in vals],
+                                "largest across the run" if agg is max else "whole run",
+                                vals))
+    for k in out:
+        k.setdefault("headline", "")
+    return out
+
+
 def smoke_ordering(a: Run, b: Run) -> dict | None:
     """How the conformance binary's own single-client rate orders the engines.
 
@@ -2769,19 +3159,26 @@ def provenance_table(runs: list[Run]) -> str:
                 + "".join(f"<td>{c}</td>" for c in cells) + "</tr>")
 
     body = "".join(_engine_row(name, cells) for name, cells in rows)
-    head = "<th></th>" + "".join(f"<th>{r.label}</th>" for r in runs)
-    engines = (f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
-               f"<tbody>{body}</tbody></table></div>")
+    # The one place the run label is the information: it names the result
+    # directory every number here was read from. `renamed` leaves it alone.
+    names = display_names(runs)
+    head = "<th></th>" + "".join(
+        f"<th>{names[r.label]}"
+        + (f'<br><code>{r.label}</code>' if names[r.label] != r.label else "")
+        + "</th>" for r in runs)
+    engines = (f'{KEEP_OPEN}<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
+               f"<tbody>{body}</tbody></table></div>{KEEP_CLOSE}")
 
     shared = []
     if ds:
-        checks = ds.get("checksums") or {}
-        pins = "".join(f"<div><code>{k}</code> <code>{v[:16]}…</code></div>"
-                       for k, v in checks.items())
-        extra = ""
-        if ds.get("checksum_count", 0) > len(checks):
-            extra = (f'<div class="muted">+{ds["checksum_count"] - len(checks)} '
-                     f"more parts, all pinned in <code>datasets.json</code></div>")
+        # The count, not the hashes: four truncated sha256s and "+22 more"
+        # identified nothing a reader could check, and `datasets.json` pins
+        # every part in full.
+        n_parts = max(ds.get("checksum_count") or 0, len(ds.get("checksums") or {}))
+        pins = ""
+        extra = (f'<div class="muted">{n_parts} file{"" if n_parts == 1 else "s"}, '
+                 f"each pinned by sha256 in <code>datasets.json</code></div>"
+                 if n_parts else "")
         shared.append(
             f'<div class="factcard"><h3>Dataset</h3>'
             f'<div><b>{_fmt(ds.get("name"))}</b>, {_fmt(ds.get("n"))} × '
@@ -2869,8 +3266,18 @@ NOT_IN_SOURCE = {
 }
 
 
-def storage_table(runs: list[Run]) -> str:
+#: The rows the summary's memory-and-disk card keeps, and what it calls them.
+#: The anonymous/file split, the op counts and the syscall counts are in the
+#: full table.
+COMPACT_STORAGE = {"peak RSS": "peak memory (RSS)", "storage on disk": "storage on disk",
+                   "disk read bytes": "read from disk", "disk write bytes": "written to disk"}
+
+
+def storage_table(runs: list[Run], compact: bool = False) -> str:
     """What each engine stored, and what it did to the disk to serve the run.
+
+    `compact` is the four rows a reader compares, with one sentence under
+    them; the full table and its method note are the appendix's.
 
     Empty, and therefore absent from the report, for runs measured before these
     fields existed. An absent section reads as "not measured"; a section full
@@ -2907,14 +3314,17 @@ def storage_table(runs: list[Run]) -> str:
         shown = procstat.human_bytes(v) if fmt == "bytes" else procstat.human_count(v)
         # Named rather than silently dropped: the reader is owed the row the
         # level came from when it is not the run's last one.
-        if kind == "level" and not key.startswith("rss_") and len(src) != len(run.rows):
+        if (kind == "level" and not key.startswith("rss_") and len(src) != len(run.rows)
+                and not compact):  # the compact card's note says it once
             skipped = [r.get("id") for r in run.rows if procstat.is_mutating(r)]
             return (f'<td class="num">{shown}'
                     f'<span class="sub">before {", ".join(str(x) for x in skipped)}</span></td>')
         return f'<td class="num">{shown}</td>'
 
     body = []
-    for label, key, fmt, kind in STORAGE_ROWS:
+    rows = ([(COMPACT_STORAGE[lab], k, f, kd) for lab, k, f, kd in STORAGE_ROWS
+             if lab in COMPACT_STORAGE] if compact else STORAGE_ROWS)
+    for label, key, fmt, kind in rows:
         cells = "".join(cell(run, key, fmt, kind) for run in runs)
         if 'class="num"' not in cells:
             continue  # nothing measured this row on any engine
@@ -2934,9 +3344,15 @@ def storage_table(runs: list[Run]) -> str:
         f"{run.label}: " + (next((r.get("io_source") for r in run.rows if r.get("io_source")),
                                  "unmeasured"))
         for run in runs)
-    head = "<th></th>" + "".join(f"<th>{r.label}</th>" for r in runs)
-    return (warn + f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>'
+    head = "<th></th>" + "".join(f'<th class="num">{r.label}</th>' for r in runs)
+    table = (f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
+             f'<tbody>{"".join(body)}</tbody></table></div>')
+    if compact:
+        return (warn + table + '<p class="note">Peak memory is the largest across the '
+                'run; disk figures are totals over every row. Storage on disk is read '
+                'before the concurrent-write rows (W11), when an engine rewriting '
+                'segments would be caught mid-rewrite.</p>')
+    return (warn + table +
             f'<p class="note">measured via {sources}. <code>proc</code> supplies '
             f'syscall counts and block-layer bytes, <code>cgroup</code> supplies '
             f'block-layer operations and bytes, so a row one interface does not carry '
@@ -3017,8 +3433,8 @@ def _ingest_total_row(runs: list[Run], df: pd.DataFrame) -> str:
         return ""
     cells = "".join(f'<td class="num"><b>{t:,.1f} s</b></td>' for t in totals)
     ratio = totals[1] / totals[0] if totals[0] else None
-    tail = (f'<td class="num {"up" if ratio >= 1 else "down"}">{ratio:,.2f}x'
-            f'<span class="sub">no noise floor for these rows</span></td>'
+    tail = (f'<td class="num {"up" if ratio >= 1 else "down"}" '
+            f'title="no noise floor for these rows, so no verdict">{ratio:,.2f}x</td>'
             if ratio else "<td></td>")
     return (f'<tr><td class="wid">{" + ".join(INGEST_SUM)}</td>'
             f'<td class="desc"><b>upload and index, together</b></td>{cells}{tail}</tr>')
@@ -3269,6 +3685,7 @@ background:var(--card);padding:13px 15px;font-size:12.5px;line-height:1.7}
 .factcard h3{margin:0 0 6px;font-size:11px;text-transform:uppercase;
 letter-spacing:.08em;color:var(--muted)}
 .factcard code{font-size:11px}
+th code{text-transform:none;letter-spacing:0}
 .muted{color:var(--muted)}
 /* Syscall counts are a different axis from the block-layer rows above them:
    they include sockets. The rule is the visual form of that separation. */
@@ -3291,6 +3708,36 @@ font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
 footer{margin-top:52px;padding-top:18px;border-top:1px solid var(--line);
 color:var(--muted);font-size:12px}
 .js-plotly-plot{width:100%!important}
+/* The summary's figures. One tile per question, the lower (better) figure of
+   a pair in the engine-neutral "up" colour. */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;
+margin:16px 0 8px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:13px 15px}
+.kpi .k{font:600 10.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.06em;
+text-transform:uppercase;color:var(--muted)}
+.kpi .h{font:700 24px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;margin:4px 0 2px}
+.kpi .v{display:flex;justify-content:space-between;gap:8px;font:13.5px/1.7 ui-monospace,
+SFMono-Regular,Menlo,monospace}
+.kpi .v span:first-child{color:var(--muted);font-family:ui-sans-serif,system-ui,sans-serif}
+.kpi .v.better span:last-child{color:var(--ok);font-weight:700}
+.kpi .s{font-size:11.5px;color:var(--muted);margin-top:4px}
+/* Everything past the summary's level, one disclosure per section. */
+details.sec{border:1px solid var(--line);border-radius:9px;background:var(--card);
+margin:0 0 10px}
+details.sec>summary{cursor:pointer;padding:11px 15px;font-weight:600;font-size:14px}
+details.sec>summary .muted{font-weight:400;font-size:12.5px}
+details.sec[open]>summary{border-bottom:1px solid var(--line)}
+details.sec>.body{padding:14px 15px 4px}
+details.sec>.body>h2:first-child{margin-top:0}
+details.more{margin:8px 0 0}
+details.more>summary{cursor:pointer;font-size:11.5px;color:var(--muted)}
+details.glossary{margin:10px 0 0}
+details.glossary>summary{cursor:pointer;font-size:12.5px;color:var(--muted)}
+.slower{margin:0;padding-left:20px;font-size:14px}
+.wid .desc{font:400 13px ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+margin-left:4px}
+[title]{text-decoration-style:dotted}
+th[title],td[title]{cursor:help}
 """
 
 
@@ -3358,6 +3805,22 @@ THEME_JS = """
   }
   new MutationObserver(apply).observe(document.documentElement,
       {attributes: true, attributeFilter: ['data-theme']});
+  // A chart drawn inside a closed <details> is laid out at zero width, so it
+  // is resized when its section opens. `toggle` does not bubble; capture does.
+  document.addEventListener('toggle', function (e) {
+    if (!window.Plotly || !e.target.open) return;
+    e.target.querySelectorAll('.plotly-graph-div').forEach(function (d) {
+      Plotly.Plots.resize(d);
+    });
+  }, true);
+  // A link into the appendix lands inside a closed <details>, which would
+  // scroll to nothing visible; open every disclosure around the target.
+  function reveal() {
+    var el = location.hash && document.getElementById(location.hash.slice(1));
+    for (; el; el = el.parentElement) { if (el.tagName === 'DETAILS') el.open = true; }
+  }
+  window.addEventListener('hashchange', reveal);
+  reveal();
 })();
 """
 
@@ -3388,6 +3851,11 @@ class Tables:
     latency: str
     recall: str
     matched_recall: str
+    #: The summary-level versions, shown by default; the full tables above
+    #: are the appendix's.
+    throughput_compact: str
+    latency_compact: str
+    resources: str
 
 
 TEMPLATE = "report.html.j2"
@@ -3432,6 +3900,7 @@ def build(runs: list[Run], title: str) -> str:
                "unknown CPU")
     shared_host = same_host(runs)
     bandwidth = bandwidth_of(runs)
+    summ = summary(runs, df)
 
     body = tpl.render(
         title=title,
@@ -3502,9 +3971,15 @@ def build(runs: list[Run], title: str) -> str:
             latency=latency_table(runs),
             recall=recall_table(runs),
             matched_recall=matched_recall_table(runs),
+            throughput_compact=compact_throughput_table(runs, df),
+            latency_compact=compact_latency_table(runs),
+            resources=storage_table(runs, compact=True),
         ),
         licence=licence_of(runs),
-        summary=summary(runs, df),
+        summary=summ,
+        kpis=kpis(runs, df, summ),
+        slower=grouped_losses(summ["losses"]),
+        names=display_names(runs),
         noise=load_noise(),
         noise_prov=noise_provenance(runs),
         figures=build_figures(runs, df),
@@ -3518,6 +3993,10 @@ def build(runs: list[Run], title: str) -> str:
         perf_refusals=perf_refusals(runs),
         perf_crosscheck=perf_crosscheck(runs),
     )
+    # Engine names in place of run labels, everywhere but the regions that
+    # keep them (`renamed`). Before the scripts go in: plotly's source is not
+    # the page's text.
+    body = renamed(body, display_names(runs))
     # Plotly's JS is embedded rather than fetched: a report mailed to someone
     # has to render in six months, when a CDN URL has moved.
     return body.replace(

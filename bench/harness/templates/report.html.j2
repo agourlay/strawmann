@@ -9,6 +9,12 @@
 <body>
 <div class="wrap">
 
+  {#- Three levels. The summary answers "which is faster, and where is it
+      not" on one screen; the sections under it show the headline rows of
+      each question; everything a reviewer needs to check the harness is in
+      the appendix, one closed disclosure per section. Nothing was dropped to
+      get here: every table the page used to show at top level is still in
+      it, one click down. -#}
   <header>
     <h1>strawm<em>ANN</em> benchmark report</h1>
     <p class="lede">{{ runs | map(attribute='label') | join(' against ') }}
@@ -44,85 +50,31 @@
       {%- if n_dirty %}
       <span class="pill bad">{{ n_dirty }} contaminated row{{ '' if n_dirty == 1 else 's' }}</span>
       {%- endif %}
-      <span class="pill">bfb {{ bfb_commit }}</span>
     </div>
   </header>
 
-  {#- Can these numbers be quoted, and for what. This was three things in three
-      places: an "ungated" banner here, the same sentence again in the summary,
-      and §8's licence below the table of contents — which the summary called
-      "the banner above". A reader had to assemble the one answer they need
-      first out of three separated claims, one of which pointed the wrong way. -#}
+  {#- Can these numbers be quoted, and for what: one line when the answer is
+      yes. The reasoning behind it (profile, segment policy, the ε the scores
+      agree within) is under "Run conditions" in the appendix; when the
+      answer is no, the reason stays here, because it is the first thing a
+      reader must know. -#}
   <div class="banner {{ '' if ungated or not licence.comparative else 'ok' }}" id="verdict">
     {%- if ungated %}
-    <b>Development-grade. Not publishable.</b> The §7.1 gate fails for
+    <b>Development-grade. Not publishable.</b> The host gate fails for
     {{ ungated | join(' and ') }}, so these numbers describe this machine in its current
     state rather than the engines.
     {%- else %}
-    <b>§7.1 gate passed</b> for every run here.
+    <b>Host gate passed</b> for every run here.
     {%- endif %}
-    {%- if profiles and profiles[0] != 'unknown' and not profile_mismatch %}
-    Measured <code>{{ profiles[0] }}</code>:
-    {%- if profiles[0] == 'as-deployed' %}
-    the scheduler was left as it ships, so a difference is what a user would see rather
-    than the engine in isolation, and ambient load is part of the measurement.
+    {%- if licence.comparative %}
+    Conformance passed through tier {{ licence.tier }}: the two engines return the same
+    answers at equal recall, so they may be compared.
     {%- else %}
-    the benchmark cores were taken from the scheduler and the tick, so a difference is
-    attributable to the engine rather than to what else the machine was doing.
+    <b>{{ licence.headline }}</b> {{ licence.detail }}
     {%- endif %}
-    {%- endif %}
-    {#- The second axis that uses the words `as-deployed`, printed beside the
-        first so neither has to be guessed. `profile` is the scheduler; this is
-        Qdrant's segment count. -#}
-    {%- if not segment_policy_mismatch %}
-    {%- if segment_policies[0] == 'as-deployed' %}
-    Qdrant ran <code>as-deployed</code> too, in the other sense: its own
-    <code>default_segment_number</code>, resolved to the CPU count. That is what a user
-    would see, and it explores several graphs per query where strawmANN explores one, so
-    its recall at a fixed <code>ef</code> is legitimately not strawmANN's &mdash; the
-    honest comparison here is throughput at matched recall, not a ratio at equal
-    <code>ef</code>.
-    {%- elif segment_policies[0] == 'equal-work' %}
-    Qdrant ran <code>equal-work</code>: asked for one populated graph
-    (<code>--segments 1</code>), as strawmANN serves, so <code>ef</code> means the same
-    thing on both sides. This is the configuration §8's comparative licensing is built
-    around, and it is a control rather than a deployment. Its optimizer treats the count
-    as a target; what it actually held is read back from the engine and stated under the
-    <code>ef</code> curves.
-    {%- else %}
-    <span class="note">This run predates <code>--segment-policy</code>, so it does not say
-    which Qdrant experiment it is; it asked for <code>segments={{ segments_requested }}</code>.
-    A segment count is not a name, which is why the flag exists.</span>
-    {%- endif %}
-    {%- endif %}
-    <p><b>{{ licence.headline }}</b> {{ licence.detail }}
-    {%- if licence.hash %} Conformance hash <code>{{ licence.hash }}</code>.{%- endif %}</p>
-    {#- §8.9's `max|Δscore|` / `p99|Δscore|`: the number behind the tier, not
-        just the tier. §8.1 calls this the load-bearing claim. -#}
-    {%- if licence.delta %}
-    <p>On exact search the two engines' scores differ by at most
-    <b>{{ '%.3e'|format(licence.delta.max) }}</b>
-    {%- if licence.delta.p99 is not none %} (p99 {{ '%.3e'|format(licence.delta.p99) }}){% endif %},
-    {%- if licence.delta.source == 'floor' %}
-    against the §8.4 <b>floor</b> {{ licence.delta.kind }} ε of
-    {{ '%.3e'|format(licence.delta.eps) }} &mdash; the expected summation error for this
-    metric and dimension, used because no calibrated cell exists for them; the
-    conformance <code>calibrate</code> command derives one from measured cross-ISA spread.
-    {%- else %}
-    against a calibrated {{ licence.delta.kind }} ε of
-    {{ '%.3e'|format(licence.delta.eps) }}.
-    {%- endif %} §8.1: bit-exactness is
-    unachievable between two different summation orders, so this &mdash; equal values
-    within a measured tolerance &mdash; is the claim the speed rests on.</p>
-    {%- elif licence.delta_missing %}
-    <p class="note">The |Δscore| distribution behind this tier is not in
-    <code>conformance.json</code>: this differ run predates its structured fields, and
-    the numbers exist only inside T1's own sentence. Re-run the differ to record them.</p>
-    {%- endif %}
+    <a href="#conditions">Run conditions</a>
   </div>
 
-  {#- A profile mismatch is *why* the hashes differ, so saying both says the
-      same thing twice, once vaguely. Most specific wins. -#}
   {#- Segments move Qdrant in *opposite* directions on the two rows, so this is
       not a shading of one result: it is two. `compare.py` already refuses the
       ratios as STALE, since the policy is hashed into every row; this says why. -#}
@@ -139,6 +91,8 @@
   </div>
   {%- endif %}
 
+  {#- A profile mismatch is *why* the hashes differ, so saying both says the
+      same thing twice, once vaguely. Most specific wins. -#}
   {%- if profile_mismatch %}
   <div class="banner">
     <b>These runs are different experiments.</b> Profiles: {{ profiles | join(', ') }}.
@@ -155,9 +109,9 @@
   </div>
   {%- elif hash_moment_only %}
   <div class="banner soft">
-    <b>One machine, two moments.</b> The §7.1 checks that describe the host agree
-    across the runs; the hashes ({{ hashes | join(', ') }}) differ only in what the box
-    was doing at each run start, which the Host card lists per run.
+    <b>One machine, two moments.</b> The host checks agree across the runs; the hashes
+    ({{ hashes | join(', ') }}) differ only in what the box was doing at each run start,
+    which the Host card in the appendix lists per run.
   </div>
   {%- endif %}
 
@@ -195,132 +149,130 @@
   </div>
   {%- endif %}
 
-  {%- if summary.matched or summary.losses or summary.matched_refusal %}
-  <div class="summary">
-    <h2>In one paragraph</h2>
+  <section class="summary" id="summary">
+    <h2>Summary</h2>
     {%- if summary.matched_refusal %}
     <p><b>No matched-recall ratio is stated between {{ runs[0].label }} and
     {{ runs[1].label }}.</b> {{ summary.matched_refusal }} The per-row tables below
     carry the same refusal wherever it applies.</p>
     {%- elif summary.matched %}
-    <p><b>At equal recall, {{ summary.matched.a }} serves
+    <p class="verdict"><b>At equal recall, {{ summary.matched.a }} serves
     {{ '%.2f'|format(summary.matched.lo) }}x to
-    {{ '%.2f'|format(summary.matched.hi) }}x {{ summary.matched.b }}'s rate</b>
-    across recall@10 {{ '%.4f'|format(summary.matched.lo_recall) }} to
-    {{ '%.4f'|format(summary.matched.hi_recall) }}. Throughput is bfb's, recall is
-    against the fp64 oracle.
+    {{ '%.2f'|format(summary.matched.hi) }}x {{ summary.matched.b }}'s throughput.</b>
     {%- if summary.matched.ci_lo %}
-    That range is a spread across the frontier, <b>not an uncertainty interval</b>:
-    carrying the recall CIs from <a href="#recall">Recall</a> through the
-    interpolation widens it to
-    {{ '%.2f'|format(summary.matched.ci_lo) }}x&ndash;{{ '%.2f'|format(summary.matched.ci_hi) }}x.
+    That range spans the recall levels measured; allowing for the uncertainty in each
+    recall figure widens it to
+    {{ '%.2f'|format(summary.matched.ci_lo) }}x to {{ '%.2f'|format(summary.matched.ci_hi) }}x.
     {%- endif %}
     {%- if summary.matched.smoke and summary.matched.smoke.verdict == 'opposite' %}
     The conformance harness's single-client rate gives the <b>opposite ordering</b>
     at every <code>ef</code> ({{ '%.2f'|format(summary.matched.smoke.lo) }}x to
     {{ '%.2f'|format(summary.matched.smoke.hi) }}x) &mdash; a finding in itself, since
-    a batched request is served differently by the two engines:
-    <a href="#recall">Recall</a>.
-    {%- elif summary.matched.smoke and summary.matched.smoke.verdict == 'mixed' %}
-    The conformance harness's single-client rate does not order the engines
-    consistently ({{ '%.2f'|format(summary.matched.smoke.lo) }}x to
-    {{ '%.2f'|format(summary.matched.smoke.hi) }}x): a different instrument, so no
-    ratio is formed from it.
-    {%- elif summary.matched.smoke %}
-    The conformance harness's single-client rate agrees on the ordering
-    ({{ '%.2f'|format(summary.matched.smoke.lo) }}x to
-    {{ '%.2f'|format(summary.matched.smoke.hi) }}x); a different instrument, so no
-    ratio is formed from it.
+    a batched request is served differently by the two engines.
     {%- endif %}</p>
     {%- endif %}
-    {%- if summary.losses %}
-    <p><b>Where it is slower:</b>
-    {%- for l in summary.losses %}
-      <code>{{ l.id }}</code> {{ l.desc }} at {{ l.ratio }}{{ ';' if not loop.last else '.' }}
-    {%- endfor %}
-    Past the noise floor, and refusals apply here exactly as in the table.</p>
+
+    {%- if kpis %}
+    <div class="kpis">
+      {%- for k in kpis %}
+      <div class="kpi">
+        <div class="k">{{ k.label }}</div>
+        {%- if k.headline %}
+        <div class="h">{{ k.headline }}</div>
+        {%- else %}
+        {%- for v in k.cells %}
+        <div class="v{{ ' better' if k.better == loop.index0 else '' }}"><span>{{ runs[loop.index0].label }}</span><span>{{ v }}</span></div>
+        {%- endfor %}
+        {%- endif %}
+        {%- if k.sub %}<div class="s">{{ k.sub }}</div>{% endif %}
+      </div>
+      {%- endfor %}
+    </div>
     {%- endif %}
+
+    {%- if slower %}
+    <p><b>Where {{ runs[0].label }} is slower</b>, past the noise floor:</p>
+    <ul class="slower">
+      {%- for l in slower %}
+      <li>{{ l.desc }} (<code>{{ l.id }}</code>{% if l.points > 1 %}, {{ l.points }} settings{% endif %}): <b class="down">{{ l.ratio }}</b></li>
+      {%- endfor %}
+    </ul>
+    {%- endif %}
+
+    {%- for c in figures if c.section == 'summary' %}
+    <figure class="chart">
+      <h3>{{ c.title }}</h3>
+      {{ c.html|safe }}
+      {%- if c.note %}<figcaption class="note">{{ c.note|safe }}</figcaption>{%- endif %}
+    </figure>
+    {%- endfor %}
+
     {#- The page used to assert "single measurement, neither run was repeated"
         unconditionally. On a folded run that is false about the page itself,
-        which is the one claim a reader has no way to check. Both halves are
-        now read off the runs. -#}
+        which is the one claim a reader has no way to check. Read off the runs;
+        the spread's coverage is under "All throughput rows". -#}
     {%- if reps and reps > 1 %}
-    <p class="note">Every figure is the <b>median of {{ reps }} passes</b> per row
-    per engine, alternated A/B/A/B (§7.4), and the spread is this run's own
-    {%- if noise_prov.rows %} over {{ noise_prov.covered }} of {{ noise_prov.rows }}
-    rows{% endif %}.
-    {%- if noise_prov.uncovered_ingest %} The ingest and index-build rows
-    ({{ noise_prov.uncovered_ingest | join(', ') }}) have none, so no build time
-    below carries a verdict.{% endif %}
-    Each pass rebuilds the index, so the bands include build variance and are wider
-    than a floor measured against one standing graph.</p>
+    <p class="note">Every figure is the median of {{ reps }} passes per engine, run
+    alternately (A/B/A/B). <a href="#limits">What this does not establish</a>.</p>
     {%- else %}
-    <p class="note">Every figure is a <b>single measurement</b> per row per engine:
-    neither run was repeated. The spread the ratios are judged against was measured
-    separately
-    {%- if noise_prov.rows %} over {{ noise_prov.covered }} of {{ noise_prov.rows }}
-    rows{% endif %}
-    {%- if noise_prov.uncovered_ingest %} (not the ingest or index-build rows,
-    {{ noise_prov.uncovered_ingest | join(', ') }}, so no build time below carries a
-    verdict){% endif %}, against an already-built graph &mdash; so it excludes the
-    rebuild and restart variance that separates these two runs.</p>
+    <p class="note">Every figure is a single measurement per engine: neither run was
+    repeated. <a href="#limits">What this does not establish</a>.</p>
     {%- endif %}
-  </div>
-  {%- endif %}
 
-  {#- One line, not a card: every throughput figure is bounded by this number,
-      but nobody makes a decision on it, and it had a three-line explanation. -#}
-  <p class="note" id="bandwidth"><b>Memory bandwidth:</b> {{ bandwidth.text|safe }}
-  ({{ bandwidth.source }}) — the ceiling every figure below sits under.</p>
+    <details class="glossary" id="glossary">
+      <summary>Glossary</summary>
+      {#- Terms the page uses and does not define inline. Near the top, closed,
+          so it costs one line until a reader needs it. -#}
+      <dl class="terms">
+        <dt>recall@10</dt><dd>Of the ten nearest neighbours a query really has,
+          the share the engine returned. 1.0 is a perfect answer. "Really has" is
+          settled by an exhaustive fp64 search, not by the other engine.</dd>
+        <dt>ef</dt><dd>The candidate-list size: how many nodes the index keeps in
+          play while searching. Larger is slower and more accurate. It does
+          <em>not</em> mean the same amount of work in both engines, which is why
+          the headline holds recall fixed instead.</dd>
+        <dt>MRDE</dt><dd>Mean relative distance error: when the engine returns a
+          wrong neighbour, how much further away it is than the right one.
+          Small numbers mean the misses were near-misses.</dd>
+        <dt>qps</dt><dd>Queries per second. On a batched row one request carries
+          several queries, and the request rate is shown under it.</dd>
+        <dt>p50 / p99 / p99.9</dt><dd>The latency half of requests beat, that 99%
+          beat, that 99.9% beat. The tail is what a user notices.</dd>
+        <dt>closed / open loop</dt><dd>A closed loop sends the next request
+          only when the last one comes back, so a slow server receives less work
+          and its tail looks better than it is. An open loop sends at a fixed
+          rate regardless.</dd>
+        <dt>noise floor</dt><dd>How much a number moves between identical runs on
+          this machine. A ratio inside it is shown grey with &asymp;: no measured
+          difference. Hover a ratio to see its band.</dd>
+        <dt>conformance tier</dt><dd>What the two engines were shown to agree on
+          before any speed was quoted. T1 licenses a single engine's own numbers;
+          T3 licenses comparing the two, and requires their recall to be
+          statistically indistinguishable.</dd>
+        <dt>§ numbers</dt><dd>Sections of <code>docs/spec.md</code>, the written
+          rule each claim in the appendix is measured against. §7.1 is the host
+          gate, §7.4 the comparison rules, §8 what may be published.</dd>
+      </dl>
+    </details>
+  </section>
 
   <nav class="toc">
-    <a href="#bandwidth">Memory bandwidth</a>
-    <a href="#what">What was measured</a>
+    <a href="#summary">Summary</a>
     <a href="#throughput">Throughput</a>
     {%- if tables.recall %}<a href="#recall">Recall</a>{%- endif %}
-    {%- if tables.latency %}<a href="#latency">Latency</a>{%- endif %}
+    {%- if tables.latency_compact %}<a href="#latency">Latency</a>{%- endif %}
     <a href="#ingest">Ingest</a>
-    {%- if tables.storage %}<a href="#storage">Storage and I/O</a>{%- endif %}
-    {%- if tables.scheduler %}<a href="#scheduler">Scheduler and memory</a>{%- endif %}
-    {%- if tables.stalls %}<a href="#stalls">Waiting and stalls</a>{%- endif %}
-    {%- if tables.hardware %}<a href="#hardware">Hardware counters</a>{%- endif %}
-    {%- if tables.sharing %}<a href="#sharing">Cache-line sharing</a>{%- endif %}
-    {%- if tables.collections %}<a href="#collections">Collection config</a>{%- endif %}
-    {%- if tables.workloads %}<a href="#workloads">Per workload</a>{%- endif %}
-    <a href="#host">Host discipline</a>
-    <a href="#method">How to read this</a>
-    <a href="#limits">What this does not establish</a>
-    <a href="#reproduce">Reproducing this</a>
+    {%- if tables.resources %}<a href="#resources">Memory and disk</a>{%- endif %}
+    <a href="#appendix">Appendix</a>
   </nav>
 
-  <h2 id="what">What was measured</h2>
-  <p class="lede">Every number below is a claim about these two builds, this dataset and
-  this machine. Nothing here is checkable without them, so they come first.</p>
-  {{ tables.provenance|safe }}
-
   <h2 id="throughput">Throughput</h2>
-  <p class="lede">Which rows differ, at a glance; what happened <em>on</em> a row is
-  under <a href="#workloads">per workload</a>.</p>
-  {{ tables.throughput|safe }}
-  {%- if rescore_cause %}
-  <p class="note">{{ rescore_cause|safe }}</p>
-  {%- endif %}
-  {%- if noise %}
-  <p class="note">A ratio marked <em>inconclusive</em> sits inside the run-to-run noise
-  floor measured on this host ({{ noise_prov.passes }} identical pass{{ '' if noise_prov.passes == 1 else 'es' }},
-  {{ noise_prov.discarded }} discarded as contaminated{{ '; ' ~ noise_prov.source if noise_prov.source else '' }}).
-  {%- if noise_prov.stamp_note %} {{ noise_prov.stamp_note }}{%- endif %}
-  {%- if noise_prov.arms and noise_prov.arms | length > 1 %}
-  Two engines means the spreads add, and both were measured here: the band is
-  3·&radic;(rsd<sub>a</sub>&sup2;&thinsp;+&thinsp;rsd<sub>b</sub>&sup2;), from
-  {{ noise_prov.arms | join(' and ') }}'s own repeated passes rather than from one
-  engine's spread used for both.
-  {%- else %}
-  Two engines means the spreads add, so the band is 3·&radic;2·rsd either side of 1.0.
-  The floor was measured on strawmANN alone; using it for both sides assumes Qdrant is
-  no noisier, which is an assumption rather than a measurement.
-  {%- endif %}</p>
-  {%- endif %}
+  <p class="lede">Queries per second; higher is better. The ratio is {{ runs[0].label }}
+  over {{ runs[1].label if runs | length > 1 else '' }}: green is faster, red slower, grey
+  &asymp; inside the noise floor (hover a ratio for its band). A dash means the pair is
+  not compared, and the note says why. An <code>ef</code> sweep is one row showing its
+  range; every measurement is under <a href="#all-throughput">All throughput rows</a>.</p>
+  {{ tables.throughput_compact|safe }}
   {%- for c in figures if c.section == 'throughput' %}
   <figure class="chart">
     <h3>{{ c.title }}</h3>
@@ -331,21 +283,17 @@
 
   {%- if tables.recall %}
   <h2 id="recall">Recall</h2>
-  <p class="lede">Against our fp64 exhaustive oracle, not against the other engine, and
-  with &epsilon;-aware ties. §7.4: a QPS number without its recall is meaningless, so
-  this is the other half of the table above. §4.1 keeps the two in separate tools &mdash;
-  bfb generates load, the conformance binary generates relevance.</p>
-  {{ tables.recall|safe }}
+  <p class="lede">recall@10 against an exact fp64 search, not against the other engine.
+  Equal <code>ef</code> is not equal work in the two engines, so the comparison that
+  counts holds recall fixed and compares throughput there.</p>
   {%- if tables.matched_recall %}
   <h3>At matched recall</h3>
-  <p class="note">The comparison the rest of this page cannot make: every ratio above is
-  at equal <code>ef</code>, which is not equal work. This one holds recall fixed
-  instead, which is the only way to answer "the faster one may simply be searching
-  less".</p>
   {{ tables.matched_recall|safe }}
   {%- endif %}
+  <h3 style="margin-top:28px">Recall by <code>ef</code></h3>
+  {{ tables.recall|safe }}
   {%- for c in figures if c.section == 'recall' %}
-  <figure class="chart">
+  <figure class="chart" style="margin-top:26px">
     <h3>{{ c.title }}</h3>
     {{ c.html|safe }}
     {%- if c.note %}<figcaption class="note">{{ c.note|safe }}</figcaption>{%- endif %}
@@ -353,18 +301,15 @@
   {%- endfor %}
   {%- endif %}
 
-  {%- if tables.latency %}
+  {%- if tables.latency_compact %}
   <h2 id="latency">Latency</h2>
-  <p class="lede">Client-side round trip, per row. §7.4: a closed-loop p99 understates
-  the tail, because a stalled server stops receiving requests, so a latency claim rests
-  on the open-loop rows. Those offer a fraction of measured saturation, so read the
-  fraction across the columns rather than the rate. A row flagged
-  <b>&ldquo;… not server time&rdquo;</b> is one where the client saw far more than the
-  server reported: below the rate at which a queue can form, what is left is the load
-  generator's own scheduling.</p>
-  {{ tables.latency|safe }}
+  <p class="lede">Client-side round trip. A closed loop understates the tail (a stalled
+  server stops receiving requests), so this keeps the fixed-rate, open-loop rows, which
+  offer the same load to both engines, plus single-client W3 and batched W5. Every row
+  is under <a href="#all-latency">All latency rows</a>.</p>
+  {{ tables.latency_compact|safe }}
   {%- for c in figures if c.section == 'latency' %}
-  <figure class="chart">
+  <figure class="chart" style="margin-top:26px">
     <h3>{{ c.title }}</h3>
     {{ c.html|safe }}
     {%- if c.note %}<figcaption class="note">{{ c.note|safe }}</figcaption>{%- endif %}
@@ -373,9 +318,9 @@
   {%- endif %}
 
   <h2 id="ingest">Ingest and index build</h2>
-  <p class="lede">Time to Green does not mean the same thing on both engines. Qdrant
-  indexes during ingest, so its upload figure already contains most of the indexing work;
-  strawmANN uploads raw and bulk-builds afterwards. Compare the sum, not the upload line.</p>
+  <p class="lede">Qdrant indexes while it ingests, so its upload time already contains
+  most of the indexing; strawmANN uploads raw and builds afterwards. Compare the sum,
+  not the upload line.</p>
   {%- for c in figures if c.section == 'ingest' %}
   <div class="card">
     <h3>{{ c.title }}</h3>
@@ -385,258 +330,118 @@
   {%- endfor %}
   {{ tables.ingest|safe }}
 
-  {%- if tables.storage %}
-  <h2 id="storage">Storage and I/O</h2>
-  <p class="lede">What each engine keeps, and what it asked the block layer for &mdash;
-  the other half of a comparison between a RAM-resident engine and a disk-backed one.
-  The syscall rows count every descriptor, sockets included, so on a search row they
-  measure the network rather than the disk.</p>
-  {{ tables.storage|safe }}
-  {%- if tables.storage_rows %}
-  <h3>Per workload</h3>
-  <p class="note">A <em>search</em> row doing block-layer reads is an engine going to
-  disk to answer a query.</p>
-  {{ tables.storage_rows|safe }}
-  {%- endif %}
+  {%- if tables.resources %}
+  <h2 id="resources">Memory and disk</h2>
+  <p class="lede">What each engine held in memory and moved to and from disk over the
+  whole run. Per-row figures are under <a href="#storage">Storage and I/O</a>.</p>
+  {{ tables.resources|safe }}
   {%- endif %}
 
-  {%- if tables.scheduler %}
-  <h2 id="scheduler">Scheduler and memory</h2>
-  <p class="lede">Whether the engine was <em>running</em> while it ran. <b>of wall</b> is
-  CPU over elapsed, <b>waiting</b> is runnable-but-not-scheduled, <b>migrations</b>
-  checks the pinning claim, and <b>switches</b> gives voluntary over involuntary &mdash;
-  the scheduler taking the core away against the engine choosing to sleep, which per
-  unit of work is the cheapest signal of lock contention there is. A dash is not a zero:
-  an index build's threads exit before the row does, and <b>threads</b> shows what
-  fraction of the row the survivors account for.</p>
-  {%- for c in figures if c.section == 'scheduler' %}
-  <div class="card">
-    <h3>{{ c.title }}</h3>
-    {{ c.html|safe }}
-    {%- if c.note %}<p class="note">{{ c.note|safe }}</p>{% endif %}
-  </div>
-  {%- endfor %}
-  {{ tables.scheduler|safe }}
-  {%- endif %}
+  <h2 id="appendix">Appendix</h2>
+  <p class="lede">How the run was set up, every row of every table, and the
+  diagnostics behind them. Charts on a logarithmic axis say so on the axis: read the
+  positions there, not the distances.</p>
 
-  {%- if tables.stalls %}
-  <h2 id="stalls">Waiting and stalls</h2>
-  <p class="lede">Where the wall clock went when the engine was <em>not</em> running, in
-  three forms no queries-per-second number distinguishes: <b>waiting</b> is runnable and
-  not scheduled, <b>blocked on disk</b> is not runnable at all, and <b>pressure</b> is
-  PSI for the engine's cgroup (<b>some</b> = at least one task stalled, <b>full</b> =
-  every runnable task).</p>
-  {%- for label, scope in psi_scopes.items() %}
-  {%- if scope != 'engine' %}
-  <p class="note"><b>{{ label }}</b>: no pressure figures.
-  {%- if scope == 'shared' %} Its cgroup held processes other than the engine and its
-  own tree &mdash; from a shell, that is the whole user session &mdash; so differencing
-  it measures the desktop. Start the engine in its own scope
-  (<code>systemd-run --scope</code>); a container already has one.
-  {%- elif scope == 'mixed' %} Its rows disagree about whose cgroup was measured, which
-  means the engine was restarted into a different scope part-way through the run, or
-  the run predates these columns in part.
-  {%- elif scope == 'unrecorded' %} These rows were measured before the harness read
-  pressure at all, so this says nothing about the host. Re-run to record it.
-  {%- else %} This kernel reports no PSI (built without <code>CONFIG_PSI</code>, or
-  booted <code>psi=0</code>).{% endif %}</p>
-  {%- endif %}
-  {%- endfor %}
-  {%- for c in figures if c.section == 'stalls' %}
-  <div class="card">
-    <h3>{{ c.title }}</h3>
-    {{ c.html|safe }}
-    {%- if c.note %}<p class="note">{{ c.note|safe }}</p>{% endif %}
-  </div>
-  {%- endfor %}
-  {{ tables.stalls|safe }}
-  <p class="note">A dash under <b>blocked on disk</b> is not a zero: most hosts ship
-  with <code>kernel.task_delayacct=0</code>, which reports the field as a permanent
-  zero and would manufacture the strongest claim here — that the memory-resident
-  engine never waits for a device — out of a sysctl. <code>bench/setup.py apply</code>
-  turns it on.</p>
-  {%- endif %}
-
-  {%- if tables.hardware %}
-  <h2 id="hardware">Hardware counters</h2>
-  <p class="lede">What the core did per query, from <code>perf stat</code> attached to
-  the engine for the same window as the <code>/proc</code> counters above. §5's cost
-  model is a set of claims about instructions per cycle, DRAM traffic and TLB reach;
-  these are those quantities, measured on the row the headline quotes rather than on a
-  microbenchmark.</p>
-  {%- if perf_refusals %}
-  <div class="banner">
-    <b>One engine could not be counted at all.</b>
-    {% for line in perf_refusals %}{{ line }}{{ ' ' if not loop.last }}{% endfor %}
-    Its columns below are blank for that reason and not because the counters read
-    zero, and no figure here may be read across the two engines.
-  </div>
-  {%- elif perf_mismatch %}
-  <div class="banner">
-    <b>The arms were not measured with the same instrument.</b>
-    {% for label, sets in perf_arms.items() %}{{ label }}: {{ sets or 'no sidecar' }}{{ '; ' if not loop.last }}{% endfor %}.
-    A row measured with counters attached and one measured without are not the same
-    experiment, and the columns below may not be read across them.
-  </div>
-  {%- endif %}
-  {%- for c in figures if c.section == 'hardware' %}
-  <div class="card">
-    <h3>{{ c.title }}</h3>
-    {{ c.html|safe }}
-    {%- if c.note %}<p class="note">{{ c.note|safe }}</p>{% endif %}
-  </div>
-  {%- endfor %}
-  {{ tables.hardware|safe }}
-  <p class="note">Nothing here is scaled. Where <code>perf</code> had to multiplex the
-  group, the values it prints are extrapolations from the fraction of the row each
-  counter was on, and they are withheld rather than shown — the same rule the scheduler
-  table applies to a thread that exited. An event this host does not implement is
-  likewise blank, never zero.</p>
-  {%- if perf_crosscheck %}
-  <p class="note"><b>The two instruments disagree on these rows.</b>
-  {% for line in perf_crosscheck %}{{ line }}{{ '; ' if not loop.last }}{% endfor %}.
-  <code>perf</code> keeps an exiting thread's counts and the <code>/proc</code> sums do
-  not, so a gap here is usually the same lost-thread effect the scheduler table reports
-  as coverage.</p>
-  {%- endif %}
-  {%- endif %}
-
-  {%- if tables.sharing %}
-  <h2 id="sharing">Cache-line sharing</h2>
-  <p class="lede">How often a load was served from <em>another core's cache</em> rather
-  than from DRAM or from this core's own levels — which is what a cache line being
-  passed between threads looks like from the load-store unit.</p>
-  <p class="note"><b>A proxy, not a proof.</b> True sharing (two threads reading one
-  datum, normal) and false sharing (two threads writing different data on one 64-byte
-  line, waste) look identical from here. What it can do is scale &mdash; hold the
-  queries constant, raise the thread count, and a per-query count that climbs with it is
-  a line being passed around, which is when a <code>perf c2c</code> capture is worth
-  taking.</p>
-  {{ tables.sharing|safe }}
-  {%- endif %}
-
-  {%- if tables.collections %}
-  <h2 id="collections">Collection config</h2>
-  <p class="lede">What each engine says its collections <em>are</em>, read back from the
-  engine rather than taken from the request. <code>--segments 1</code> sets Qdrant's
-  <code>default_segment_number</code>, which its optimizer treats as a target, and the
-  segment count is the largest confound in the <code>ef</code> comparison.
-  {%- for label, n in segments.items() %}
-  {{ label }} held <b>{{ n }}</b> segment{{ '' if n == 1 else 's' }}{{ ';' if not loop.last else '.' }}
-  {%- endfor %}</p>
-  {{ tables.collections|safe }}
-  {%- endif %}
-
-  {%- if tables.workloads %}
-  <h2 id="workloads">Per workload</h2>
-  <p class="lede">Metric down, engine across, so a comparison is two adjacent cells.
-  Metrics a row did not measure are dropped rather than shown empty.</p>
-  {{ tables.workloads|safe }}
-  {%- endif %}
-
-  <h2 id="host">Host discipline (§7.1)</h2>
-  {%- for c in figures if c.section == 'host' %}
-  <figure class="chart">
-    <h3>{{ c.title }}</h3>
-    {{ c.html|safe }}
-    {%- if c.note %}<figcaption class="note">{{ c.note|safe }}</figcaption>{%- endif %}
-  </figure>
-  {%- endfor %}
-  {%- if shared_host %}
-  <div class="gatewrap">
-    <div class="gatecard">
-      <h3>{{ cpu }}
-        <span class="pill {{ 'ok' if runs[0].gate_pass else 'bad' }}">
-          {{ 'gate pass' if runs[0].gate_pass else 'gate FAIL' }}</span></h3>
-      <div class="muted">One machine: both runs were measured on it, and the checks
-        below are the same for both. What differed at each run start is listed
-        underneath, per run.</div>
-      {%- for c in runs[0].static_checks %}
-      <div class="chk {{ c.kind }}">
-        {%- if c.kind != 'cont' %}<span>{{ 'ok' if c.kind == 'pass' else 'FAIL' }}</span>{% endif -%}
-        {{ c.text }}</div>
-      {%- endfor %}
-      {%- for r in runs %}
-      <div class="moment">
-        <div class="hash"><b>{{ r.label }}</b> at run start · environment hash <code>{{ r.env_hash }}</code></div>
-        {%- for c in r.moment_checks %}
-        <div class="chk {{ c.kind }}">
-          {%- if c.kind != 'cont' %}<span>{{ 'ok' if c.kind == 'pass' else 'FAIL' }}</span>{% endif -%}
-          {{ c.text }}</div>
-        {%- endfor %}
-      </div>
-      {%- endfor %}
-    </div>
-  </div>
-  {%- else %}
-  <div class="gatewrap">
-    {%- for r in runs %}
-    <div class="gatecard">
-      <h3>{{ r.label }}
-        <span class="pill {{ 'ok' if r.gate_pass else 'bad' }}">
-          {{ 'gate pass' if r.gate_pass else 'gate FAIL' }}</span></h3>
-      <div class="hash">environment hash <code>{{ r.env_hash }}</code></div>
-      {%- for c in r.checks %}
-      <div class="chk {{ c.kind }}">
-        {%- if c.kind != 'cont' %}<span>{{ 'ok' if c.kind == 'pass' else 'FAIL' }}</span>{% endif -%}
-        {{ c.text }}</div>
-      {%- endfor %}
-    </div>
-    {%- endfor %}
-  </div>
-  {%- endif %}
-
-  <h2 id="method">How to read this</h2>
-  <div class="prose">
-    {#- The page is dense with terms it never defines and with section numbers
-        that mean nothing without `docs/spec.md`. Everything below was already
-        load-bearing prose somewhere on the page; this is the one place a
-        reader who does not already know it can find out. -#}
-    <dl class="terms">
-      <dt>recall@10</dt><dd>Of the ten nearest neighbours a query really has,
-        the share the engine returned. 1.0 is a perfect answer. "Really has" is
-        settled by an exhaustive fp64 search, not by the other engine.</dd>
-      <dt>ef</dt><dd>The candidate-list size: how many nodes the index keeps in
-        play while searching. Larger is slower and more accurate. It is the
-        knob that trades throughput for recall, and it does <em>not</em> mean
-        the same amount of work in both engines &mdash; see below.</dd>
-      <dt>MRDE</dt><dd>Mean relative distance error: when the engine returns a
-        wrong neighbour, how much further away it is than the right one.
-        Small numbers mean the misses were near-misses.</dd>
-      <dt>qps / rps</dt><dd>Queries per second against <em>requests</em> per
-        second. One request can carry a batch of queries, and where the two
-        differ both are shown.</dd>
-      <dt>p50 / p99 / p99.9</dt><dd>The latency half of requests beat, that 99%
-        beat, that 99.9% beat. The tail is what a user notices.</dd>
-      <dt>closed loop / open loop</dt><dd>A closed loop sends the next request
-        only when the last one comes back, so a slow server receives less work
-        and its tail looks better than it is. An open loop sends at a fixed
-        rate regardless.</dd>
-      <dt>noise floor</dt><dd>How much a number moves between identical runs on
-        this machine. A difference smaller than it is not a difference. Where
-        the measured spread is tiny this page reports a 2% minimum instead, and
-        labels which of the two it is using.</dd>
-      <dt>conformance tier</dt><dd>What the two engines were shown to agree on
-        before any speed was quoted. T1 licenses a single engine's own numbers;
-        T3 licenses comparing the two, and requires their recall to be
-        statistically indistinguishable.</dd>
-      <dt>§ numbers</dt><dd>Sections of <code>docs/spec.md</code> in this
-        repository, which is the written rule each claim is measured against.
-        §1 is scope, §7.1 the host gate, §7.4 the comparison rules, §8 what may
-        be published.</dd>
-    </dl>
-
+  <details class="sec" id="conditions">
+    <summary>Run conditions and conformance</summary>
+    <div class="body prose">
+    <p>
+    {%- if profiles and profiles[0] != 'unknown' and not profile_mismatch %}
+    Measured <code>{{ profiles[0] }}</code>:
+    {%- if profiles[0] == 'as-deployed' %}
+    the scheduler was left as it ships, so a difference is what a user would see rather
+    than the engine in isolation, and ambient load is part of the measurement.
+    {%- else %}
+    the benchmark cores were taken from the scheduler and the tick, so a difference is
+    attributable to the engine rather than to what else the machine was doing.
+    {%- endif %}
+    {%- endif %}
+    {#- The second axis that uses the words `as-deployed`, printed beside the
+        first so neither has to be guessed. `profile` is the scheduler; this is
+        Qdrant's segment count. -#}
+    {%- if not segment_policy_mismatch %}
+    {%- if segment_policies[0] == 'as-deployed' %}
+    Qdrant ran <code>as-deployed</code> too, in the other sense: its own
+    <code>default_segment_number</code>, resolved to the CPU count. That is what a user
+    would see, and it explores several graphs per query where strawmANN explores one, so
+    its recall at a fixed <code>ef</code> is legitimately not strawmANN's &mdash; the
+    honest comparison here is throughput at matched recall, not a ratio at equal
+    <code>ef</code>.
+    {%- elif segment_policies[0] == 'equal-work' %}
+    Qdrant ran <code>equal-work</code>: asked for one populated graph
+    (<code>--segments 1</code>), as strawmANN serves, so <code>ef</code> means the same
+    thing on both sides. This is the configuration §8's comparative licensing is built
+    around, and it is a control rather than a deployment. Its optimizer treats the count
+    as a target; what it actually held is read back from the engine and stated under
+    Collection config.
+    {%- else %}
+    <span class="note">This run predates <code>--segment-policy</code>, so it does not say
+    which Qdrant experiment it is; it asked for <code>segments={{ segments_requested }}</code>.
+    A segment count is not a name, which is why the flag exists.</span>
+    {%- endif %}
+    {%- endif %}</p>
+    <p><b>{{ licence.headline }}</b> {{ licence.detail }}
+    {%- if licence.hash %} Conformance hash <code>{{ licence.hash }}</code>.{%- endif %}</p>
+    {#- §8.9's `max|Δscore|` / `p99|Δscore|`: the number behind the tier, not
+        just the tier. §8.1 calls this the load-bearing claim. -#}
+    {%- if licence.delta %}
+    <p>On exact search the two engines' scores differ by at most
+    <b>{{ '%.3e'|format(licence.delta.max) }}</b>
+    {%- if licence.delta.p99 is not none %} (p99 {{ '%.3e'|format(licence.delta.p99) }}){% endif %},
+    {%- if licence.delta.source == 'floor' %}
+    against the §8.4 <b>floor</b> {{ licence.delta.kind }} ε of
+    {{ '%.3e'|format(licence.delta.eps) }} &mdash; the expected summation error for this
+    metric and dimension, used because no calibrated cell exists for them; the
+    conformance <code>calibrate</code> command derives one from measured cross-ISA spread.
+    {%- else %}
+    against a calibrated {{ licence.delta.kind }} ε of
+    {{ '%.3e'|format(licence.delta.eps) }}.
+    {%- endif %} §8.1: bit-exactness is
+    unachievable between two different summation orders, so this &mdash; equal values
+    within a measured tolerance &mdash; is the claim the speed rests on.</p>
+    {%- elif licence.delta_missing %}
+    <p class="note">The |Δscore| distribution behind this tier is not in
+    <code>conformance.json</code>: this differ run predates its structured fields, and
+    the numbers exist only inside T1's own sentence. Re-run the differ to record them.</p>
+    {%- endif %}
+    {%- if summary.matched and summary.matched.smoke and summary.matched.smoke.verdict != 'opposite' %}
+    <p>The conformance harness's single-client rate
+    {{ 'agrees on the ordering' if summary.matched.smoke.verdict == 'same' else 'does not order the engines consistently' }}
+    ({{ '%.2f'|format(summary.matched.smoke.lo) }}x to
+    {{ '%.2f'|format(summary.matched.smoke.hi) }}x); a different instrument, so no
+    ratio is formed from it.</p>
+    {%- endif %}
+    {%- if reps and reps > 1 %}
+    <p class="note">Every figure is the <b>median of {{ reps }} passes</b> per row
+    per engine, alternated A/B/A/B (§7.4), and the spread is this run's own
+    {%- if noise_prov.rows %} over {{ noise_prov.covered }} of {{ noise_prov.rows }}
+    rows{% endif %}.
+    {%- if noise_prov.uncovered_ingest %} The ingest and index-build rows
+    ({{ noise_prov.uncovered_ingest | join(', ') }}) have none, so no build time
+    carries a verdict.{% endif %}
+    Each pass rebuilds the index, so the bands include build variance and are wider
+    than a floor measured against one standing graph.</p>
+    {%- else %}
+    <p class="note">Every figure is a <b>single measurement</b> per row per engine:
+    neither run was repeated. The spread the ratios are judged against was measured
+    separately
+    {%- if noise_prov.rows %} over {{ noise_prov.covered }} of {{ noise_prov.rows }}
+    rows{% endif %}
+    {%- if noise_prov.uncovered_ingest %} (not the ingest or index-build rows,
+    {{ noise_prov.uncovered_ingest | join(', ') }}, so no build time carries a
+    verdict){% endif %}, against an already-built graph &mdash; so it excludes the
+    rebuild and restart variance that separates these two runs.</p>
+    {%- endif %}
+    <div id="method">
     <p><b>Units are queries per second.</b> bfb reports <code>rps</code>, which counts
     batch <em>requests</em>: at <code>--search-batch-size 16</code> the two differ by 16x,
     and reading one as the other once turned a 2.2x speedup into an apparent 7x
-    regression. The table shows both wherever they diverge.</p>
-
+    regression. The tables show the request rate wherever it diverges.</p>
     <p><b>The open-loop rows are not a speed.</b> <code>W4-sat50/70/90</code> offer a
     fixed fraction of measured saturation; serving it means the engine kept up, not that
     it was faster, so no ratio is printed. They exist because <code>--parallel</code> is
     a closed loop, where a stalled server stops receiving requests and understates its
     own tail.</p>
-
     {#- The measured counts, not the cap. `collections.json` records what each
         engine actually held and the page used to quote "capped at 8" three
         times while displaying the real number in §Collection config. -#}
@@ -648,10 +453,294 @@
     holds one graph and searches <code>ef</code> once, so comparing the W10 curves at
     equal x overstates strawmANN in traversal work by roughly that factor. Read
     the recall/throughput frontier vertically instead, at a recall both engines reach.</p>
-  </div>
+    </div>
+    </div>
+  </details>
 
-  <h2 id="limits">What this does not establish</h2>
-  <div class="prose">
+  <details class="sec" id="what">
+    <summary>What was measured <span class="muted">builds, dataset, host</span></summary>
+    <div class="body">
+    {{ tables.provenance|safe }}
+    </div>
+  </details>
+
+  <details class="sec" id="all-throughput">
+    <summary>All throughput rows <span class="muted">every measurement, with its notes</span></summary>
+    <div class="body">
+    {{ tables.throughput|safe }}
+    {%- if rescore_cause %}
+    <p class="note">{{ rescore_cause|safe }}</p>
+    {%- endif %}
+    {%- if noise %}
+    <p class="note">A ratio marked <em>&asymp;</em> sits inside the run-to-run noise
+    floor measured on this host ({{ noise_prov.passes }} identical pass{{ '' if noise_prov.passes == 1 else 'es' }},
+    {{ noise_prov.discarded }} discarded as contaminated{{ '; ' ~ noise_prov.source if noise_prov.source else '' }}).
+    {%- if noise_prov.stamp_note %} {{ noise_prov.stamp_note }}{%- endif %}
+    {%- if noise_prov.arms and noise_prov.arms | length > 1 %}
+    Two engines means the spreads add, and both were measured here: the band is
+    3·&radic;(rsd<sub>a</sub>&sup2;&thinsp;+&thinsp;rsd<sub>b</sub>&sup2;), from
+    {{ noise_prov.arms | join(' and ') }}'s own repeated passes rather than from one
+    engine's spread used for both.
+    {%- else %}
+    Two engines means the spreads add, so the band is 3·&radic;2·rsd either side of 1.0.
+    The floor was measured on strawmANN alone; using it for both sides assumes Qdrant is
+    no noisier, which is an assumption rather than a measurement.
+    {%- endif %}</p>
+    {%- endif %}
+    {%- for c in figures if c.section == 'throughput-more' %}
+    <figure class="chart" style="margin-top:18px">
+      <h3>{{ c.title }}</h3>
+      {{ c.html|safe }}
+      {%- if c.note %}<figcaption class="note">{{ c.note|safe }}</figcaption>{%- endif %}
+    </figure>
+    {%- endfor %}
+    </div>
+  </details>
+
+  {%- if tables.latency %}
+  <details class="sec" id="all-latency">
+    <summary>All latency rows <span class="muted">closed loop included, p50 to max</span></summary>
+    <div class="body">
+    <p class="note">A row flagged <b>&ldquo;… not server time&rdquo;</b> is one where the
+    client saw far more than the server reported: below the rate at which a queue can
+    form, what is left is the load generator's own scheduling.</p>
+    {{ tables.latency|safe }}
+    </div>
+  </details>
+  {%- endif %}
+
+  {%- if tables.storage %}
+  <details class="sec" id="storage">
+    <summary>Storage and I/O <span class="muted">block layer and syscalls, per row</span></summary>
+    <div class="body">
+    <p class="note">The syscall rows count every descriptor, sockets included, so on a
+    search row they measure the network rather than the disk.</p>
+    {{ tables.storage|safe }}
+    {%- if tables.storage_rows %}
+    <h3 style="margin-top:18px">Per workload</h3>
+    <p class="note">A <em>search</em> row doing block-layer reads is an engine going to
+    disk to answer a query.</p>
+    {{ tables.storage_rows|safe }}
+    {%- endif %}
+    </div>
+  </details>
+  {%- endif %}
+
+  {%- if tables.scheduler %}
+  <details class="sec" id="scheduler">
+    <summary>Scheduler and memory <span class="muted">CPU use, run-queue wait, migrations</span></summary>
+    <div class="body">
+    <p class="note">Whether the engine was <em>running</em> while it ran. <b>of wall</b> is
+    CPU over elapsed, <b>waiting</b> is runnable-but-not-scheduled, <b>migrations</b>
+    checks the pinning claim, and <b>switches</b> gives voluntary over involuntary &mdash;
+    the scheduler taking the core away against the engine choosing to sleep, which per
+    unit of work is the cheapest signal of lock contention there is. A dash is not a zero:
+    an index build's threads exit before the row does, and <b>threads</b> shows what
+    fraction of the row the survivors account for.</p>
+    {%- for c in figures if c.section == 'scheduler' %}
+    <div class="card">
+      <h3>{{ c.title }}</h3>
+      {{ c.html|safe }}
+      {%- if c.note %}<p class="note">{{ c.note|safe }}</p>{% endif %}
+    </div>
+    {%- endfor %}
+    {{ tables.scheduler|safe }}
+    </div>
+  </details>
+  {%- endif %}
+
+  {%- if tables.stalls %}
+  <details class="sec" id="stalls">
+    <summary>Waiting and stalls <span class="muted">where the time went when the engine was not running</span></summary>
+    <div class="body">
+    <p class="note"><b>waiting</b> is runnable and not scheduled, <b>blocked on disk</b>
+    is not runnable at all, and <b>pressure</b> is PSI for the engine's cgroup
+    (<b>some</b> = at least one task stalled, <b>full</b> = every runnable task).</p>
+    {%- for label, scope in psi_scopes.items() %}
+    {%- if scope != 'engine' %}
+    <p class="note"><b>{{ label }}</b>: no pressure figures.
+    {%- if scope == 'shared' %} Its cgroup held processes other than the engine and its
+    own tree &mdash; from a shell, that is the whole user session &mdash; so differencing
+    it measures the desktop. Start the engine in its own scope
+    (<code>systemd-run --scope</code>); a container already has one.
+    {%- elif scope == 'mixed' %} Its rows disagree about whose cgroup was measured, which
+    means the engine was restarted into a different scope part-way through the run, or
+    the run predates these columns in part.
+    {%- elif scope == 'unrecorded' %} These rows were measured before the harness read
+    pressure at all, so this says nothing about the host. Re-run to record it.
+    {%- else %} This kernel reports no PSI (built without <code>CONFIG_PSI</code>, or
+    booted <code>psi=0</code>).{% endif %}</p>
+    {%- endif %}
+    {%- endfor %}
+    {%- for c in figures if c.section == 'stalls' %}
+    <div class="card">
+      <h3>{{ c.title }}</h3>
+      {{ c.html|safe }}
+      {%- if c.note %}<p class="note">{{ c.note|safe }}</p>{% endif %}
+    </div>
+    {%- endfor %}
+    {{ tables.stalls|safe }}
+    <p class="note">A dash under <b>blocked on disk</b> is not a zero: most hosts ship
+    with <code>kernel.task_delayacct=0</code>, which reports the field as a permanent
+    zero and would manufacture the strongest claim here — that the memory-resident
+    engine never waits for a device — out of a sysctl. <code>bench/setup.py apply</code>
+    turns it on.</p>
+    </div>
+  </details>
+  {%- endif %}
+
+  {%- if tables.hardware %}
+  <details class="sec" id="hardware">
+    <summary>Hardware counters <span class="muted">cycles, DRAM loads, TLB walks, IPC per query</span></summary>
+    <div class="body">
+    <p class="note">What the core did per query, from <code>perf stat</code> attached to
+    the engine for the same window as the <code>/proc</code> counters. §5's cost model is
+    a set of claims about instructions per cycle, DRAM traffic and TLB reach; these are
+    those quantities, measured on the row the headline quotes rather than on a
+    microbenchmark.</p>
+    {%- if perf_refusals %}
+    <div class="banner">
+      <b>One engine could not be counted at all.</b>
+      {% for line in perf_refusals %}{{ line }}{{ ' ' if not loop.last }}{% endfor %}
+      Its columns below are blank for that reason and not because the counters read
+      zero, and no figure here may be read across the two engines.
+    </div>
+    {%- elif perf_mismatch %}
+    <div class="banner">
+      <b>The arms were not measured with the same instrument.</b>
+      {% for label, sets in perf_arms.items() %}{{ label }}: {{ sets or 'no sidecar' }}{{ '; ' if not loop.last }}{% endfor %}.
+      A row measured with counters attached and one measured without are not the same
+      experiment, and the columns below may not be read across them.
+    </div>
+    {%- endif %}
+    {%- for c in figures if c.section == 'hardware' %}
+    <div class="card">
+      <h3>{{ c.title }}</h3>
+      {{ c.html|safe }}
+      {%- if c.note %}<p class="note">{{ c.note|safe }}</p>{% endif %}
+    </div>
+    {%- endfor %}
+    {{ tables.hardware|safe }}
+    <p class="note">Nothing here is scaled. Where <code>perf</code> had to multiplex the
+    group, the values it prints are extrapolations from the fraction of the row each
+    counter was on, and they are withheld rather than shown — the same rule the scheduler
+    table applies to a thread that exited. An event this host does not implement is
+    likewise blank, never zero.</p>
+    {%- if perf_crosscheck %}
+    <p class="note"><b>The two instruments disagree on these rows.</b>
+    {% for line in perf_crosscheck %}{{ line }}{{ '; ' if not loop.last }}{% endfor %}.
+    <code>perf</code> keeps an exiting thread's counts and the <code>/proc</code> sums do
+    not, so a gap here is usually the same lost-thread effect the scheduler table reports
+    as coverage.</p>
+    {%- endif %}
+    </div>
+  </details>
+  {%- endif %}
+
+  {%- if tables.sharing %}
+  <details class="sec" id="sharing">
+    <summary>Cache-line sharing</summary>
+    <div class="body">
+    <p class="note">How often a load was served from <em>another core's cache</em> rather
+    than from DRAM or from this core's own levels — which is what a cache line being
+    passed between threads looks like from the load-store unit.</p>
+    <p class="note"><b>A proxy, not a proof.</b> True sharing (two threads reading one
+    datum, normal) and false sharing (two threads writing different data on one 64-byte
+    line, waste) look identical from here. What it can do is scale &mdash; hold the
+    queries constant, raise the thread count, and a per-query count that climbs with it is
+    a line being passed around, which is when a <code>perf c2c</code> capture is worth
+    taking.</p>
+    {{ tables.sharing|safe }}
+    </div>
+  </details>
+  {%- endif %}
+
+  {%- if tables.collections %}
+  <details class="sec" id="collections">
+    <summary>Collection config <span class="muted">what each engine says it built</span></summary>
+    <div class="body">
+    <p class="note">Read back from the engine rather than taken from the request.
+    <code>--segments 1</code> sets Qdrant's <code>default_segment_number</code>, which its
+    optimizer treats as a target, and the segment count is the largest confound in the
+    <code>ef</code> comparison.
+    {%- for label, n in segments.items() %}
+    {{ label }} held <b>{{ n }}</b> segment{{ '' if n == 1 else 's' }}{{ ';' if not loop.last else '.' }}
+    {%- endfor %}</p>
+    {{ tables.collections|safe }}
+    </div>
+  </details>
+  {%- endif %}
+
+  {%- if tables.workloads %}
+  <details class="sec" id="workloads">
+    <summary>Per workload <span class="muted">every metric of every row, engine beside engine</span></summary>
+    <div class="body">
+    <p class="note">Metric down, engine across, so a comparison is two adjacent cells.
+    Metrics a row did not measure are dropped rather than shown empty.</p>
+    {{ tables.workloads|safe }}
+    </div>
+  </details>
+  {%- endif %}
+
+  <details class="sec" id="host">
+    <summary>Host discipline <span class="muted">the §7.1 gate, per check, and ambient load per row</span></summary>
+    <div class="body">
+    {%- for c in figures if c.section == 'host' %}
+    <figure class="chart">
+      <h3>{{ c.title }}</h3>
+      {{ c.html|safe }}
+      {%- if c.note %}<figcaption class="note">{{ c.note|safe }}</figcaption>{%- endif %}
+    </figure>
+    {%- endfor %}
+    {%- if shared_host %}
+    <div class="gatewrap">
+      <div class="gatecard">
+        <h3>{{ cpu }}
+          <span class="pill {{ 'ok' if runs[0].gate_pass else 'bad' }}">
+            {{ 'gate pass' if runs[0].gate_pass else 'gate FAIL' }}</span></h3>
+        <div class="muted">One machine: both runs were measured on it, and the checks
+          below are the same for both. What differed at each run start is listed
+          underneath, per run.</div>
+        {%- for c in runs[0].static_checks %}
+        <div class="chk {{ c.kind }}">
+          {%- if c.kind != 'cont' %}<span>{{ 'ok' if c.kind == 'pass' else 'FAIL' }}</span>{% endif -%}
+          {{ c.text }}</div>
+        {%- endfor %}
+        {%- for r in runs %}
+        <div class="moment">
+          <div class="hash"><b>{{ r.label }}</b> at run start · environment hash <code>{{ r.env_hash }}</code></div>
+          {%- for c in r.moment_checks %}
+          <div class="chk {{ c.kind }}">
+            {%- if c.kind != 'cont' %}<span>{{ 'ok' if c.kind == 'pass' else 'FAIL' }}</span>{% endif -%}
+            {{ c.text }}</div>
+          {%- endfor %}
+        </div>
+        {%- endfor %}
+      </div>
+    </div>
+    {%- else %}
+    <div class="gatewrap">
+      {%- for r in runs %}
+      <div class="gatecard">
+        <h3>{{ r.label }}
+          <span class="pill {{ 'ok' if r.gate_pass else 'bad' }}">
+            {{ 'gate pass' if r.gate_pass else 'gate FAIL' }}</span></h3>
+        <div class="hash">environment hash <code>{{ r.env_hash }}</code></div>
+        {%- for c in r.checks %}
+        <div class="chk {{ c.kind }}">
+          {%- if c.kind != 'cont' %}<span>{{ 'ok' if c.kind == 'pass' else 'FAIL' }}</span>{% endif -%}
+          {{ c.text }}</div>
+        {%- endfor %}
+      </div>
+      {%- endfor %}
+    </div>
+    {%- endif %}
+    </div>
+  </details>
+
+  <details class="sec" id="limits">
+    <summary>What this does not establish</summary>
+    <div class="body prose">
     <p><b>No Qdrant developer has used this tool.</b> Nothing here has been run, checked
     against something already known, or disagreed with by anyone outside the project:
     every number has one author and one reviewer, and they are the same person. A result
@@ -677,10 +766,12 @@
     naming the construct and reports <code>n/a</code>, never a silent degradation. A
     strawman that was not faster would mean it was badly built; the question is by how
     much, and where the model was wrong.</p>
-  </div>
+    </div>
+  </details>
 
-  <h2 id="reproduce">Reproducing this</h2>
-  <div class="prose">
+  <details class="sec" id="reproduce">
+    <summary>Reproducing this</summary>
+    <div class="body prose">
     <p>Everything below runs from a clone. The engine has no dependencies; the
     analysis path is a <code>uv</code> project pinned by <code>bench/uv.lock</code>.</p>
     <pre><code>scripts/doctor.py                    # what can this machine measure?
@@ -711,14 +802,15 @@ uv run --project bench bench/harness/report.py strawmann qdrant</code></pre>
     measured against, <code>docs/bugs.md</code> lists the measurement bugs found so far
     (each produced a plausible wrong number rather than a failure), and
     <code>docs/validation.md</code> records what has and has not been checked.</p>
-  </div>
+    </div>
+  </details>
 
-  <footer>
+  <!--keep-labels--><footer>
     Generated by <code>bench/harness/report.py</code> from <code>bench/results/</code>.
     Self-contained: charts are embedded, nothing is fetched at open time.
     Regenerate with
     <code>uv run --project bench bench/harness/report.py {{ runs | map(attribute='label') | join(' ') }}</code>.
-  </footer>
+  </footer><!--/keep-labels-->
 
 </div>
 </body>
