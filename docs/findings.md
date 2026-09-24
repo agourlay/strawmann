@@ -13,15 +13,27 @@ The d=1536 comparison is licensed since 2026-09-24 (`sm/qd-dbp1m-perf-0924`,
 T4, 1.29x to 1.40x at matched recall; the account is in `decisions.md`). What
 that page publishes wrongly, or still refuses and could not:
 
-**1. strawmANN's SQ8 path returns a score that is not the fp32 score.** T4 on
-2026-09-24: `sq8/strawmann |Δscore| p50=4.866e-1` against the fp64 oracle with
-`rescore=true`, Kendall τ 0.6628; Qdrant's SQ8 reads `1.943e-3` and τ 0.7935 on
-the same queries. Identical on 2026-09-03, so it is the engine and not the
-run. Recall@10 is equal to Qdrant's at every `ef` and `quantization_dominance`
-holds, so the candidate set is right and the tier passes; the score field a
-client receives is off by half a cosine unit. Either the rescore is not what
-lands in the response, or fewer candidates are rescored than the pool claims.
-A wrong published value on every SQ8 query costs more than any refused ratio.
+**1. strawmANN's SQ8 bounds clip dbpedia's dominant dimension, and the
+score carries the loss.** T4 on both d=1536 pages: `sq8/strawmann |Δscore|
+p50=4.866e-1` against the fp64 oracle, Qdrant's SQ8 `1.943e-3`, and 38% of
+strawmANN's stage-1 top-10 ids are not the fp32 top-10 against Qdrant's 21%.
+The differ measures with `rescore=false`, so this is the quantized score
+itself, and the cause is measured (`decisions.md`, 2026-09-24): `scalar.train`
+clips the 0.5% and 99.5% *values* of the pooled sample, and dbpedia's
+component 194 sits at -0.64 in every vector (std 0.013), with 954 at +0.20 and
+1120 at -0.16. Three dimensions carry 0.48 of a typical 0.81 top-10 dot, each
+is 0.065% of the values, so all three are clipped to `lo=-0.050`, and the
+reconstruction loses the 0.4876 they carried. Qdrant reads the same
+`quantile: 0.99` as "cut `⌊vectors·(1-q)/2⌋` values per end", 25 of 7.7
+million, keeps the dimension, and lands at `lo=-0.67`. Simulated on 50,000
+vectors, Qdrant's rule takes strawmANN's SQ8 to `|Δ|` 0.0010 and the stage-1
+top-10 overlap from 0.810 to 0.947; on sift1m the same change moves overlap
+from 0.972 to 0.985. One knob, two semantics, so the "same configuration" was
+never the same. With `rescore` on (the default) the returned score is fp32 and
+recall is unaffected, which is why W6 matched; what the clipping costs is the
+`ef`-sized rescore pool that compensates for it (3.3 MB of DRAM per SQ8 query
+against Qdrant's 0.5). The decision is whether `quantile` means what Qdrant's
+does; the measurement after it is the SQ8 sweep and W6 on both corpora.
 
 **2. The SQ8 recall controls page the collection back in on the Qdrant arm.**
 `W6-ef32` folded at a 41% spread and `W6-ef64` is refused as drift (+19%,

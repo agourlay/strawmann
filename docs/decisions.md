@@ -1396,3 +1396,92 @@ door had moved five commits past the pin, so the pin was built in a worktree
 (`git worktree add --detach ~/.cache/strawmann/bfb-pinned fc6632e5`) and
 passed as `$BFB`; and the first launch's night directory had to be moved aside
 before the second, which `nightrun.py` refuses to share by design.
+
+---
+
+## The SQ8 score offset is the quantile rule, measured 2026-09-24
+
+T4 on dbpedia-openai-1m reads `sq8/strawmann |Δscore| p50=4.866e-1` against
+the fp64 oracle, `p99 5.107e-1`, and has since the 100K tier (`4.855e-1`);
+Qdrant's SQ8 reads `1.943e-3` on the same queries. The differ takes both with
+`rescore=false` ("with it on we would measure the rescorer, not the
+encoding"), so the number is the quantized score itself. A distribution that
+tight around one value is a constant, not noise, and the first suspicion was
+a dropped term in `SymmetricQuery.dot`'s reconstruction identity.
+
+It is not. Reimplementing strawmANN's rule in numpy on 50,000 base vectors and
+500 queries reproduces the offset from the data alone: `lo=-0.0500 hi=+0.0489`,
+and the full reconstruction `Σ(lo+α·a)(lo+α·b)` sits **0.4876** below the
+fp32 cosine at the median of the true top-10, `p99 0.5088`. The kernel is
+computing exactly what it was asked to.
+
+### The data has a dimension every vector shares
+
+OpenAI `text-embedding-ada-002` is anisotropic. Per dimension over 50,000
+normalised vectors:
+
+| dim | mean | std | min | max |
+|--:|--:|--:|--:|--:|
+| 194 | -0.6402 | 0.0127 | -0.680 | +0.074 |
+| 954 | +0.1956 | 0.0135 | -0.000 | +0.252 |
+| 1120 | -0.1609 | 0.0059 | -0.186 | +0.076 |
+| 1246 | -0.0940 | 0.0169 | -0.149 | +0.074 |
+
+Those three leading dimensions carry a median **0.4755** of a median top-10
+dot of 0.8128. Each is one dimension in 1,536, 0.065% of the pooled values,
+and `scalar.train` clips the lowest and highest 0.5% of *values*. So every
+vector's component 194 encodes as code 0 and decodes as -0.050, every pair
+loses about 0.41 there, the two others lose the rest, and the sum is the
+0.4876. The offset is nearly constant because the clipped components nearly
+are, which is also why ranking survives it and recall does not move.
+
+### The same knob means two things
+
+bfb sends `ScalarQuantization { quantile: 0.99 }` to both engines. Qdrant's
+`find_quantile_interval` cuts `⌊vectors·(1-q)/2⌋` values per end, 25 of a
+5,000-vector sample's 7.7 million values, then takes min and max of the rest,
+so its bounds are effectively the range: `lo=-0.67`, and the dimension is
+kept. strawmANN's `train` reads the same 0.99 as the order statistics at 0.5%
+and 99.5% of the pooled sample, `scalar.zig`'s docstring says so and calls the
+result "tighter on heavy-tailed data". Tighter it is; on tails that are whole
+dimensions rather than stray outliers, tighter means gone.
+
+Simulated with strawmANN's encoder under each rule, 50,000 vectors, true
+top-10 of 500 queries:
+
+| bounds | lo / hi | α | median \|Δ\| | stage-1 top-10 ∩ true top-10 | true top-10 inside stage-1 top-128 |
+|---|---|--:|--:|--:|--:|
+| strawmANN, 0.5% of values | -0.050 / +0.049 | 3.9e-4 | 0.4876 | 0.810 | 1.0000 |
+| strawmANN's rule at 0.9999 | -0.658 / +0.218 | 3.4e-3 | 0.0011 | 0.941 | 1.0000 |
+| Qdrant's rule at 0.99 | -0.668 / +0.231 | 3.5e-3 | 0.0010 | 0.947 | 1.0000 |
+| min / max | -0.673 / +0.234 | 3.6e-3 | 0.0010 | 0.949 | 1.0000 |
+
+The differ's own figures agree with the first and third rows: 38% of
+strawmANN's stage-1 ids not in the fp32 top-10 against Qdrant's 21%, Kendall τ
+0.66 against 0.79. On sift1m, where no dimension dominates, the same
+substitution moves the stage-1 overlap from 0.972 to 0.985, so the rule is
+not buying anything there either.
+
+### What it costs, and what it does not
+
+- Recall is untouched: `rescore` defaults on, the walk's `ef` candidates all
+  land in fp32 (decisions §5), and the true top-10 is inside the stage-1
+  top-128 under every rule above. W6's licensed 1.29x stands.
+- The score a client receives with `rescore=false` is off by 0.49 on this
+  data. Qdrant's is off by 0.002. The T4 tier passes on dominance, which
+  holds; it does not bound the value.
+- The `ef`-sized rescore pool, which strawmANN's SQ8 pays for in DRAM (3.3 MB
+  per query against Qdrant's 0.5 MB, W6 counters), is doing the work the
+  bounds undo: a stage 1 that orders at 0.947 needs less of it than one at
+  0.810. How much less is a measurement, not a deduction.
+
+### Not changed here
+
+The fix is a semantics choice, not a kernel change: read `quantile` as Qdrant
+reads it, cutting `⌊vectors·(1-q)/2⌋` values per end, so the same request
+builds the same bounds on both engines and the comparison is of encoders
+rather than of two meanings of one word. It changes the SQ8 store of every
+quantized collection and the sweep behind W6, so it goes in with the sweep
+re-run on both corpora and a test that holds a shared dominant dimension.
+`findings.md` item 1 carries it.
+
