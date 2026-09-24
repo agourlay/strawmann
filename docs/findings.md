@@ -54,10 +54,11 @@ cached search row exceed a floor.
 `W11_SPAN_S` 60 s were sized for d=128. At d=1536 the search covered 12 to 23%
 of the append on every pass of both engines, so both mixed rows measured the
 rebuild the append provoked rather than a concurrent write, as their own note
-says, and both are refused. Derive the span from the corpus: the previous
-pair's W3 latency times the query count, which `resolve_rps_reference`
-already reads. Item 8 is what the row will show once it measures what it
-claims to.
+says, and both are refused. Since 2026-09-24 `fullrun.resolve_w11_spans`
+reads each row's span off the previous pair, the slower engine's search times
+1.25 (256 s and 431 s for the 0925 pair), and gives both arms the same value.
+The 0925 pair's `write overlap` says whether that holds; item 8 is what the
+row shows once it measures what it claims to.
 
 **4. `matched` oversampling matches SQ8 and nothing else.** `W6` is licensed
 at 1.29x under the policy; `W7` (0.9474 against 0.8887) and `W8` (0.9656

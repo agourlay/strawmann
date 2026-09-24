@@ -708,6 +708,10 @@ def harness_stamp() -> dict:
                           # is part of what a settle *is*.
                           "dropped_not_settled": rows_writing_dead_collections()},
         "filtered_queries": FILTERED_QUERIES,
+        # Provenance, not hashed: `fullrun` derives both from the previous pair
+        # and gives both arms the same pair of values, and the mixed rows are
+        # refused a ratio by policy whatever they are.
+        "w11_spans_s": {"W11-steady": W11_STEADY_SPAN_S, "W11": W11_SPAN_S},
         "bfb_pin": BFB_PIN, "bfb_timeout_s": BFB_TIMEOUT_S,
         "collection": collection_settings(),
         # Hashed, so the two quantized experiments can never share a table.

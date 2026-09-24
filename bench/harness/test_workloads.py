@@ -9,6 +9,7 @@ import importlib.util
 import io
 import itertools
 import json
+import math
 import os
 import subprocess
 import sys
@@ -1557,6 +1558,35 @@ class FullrunRowInvocationTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(
                 self.f.resolve_rps_reference("auto", ["prev-sm", "prev-qd"]), 3484.0)
+
+    def test_the_mixed_rows_append_over_the_previous_pairs_slower_search(self):
+        """The 25 s and 60 s spans were sift1m's. At d=1536 the searches ran
+        117 to 345 s, the writer covered 12 to 23% of them, and both mixed rows
+        were refused. The span is read off the previous pair instead."""
+        f = self.f
+        # qd-dbp1m-perf-0924's own figures: sm 244 / 166 qps, qd 427 / 145.
+        for lbl, steady, w11 in (("sm-dbp1m-perf-0924", 244.0, 166.0),
+                                 ("qd-dbp1m-perf-0924", 427.0, 145.0)):
+            d = f.ROOT / "bench/results" / lbl
+            d.mkdir(parents=True)
+            (d / "rows.json").write_text(json.dumps([
+                {"id": "W11-steady", "qps": steady, "n_queries": 50_000},
+                {"id": "W11", "qps": w11, "n_queries": 50_000}]))
+        spans = f.resolve_w11_spans(["sm-dbp1m-perf-0925", "qd-dbp1m-perf-0925"])
+        # The slower engine's search plus a quarter: 50,000 / 244 = 205 s and
+        # 50,000 / 145 = 345 s.
+        self.assertEqual(spans, {"W11_STEADY_SPAN_S": float(math.ceil(50_000 / 244 * 1.25)),
+                                 "W11_SPAN_S": float(math.ceil(50_000 / 145 * 1.25))})
+        # Never below the constant: a fast corpus keeps sift1m's span.
+        for lbl in ("sm-sift-perf-0920", "qd-sift-perf-0920"):
+            d = f.ROOT / "bench/results" / lbl
+            d.mkdir(parents=True)
+            (d / "rows.json").write_text(json.dumps([
+                {"id": "W11-steady", "qps": 50_000.0, "n_queries": 50_000}]))
+        self.assertEqual(f.resolve_w11_spans(["sm-sift-perf-0921", "qd-sift-perf-0921"]),
+                         {"W11_STEADY_SPAN_S": f.workloads.W11_STEADY_SPAN_S})
+        # Nothing to read: nothing changes.
+        self.assertEqual(f.resolve_w11_spans(["strawmann", "qdrant"]), {})
 
     def _dirs(self, *names):
         for n in names:

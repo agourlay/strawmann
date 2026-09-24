@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import os
 import re
 import shutil
@@ -281,6 +282,54 @@ def resolve_rps_reference(arg: str | None, labels: list[str]) -> float | None:
           f"{workloads.SATURATION_ROW} — the slower of "
           + ", ".join(f"{k} {v:,.0f}" for k, v in seen.items()), flush=True)
     return seen[slower]
+
+
+#: Each mixed row's append span and the constant it replaces.
+W11_SPAN_ENV = {"W11-steady": "W11_STEADY_SPAN_S", "W11": "W11_SPAN_S"}
+
+#: How far past the slower engine's previous search a span reaches. The row
+#: waits for the appender, so an overshoot costs wall clock and keeps the
+#: coverage at 100%; an undershoot puts the "writer covered under 90%" refusal
+#: straight back.
+W11_SPAN_MARGIN = 1.25
+
+
+def resolve_w11_spans(labels: list[str]) -> dict[str, float]:
+    """`{env var: seconds}` for the two mixed rows' append spans.
+
+    The constants (`workloads.W11_STEADY_SPAN_S`, `W11_SPAN_S`, 25 s and 60 s)
+    are sift1m's searches plus margin. At d=1536 the searches ran 117 to 345 s,
+    so the writer covered 12 to 23% of them on every pass of both engines, both
+    rows measured the rebuild the append provoked rather than a concurrent
+    write, and both were refused (findings 3).
+
+    So the span is read, like `--rps-reference auto`, off the previous pair of
+    this family (or these labels' own rows when they have some): the slower
+    engine's search duration on that row, `n_queries / qps`, times
+    `W11_SPAN_MARGIN`, and never below the constant. One value for both arms,
+    since the throttle is part of what the row measures. Empty when there is
+    nothing to read, and the constants stand.
+    """
+    if not any((ROOT / "bench/results" / x / "rows.json").is_file() for x in labels):
+        labels = previous_pair(labels) or []
+    durations: dict[str, list[float]] = {}
+    for label in labels:
+        try:
+            got = {r["id"]: r for r in json.loads(
+                (ROOT / "bench/results" / label / "rows.json").read_text())}
+        except (OSError, json.JSONDecodeError):
+            continue
+        for wid in W11_SPAN_ENV:
+            r = got.get(wid) or {}
+            n, qps = r.get("n_queries"), r.get("qps")
+            if isinstance(n, (int, float)) and isinstance(qps, (int, float)) and qps > 0:
+                durations.setdefault(wid, []).append(n / qps)
+    out = {}
+    for wid, env in W11_SPAN_ENV.items():
+        if wid in durations:
+            floor = getattr(workloads, env)
+            out[env] = float(max(floor, math.ceil(max(durations[wid]) * W11_SPAN_MARGIN)))
+    return out
 
 
 def previous_pair(labels: list[str]) -> list[str] | None:
@@ -2130,6 +2179,13 @@ def main(argv: list[str]) -> int:
     # for it: strawmANN pins its workers and leaves the main thread free, so
     # the observed mask and the requested set legitimately differ.
     os.environ["BENCH_SERVER_CPUS"] = args.server_cpus
+    # The mixed rows' append spans, by the same mechanism as the dataset: bound
+    # here and exported, so both arms' subprocesses build the same `-T`.
+    for env, span in resolve_w11_spans(labels).items():
+        os.environ[env] = str(span)
+        setattr(workloads, env, span)
+        print(f"{env}={span:.0f} s: the slower engine's previous search on that row, "
+              f"plus {W11_SPAN_MARGIN - 1:.0%}, so the append covers the whole search")
     if RPS_REFERENCE:
         print(f"open-loop arms pinned to {RPS_REFERENCE:,.0f} qps for both engines "
               f"(§4's fractions of one reference, so the two arms are the same "
