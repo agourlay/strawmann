@@ -406,6 +406,12 @@ def iso(stamp: str) -> dt.datetime:
     return dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
 
 
+def planned_rows() -> list[str] | None:
+    """The rows a pass will make, which `estimated_minutes` prices. None prices
+    each basis arm as it ran."""
+    return [w.id for w in workloads.table()]
+
+
 def estimated_minutes(dataset: str, reps: int) -> tuple[float, str] | None:
     """Minutes of measurement passes, from the arms already run on this corpus.
 
@@ -429,6 +435,7 @@ def estimated_minutes(dataset: str, reps: int) -> tuple[float, str] | None:
     stamps, for the reason given below.
     """
     per_engine: dict[str, tuple[float, str, list[float]]] = {}
+    table_ids = planned_rows()
     for d in sorted(RESULTS.glob("*/rows.json")):
         try:
             meta = json.loads((d.parent / "run.json").read_text())
@@ -483,8 +490,16 @@ def estimated_minutes(dataset: str, reps: int) -> tuple[float, str] | None:
             continue
         heaviest, label, ratios = per_engine.get(engine, (0.0, "", []))
         ratios.extend(s / row_s for s in spans)
-        if row_s > heaviest:
-            heaviest, label = row_s, d.parent.name
+        # The rows *this* run will make, priced from that arm. The table grew
+        # from 32 to 43 rows between rel-0903 and perf-0924 and the estimate,
+        # priced on the old arm's rows alone, came out three hours short
+        # (findings 10). A row the basis never ran costs its mean row; a row it
+        # ran that the table has since dropped costs nothing.
+        by_id = {r["id"]: secs(r) for r in rows if r.get("id")}
+        mean = row_s / max(len(by_id), 1)
+        priced = row_s if table_ids is None else sum(by_id.get(i, mean) for i in table_ids)
+        if priced > heaviest:
+            heaviest, label = priced, d.parent.name
         per_engine[engine] = (heaviest, label, ratios)
     if not per_engine:
         return None
@@ -1508,6 +1523,16 @@ def split_after_dead_writers(stable: list[str]) -> tuple[list[str], list[str], l
     return stable[:cut], stable[cut:], early
 
 
+def invocations_per_arm() -> int:
+    """How many times `measure` runs `workloads.py` for one arm, each behind
+    its own `settle`: the stable rows (in two parts around a dead writer), then
+    the mutating rows."""
+    rows = [w.id for w in workloads.table()]
+    mutators = mutating_rows()
+    _, rest, _ = split_after_dead_writers([r for r in rows if r not in mutators])
+    return 1 + bool(rest) + any(r in mutators for r in rows)
+
+
 def measure(uri: str, label: str, client_cpus: str, storage: str | None,
             placement: str | None = None) -> int:
     """Every row, the recall sweeps, then the rows that would invalidate them."""
@@ -2233,10 +2258,12 @@ def main(argv: list[str]) -> int:
         done = time.strftime("%H:%M", time.localtime(time.time() + mins * 60))
         tail = "" if "conformance" in args.skip else \
             ", plus the §8 differ and the render after them (not timed here)"
-        # Four settles per pass (two invocations per arm), each up to
-        # SETTLE_TIMEOUT_S:'s nine took 1-2 min apiece and were
-        # the whole gap between the 05:41 estimate and the 05:56 finish.
-        settles = 4 * max(1, args.reps)
+        # One settle per `workloads.py` invocation, each up to
+        # SETTLE_TIMEOUT_S: nine took 1-2 min apiece and were the whole gap
+        # between the 05:41 estimate and the 05:56 finish. Counted from what
+        # `measure` actually invokes rather than written down, since splitting
+        # the stable rows around W1 made it three per arm.
+        settles = 2 * invocations_per_arm() * max(1, args.reps)
         print(f"estimate    ~{mins / 60:.1f} h of measurement passes for "
               f"{DATASET} x{args.reps}{tail}"
               f"\n            passes alone would end about {done}; measured from "

@@ -136,9 +136,3 @@ of settling (`workloads.rows_writing_dead_collections`), and the settle stamp
 records it, so the next pair is STALE against 0924 by design. That pair's `W2`
 is the clean figure; until then read 657.7 s as an upper bound on Qdrant's
 build and the 2.63x as an upper bound on strawmANN's lead.
-
-**10. The pre-run estimate was three hours short.** `estimated_minutes` prices
-the passes from the previous run's rows, and the table grew from 32 to 43 rows
-between `rel-0903` and `perf-0924` (the `W12` selectivity grades and their `ef`
-controls). Scale the basis by the rows present, and print the settle count the
-run will actually make (10 here, against `12 x <= 300s`).

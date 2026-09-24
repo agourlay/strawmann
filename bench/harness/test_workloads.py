@@ -2068,9 +2068,33 @@ class RunEstimateTests(unittest.TestCase):
         self.f = importlib.reload(sys.modules["fullrun"]) \
             if "fullrun" in sys.modules else importlib.import_module("fullrun")
         self.f.RESULTS = Path(self.tmp.name) / "bench/results"
+        # Priced as each basis ran, except where a test names the table.
+        self._planned = self.f.planned_rows
+        self.f.planned_rows = lambda: None
 
     def tearDown(self):
+        self.f.planned_rows = self._planned
         self.tmp.cleanup()
+
+    def test_the_basis_is_priced_for_the_rows_this_run_will_make(self):
+        """The table grew from 32 rows to 43 between rel-0903 and perf-0924,
+        and the estimate, priced on the old arm's rows, came out three hours
+        short. A row the basis never ran costs its mean row; one the table has
+        dropped costs nothing."""
+        f = self.f
+        self._label("qd-old", "sift1m", [
+            {"id": "W3", "wall_s": 100, "when": "2026-09-01T00:00:00Z"},
+            {"id": "W4", "wall_s": 300, "when": "2026-09-01T00:01:40Z"},
+            {"id": "W9", "wall_s": 200, "when": "2026-09-01T00:06:40Z"}])
+        f.planned_rows = lambda: ["W3", "W4", "W12-sel1", "W12-sel10"]
+        mins, _ = f.estimated_minutes("sift1m", 1)
+        # W3 + W4 as measured, the two W12 rows at the 200 s mean, W9 dropped;
+        # a single engine counts twice; the span is exactly the rows (1.0x).
+        self.assertAlmostEqual(mins, 2 * (100 + 300 + 200 + 200) / 60, places=2)
+
+    def test_settles_are_counted_from_the_invocations_measure_makes(self):
+        # Stable rows in two parts around W1, then the mutating rows.
+        self.assertEqual(self.f.invocations_per_arm(), 3)
 
     def _label(self, name, dataset, rows, engine="qdrant"):
         d = self.f.RESULTS / name

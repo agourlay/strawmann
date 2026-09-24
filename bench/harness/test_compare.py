@@ -1373,11 +1373,13 @@ class RetentionTests(unittest.TestCase):
         self.results = self.root / "bench/results"
         self.results.mkdir(parents=True)
         self.fr = importlib.import_module("fullrun")
-        self._saved = (self.fr.ROOT, self.fr.RESULTS)
+        self._saved = (self.fr.ROOT, self.fr.RESULTS, self.fr.planned_rows)
         self.fr.ROOT, self.fr.RESULTS = self.root, self.results
+        # Spans and folding, not the row set: each basis priced as it ran.
+        self.fr.planned_rows = lambda: None
 
     def tearDown(self):
-        self.fr.ROOT, self.fr.RESULTS = self._saved
+        self.fr.ROOT, self.fr.RESULTS, self.fr.planned_rows = self._saved
         self.tmp.cleanup()
 
     def _label(self, name, *, age_days=400, files=("rows.json",)):
@@ -1476,11 +1478,13 @@ class EstimateTests(unittest.TestCase):
         self.results = self.root / "bench/results"
         self.results.mkdir(parents=True)
         self.fr = importlib.import_module("fullrun")
-        self._saved = (self.fr.ROOT, self.fr.RESULTS)
+        self._saved = (self.fr.ROOT, self.fr.RESULTS, self.fr.planned_rows)
         self.fr.ROOT, self.fr.RESULTS = self.root, self.results
+        # Spans and folding, not the row set: each basis priced as it ran.
+        self.fr.planned_rows = lambda: None
 
     def tearDown(self):
-        self.fr.ROOT, self.fr.RESULTS = self._saved
+        self.fr.ROOT, self.fr.RESULTS, self.fr.planned_rows = self._saved
         self.tmp.cleanup()
 
     def _at(self, offset_s: float) -> str:
