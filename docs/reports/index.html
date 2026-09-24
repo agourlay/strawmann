@@ -58,6 +58,15 @@
 
   <ul>
     <li>
+      <div class="name"><a href="report-dbpedia-openai-1m-sm-dbp1m-perf-0924-vs-qd-dbp1m-perf-0924-2026-09-23-1816.html">dbpedia-openai-1m, 2026-09-24</a></div>
+      <div class="what">The current dbpedia-openai-1m comparison, the headline tier at d=1536
+      and 1M, and the source of <code>comparison-dbpedia-openai-1m.md</code>. T4 with T3
+      passing, the first licensed comparison at that width and scale. Gate <code>pass</code>
+      both arms, 3 passes, equal-work, matched oversampling, <code>--perf</code>, Qdrant's
+      release binary. No contaminated row in any pass. Qdrant's SQ8 recall controls at ef 32
+      and 64 paged the collection back in during two passes and are refused as drift.</div>
+    </li>
+    <li>
       <div class="name"><a href="report-sift1m-sm-sift-perf-0923-vs-qd-sift-perf-0923-2026-09-23-0230.html">sift1m, 2026-09-23</a></div>
       <div class="what">The current sift1m comparison, and the source of the tables in
       <code>README.md</code> and <code>comparison-sift1m.md</code>. T4, gate <code>pass</code>
@@ -96,15 +105,11 @@
     </li>
     <li>
       <div class="name"><a href="report-dbpedia-openai-1m-sm-dbp1m-perf-rel-0903-vs-qd-dbp1m-perf-rel-0903-2026-09-03-1952.html">dbpedia-openai-1m, 2026-09-03</a></div>
-      <div class="what">The headline tier, d=1536 at 1M. Its differ reached only T2, so no
-      ratio is licensed and there is no per-dataset document. The per-engine numbers are
-      here.</div>
-    </li>
-    <li>
-      <div class="name"><a href="report-dbpedia-openai-1m-strawmann-vs-qdrant-2026-08-27-2309.html">dbpedia-openai-1m, 2026-08-27</a></div>
-      <div class="what">The only rendering of the run at labels <code>strawmann</code> and
-      <code>qdrant</code>. It carries no <code>conformance.json</code>, so no comparison is
-      licensed from it. A licensed dbpedia-openai-1m run retires this page.</div>
+      <div class="what">The pair the headline tier had until 2026-09-24. Its differ reached
+      only T2 because it built its own Qdrant collection at Qdrant's default segment count,
+      four populated graphs against strawmANN's one, while the rows ran equal-work; the rows'
+      recall sweeps match the 09-24 page within 0.003. No per-dataset document was written
+      from it.</div>
     </li>
   </ul>
 

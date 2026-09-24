@@ -208,7 +208,9 @@ could be removed by editing anything, because each was a property of how that
 run was measured. The causes were tracked down 2026-08-26, the fixes went into
 the harness, and a `--reps 3` run on 2026-09-03
 (`sm/qd-dbp1m-perf-rel-0903`, archived in [`reports/`](reports/)) is the one
-that tested them. **Four came off. The two that matter did not.**
+that tested them. **Four came off. The two that matter did not**, and a
+third run on 2026-09-24 (`sm/qd-dbp1m-perf-0924`, archived) took those off
+too.
 
 | banner | cause | what clears it | 2026-09-03 |
 |---|---|---|---|
@@ -216,18 +218,23 @@ that tested them. **Four came off. The two that matter did not.**
 | No noise floor for this corpus | `--reps 1` folds no per-label floor, so the global sift1m one applies | `--reps 3` | cleared: the floor records `dbpedia-openai-1m`, 25 rows |
 | No noise floor for this pair | same, and the global floor is strawmANN's alone | `--reps 3` | cleared: folded per label, both arms |
 | Open-loop rows not compared | `--rps-reference` was unset, so each arm used its own saturation | now defaults to `auto` | cleared: both arms offered 1,742 qps, 50% of the slower engine's 3,484 |
-| Not a licensed comparative claim (×2) | T3: Qdrant searched four populated graphs to strawmANN's one | `--max-segment-size`, now passed | **still refused**, and now for the engine rather than the setup |
+| Not a licensed comparative claim (×2) | T3: Qdrant searched four populated graphs to strawmANN's one | `--max-segment-size` for the rows, and `default_segment_number` pinned at the server for the differ's own collections | still refused on 2026-09-03; **cleared 2026-09-24**: T3 passed, 0.9665 against 0.9691 |
 
 The prediction below was that removing the segment confound might not be
-enough, and it was not: with `--max-segment-size` passed the differ reached
-**T2**, because strawmANN measured recall@10 0.9667 [0.9630, 0.9700] against
-Qdrant's 0.9831 [0.9804, 0.9854] and the intervals do not overlap. At d=1536
-and 1M points strawmANN simply retrieves less well, so §8 refuses the ratio and
-there is no `docs/comparison-dbpedia-openai-1m.md` for it to go in. That is the
-refusal working: it is now a statement about the engine, which is what the last
-paragraph of this section asked for. Findings 40 argues the *matched-recall*
-comparison should survive a T3 failure, since matched recall constructs equal
-recall rather than assuming it; that has not been acted on.
+enough, and on 2026-09-03 it was not: with `--max-segment-size` passed the
+differ reached **T2**, because strawmANN measured recall@10 0.9667 [0.9630,
+0.9700] against Qdrant's 0.9831 [0.9804, 0.9854]. This section then read that
+as "at d=1536 and 1M points strawmANN simply retrieves less well". **It was the
+setup after all**, one level down: `--max-segment-size` governed the rows'
+collections and not the differ's, which `conformance/` builds itself at
+Qdrant's default segment count, four populated graphs at this size. With
+`default_segment_number` pinned at the server for the differ's Qdrant
+(`fullrun.qdrant_segment_env`), the 2026-09-24 run measured 0.9665 [0.9628,
+0.9699] against **0.9691** [0.9655, 0.9723], the intervals overlap, T3 passed,
+and `docs/comparison-dbpedia-openai-1m.md` exists. strawmANN did not move;
+Qdrant's differ-collection recall fell to what its row collection had measured
+in both runs (0.9692 and 0.9683 at `ef` 128). The account is in
+[`decisions.md`](decisions.md), 2026-09-24.
 
 Three of the four cleared are one flag. `--reps N` alternates the arms *and* makes
 `aggregate.py` fold each label its own `noise.json`, which `regression.floor_for`
@@ -237,15 +244,15 @@ on synthetic folds: the floor then records `dbpedia-openai-1m` and combines both
 arms as `sqrt(mean(rsd^2))` rather than using one for both.
 
 The two licensing banners were the ones worth watching. `--max-segment-size`
-removes the *confound* (measured, five segments merge to one 990,000-vector
-graph) but T3 also needs the two engines' recall confidence intervals to
-overlap once it is gone, and findings 39 put the segments at a minority of the
-0.0135 gap. The prediction was that the tier might refuse again; on 2026-09-03
-it did, at a gap of 0.0164, and the refusal is now a clean statement about the
-engine rather than about the setup. That was the point, and it means the open
-question at d=1536 is no longer "is the comparison set up fairly" but "why does
-this engine lose recall at 1536 dimensions". Which
-[findings 39](findings.md) starts on and nothing has closed.
+removes the *confound* from the rows (measured, five segments merge to one
+990,000-vector graph), and findings 39 put the segments at a minority of the
+0.0135 gap. That estimate was wrong: the segments were the whole gap, in the
+one collection the flag did not reach. On 2026-09-03 the tier refused at
+0.0164 and was read as a clean statement about the engine; on 2026-09-24, with
+the differ's collection held to one graph too, the gap is 0.0026 and inside the
+intervals. The question "why does this engine lose recall at 1536 dimensions"
+is closed as asked of the wrong collection; the comparison at d=1536 is
+licensed and reads 1.29x to 1.40x at matched recall.
 
 Not on that list any more: W12 read `n/a` on the strawmANN arm until
 2026-09-03, when payload storage, `CreateFieldIndex` and filtered search were

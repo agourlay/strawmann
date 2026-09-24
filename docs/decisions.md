@@ -675,6 +675,13 @@ silently, and the failure mode grows with the corpus. Fixing it means an
 `optimizers_config` on the differ's builder and a flag to carry the policy
 across. Not done here, and named so it is not rediscovered.
 
+> **Done, and it was the whole gap** (2026-09-24). `fullrun.qdrant_segment_env`
+> exports `QDRANT__STORAGE__OPTIMIZERS__DEFAULT_SEGMENT_NUMBER=1` to the Qdrant
+> the differ starts under `equal-work`, so its collections are one graph like
+> the rows'. The first run under it passed T3 at 990,000 x 1536. The section
+> "The d=1536 recall deficit was the differ's segment count" below has the
+> numbers.
+
 ## What the 2026-08-26 run cost, and what the harness now says
 
 A `--reps 3 --dataset dbpedia-openai-1m --perf` run held the machine from
@@ -1308,3 +1315,84 @@ that happens to score well would be selecting on the outcome. The first
 measurement if this is picked up again: that build over several keyed seeds,
 `graph-diff --shuffle 100 --stable-levels --stable-order --seeds ...`, and how
 often it reaches file order's 0.9995.
+
+---
+
+## The d=1536 recall deficit was the differ's segment count, measured 2026-09-24
+
+`sm/qd-dbp1m-perf-0924`: dbpedia-openai-1m, three interleaved passes,
+`equal-work`, `--oversampling-policy matched`, `--perf`, Qdrant `878843e6e`
+(release, sha256 `dbeb0f73dea2d371`), strawmANN `288b353`, bfb at the pin
+`fc6632e5` from a worktree. Gate `pass` on every arm, no contaminated row, T4,
+and **T3 passed**: strawmANN recall@10 0.9665 [0.9628, 0.9699] against
+Qdrant's 0.9691 [0.9655, 0.9723]. The first licensed comparison at the
+headline tier, and `docs/comparison-dbpedia-openai-1m.md` was written from it.
+
+### What moved, and what did not
+
+Findings 37 read the 2026-08-26 T3 failure as "at d=1536 and 1M points
+strawmANN simply retrieves less well", findings 39 put the segment confound at
+"a minority of the 0.0135 gap", and the 2026-09-03 re-run with
+`--max-segment-size` on the rows failed again at 0.0164 and was recorded as a
+clean statement about the engine. All three readings were wrong in the same
+way: they were about the differ's collection, and `--max-segment-size` never
+reached it. The rows' own sweeps, which did run at one graph in both runs, say
+the two engines were never apart:
+
+| recall@10 on `bench2` | ef 32 | 64 | 128 | 256 | 512 |
+|---|--:|--:|--:|--:|--:|
+| strawmANN, rel-0903 | 0.8918 | 0.9395 | 0.9666 | 0.9809 | 0.9894 |
+| strawmANN, perf-0924 | 0.8910 | 0.9395 | 0.9664 | 0.9810 | 0.9892 |
+| Qdrant, rel-0903 | 0.8943 | 0.9440 | 0.9692 | 0.9826 | 0.9902 |
+| Qdrant, perf-0924 | 0.8942 | 0.9425 | 0.9683 | 0.9818 | 0.9899 |
+
+Within 0.003 at every `ef`, in both runs. What differed between the two runs
+is only the differ's Qdrant: 0.9831 on 2026-09-03, built by
+`recreate_collection_hnsw` at Qdrant's default segment count, which at this
+size is four populated graphs and findings 33's recall bonus; 0.9691 on
+2026-09-24 with `default_segment_number` pinned to 1 at the server, where it
+lands on the row collection's own curve. The Qdrant binary changed between the
+runs and is not the cause: every Qdrant fp32 search row is within 2% of
+rel-0903, and its row-collection sweep moved by 0.0009.
+
+So the segment count was not a minority of the gap. It was the gap, in the one
+collection the flag did not govern, and the "engine question" the open list
+carried for three weeks was a question about a control that measured two
+different things on the two sides.
+
+### What it licenses
+
+At matched recall strawmANN serves 1.29x to 1.40x Qdrant's rate across
+recall@10 0.894 to 0.989, widening to 1.05x to 1.63x over the recall
+intervals. At equal `ef`: W3 1.73x, W4 1.38x, W5 2.68x, W13 1.15x; W9 0.80x
+and W12-sel1 0.73x are the licensed losses. The decomposition puts W4's 1.38x
+at 0.85x less work per query times 1.61x cores busy, so at saturation the
+headline tier is an occupancy result, as sift1m's is.
+
+Under `matched`, W6 is licensed at 1.29x for the first time (Qdrant's SQ8
+recall 0.9666 against 0.9640, from 0.880 at `defaults`). W7 and W8 are not:
+Qdrant's binary-quantized recall is flat in `ef`, so one oversampling for both
+engines is not a matched pool there. `findings.md` carries it.
+
+### Two things the previous page said that this one retires
+
+The 2026-09-03 page refused the matched-recall table because strawmANN's
+W10-ef128 and ef256 had drifted 25 and 27% across passes, a spread of 11 to
+16% on the engine that holds 0.5% on sift1m. It did not reproduce: the same
+rows fold at 0.06% and 0.19% here, and their medians equal the 2026-09-03
+first pass. Whatever moved that night was not the engine.
+
+And the unlicensed 2026-08-27 page at labels `strawmann`/`qdrant` is retired
+from `docs/reports/`, as its own description said a licensed run would do.
+
+### What the run cost
+
+10 h 36 min wall clock from launch to report, 18:34 to 05:11: six arms of 91
+to 99 minutes, a 51-minute differ, 11 seconds of render. The pre-run estimate
+said the passes would end at 01:13 and they ended at 04:20, because it priced
+them from rel-0903's 32 rows and the table now has 43. Two things had to be
+fixed before the launch and neither was the harness: the bfb checkout next
+door had moved five commits past the pin, so the pin was built in a worktree
+(`git worktree add --detach ~/.cache/strawmann/bfb-pinned fc6632e5`) and
+passed as `$BFB`; and the first launch's night directory had to be moved aside
+before the second, which `nightrun.py` refuses to share by design.
