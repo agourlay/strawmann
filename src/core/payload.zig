@@ -33,7 +33,8 @@
 //! truth**: an overwrite leaves the old value's posting in place rather than
 //! searching it out (a linear scan of a posting list on every overwrite is the
 //! cost W11 would pay for an index it does not use), so every offset a posting
-//! yields is re-checked against the point's actual blob before it is admitted.
+//! yields is re-checked against the point's actual blob before it is admitted,
+//! unless no write has yet made any posting stale (`Store.exact_postings`).
 //! The index can only over-approximate, never miss, and an unindexed filter is
 //! answered by evaluating the blob directly, so the answer does not depend on
 //! whether `CreateFieldIndex` was ever called, only its cost does. That is
@@ -543,6 +544,12 @@ pub const Store = struct {
     with_payload: usize = 0,
     fields: std.ArrayList(Field) = .empty,
     index_lock: RwLock = .{},
+    /// Whether every posting still names a point whose published blob holds
+    /// that value. True until a payload is rewritten (overwrite, merge, clear)
+    /// or an index insert fails part-way, since either leaves a posting the
+    /// blob no longer backs. While it holds, `select` can admit a
+    /// single-condition filter's postings without re-reading the blobs.
+    exact_postings: std.atomic.Value(bool) = .init(true),
 
     pub fn init(alloc: std.mem.Allocator, capacity: usize) !Store {
         const slots = try alloc.alloc(std.atomic.Value(u64), capacity);
@@ -590,6 +597,7 @@ pub const Store = struct {
     /// collection's write lock. Empty entries clear the payload, which is what
     /// an upsert without one means.
     pub fn set(self: *Store, alloc: std.mem.Allocator, offset: u32, entries: []const u8, map_field: u32) !void {
+        self.noteRewrite(offset);
         var total: usize = 0;
         var it = WireEntries.init(entries, map_field);
         while (try it.next()) |e| total += framedLen(e);
@@ -641,6 +649,7 @@ pub const Store = struct {
 
     /// Replace `offset`'s payload with an already framed blob.
     pub fn setFramed(self: *Store, alloc: std.mem.Allocator, offset: u32, framed: []const u8) !void {
+        self.noteRewrite(offset);
         if (framed.len == 0) {
             self.publish(offset, 0);
             return;
@@ -672,6 +681,15 @@ pub const Store = struct {
         };
     }
 
+    /// A write to `offset` that replaces a published blob leaves the old
+    /// value's postings behind (the module doc), so the postings stop being
+    /// exact. Called before the new postings go in: a `select` between the
+    /// index insert and the publish would otherwise trust a posting for a
+    /// value the published blob does not yet hold.
+    fn noteRewrite(self: *Store, offset: u32) void {
+        if (self.slots[offset].load(.monotonic) != 0) self.exact_postings.store(false, .release);
+    }
+
     fn publish(self: *Store, offset: u32, slot: u64) void {
         const had = self.slots[offset].load(.monotonic) != 0;
         self.slots[offset].store(slot, .release);
@@ -686,6 +704,9 @@ pub const Store = struct {
         if (self.fields.items.len == 0) return;
         self.index_lock.lock();
         defer self.index_lock.unlock();
+        // A failure part-way leaves postings for a blob that is never
+        // published, and a later write to the offset will not remove them.
+        errdefer self.exact_postings.store(false, .release);
         for (self.fields.items) |*f| try f.addBlob(alloc, offset, blob);
     }
 
@@ -826,7 +847,9 @@ pub const Store = struct {
     /// an offset whose row is written but not yet published, and nothing may
     /// score that). Every offset a posting yields is verified against the
     /// point's blob and the whole filter, so the result is exact whatever the
-    /// postings have accumulated. Returns null when no `must` condition is
+    /// postings have accumulated, except where `exact_postings` makes the
+    /// check redundant: a single-condition filter over postings no rewrite
+    /// has made stale. Returns null when no `must` condition is
     /// indexed, in which case the caller evaluates blobs directly.
     pub fn select(self: *const Store, filter: *const Filter, bits: []u64, bound: usize) ?Selection {
         // The lock is the one thing a *reader* mutates, like `SearchGuard`.
@@ -834,6 +857,15 @@ pub const Store = struct {
         rw.lockShared();
         defer rw.unlockShared();
         const pick = self.cheapestMust(filter) orelse return null;
+        // When the picked condition is the whole filter and no posting is
+        // stale, a posting *is* the answer: re-reading each blob to confirm it
+        // cost as much as scoring the vectors on W12-sel1 at d=1536 (32% of
+        // the engine's samples in `splitEntry`, `mem.eql` and
+        // `valueMatchesAt`, against 47% in the distance kernel). `has` still
+        // runs, so a point whose postings went in before its blob was
+        // published is not admitted early.
+        const trusted = filter.must_len == 1 and filter.must_not_len == 0 and
+            filter.should_len == 0 and self.exact_postings.load(.acquire);
         const words = (bound + 63) / 64;
         std.debug.assert(words <= bits.len);
         @memset(bits[0..words], 0);
@@ -845,7 +877,9 @@ pub const Store = struct {
                 const w = off / 64;
                 const m = @as(u64, 1) << @intCast(off % 64);
                 if (bits[w] & m != 0) continue;
-                if (!self.matches(off, filter)) continue;
+                if (trusted) {
+                    if (!self.has(off)) continue;
+                } else if (!self.matches(off, filter)) continue;
                 bits[w] |= m;
                 count += 1;
             }
@@ -1151,6 +1185,74 @@ test "an overwrite leaves a stale posting that verification drops" {
     // A point whose payload was cleared drops out of every selection.
     try store.set(testing.allocator, 0, &.{}, 3);
     try testing.expectEqual(@as(usize, 0), store.select(&keywordFilter("a", "new"), &bits, 1).?.count);
+}
+
+test "postings stay exact until a payload is rewritten, and select trusts them only then" {
+    var store = try Store.init(testing.allocator, 8);
+    defer store.deinit(testing.allocator);
+    try store.createIndex(testing.allocator, "a", .keyword, 0);
+    try store.createIndex(testing.allocator, "b", .keyword, 0);
+    var m: [128]u8 = undefined;
+    var e1: [64]u8 = undefined;
+    var e2: [64]u8 = undefined;
+    // Append-only: 0 is (x, y), 1 is (x, z), 2 has no payload.
+    try store.set(testing.allocator, 0, mapBytes(&m, &.{
+        entryBytes(&e1, "a", value_string, "x"), entryBytes(&e2, "b", value_string, "y"),
+    }), 3);
+    try store.set(testing.allocator, 1, mapBytes(&m, &.{
+        entryBytes(&e1, "a", value_string, "x"), entryBytes(&e2, "b", value_string, "z"),
+    }), 3);
+    try store.set(testing.allocator, 2, &.{}, 3);
+    try testing.expect(store.exact_postings.load(.acquire));
+    var bits: [1]u64 = undefined;
+    try testing.expectEqual(@as(usize, 2), store.select(&keywordFilter("a", "x"), &bits, 3).?.count);
+    try testing.expectEqual(@as(u64, 0b11), bits[0]);
+    // Two conditions: the postings answer one of them, so the blobs still
+    // decide, and only point 0 satisfies both.
+    var both = keywordFilter("a", "x");
+    try both.add(.must, .{ .key = "b", .match = .{ .keyword = "y" } });
+    try testing.expectEqual(@as(usize, 1), store.select(&both, &bits, 3).?.count);
+    try testing.expectEqual(@as(u64, 0b01), bits[0]);
+    // A must_not is not answered by a posting either.
+    var not_y = keywordFilter("a", "x");
+    try not_y.add(.must_not, .{ .key = "b", .match = .{ .keyword = "y" } });
+    try testing.expectEqual(@as(usize, 1), store.select(&not_y, &bits, 3).?.count);
+    try testing.expectEqual(@as(u64, 0b10), bits[0]);
+
+    // Rewriting 1 leaves its "x" posting stale: from here the blobs decide.
+    try store.set(testing.allocator, 1, mapBytes(&m, &.{entryBytes(&e1, "a", value_string, "w")}), 3);
+    try testing.expect(!store.exact_postings.load(.acquire));
+    try testing.expectEqual(@as(usize, 1), store.select(&keywordFilter("a", "x"), &bits, 3).?.count);
+    try testing.expectEqual(@as(u64, 0b01), bits[0]);
+}
+
+test "a first payload keeps the postings exact; a clear or a merge does not" {
+    var m: [128]u8 = undefined;
+    var e: [64]u8 = undefined;
+    // Clearing a published payload.
+    {
+        var store = try Store.init(testing.allocator, 4);
+        defer store.deinit(testing.allocator);
+        try store.createIndex(testing.allocator, "a", .keyword, 0);
+        try store.set(testing.allocator, 0, mapBytes(&m, &.{entryBytes(&e, "a", value_string, "x")}), 3);
+        try testing.expect(store.exact_postings.load(.acquire));
+        try store.set(testing.allocator, 0, &.{}, 3);
+        try testing.expect(!store.exact_postings.load(.acquire));
+        var bits: [1]u64 = undefined;
+        try testing.expectEqual(@as(usize, 0), store.select(&keywordFilter("a", "x"), &bits, 1).?.count);
+    }
+    // Merging over a published payload.
+    {
+        var store = try Store.init(testing.allocator, 4);
+        defer store.deinit(testing.allocator);
+        try store.createIndex(testing.allocator, "a", .keyword, 0);
+        try store.set(testing.allocator, 0, mapBytes(&m, &.{entryBytes(&e, "a", value_string, "x")}), 3);
+        try store.merge(testing.allocator, 0, mapBytes(&m, &.{entryBytes(&e, "a", value_string, "y")}), 3);
+        try testing.expect(!store.exact_postings.load(.acquire));
+        var bits: [1]u64 = undefined;
+        try testing.expectEqual(@as(usize, 0), store.select(&keywordFilter("a", "x"), &bits, 1).?.count);
+        try testing.expectEqual(@as(usize, 1), store.select(&keywordFilter("a", "y"), &bits, 1).?.count);
+    }
 }
 
 test "SetPayload merges by key and indexes the merged values" {

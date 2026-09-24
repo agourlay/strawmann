@@ -94,17 +94,25 @@ within 5%. Something Qdrant does per visited node scales with the dimension.
 The 1.73x is licensed and correct as measured; what it measures is not known,
 and if it is a setting rather than a path the ratio is being read wrongly.
 
-**7. Filtered search is the licensed loss, and the loss is a dispatch.**
-`W12-sel10` is flat at 166 qps from `ef` 64 with 45 MB of DRAM and 23M cycles
-per query and recall 1.0000 at every `ef`: strawmANN scores the 20,054 matches
-directly. Qdrant's curve moves with `ef` (2,226 to 288 qps, recall 0.76 to
-0.999), so it walks the graph under the filter, and at matched recall strawmANN
-reads 0.34x to 0.59x. At 1% the curves cross at `ef` 256. The scan itself is
-slow for what it is: 1,974 vectors, 12 MB, in 1.63 ms is about 7 GB/s on two
-cores, a fraction of the W9 kernel's per-core rate. `docs/workloads.md` quotes
-~14,800 q/s for that scan and the row measures 1,221. Read the dispatch in
-`handlers.searchOne` against the 10 KB `--full-scan-threshold` bfb passes, and
-the scan loop it lands in, and correct the doc or the engine.
+**7. Filtered search is the licensed loss; at 10% it is the dispatch.**
+`W12-sel10` is flat at 166 qps from `ef` 64 with recall 1.0000 at every `ef`:
+strawmANN scores the 20,054 matches directly. Qdrant's curve moves with `ef`
+(2,226 to 288 qps, recall 0.76 to 0.999), so it walks the graph under the
+filter, and at matched recall strawmANN reads 0.34x to 0.59x. The scan was
+not the slow part. Profiled on 2026-09-24, 43% of W12-sel1's samples were
+`payload.Store.select` re-reading every matching blob, which the append-only
+bench12 never needed; trusting exact postings for a single-condition filter
+took sel1 from 1,194 to 1,854 qps and sel10 from 167 to 285 (one pass each,
+not a gated run), and sel1 is now 81% distance kernel. Software prefetch in
+`searchSelected` was measured in the same session and lost (0.75x to 0.80x).
+What is left at 10% is 123 MB scanned per query against Qdrant's filtered
+walk. strawmANN's walk scores every neighbour the filter rejects
+(`hnsw.zig`: the filter gates admission, not expansion), so the graph cannot
+take over from the scan until it stops doing that (ACORN-style: skip scoring
+rejected neighbours, hop through them), and `plainFilteredSearch`'s cost model
+changes with it. The next night run's W12 rows are the measurement of record.
+`docs/workloads.md` still quotes ~14,800 q/s for the 1% scan; correct it from
+that run.
 
 **8. The exhaustive pending tail costs 15x at d=1536.** `W11-steady` is refused
 (item 3), but its counters are readable: during a 5% append strawmANN's search
