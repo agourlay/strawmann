@@ -1321,6 +1321,32 @@ def table() -> list[Workload]:
                  flags("--collection-name", f"{C}6", "--skip-setup", "-n", QUERIES, "--search",
                        "--search-limit", 10, "--search-hnsw-ef", 128,
                        "--quantization-rescore", "true"), query_collection="bench6"),
+    ]
+
+    # W6's frontier, for the same reason W10 is bench2's. W6/W7/W8 are refused a
+    # ratio because the engines size their rescore pools differently
+    # (decisions.md §5), which left SQ8 — the one encoding usable on both
+    # corpora — with no comparison at all. Sweeping `ef` and reading the frontier
+    # vertically at a recall both engines reach is the same answer W10 gives
+    # fp32; only the throughput half was missing.
+    #
+    # On sift1m Qdrant's SQ8 recall saturates near 0.974 against strawmANN's
+    # 0.997, so the top of this frontier is a recall only one engine serves.
+    #
+    # Straight after W6, while `bench6` is still resident. It ran after W9, and
+    # by then W7-upload, W8-upload and W9's 6 GB scan had pushed Qdrant's
+    # file-backed `bench6` out of the page cache: on qd-dbp1m-perf-0924 passes
+    # 1 and 2 took 152,697 and 254,138 major faults on W6-ef32 and pass 3 took
+    # one, so the first rows of the sweep measured a page-in and two ratios
+    # were refused as drift (findings 2). strawmANN pins its arena and took nine.
+    for ef in (32, 64, 128, 256, 512):
+        rows.append(Workload(
+            f"W6-ef{ef}", f"SQ8 recall control, ef={ef} (latency only)",
+            flags("--collection-name", f"{C}6", "--skip-setup", "-n", QUERIES, "--search",
+                  "--search-limit", 10, "--search-hnsw-ef", ef,
+                  "--quantization-rescore", "true"), query_collection=f"{C}6"))
+
+    rows += [
         Workload("W7-upload", "binary quantization: load",
                  flags(*CREATE, "--collection-name", f"{C}7", "--fbin", corpus(), "-n", upload_n(), "-d", DIM,
                        "--quantization", "binary"), upload_only=True),
@@ -1359,22 +1385,6 @@ def table() -> list[Workload]:
             f"W10-ef{ef}", f"recall control, ef={ef} (latency only)",
             flags("--collection-name", f"{C}2", "--skip-setup", "-n", QUERIES, "--search",
                   "--search-limit", 10, "--search-hnsw-ef", ef, "-p", 8), query_collection=f"{C}2"))
-
-    # W6's frontier, for the same reason W10 is bench2's. W6/W7/W8 are refused a
-    # ratio because the engines size their rescore pools differently
-    # (decisions.md §5), which left SQ8 — the one encoding usable on both
-    # corpora — with no comparison at all. Sweeping `ef` and reading the frontier
-    # vertically at a recall both engines reach is the same answer W10 gives
-    # fp32; only the throughput half was missing.
-    #
-    # On sift1m Qdrant's SQ8 recall saturates near 0.974 against strawmANN's
-    # 0.997, so the top of this frontier is a recall only one engine serves.
-    for ef in (32, 64, 128, 256, 512):
-        rows.append(Workload(
-            f"W6-ef{ef}", f"SQ8 recall control, ef={ef} (latency only)",
-            flags("--collection-name", f"{C}6", "--skip-setup", "-n", QUERIES, "--search",
-                  "--search-limit", 10, "--search-hnsw-ef", ef,
-                  "--quantization-rescore", "true"), query_collection=f"{C}6"))
 
     rows += [
         # W12, filtered. bfb builds the keyword index before the upload on both

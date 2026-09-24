@@ -175,6 +175,22 @@ class WorkloadTests(unittest.TestCase):
         # A run that does not include W1 drops nothing early.
         self.assertEqual(fullrun.split_after_dead_writers(["W2", "W3"]), (["W2", "W3"], [], []))
 
+    def test_the_sq8_sweep_runs_before_anything_can_evict_bench6(self):
+        """Qdrant's `bench6` is file-backed, and W7-upload, W8-upload and W9's
+        exact scan pushed it out of the page cache before the W6-ef sweep ran:
+        150k to 250k major faults on the first passes and two ratios refused
+        as drift. Nothing that uploads another collection or scans one whole
+        may run between `bench6`'s upload and the end of its sweep.
+        """
+        rows = self.w.table()
+        ids = [x.id for x in rows]
+        start = ids.index("W6-upload")
+        end = max(i for i, x in enumerate(ids) if x.startswith("W6-ef"))
+        for x in rows[start + 1:end]:
+            self.assertFalse(x.upload_only, f"{x.id} uploads between W6-upload and the sweep")
+            self.assertNotIn("--search-exact", x.args, f"{x.id} scans between them")
+            self.assertEqual(self.w.collection_of(x), "bench6", x.id)
+
     def test_w5_uses_distinct_dataset_queries(self):
         w5 = {x.id: x for x in self.w.table()}["W5"]
         self.assertEqual(w5.query_strategy, "random-sample")

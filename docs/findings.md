@@ -44,10 +44,11 @@ it: Qdrant's passes 1 and 2 took 152,697 and 254,138 major faults on `W6-ef32`
 `W6-ef` sweep reaches it, so the first rows of the sweep measure a page-in on
 a row that claims `cached` residency, and `aggregate._rep_drift` reads the
 monotone slide as a trend. strawmANN's arm pins its arena and took nine.
-Two ratios refused on the headline page. Either mark and drop a pass whose
-`major_faults` on a cached search row exceed a floor, or order the `W6-ef`
-sweep before the scan that evicts it; the second changes the row set and its
-stamp.
+Two ratios refused on the headline page. The sweep now runs straight after
+`W6`, before anything can evict `bench6` (2026-09-24); the 0925 pair's
+`W6-ef` major faults and spreads say whether that was all of it. If a pass
+still pages in, the other fix remains: drop a pass whose `major_faults` on a
+cached search row exceed a floor.
 
 **3. W11's append spans are sift1m's.** `W11_STEADY_SPAN_S` 25 s and
 `W11_SPAN_S` 60 s were sized for d=128. At d=1536 the search covered 12 to 23%
