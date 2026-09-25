@@ -257,6 +257,11 @@ pub const Engine = struct {
         self.mutex.unlock();
 
         const c = doomed orelse return false;
+        // A build still running on it stops at its next node instead of
+        // finishing a graph nothing will read (`Collection.drop_requested`).
+        // The build holds no `users` reference; what the drop waited on is
+        // `deinit` joining the build thread, 240 s for `bench1` on 0925.
+        c.drop_requested.store(true, .release);
         // Then wait out the requests that acquired it before the unlink. The
         // wait is bounded because no new ones can arrive, and it happens
         // outside the registry lock so an in-flight search does not block
@@ -2026,6 +2031,44 @@ test "drop waits for a request that is already inside" {
     held.release();
     t.join();
     try testing.expect(done.load(.acquire));
+}
+
+test "a drop stops a build still running on the collection" {
+    // 0925: the read-back before `bench1`'s drop started a 240 s build of a
+    // collection about to be deleted, and the drop waited in `deinit`'s join
+    // for all of it.
+    const dim = 16;
+    const n = 6000;
+    var prng = std.Random.DefaultPrng.init(0xd40b);
+    const rnd = prng.random();
+    var v: [dim]f32 = undefined;
+
+    // What an uninterrupted build of this collection costs, for scale.
+    var e = Engine.init(testing.allocator);
+    defer e.deinit();
+    const full = try e.create("full", .{ .dim = dim, .metric = .dot, .capacity = n });
+    for (0..n) |i| {
+        for (&v) |*x| x.* = rnd.float(f32);
+        _ = try full.upsert(.{ .num = i }, &v);
+    }
+    const t_full = core.collection.monotonicNs();
+    try core.collection.buildIndex(full, .parallel, 2);
+    const full_ns = core.collection.monotonicNs() - t_full;
+
+    const c = try e.create("doomed", .{ .dim = dim, .metric = .dot, .capacity = n });
+    for (0..n) |i| {
+        for (&v) |*x| x.* = rnd.float(f32);
+        _ = try c.upsert(.{ .num = i }, &v);
+    }
+    e.build_threads = 2;
+    e.ensureIndexBuilding(c);
+    try testing.expectEqual(core.collection.IndexState.building, c.index_state.load(.acquire));
+    const t_drop = core.collection.monotonicNs();
+    try testing.expect(e.drop("doomed"));
+    const drop_ns = core.collection.monotonicNs() - t_drop;
+    // Stopped at its next node, not finished: a quarter of a full build is
+    // a generous bound for a check made once per inserted point.
+    try testing.expect(drop_ns * 4 < full_ns);
 }
 
 test "concurrent creates of one name: exactly one creates, and the loser touches nothing" {

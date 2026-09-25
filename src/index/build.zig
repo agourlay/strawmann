@@ -229,7 +229,7 @@ pub const Builder = struct {
     /// §8.7 option (c). Deterministic for a given (seed, dataset): the
     /// insertion order is fixed, the level assignment is a pure function of the
     /// node id, and every tie is broken by the total order of §8.7.
-    pub fn buildSerial(self: *Builder, count: usize) error{CsrOverflow}!void {
+    pub fn buildSerial(self: *Builder, count: usize) error{ CsrOverflow, Cancelled }!void {
         const g = self.graph;
         g.count = 0;
         g.entry_point = empty_neighbour;
@@ -242,6 +242,7 @@ pub const Builder = struct {
         try layoutUpperLevels(g, 0, count);
 
         for (0..count) |i| {
+            if (g.cancelled()) return error.Cancelled;
             self.insertOne(@intCast(i));
             self.promoteEntry(@intCast(i));
             g.count = i + 1;
@@ -747,6 +748,7 @@ pub fn extendParallel(
             b.entry = &sh.entry;
 
             while (true) {
+                if (sh.graph.cancelled()) break;
                 const i = sh.next.fetchAdd(1, .monotonic);
                 if (i >= sh.count) break;
                 const node: u32 = if (sh.graph.insert_order) |o| o[i] else @intCast(i);
@@ -785,6 +787,9 @@ pub fn extendParallel(
     for (handles[0..spawned]) |h| h.join();
     if (spawned == 0) return error.SpawnFailed;
     if (shared.err.load(.acquire)) return error.OutOfMemory;
+    // Stopped part-way: the graph is not a graph of `count` nodes, and the
+    // caller must not publish it.
+    if (graph.cancelled()) return error.Cancelled;
 
     // Before anything can search it. `linkBack` evicts back-edges as it prunes
     // and the eviction order follows the threads', so a build can leave nodes
@@ -803,6 +808,34 @@ pub fn extendParallel(
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
+
+test "both builders stop when the graph's build is cancelled" {
+    var corpus = try Corpus.init(testing.allocator, 500, 8, 0xca11, .euclid);
+    defer corpus.deinit(testing.allocator);
+    var stop = std.atomic.Value(bool).init(true);
+    {
+        var g = try Graph.init(testing.allocator, Params.fromM(8, 32, 1), 500);
+        defer g.deinit();
+        g.cancel = &stop;
+        try testing.expectError(error.Cancelled, extendParallel(testing.allocator, &g, corpus.scorer(), 0, 500, 4));
+    }
+    {
+        var g = try Graph.init(testing.allocator, Params.fromM(8, 32, 1), 500);
+        defer g.deinit();
+        g.cancel = &stop;
+        var b = try Builder.init(testing.allocator, &g, corpus.scorer());
+        defer b.deinit(testing.allocator);
+        try testing.expectError(error.Cancelled, b.buildSerial(500));
+        try testing.expectEqual(@as(usize, 0), g.count);
+    }
+    // Not cancelled, the same build completes.
+    stop.store(false, .release);
+    var g = try Graph.init(testing.allocator, Params.fromM(8, 32, 1), 500);
+    defer g.deinit();
+    g.cancel = &stop;
+    const st = try extendParallel(testing.allocator, &g, corpus.scorer(), 0, 500, 4);
+    try testing.expectEqual(@as(usize, 500), st.nodes);
+}
 
 const testing = std.testing;
 const dist = @import("../dist/dist.zig");

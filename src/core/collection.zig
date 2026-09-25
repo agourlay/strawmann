@@ -580,6 +580,12 @@ pub const Collection = struct {
     /// not just the search, because an upsert or a scroll dereferences the
     /// same pointer.
     users: std.atomic.Value(usize) = .init(0),
+    /// Set by `Engine.drop` once the collection is unlinked, so a build still
+    /// running on it stops rather than finishing for nothing: the drop waits
+    /// on `users`, and a bulk build is one for as long as it runs. The W1
+    /// read-back started a 240 s build of `bench1` seconds before its drop on
+    /// every 0925 pass, and the drop sat through all of it.
+    drop_requested: std.atomic.Value(bool) = .init(false),
     /// Per-row write counter, odd while that row is being overwritten.
     ///
     /// Only consulted once `in_place_updates` is set, so an append-only
@@ -1469,7 +1475,7 @@ test "§8.6 metamorphic: score(x,x) is maximal for every metric" {
 /// `std.time.nanoTimestamp` moved under the `Io` interface in Zig 0.16 and the
 /// collection has no `Io` to thread through; the raw clock is what a build
 /// timer needs anyway (§7.2 wants build time as a first-class W2 measurement).
-fn monotonicNs() u64 {
+pub fn monotonicNs() u64 {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
@@ -1859,6 +1865,7 @@ pub fn buildIndex(coll: *Collection, mode: BuildMode, threads: usize) !void {
         coll.config.seed,
     ), coll.config.capacity);
     errdefer g.deinit();
+    g.cancel = &coll.drop_requested;
 
     // Scratch for widening rows the builder has to re-encode at publish
     // (below). Taken before the log opens so that an allocation failure
@@ -2811,6 +2818,18 @@ test "a two-hop filtered walk returns only admitted, live points and keeps recal
         }
         const recall = @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(total));
         try testing.expect(recall >= 0.9);
+    }
+}
+
+test "a build asked to stop publishes nothing, on either path" {
+    inline for (.{ BuildMode.serial, BuildMode.parallel }) |mode| {
+        var c = try makeCollection(4, .dot, 4096);
+        defer c.deinit();
+        var v = [_]f32{ 1, 0, 0, 0 };
+        for (0..2000) |i| _ = try c.upsert(.{ .num = i }, &v);
+        c.drop_requested.store(true, .release);
+        try testing.expectError(error.Cancelled, buildIndex(&c, mode, 4));
+        try testing.expect(publishedGraph(&c) == null);
     }
 }
 

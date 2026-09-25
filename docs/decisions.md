@@ -1648,3 +1648,25 @@ quantized row whose recall still differs with matched pools names the
 encoders, not the pools (`compare.Row._rescore_cause`). The published pages
 render identically.
 
+## A dropped collection's build stops, decided 2026-09-25
+
+9c7b68d dropped `bench1` between W1 and W2 so Qdrant's W2 would no longer run
+beside `bench1`'s index build, and it worked for Qdrant (time-to-green 658 s
+to 303 s). On strawmANN it moved the wait rather than removing it: the gap
+from W1 to W2 went from 3 s to 344-367 s per pass. `server.log` says why. The
+read-back `fullrun` takes of `bench1` just before the drop is a collection-info
+request, which starts a build on strawmANN (`collections.zig`, so that bfb's
+wait-for-green works), and the drop then waited in `Collection.deinit`'s join
+of the build thread for the whole 240 s build of a collection nothing reads.
+
+Taken: a drop stops the build. `Engine.drop` sets `drop_requested` once the
+collection is unlinked, the graph under construction carries a pointer to it
+(`hnsw.Graph.cancel`), both builders check it before each node, and
+`buildIndex`'s existing error path releases the half-built graph. Qdrant
+cancels optimizations on a collection delete too. A test drops a collection
+mid-build and returns in under a quarter of an uninterrupted build's time; it
+fails without the flag. Not taken: skipping the read-back of a collection
+about to be dropped, which would have cured this one path and left every
+other drop waiting out its build; and dropping the load-average settle,
+which would have left the 240 s inside the drop.
+

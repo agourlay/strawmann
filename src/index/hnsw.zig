@@ -102,6 +102,10 @@ pub const Graph = struct {
     /// Borrowed, not owned: it has to outlive the build, and nothing reads it
     /// afterwards.
     level_keys: ?[]const u64 = null,
+    /// Set while a build fills this graph, so the collection it is for can
+    /// stop it: a dropped collection's build is work nothing will read, and
+    /// the drop waits for it. Borrowed; null for every graph built elsewhere.
+    cancel: ?*const std.atomic.Value(bool) = null,
 
     /// Optional order to *insert* nodes in, as node ids: `insert_order[k]` is
     /// the node the build links k-th. Null inserts 0, 1, 2, ...
@@ -134,6 +138,11 @@ pub const Graph = struct {
     /// the caller checks, because at this level the arrays would simply be the
     /// wrong length and the copy would be a silent corruption rather than an
     /// error.
+    /// Whether the build filling this graph has been asked to stop.
+    pub fn cancelled(self: *const Graph) bool {
+        return if (self.cancel) |c| c.load(.acquire) else false;
+    }
+
     pub fn copyFrom(self: *Graph, other: *const Graph) void {
         std.debug.assert(self.capacity == other.capacity);
         std.debug.assert(self.params.m0 == other.params.m0);
