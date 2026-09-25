@@ -2237,6 +2237,41 @@ def _matched_oversampling(w: Workload) -> Workload:
         w, args=[*w.args, "--quantization-oversampling", str(MATCHED_OVERSAMPLING)])
 
 
+def identical_invocations() -> list[list[str]]:
+    """Search rows that run the same bfb invocation under different ids.
+
+    `W12-sel1` and `W12-sel1-ef128` send identical arguments to one
+    collection; the second is the ladder's point at the base row's `ef`. Two
+    measurements of one configuration, and on 0925 the verdicts disagreed
+    (1.12x against parity), because each row's band came from its own
+    spread and one Qdrant pass dipped on only one of them. The open-loop arms
+    share their arguments too and are not one configuration: `rps_fraction`
+    is in the key.
+    """
+    groups: dict[tuple, list[str]] = {}
+    for w in table():
+        if w.upload_only:
+            continue
+        key = (tuple(str(a) for a in w.args), w.query_collection, w.query_strategy,
+               tuple(str(a) for a in (w.background or ())), w.keyword_filter,
+               w.rps_fraction)
+        groups.setdefault(key, []).append(w.id)
+    return [ids for ids in groups.values() if len(ids) > 1]
+
+
+def widest_per_configuration(rsd: dict[str, float]) -> dict[str, float]:
+    """`rsd` with every row of an identical invocation given the group's
+    widest spread, so one configuration gets one band and one verdict."""
+    out = dict(rsd)
+    for ids in identical_invocations():
+        got = [rsd[i] for i in ids if i in rsd]
+        if got:
+            for i in ids:
+                if i in rsd:
+                    out[i] = max(got)
+    return out
+
+
 def pool_oversampling(ef: int, limit: int) -> float:
     """The oversampling that makes Qdrant's rescore pool `ef` candidates:
     it takes `limit x oversampling` from the quantized walk."""

@@ -3178,3 +3178,30 @@ class QdrantW4ProbeTests(unittest.TestCase):
         states = self.p.thread_states(os.getpid())
         self.assertTrue(states)
         self.assertTrue(all(len(st) == 1 for _, st in states))
+
+
+class IdenticalInvocationTests(unittest.TestCase):
+    """One configuration, one verdict (decision 6.5)."""
+
+    def setUp(self):
+        self.w = importlib.reload(workloads)
+
+    def test_the_ladder_points_at_their_base_rows_ef_are_their_base_rows(self):
+        groups = {tuple(sorted(g)) for g in self.w.identical_invocations()}
+        self.assertIn(("W6", "W6-ef128"), groups)
+        self.assertIn(("W12-sel1", "W12-sel1-ef128"), groups)
+        self.assertIn(("W12-sel10", "W12-sel10-ef128"), groups)
+        # Different offered loads are different configurations.
+        self.assertFalse(any("W4-sat50" in g for g in groups))
+
+    def test_the_group_takes_its_widest_spread(self):
+        """0925's Qdrant: W12-sel1 at 0.9% and its twin at 7.4%, so the base
+        row cleared a band its twin did not."""
+        got = self.w.widest_per_configuration(
+            {"W12-sel1": 0.0086, "W12-sel1-ef128": 0.0744, "W3": 0.01, "W6": 0.003})
+        self.assertEqual(got["W12-sel1"], 0.0744)
+        self.assertEqual(got["W12-sel1-ef128"], 0.0744)
+        self.assertEqual(got["W3"], 0.01)
+        # A member the floor does not cover stays uncovered.
+        self.assertEqual(got["W6"], 0.003)
+        self.assertNotIn("W6-ef128", got)

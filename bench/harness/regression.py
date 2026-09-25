@@ -247,6 +247,10 @@ def floor_for(labels: list[str]) -> dict:
     stamps = {d.get("harness_hash") for _, d in found}
     datasets = {d.get("dataset") for _, d in found}
     envs = {d.get("env_hash") for _, d in found}
+    # One configuration, one band: the rows that run an identical invocation
+    # take the widest of their spreads (`workloads.widest_per_configuration`).
+    import workloads
+    rsd = workloads.widest_per_configuration(rsd)
     return {
         "rsd": rsd,
         "reps": {r: min(d.get("reps", {}).get(r, 0) for _, d in found) for r in rows},

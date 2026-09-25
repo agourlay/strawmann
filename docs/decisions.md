@@ -1670,3 +1670,23 @@ about to be dropped, which would have cured this one path and left every
 other drop waiting out its build; and dropping the load-average settle,
 which would have left the 240 s inside the drop.
 
+## One configuration, one verdict, decided 2026-09-25
+
+`W12-sel1` and `W12-sel1-ef128` send bfb identical arguments: the second is
+the ladder's point at the base row's `ef`. On 0925 the first read 1.12x and
+the second parity (+-22.3%), because each row's noise band comes from its own
+spread across passes, and one Qdrant pass dipped to 1,471 on the twin only
+(7.4% against 0.9%). `W6` and `W12-sel10` have twins too; their spreads
+agreed, so their verdicts did.
+
+Taken: rows that run an identical invocation share the widest of their
+spreads (`workloads.identical_invocations`, applied in
+`regression.floor_for`, which every verdict reads). The configuration was
+observed to dip 12% in one pass, and a win smaller than that is not
+established, so W12-sel1 reads parity on the 0925 page and in
+`comparison-dbpedia-openai-1m.md`. Offered load is part of the key, so the
+three open-loop arms, which share their arguments, stay three
+configurations. Pooling the passes of both rows would have given the same
+band here (about +-22%) and needed the per-pass directories; judging only
+the base row would have kept a 1.12x on a configuration seen to vary by more.
+
