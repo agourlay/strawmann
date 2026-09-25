@@ -1010,6 +1010,23 @@ class CompareTests(unittest.TestCase):
         self.assertIn("[search-during-write; no recall join]", rows["W11"].note_text)
         self.assertNotIn("write overlap", rows["W11"].note_text)
 
+    def test_w11_note_says_most_only_when_it_was_most(self):
+        """0925's strawmANN W11 ran at 82% overlap and the note said "most of
+        that row measured the rebuild": 18% of it did."""
+        w11 = dict(recall_joinable=False, ratio_policy="search-during-write; no recall join")
+        note = lambda pa, pb: self._joined(
+            [_row("W11", 4000, write_overlap_pct=pa, **w11)],
+            [_row("W11", 2000, write_overlap_pct=pb, **w11)],
+            good_stamp(), good_stamp())[0]["W11"].note_text
+        text = note(82.0, 100.0)
+        self.assertIn("under 90% of a's search, so the last 18% of that row", text)
+        self.assertNotIn("most", text)
+        self.assertIn("most of that row", note(40.0, 100.0))
+        self.assertIn("most of both rows", note(12.0, 22.0))
+        text = note(82.0, 60.0)
+        self.assertIn("the last 18% and 40% of the two rows", text)
+        self.assertNotIn("most", text)
+
     def test_system_load_is_not_read_as_foreign_load(self):
         """`load_start` counts the engine under test; `foreign` does not.
 
@@ -1782,6 +1799,17 @@ class HarnessBoundRowTests(unittest.TestCase):
         self.assertNotIn("monotonically", rows["W4"].note_text)
 
 
+class ComparisonDocStubTests(unittest.TestCase):
+    def test_a_new_comparison_doc_names_no_qdrant_version(self):
+        """The stub said "Qdrant 1.19.0" above 0925's 1.19.2-dev rows."""
+        compare = importlib.import_module("compare")
+        doc = compare.new_comparison_doc("dbpedia-openai-1m")
+        self.assertEqual(doc.splitlines()[0], "# strawmann vs Qdrant: dbpedia-openai-1m")
+        self.assertNotRegex(doc.splitlines()[0], r"\d+\.\d+")
+        begin, end = compare.markers("compare-full")
+        self.assertIn(f"{begin}\n{end}\n", doc)
+
+
 class DecompositionTests(unittest.TestCase):
     """A ratio said as the three things that produce it.
 
@@ -1833,6 +1861,31 @@ class DecompositionTests(unittest.TestCase):
         self.assertIn("1.35x cores busy", note)
         self.assertIn("1.03x clock", note)
         self.assertIn("(7.50 against 5.55)", note)
+
+    def test_the_clock_is_the_reference_counters_not_cycles_over_task_clock(self):
+        """0925's W0 read "x 1.08x clock" beside a GHz column of 2.01 on both
+        engines: `cycles / task_clock` was 1.735 against 1.604 GHz because the
+        cycle counter saw a different share of on-CPU time on each."""
+        def row(cores, counted_ghz, cyc_per_q):
+            r = self._perf(cores, counted_ghz, cyc_per_q)
+            r["perf_cycles"] = counted_ghz * r["perf_task_clock_s"]
+            r["n_queries"] = r["perf_cycles"] / cyc_per_q
+            r["perf_ref_hz"] = 2.0e9
+            # Both at 2.006 GHz by the reference counter.
+            r["perf_ref_cycles"] = r["perf_cycles"] * 2.0e9 / 2.006e9
+            return r
+        a, b = row(0.67, 1.735e9, 400_000), row(1.05, 1.604e9, 784_000)
+        note = self._row_note(a, b, qa=4572.0, qb=3380.0)
+        self.assertIn("1.00x clock", note)
+        self.assertIn("1.08x counted on-CPU share", note)
+        # The factors still multiply to the throughput ratio the counters imply.
+        qps = lambda r: r["n_queries"] / r["duration_s"]
+        self.assertIn(f"[{qps(a) / qps(b):.2f}x is", note)
+        # Where the two shares agree the fourth term is not printed.
+        a, b = row(7.15, 2.0e9, 4_030_000), row(4.46, 2.0e9, 3_410_000)
+        note = self._row_note(a, b, qa=3552.0, qb=2580.0)
+        self.assertIn("1.00x clock", note)
+        self.assertNotIn("counted", note)
 
     def test_silent_when_the_engines_are_occupancy_matched(self):
         """The ordinary case: the ratio is per-query efficiency and says so by

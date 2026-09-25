@@ -276,6 +276,17 @@ class ReportHostTests(unittest.TestCase):
             # And it says what the condition selected, so the reader is not
             # asked to take the grade's name for the size of the matching set.
             self.assertIn("19,936", html)
+            self.assertIn("bfb's W12-sel10 sweep", html)
+            self.assertNotIn("bfb's W10 sweep", html.split("filtered to 10%", 1)[1])
+            # Each engine searched its own matching set: one number was one
+            # engine's first pass (0925: 19,896 printed, 19,796 to 20,176 run).
+            filt_b = [dict(p, n_matching=19796) for p in filt]
+            sw_b = [sw[0], ("recall.sift1m.bench12.sel10.json",
+                            _sweep("bench12", "sift1m", 0.99, points=filt_b, grade="sel10"))]
+            report, runs, df = self._pair(Path(tmp), rows_a, rows_b,
+                                          sw_a=sw, sw_b=sw_b, colls=colls)
+            html = report.matched_recall_table(runs)
+            self.assertIn("19,936 in a and 19,796 in b", html)
 
     def test_recall_ci_widens_the_matched_ratio(self):
         """The headline range treats each measured recall as exact; the recall
@@ -1145,6 +1156,29 @@ class ReportHostTests(unittest.TestCase):
         one = [run("strawmann", 1), run("qdrant", 1)]
         self.assertNotIn("node visits", report.segment_note(one))
 
+    def test_the_page_says_one_thing_about_ef(self):
+        """0925's chart note said "ef is the same unit here" (two segments, one
+        of them an empty appendable) and the Run conditions paragraph, which
+        counted every segment, said it was not and that equal x "overstates
+        strawmANN in traversal work"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
+            runs[0].meta["strawmann"] = {"commit": "c"}
+            runs[1].meta["qdrant"] = {"version": "1.19.2-dev"}
+            runs[0].collections = {"collections": [
+                {"collection": "bench2", "segments_count": 1}]}
+            runs[1].collections = {"collections": [
+                {"collection": "bench2", "segments_count": 2, "populated_segments_count": 1}]}
+            html = report.build(runs, "t")
+            self.assertIn("ef is the same unit here", html)
+            self.assertNotIn("not the same unit", html)
+            self.assertNotIn("overstates", html)
+            runs[1].collections["collections"][0]["populated_segments_count"] = 2
+            html = report.build(runs, "t")
+            self.assertIn("not the same unit", html)
+            self.assertNotIn("the same unit here", html)
+            self.assertIn("Read the recall/throughput", html)
+
     def test_an_empty_appendable_is_a_segment_and_not_a_graph(self):
         """sift1m's Qdrant "held 2 segments": one graph over every point and the
         empty appendable it keeps for writes. The note had to call the count an
@@ -1380,6 +1414,47 @@ class ReportHostTests(unittest.TestCase):
         # A field no collection reports gets no column at all.
         self.assertNotIn("quantization", html)
 
+    def test_a_folded_pair_is_stamped_by_the_newest_arms_first_pass(self):
+        """What the docstring now says, pinned: the archived pages are named by
+        it, so a change here renames them."""
+        report = self.report
+        sm = report.Run("sm", [], "", True, "h", meta={
+            "started": "2026-09-24T20:30:20Z",
+            "passes": [{"started": "2026-09-24T20:30:20Z"}, {"started": "2026-09-25T02:11:42Z"}]})
+        qd = report.Run("qd", [], "", True, "h", meta={
+            "started": "2026-09-24T21:52:15Z",
+            "passes": [{"started": "2026-09-24T21:52:15Z"}, {"started": "2026-09-25T03:33:51Z"}]})
+        self.assertEqual(report.run_stamp([sm, qd]), "2026-09-24-2152")
+
+    def test_a_collection_read_mid_ingest_before_its_drop_is_not_a_disagreement(self):
+        """0925: Qdrant's bench1 was read back seconds after W1's unwaited
+        upload, at 988,196 points and 5 segments, then dropped at 990,000. The
+        table marked it as the engines disagreeing."""
+        report = self.report
+
+        def run(label, pts, segs, stamp):
+            return report.Run(label, [], "", True, "h",
+                              meta={"upload_n": 990000, "harness": stamp},
+                              collections={"collections": [
+                                  {"collection": c, "points_count": pts,
+                                   "segments_count": segs} for c in ("bench1", "bench2")]})
+
+        settled = {"engine_settle": {"dropped_not_settled": ["W1"]}}
+        html = report.collection_table([run("sm", 990000, 1, settled),
+                                        run("qd", 988196, 5, settled)])
+        bench1 = html.split('<td class="wid">bench1</td>', 1)[1].split("</tr>", 1)[0]
+        bench2 = html.split('<td class="wid">bench2</td>', 1)[1].split("</tr>", 1)[0]
+        self.assertIn("990,000 / 988,196", bench1)
+        self.assertNotIn("differs", bench1)
+        self.assertIn("differs", bench2)          # every other collection as before
+        self.assertIn("<b>bench1</b> was read back straight after its row", html)
+        # A run from before the drop settled on bench1: its read-back is an end
+        # state, and a difference in it is one.
+        html = report.collection_table([run("sm", 990000, 1, {}), run("qd", 988196, 5, {})])
+        bench1 = html.split('<td class="wid">bench1</td>', 1)[1].split("</tr>", 1)[0]
+        self.assertIn("differs", bench1)
+        self.assertNotIn("mid-ingest", html)
+
     def test_capture_after_the_mutating_rows_is_flagged(self):
         """`collections.json` is read back last, so for a collection W11
         appends to it describes a state no search row was measured in: bench2
@@ -1543,6 +1618,23 @@ class ReportHostTests(unittest.TestCase):
             html = report.build(runs, "t")
             self.assertIn("qdrant/qdrant:v1.19.0", html)
             self.assertNotIn("pinned by commit", html)
+
+    def test_a_binary_older_than_its_checkout_is_not_pinned_by_that_commit(self):
+        """0925 ran the binary 0924 built at 878843e6e after the checkout had
+        moved to 2874d0f1d. run.json said so (`binary_predates_commit`), and
+        the page printed `commit 2874d0f1dbfa` beside "pinned by commit"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
+            runs[1].meta["qdrant"] = {
+                "image": None, "digest": None, "version": "1.19.2-dev",
+                "network": "native", "binary": "/opt/qdrant/target/release/qdrant",
+                "binary_sha256": "dbeb0f73dea2d371", "commit": "2874d0f1dbfa",
+                "dirty": False, "binary_predates_commit": True}
+            html = report.build(runs, "t")
+            self.assertIn("dbeb0f73dea2d371", html)
+            self.assertIn("predates checkout <code>2874d0f1dbfa</code>", html)
+            self.assertNotIn("pinned by commit", html)
+            self.assertNotIn("commit <code>2874d0f1dbfa</code>", html)
 
     def test_a_native_qdrant_shows_its_cargo_profile(self):
         """`target/perf/qdrant` is release without LTO; the page showed only
@@ -2574,6 +2666,15 @@ class ReportReadabilityTests(unittest.TestCase):
             {"id": "W12-sel1-ef64", "desc": "filtered, ef=64", "ratio": "0.51x"}])
         self.assertEqual([(g["id"], g["ratio"], g["points"]) for g in got],
                          [("W9", "0.80x", 1), ("W12-sel1", "0.51 to 0.73x", 2)])
+
+    def test_a_lone_sweep_point_is_not_named_as_its_base_row(self):
+        """0925's summary read `(W12-sel1): 0.79x` for W12-sel1-ef64, while the
+        table's own W12-sel1 row was a 1.12x win."""
+        got = self.report.grouped_losses([
+            {"id": "W9", "desc": "exact", "ratio": "0.77x"},
+            {"id": "W12-sel1-ef64", "desc": "filtered, ef=64", "ratio": "0.79x"}])
+        self.assertEqual([(g["id"], g["ratio"], g["points"]) for g in got],
+                         [("W9", "0.77x", 1), ("W12-sel1-ef64", "0.79x", 1)])
 
     def test_the_summary_latency_table_keeps_the_rows_a_latency_claim_rests_on(self):
         report = self.report

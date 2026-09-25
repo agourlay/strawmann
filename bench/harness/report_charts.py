@@ -1060,15 +1060,25 @@ def filtered_matched_recall_table(runs: list[Run]) -> str:
                                    collection="bench12", recall_doc=doc))
     if not pts[0] or not pts[1]:
         return ""
-    inner = _matched_table(a, b, pts[0], pts[1], encoding="filtered, 10%",
+    inner = _matched_table(a, b, pts[0], pts[1], sweep="W12-sel10",
                            caveat=False)
     if not inner:
         return ""
-    n = ((pts[0][0] or {}).get("n_matching")
-         or (recall_mod.load_recall_json(a.label,
-             (a.meta.get("dataset") or {}).get("name") or "sift1m",
-             "bench12", grade=grade).get("points") or [{}])[0].get("n_matching"))
-    matched = f" over the {n:,} points the condition matched" if n else ""
+    # Each engine's own count: bfb draws the keyword payloads unseeded at
+    # every upload, so the two matching sets differ, and one number was one
+    # engine's first pass.
+    def n_of(run: Run, p: list):
+        return ((p[0] or {}).get("n_matching")
+                or (recall_mod.load_recall_json(run.label,
+                    (run.meta.get("dataset") or {}).get("name") or "sift1m",
+                    "bench12", grade=grade).get("points") or [{}])[0].get("n_matching"))
+    na, nb = n_of(a, pts[0]), n_of(b, pts[1])
+    if na and nb and na != nb:
+        matched = (f" over the points the condition matched, {na:,} in {a.label} "
+                   f"and {nb:,} in {b.label} (bfb draws the keyword payloads "
+                   f"unseeded at each upload)")
+    else:
+        matched = f" over the {na or nb:,} points the condition matched" if na or nb else ""
     return ('<h3 style="margin-top:28px">At matched recall, filtered to 10%</h3>'
             '<p class="note">The same reading under a keyword filter'
             + html.escape(matched) +
@@ -1112,7 +1122,7 @@ def sq8_matched_recall_table(runs: list[Run]) -> str:
                                    collection="bench6", recall_doc=doc))
     if not pts[0] or not pts[1]:
         return ""
-    inner = _matched_table(a, b, pts[0], pts[1], encoding="SQ8", caveat=False)
+    inner = _matched_table(a, b, pts[0], pts[1], sweep="W6", caveat=False)
     if not inner:
         return ""
     return ('<h3 style="margin-top:28px">At matched recall, SQ8</h3>'
@@ -1125,7 +1135,7 @@ def sq8_matched_recall_table(runs: list[Run]) -> str:
             'fact about an encoding than any ratio.</p>' + inner)
 
 
-def _matched_table(a: Run, b: Run, pa: list, pb: list, encoding: str = "fp32",
+def _matched_table(a: Run, b: Run, pa: list, pb: list, sweep: str = "W10",
                    caveat: bool = True) -> str:
     """One matched-recall table, shared by the fp32 and SQ8 readings.
 
@@ -1169,7 +1179,7 @@ def _matched_table(a: Run, b: Run, pa: list, pb: list, encoding: str = "fp32",
             f'<details class="more"><summary>How this is computed</summary>'
             f'<p class="note">Interpolated linear in log(q/s) between the two '
             f'bracketing measurements, nothing extrapolated past the measured range. '
-            f'Throughput is bfb\'s {"W6" if encoding == "SQ8" else "W10"} sweep, recall '
+            f'Throughput is bfb\'s {sweep} sweep, recall '
             f'the conformance sweep, joined on <code>ef</code> — same <code>m</code> and '
             f'<code>ef_construct</code>, but separate builds, so the pairing assumes two '
             f'builds with identical parameters are equivalent.</p>'

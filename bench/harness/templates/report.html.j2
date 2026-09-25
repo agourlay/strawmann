@@ -445,14 +445,11 @@
     {#- The measured counts, not the cap. `collections.json` records what each
         engine actually held and the page used to quote "capped at 8" three
         times while displaying the real number in §Collection config. -#}
-    <p><b><code>ef</code> is not the same unit in both engines.</b> Qdrant searches
-    <code>ef</code> candidates in <em>each</em> segment
-    {%- if segments %}, and for this run held
-    {% for label, n in segments.items() %}{{ n }} in {{ label }}{{ ', ' if not loop.last else '' }}{% endfor %}
-    {%- else %}, capped at 8 segments{% endif %}. strawmANN
-    holds one graph and searches <code>ef</code> once, so comparing the W10 curves at
-    equal x overstates strawmANN in traversal work by roughly that factor. Read
-    the recall/throughput frontier vertically instead, at a recall both engines reach.</p>
+    {#- The chart note's own sentence, which counts populated segments: this
+        paragraph counted all of them and contradicted it on a run whose second
+        segment was an empty appendable. -#}
+    <p>{{ ef_note }}{% if 'not the same unit' in ef_note %} Read the recall/throughput
+    frontier vertically instead, at a recall both engines reach.{% endif %}</p>
     </div>
     </div>
   </details>

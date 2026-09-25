@@ -674,18 +674,23 @@ class Row:
         # each one's `write overlap N%`. Naming them matters — one arm can be
         # below the floor while the other is not, and a note that says "each
         # row" then describes a row it does not apply to.
-        low = [lbl for lbl, r in ((self.a_label, ra), (self.b_label, rb))
+        low = [(lbl, r["write_overlap_pct"]) for lbl, r in ((self.a_label, ra), (self.b_label, rb))
                if r.get("write_overlap_pct") is not None
                and r["write_overlap_pct"] < 100 * W11_MIN_OVERLAP]
         floor = f"{100 * W11_MIN_OVERLAP:.0f}%"
+        # "Most" only when it is: at 82% overlap the rebuild had 18% of the row.
+        rest = [f"{100 - pct:.0f}%" for _, pct in low]
+        tail = "measured the rebuild the append provoked rather than a concurrent write"
         if len(low) == 2:
-            low_note = (f"the writer covered under {floor} of either search, so most of "
-                        f"both rows measured the rebuild the append provoked rather "
-                        f"than a concurrent write")
+            low_note = (f"the writer covered under {floor} of either search, so "
+                        + ("most of both rows " if all(pct < 50 for _, pct in low) else
+                           f"the last {rest[0]} and {rest[1]} of the two rows ")
+                        + tail)
         elif low:
-            low_note = (f"the writer covered under {floor} of {low[0]}'s search, so most "
-                        f"of that row measured the rebuild the append provoked rather "
-                        f"than a concurrent write")
+            low_note = (f"the writer covered under {floor} of {low[0][0]}'s search, so "
+                        + ("most of that row " if low[0][1] < 50 else
+                           f"the last {rest[0]} of that row ")
+                        + tail)
         else:
             low_note = ""
         if policy:
@@ -784,21 +789,32 @@ class Row:
             dur, n = r.get("duration_s"), r.get("n_queries")
             if not (cyc and tc and dur and n):
                 return None
-            return tc / dur, cyc / tc, cyc / n     # cores, hz, cycles/query
+            # `cyc / tc` is the clock only if the cycle counter ran for all of
+            # task-clock. It does not: on 0925's W0 it read 1.735 against 1.604
+            # GHz while both engines ran at 2.006. Where the row has the
+            # reference counter, the clock is the GHz column's own figure and
+            # the rest is the share of on-CPU time the counter saw.
+            ref, ref_hz = r.get("perf_ref_cycles"), r.get("perf_ref_hz")
+            ghz = ref_hz * cyc / ref if ref and ref_hz else cyc / tc
+            return tc / dur, ghz, cyc / n, (cyc / tc) / ghz  # cores, hz, cycles/query, counted
         pa, pb = parts(ra), parts(rb)
         if not pa or not pb:
             return None
         occupancy = pa[0] / pb[0]
         if abs(occupancy - 1.0) <= self.OCCUPANCY_TOL:
             return None
-        work, clock = pb[2] / pa[2], pa[1] / pb[1]
+        work, clock, counted = pb[2] / pa[2], pa[1] / pb[1], pa[3] / pb[3]
+        # Printed whenever it is not 1.00x: at two decimals a hidden term
+        # would leave the product visibly unequal to the ratio.
+        counted_txt = (f" x {counted:.2f}x counted on-CPU share"
+                       if f"{counted:.2f}" != "1.00" else "")
         # "cores busy during the row", not "of its cpuset": on `-p 1` rows the
         # number is how many cores one query used, which is a real result (at
         # W3 Qdrant spends 1.05 cores on a query and strawmANN 0.86) and not a
         # statement about filling a cpuset the row never tried to fill.
-        return (f"[{work * occupancy * clock:.2f}x is {work:.2f}x less work per "
+        return (f"[{work * occupancy * clock * counted:.2f}x is {work:.2f}x less work per "
                 f"query x {occupancy:.2f}x cores busy during the row "
-                f"({pa[0]:.2f} against {pb[0]:.2f}) x {clock:.2f}x clock: the "
+                f"({pa[0]:.2f} against {pb[0]:.2f}) x {clock:.2f}x clock{counted_txt}: the "
                 f"middle term is occupancy, not search speed]")
 
     #: How far apart the client's and the server's p50 must be before the row
@@ -1605,7 +1621,9 @@ def new_comparison_doc(dataset: str) -> str:
     nobody could have known to add is missing.
     """
     begin, end = markers("compare-full")
-    return (f"# strawmann vs Qdrant 1.19.0 — {dataset}\n\n"
+    # No version: the generated block names the labels and the report the
+    # build, and a literal here outlived the Qdrant it named.
+    return (f"# strawmann vs Qdrant: {dataset}\n\n"
             f"The table below is generated from the last full run that measured "
             f"this dataset. Anything written under it by hand is not, and is not "
             f"re-derived when the table is.\n\n"

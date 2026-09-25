@@ -1054,6 +1054,7 @@ def collection_table(runs: list[Run]) -> str:
 
     grid = {name: [next((x for x in cs if x.get("collection") == name), None) or {}
                    for _, cs in caps] for name in names}
+    early = _read_before_drop(runs)
     fields = [(label, key) for label, key in COLLECTION_FIELDS
               if any(c.get(key) is not None for cs in grid.values() for c in cs)]
     if not fields:
@@ -1070,7 +1071,7 @@ def collection_table(runs: list[Run]) -> str:
                 cells.append(f'<td class="num">{fmt(present[0])}</td>')
             else:
                 text = " / ".join("-" if v is None else fmt(v) for v in vals)
-                differs = len(set(map(str, present))) > 1
+                differs = len(set(map(str, present))) > 1 and name not in early
                 cells.append(f'<td class="num{" differs" if differs else ""}">{text}</td>')
         body.append(f'<tr><td class="wid">{html.escape(str(name))}</td>{"".join(cells)}</tr>')
     head = "<th>collection</th>" + "".join(f'<th class="num">{label}</th>'
@@ -1081,8 +1082,31 @@ def collection_table(runs: list[Run]) -> str:
                f'{" / ".join(html.escape(r.label) for r in runs)}, and is marked.</p>')
     notes = "".join(_capture_lag(runs, caps, name) + _after_mutation_note(caps, name)
                     for name in names)
+    if seen := [n for n in names if n in early]:
+        notes += (f'<p class="note"><b>{", ".join(html.escape(str(n)) for n in seen)}</b> '
+                  f'was read back straight after its row and dropped, with no settle '
+                  f'between, so an engine still building it reports a snapshot taken '
+                  f'mid-ingest. Its cells are not marked as a disagreement.</p>')
     return (f'{key}<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>{notes}')
+
+
+def _read_before_drop(runs: list[Run]) -> set[str]:
+    """Collections read back right after their row and then dropped unsettled.
+
+    From each run's own stamp (`harness.engine_settle.dropped_not_settled`),
+    not from today's table: a run measured before 9c7b68d settled on bench1
+    and its read-back is an end state. 0925's Qdrant bench1 read 988,196
+    points and 5 segments seconds before the drop reported 990,000.
+    """
+    by_id = {w.id: w for w in workloads.table()}
+    out: set[str] = set()
+    for r in runs:
+        settle = ((r.meta or {}).get("harness") or {}).get("engine_settle") or {}
+        for wid in settle.get("dropped_not_settled") or []:
+            if wid in by_id and (c := workloads.collection_of(by_id[wid])):
+                out.add(c)
+    return out
 
 
 def _after_mutation_note(caps: list, name: str) -> str:
@@ -2641,6 +2665,10 @@ def grouped_losses(items: list[dict]) -> list[dict]:
         lo, hi = min(g["ratios"]), max(g["ratios"])
         g["ratio"] = f"{lo:.2f}x" if lo == hi else f"{lo:.2f} to {hi:.2f}x"
         g["points"] = len(g["ids"])
+        # A lone sweep point is named as itself: under its family's id it read
+        # as the base row, which the throughput table shows winning.
+        if g["points"] == 1:
+            g["id"] = g["ids"][0]
     return list(out.values())
 
 
@@ -3039,14 +3067,22 @@ def provenance_table(runs: list[Run]) -> str:
                 commit = _fmt(q.get("commit"))
                 if q.get("dirty"):
                     commit += "-dirty"
+                code = f"<code>{commit}</code>"
+                commit = f"commit {code}"
+                pill = ('<span class="pill warn">native binary: pinned by commit, '
+                        'not by image digest (§8.9)</span>')
+                # A binary older than its checkout was not built from it, so
+                # the commit is only where the tree stood when the run began.
+                if q.get("binary_predates_commit"):
+                    commit = f"commit unknown (the binary predates checkout {code})"
+                    pill = ('<span class="pill warn">binary predates its checkout: '
+                            'sha256 is the identity (§8.9)</span>')
                 bits = [f"version {_fmt(q.get('version'))}",
                         f"binary <code>{_tilde(q.get('binary'))}</code>"
                         + (f" (cargo profile <code>{q['cargo_profile']}</code>)"
                            if q.get("cargo_profile") else ""),
-                        f"sha256 <code>{_fmt(q.get('binary_sha256'))}</code> "
-                        f"commit <code>{commit}</code>",
-                        '<span class="pill warn">native binary: pinned by commit, '
-                        'not by image digest (§8.9)</span>',
+                        f"sha256 <code>{_fmt(q.get('binary_sha256'))}</code> {commit}",
+                        pill,
                         _network_path(q.get("network"))]
                 return "<br>".join(bits)
             bits = [f"version {_fmt(q.get('version'))}",
@@ -3944,6 +3980,7 @@ def build(runs: list[Run], title: str) -> str:
         # The measured segment counts, so the prose can quote what these
         # engines held rather than the cap they might have held.
         segments=segments_of(runs),
+        ef_note=segment_note(runs),
         # §7.2(5): A/B/A/B, not A-then-B. Checked from the row stamps rather
         # than assumed, and stated where a reader forms their opinion.
         interleave=interleaving(runs),
@@ -4010,8 +4047,12 @@ def build(runs: list[Run], title: str) -> str:
 def run_stamp(runs: list[Run]) -> str:
     """When these runs were measured, `YYYY-MM-DD-HHMM`, for the file name.
 
-    The newest arm wins, so a comparison straddling midnight is filed under the day
-    it finished — the day a reader reaching for "the latest report" wants.
+    The newest arm's `started` wins. For a single-pass pair that is the second
+    arm's start, so a comparison straddling midnight is filed under the later
+    day. For a folded label `started` is its first pass, so a three-pass night
+    is filed under the start of the last engine's first pass (0925's page is
+    `-2026-09-24-2152`, the Qdrant arm's pass 1, in UTC), not the day it
+    finished. Kept that way: the archived pages are named by it.
 
     The stamp is the *run's*, never today's: keying on render time would file a
     re-render of August's numbers under the moment it was re-rendered, and spray a
