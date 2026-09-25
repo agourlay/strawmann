@@ -1564,3 +1564,12 @@ It needs new plumbing and applies only to runs measured after it, and it is
 the next step if the tile should be a physical figure rather than a mapped
 one.
 
+The written-to-disk tile follows the same rule, for a different reason. Its
+bytes are real, but the writer rows' share is set by the harness's write
+rate, not by the engine's ingest: Qdrant's W11-steady wrote 24.4 GiB at 2,000
+points/s on 0924 and 88.8 GiB at 200 on 0925, rewriting its one segment each
+time the optimizer caught up. So the tile and the storage card sum the rows
+before the writers (0925: strawmANN 29.5 GiB, Qdrant 133.9) and say what the
+writers added (1.4 and 125.4 GiB), and the full table and `compare.py` keep
+the whole run's total.
+

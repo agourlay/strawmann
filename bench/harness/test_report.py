@@ -2768,6 +2768,35 @@ class ReportReadabilityTests(unittest.TestCase):
                 for x in ("a", "b")]
         self.assertEqual(report.memory_kpi(only)["cells"], [procstat.human_bytes(G)] * 2)
 
+    def test_bytes_written_are_read_before_the_writers_and_the_rest_is_named(self):
+        """0925's tile read Qdrant 259.3 GiB, 125.4 of it W11-steady and W11
+        rewriting segments at a write rate the harness chose: 0924's same rows
+        wrote 54 GiB at ten times the rate."""
+        report = self.report
+        procstat = importlib.import_module("procstat")
+        G = 1 << 30
+
+        def rows(search, writes):
+            return [_row("W2", 100, disk_write_bytes=search * G),
+                    _row("W11-steady", 100, disk_write_bytes=writes * G, background_s=26.0)]
+
+        runs = [report.Run("sm", rows(29, 1), "", True, "h"),
+                report.Run("qd", rows(134, 125), "", True, "h")]
+        k = report.disk_kpi(runs)
+        self.assertEqual(k["cells"], [procstat.human_bytes(29 * G), procstat.human_bytes(134 * G)])
+        self.assertIn("before the concurrent-write rows", k["sub"])
+        self.assertIn("they wrote " + procstat.human_bytes(G) + " / "
+                      + procstat.human_bytes(125 * G) + " more", k["sub"])
+        card = report.storage_table(runs, compact=True)
+        self.assertIn(procstat.human_bytes(134 * G), card)
+        self.assertNotIn(procstat.human_bytes(259 * G), card)
+        # The full table is still the whole run's total.
+        self.assertIn(procstat.human_bytes(259 * G), report.storage_table(runs))
+        # No writer rows, nothing more to say.
+        quiet = [report.Run(x, [_row("W2", 1, disk_write_bytes=G)], "", True, "h")
+                 for x in ("a", "b")]
+        self.assertNotIn("more", report.disk_kpi(quiet)["sub"])
+
     def test_the_page_opens_on_the_summary_and_closes_the_appendix(self):
         with tempfile.TemporaryDirectory() as tmp:
             report, runs, _ = self._sweep_pair(Path(tmp))

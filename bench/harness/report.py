@@ -2731,14 +2731,8 @@ def kpis(runs: list[Run], df: pd.DataFrame, summ: dict) -> list[dict]:
     if not placement_refusal(runs):
         if mem := memory_kpi(runs):
             out.append(mem)
-        vals = []
-        for run in runs:
-            got = [r["disk_write_bytes"] for r in run.rows
-                   if r.get("disk_write_bytes") is not None]
-            vals.append(sum(got) if got else None)
-        if all(v is not None for v in vals):
-            out.append(_kpi("written to disk", [procstat.human_bytes(v) for v in vals],
-                            "whole run", vals))
+        if disk := disk_kpi(runs):
+            out.append(disk)
     for k in out:
         k.setdefault("headline", "")
     return out
@@ -2769,6 +2763,34 @@ def memory_kpi(runs: list[Run]) -> dict | None:
     if all(v is not None for v in anon):
         sub += "; of it, anonymous " + " / ".join(procstat.human_bytes(v) for v in anon)
     return _kpi("peak memory (RSS)", [procstat.human_bytes(v) for v in peaks], sub, peaks)
+
+
+def written_before_writers(run: Run) -> tuple[int | None, int]:
+    """Bytes written by the rows before the concurrent writers, and by them.
+
+    The writers' bytes are real, unlike a double-counted peak, but their size
+    is the harness's write rate rather than the engine's ingest: Qdrant's
+    W11-steady wrote 24.4 GiB at 2,000 points/s on 0924 and 88.8 GiB at 200 on
+    0925, rewriting its segment each time the optimizer caught up.
+    """
+    pre = procstat.settled_rows(run.rows)
+    ids = {id(r) for r in pre}
+    got = [r["disk_write_bytes"] for r in pre if r.get("disk_write_bytes") is not None]
+    rest = sum(r.get("disk_write_bytes") or 0 for r in run.rows if id(r) not in ids)
+    return (sum(got) if got else None), rest
+
+
+def disk_kpi(runs: list[Run]) -> dict | None:
+    """The written-to-disk tile: the rows before the writers, and what the
+    writers added beside it rather than inside it."""
+    parts = [written_before_writers(run) for run in runs]
+    vals = [v for v, _ in parts]
+    if any(v is None for v in vals):
+        return None
+    sub = "before the concurrent-write rows (W11)"
+    if any(extra for _, extra in parts):
+        sub += "; they wrote " + " / ".join(procstat.human_bytes(x) for _, x in parts) + " more"
+    return _kpi("written to disk", [procstat.human_bytes(v) for v in vals], sub, vals)
 
 
 def smoke_ordering(a: Run, b: Run) -> dict | None:
@@ -3387,6 +3409,11 @@ def storage_table(runs: list[Run], compact: bool = False) -> str:
         # A level is the end state; a total is summed over the rows.
         # The resident levels take the largest across the rows, like the peak
         # they sit under; every other level is the end state.
+        if kind != "level" and compact and key == "disk_write_bytes":
+            # The summary tile's figure: the writers' bytes are the harness's
+            # write rate, not the engine's ingest (`written_before_writers`).
+            vals = [r.get(key) for r in procstat.settled_rows(run.rows)
+                    if r.get(key) is not None] or vals
         v = (max(vals) if key.startswith("rss_") else vals[-1]) if kind == "level" else sum(vals)
         shown = procstat.human_bytes(v) if fmt == "bytes" else procstat.human_count(v)
         if kind == "level" and rss and not compact:
@@ -3433,7 +3460,9 @@ def storage_table(runs: list[Run], compact: bool = False) -> str:
         return (warn + table + '<p class="note">Peak memory and storage on disk are '
                 'read before the concurrent-write rows (W11): an engine rewriting '
                 'segments maps old and new files at once, and RSS counts each '
-                'mapping. Disk figures are totals over every row.</p>')
+                'mapping. Bytes written are summed over the same rows, since '
+                'W11\'s volume is set by the harness\'s write rate; the other '
+                'disk figures are totals over every row.</p>')
     return (warn + table +
             f'<p class="note">measured via {sources}. <code>proc</code> supplies '
             f'syscall counts and block-layer bytes, <code>cgroup</code> supplies '
