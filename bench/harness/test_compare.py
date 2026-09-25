@@ -1624,13 +1624,18 @@ class StorageLevelTests(unittest.TestCase):
         self.assertIn(self.m["procstat"].human_bytes(3_700_000_000), line)
         self.assertNotIn(self.m["procstat"].human_bytes(10_900_000_000), line)
 
-    def test_peak_rss_still_sees_every_row(self):
-        """A peak during a rewrite is still a peak the engine reached."""
+    def test_peak_rss_is_read_before_the_writers(self):
+        """It was every row, "a peak being a peak", until 0925's Qdrant read
+        68.1 GiB on a 54.6 GiB host while W11 rewrote its segments: RSS counts
+        a file mapped twice during a rewrite twice, so that peak was never
+        memory the machine held."""
         cmp = self.m["compare"]
         a = self._rows(1_000, 1_000)
         out = cmp.storage_and_io("a", "b", a, self._rows(1_000, 1_000), markdown=True)
         line = next(l for l in out if l.startswith("| peak RSS"))
-        self.assertIn(self.m["procstat"].human_bytes(900), line)
+        self.assertIn(self.m["procstat"].human_bytes(110), line)
+        self.assertNotIn(self.m["procstat"].human_bytes(900), line)
+        self.assertIn("peak RSS are read before W11-steady, W11", out[-1])
 
     def test_the_note_names_the_excluded_rows_in_run_order(self):
         cmp = self.m["compare"]

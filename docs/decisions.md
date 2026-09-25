@@ -1537,3 +1537,30 @@ For the next dbpedia-openai-1m pair: 4,840 and 6,965 queries, about 20 s and
 six arms' mixed rows take about 520 s against 0925's 2,262 s. The first night reads 0924, whose
 under-write speed is an estimate; its `write overlap` is the check.
 
+## Peak memory is read before the concurrent writes, decided 2026-09-25
+
+The 0925 summary quoted Qdrant's peak memory at 68.1 GiB, on a host with
+54.6 GiB of RAM and no memory pressure (PSI 0.0 s on every row). The figure
+is `VmHWM`, the process's high-water mark, and at cached placement nearly all
+of it is mapped vector files (Qdrant's own anonymous memory never passed 3.4
+GiB, strawmANN's 4.3). RSS counts a file page once per mapping, and while W11
+made Qdrant rewrite its segments it mapped old and new files together. The
+peak was set there, and moved 82% between two runs of one binary on a harness
+change alone (0924 37.5 GiB, 0925 68.1). sift1m's page had the same defect:
+Qdrant 21.2 GiB across every row, 5.8 GiB before W11.
+
+Taken: the summary tile, the storage card, and `compare.py`'s peak RSS row
+read the rows before the concurrent writers (`procstat.settled_rows`), the
+same rule the storage level has followed since findings 53, and the tile
+names each engine's anonymous peak beside it. The appendix's full storage
+table keeps the peak the process reached and says what it was before the
+writers. That reverses "a peak during a rewrite is still a peak the engine
+reached": a peak counted twice was never memory the machine held.
+
+At 0925 the tile now reads strawmANN 37.8 GiB against Qdrant 29.4 GiB, which
+is the honest direction: strawmANN keeps more of its arena mapped. Not taken:
+reading the engine cgroup's `memory.peak`, which RAM bounds by construction.
+It needs new plumbing and applies only to runs measured after it, and it is
+the next step if the tile should be a physical figure rather than a mapped
+one.
+

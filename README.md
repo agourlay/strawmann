@@ -38,11 +38,11 @@
   exact                           191              145      1.31x
                                                        queries/second
 
-  sift1m, d=128, euclid — these ratios are this dimension's. Also measured: dbpedia-openai-100K-1536-angular
+  sift1m, d=128, euclid — these ratios are this dimension's. Also measured: dbpedia-openai-100K-1536-angular, dbpedia-openai-1m
 
   at equal recall (§7.4's comparison, not equal ef): 2.17x at recall 0.9877, falling to 1.69x at 0.9984, over 8 anchors
 
-  saturating: [2.24x is 1.57x less work per query x 1.37x cores busy during the row (7.53 against 5.48) x 1.04x clock: the middle term is occupancy, not search speed]
+  saturating: [2.24x is 1.57x less work per query x 1.37x cores busy during the row (7.53 against 5.48) x 1.00x clock x 1.04x counted on-CPU share: the middle term is occupancy, not search speed]
   mixed read/write: [strawmann: search covered 45% of the append; append 3,300 points/s] [qdrant: search covered 44% of the append; append 3,300 points/s] [search-during-write; no recall join]
   exact: [1.31x is 0.77x less work per query x 1.70x cores busy during the row (6.94 against 4.09) x 1.00x clock: the middle term is occupancy, not search speed]
 ```

@@ -1432,9 +1432,11 @@ def storage_and_io(a_label: str, b_label: str,
     def totals(rows: dict[str, dict]) -> dict:
         out: dict = dict.fromkeys(procstat.IO_FIELDS)
         out.update(source="", storage=None, rss=None, storage_excludes=[])
-        # Totals and the peak see every row; the storage *level* sees only the
+        # Totals see every row; the storage level and the peak see only the
         # settled ones, because the last row appends 200,000 points and catches
-        # a segment-rewriting engine mid-rewrite (findings 53).
+        # a segment-rewriting engine mid-rewrite (findings 53), and `VmHWM`
+        # counts a mapped page once per mapping: Qdrant's read 68.1 GiB on a
+        # 54.6 GiB host while W11 rewrote its segments (decisions, 2026-09-25).
         settled = {id(r) for r in procstat.settled_rows(list(rows.values()))}
         out["storage_excludes"] = [r["id"] for r in rows.values()
                                    if procstat.is_mutating(r)]
@@ -1451,7 +1453,7 @@ def storage_and_io(a_label: str, b_label: str,
             # Levels, not sums: the last row that saw one is the end state.
             if r.get("storage_bytes") is not None and id(r) in settled:
                 out["storage"] = r["storage_bytes"]
-            if r.get("rss_peak_bytes") is not None:
+            if r.get("rss_peak_bytes") is not None and id(r) in settled:
                 out["rss"] = max(out["rss"] or 0, r["rss_peak_bytes"])
         return out
 
@@ -1544,10 +1546,11 @@ def note_text(ta: dict, tb: dict) -> str:
          "search row they measure the network rather than the disk, and no "
          "ratio between them and the disk rows means anything.")
     if skipped:
-        s += (f" Storage on disk is the level before {', '.join(skipped)}, the rows "
-              f"with a concurrent writer: an engine that rewrites segments is caught "
-              f"mid-rewrite there, and the same row has read 3.47 and 10.11 GiB on two "
-              f"runs of one binary. Peak RSS does include those rows, being a peak.")
+        s += (f" Storage on disk and peak RSS are read before {', '.join(skipped)}, "
+              f"the rows with a concurrent writer: an engine that rewrites segments "
+              f"is caught mid-rewrite there, the same row has read 3.47 and 10.11 GiB "
+              f"of storage on two runs of one binary, and RSS counts a file mapped "
+              f"twice during the rewrite twice.")
     if ta["source"] and tb["source"] and ta["source"] != tb["source"]:
         s += (f" The two engines were measured through different interfaces "
               f"({ta['source']} and {tb['source']}): `proc` supplies syscalls and "

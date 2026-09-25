@@ -47,7 +47,7 @@ The table below is generated from the last full run that measured this dataset. 
 | | sm-dbp1m-perf-0925 | qd-dbp1m-perf-0925 |
 |---|--:|--:|
 | storage on disk | 42.6 GiB | 26.5 GiB |
-| peak RSS | 37.9 GiB | 68.1 GiB |
+| peak RSS | 37.8 GiB | 29.4 GiB |
 | disk read ops | 52,419 | 703,224 |
 | disk write ops | 436,091 | 4,772,585 |
 | disk read bytes | 68.3 MiB | 3.4 GiB |
@@ -56,7 +56,7 @@ The table below is generated from the last full run that measured this dataset. 
 | *syscall writes (all fds)* | *4,723,638* | *42,165,597* |
 | measured via | proc+cgroup | proc+cgroup |
 
-Storage and RSS are end states; the rest are totals over every row. The syscall rows count every descriptor, sockets included, so on a search row they measure the network rather than the disk, and no ratio between them and the disk rows means anything. Storage on disk is the level before W11-steady, W11, the rows with a concurrent writer: an engine that rewrites segments is caught mid-rewrite there, and the same row has read 3.47 and 10.11 GiB on two runs of one binary. Peak RSS does include those rows, being a peak.
+Storage and RSS are end states; the rest are totals over every row. The syscall rows count every descriptor, sockets included, so on a search row they measure the network rather than the disk, and no ratio between them and the disk rows means anything. Storage on disk and peak RSS are read before W11-steady, W11, the rows with a concurrent writer: an engine that rewrites segments is caught mid-rewrite there, the same row has read 3.47 and 10.11 GiB of storage on two runs of one binary, and RSS counts a file mapped twice during the rewrite twice.
 
 qps is wall-clock: queries / bfb's `duration_secs`, not bfb's `Median qps` (kept per row as `qps_bfb_median`), which is a median of a rate series and understates short rows. Latency is client-side round trip. §7.4: a closed-loop p99 is not a latency result, because a stalled server stops receiving requests and the tail it did not serve never appears; the `W4-sat` rows are the open-loop ones, and read `saturated` where a client p50 past one second says the offered rate was not served. A ratio is printed only where both engines' recall@10 at the row's `ef` is known and within 0.01; `-` with `recall unequal` or `recall missing` says which. A `-` under recall means the sweep does not speak for that row's configuration rather than that recall was poor.
 

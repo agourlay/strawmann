@@ -2736,6 +2736,38 @@ class ReportReadabilityTests(unittest.TestCase):
         self.assertNotIn("syscall", card)
         self.assertIn("syscall reads", report.storage_table(runs))
 
+    def test_peak_memory_is_read_before_the_writers(self):
+        """0925's tile read Qdrant 68.1 GiB on a 54.6 GiB host: `VmHWM` while
+        W11 rewrote its segments, mapped files counted once per mapping. The
+        search rows ran at 29.4 GiB, 3.4 GiB of it anonymous."""
+        report = self.report
+        procstat = importlib.import_module("procstat")
+        G = 1 << 30
+
+        def rows(search, write, anon):
+            return [_row("W10-ef128", 100, rss_peak_bytes=search * G, rss_anon_bytes=anon * G),
+                    _row("W11", 100, rss_peak_bytes=write * G, rss_anon_bytes=anon * G,
+                         background_s=396.0)]
+
+        runs = [report.Run("sm", rows(37, 37, 4), "", True, "h"),
+                report.Run("qd", rows(29, 68, 3), "", True, "h")]
+        k = report.memory_kpi(runs)
+        self.assertEqual(k["cells"], [procstat.human_bytes(37 * G), procstat.human_bytes(29 * G)])
+        self.assertIn("before the concurrent-write rows", k["sub"])
+        self.assertIn("anonymous " + procstat.human_bytes(4 * G), k["sub"])
+        self.assertEqual(k["better"], 1)          # the lower figure
+        # The compact card agrees with the tile; the full table keeps the
+        # peak the process reached and names the one before the writers.
+        card = report.storage_table(runs, compact=True)
+        self.assertNotIn(procstat.human_bytes(68 * G), card)
+        full = report.storage_table(runs)
+        self.assertIn(procstat.human_bytes(68 * G), full)
+        self.assertIn(procstat.human_bytes(29 * G) + " before the writers", full)
+        # A run with no rows before the writers still reports what it has.
+        only = [report.Run(x, [_row("W11", 1, rss_peak_bytes=G, background_s=1.0)], "", True, "h")
+                for x in ("a", "b")]
+        self.assertEqual(report.memory_kpi(only)["cells"], [procstat.human_bytes(G)] * 2)
+
     def test_the_page_opens_on_the_summary_and_closes_the_appendix(self):
         with tempfile.TemporaryDirectory() as tmp:
             report, runs, _ = self._sweep_pair(Path(tmp))

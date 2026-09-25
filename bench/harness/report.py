@@ -2729,19 +2729,46 @@ def kpis(runs: list[Run], df: pd.DataFrame, summ: dict) -> list[dict]:
         out.append(_kpi("upload and index build", [f"{t:,.0f} s" for t in totals],
                         " + ".join(INGEST_SUM), totals))
     if not placement_refusal(runs):
-        for label, key, agg in (("peak memory (RSS)", "rss_peak_bytes", max),
-                                ("written to disk", "disk_write_bytes", sum)):
-            vals = []
-            for run in runs:
-                got = [r.get(key) for r in run.rows if r.get(key) is not None]
-                vals.append(agg(got) if got else None)
-            if all(v is not None for v in vals):
-                out.append(_kpi(label, [procstat.human_bytes(v) for v in vals],
-                                "largest across the run" if agg is max else "whole run",
-                                vals))
+        if mem := memory_kpi(runs):
+            out.append(mem)
+        vals = []
+        for run in runs:
+            got = [r["disk_write_bytes"] for r in run.rows
+                   if r.get("disk_write_bytes") is not None]
+            vals.append(sum(got) if got else None)
+        if all(v is not None for v in vals):
+            out.append(_kpi("written to disk", [procstat.human_bytes(v) for v in vals],
+                            "whole run", vals))
     for k in out:
         k.setdefault("headline", "")
     return out
+
+
+def memory_kpi(runs: list[Run]) -> dict | None:
+    """The peak memory tile, over the rows before the concurrent writes.
+
+    `rss_peak_bytes` is `VmHWM`, the process's high-water mark since start,
+    and nearly all of it is mapped vector files, which RSS counts once per
+    mapping. While W11 rewrote Qdrant's segments on 0925 it read 68.1 GiB on
+    a 54.6 GiB host with no memory pressure: old and new files mapped at
+    once, the same pages counted twice. The rows before the mutating ones are
+    the state every search row was measured in, as the storage table reads
+    them (`procstat.settled_rows`), and the anonymous peak beside it is what
+    the engine itself allocates.
+    """
+    peaks, anon = [], []
+    for run in runs:
+        pre = procstat.settled_rows(run.rows)
+        got = [r["rss_peak_bytes"] for r in pre if r.get("rss_peak_bytes") is not None]
+        peaks.append(max(got) if got else None)
+        got = [r["rss_anon_bytes"] for r in pre if r.get("rss_anon_bytes") is not None]
+        anon.append(max(got) if got else None)
+    if any(v is None for v in peaks):
+        return None
+    sub = "largest before the concurrent-write rows (W11)"
+    if all(v is not None for v in anon):
+        sub += "; of it, anonymous " + " / ".join(procstat.human_bytes(v) for v in anon)
+    return _kpi("peak memory (RSS)", [procstat.human_bytes(v) for v in peaks], sub, peaks)
 
 
 def smoke_ordering(a: Run, b: Run) -> dict | None:
@@ -3334,8 +3361,12 @@ def storage_table(runs: list[Run], compact: bool = False) -> str:
         # A level is read from the settled rows only: the run's last row is
         # W11, and an end state sampled while Qdrant's optimiser rewrites
         # segments is that rewrite rather than the corpus (findings 53,
-        # `procstat.settled_rows`). A peak keeps every row, a peak being a peak.
-        src = run.rows if (kind != "level" or key.startswith("rss_")) \
+        # `procstat.settled_rows`). The full table's peak keeps every row; the
+        # compact card's is the summary tile's, before the writers, because
+        # `VmHWM` counts a mapped page once per mapping and Qdrant's rewrite
+        # read 68.1 GiB on a 54.6 GiB host (`memory_kpi`).
+        rss = key.startswith("rss_")
+        src = run.rows if (kind != "level" or (rss and not compact)) \
             else procstat.settled_rows(run.rows)
         vals = [r.get(key) for r in src if r.get(key) is not None]
         if not vals:
@@ -3358,6 +3389,11 @@ def storage_table(runs: list[Run], compact: bool = False) -> str:
         # they sit under; every other level is the end state.
         v = (max(vals) if key.startswith("rss_") else vals[-1]) if kind == "level" else sum(vals)
         shown = procstat.human_bytes(v) if fmt == "bytes" else procstat.human_count(v)
+        if kind == "level" and rss and not compact:
+            pre = [r.get(key) for r in procstat.settled_rows(run.rows) if r.get(key) is not None]
+            if pre and max(pre) != v:
+                return (f'<td class="num">{shown}<span class="sub">'
+                        f'{procstat.human_bytes(max(pre))} before the writers</span></td>')
         # Named rather than silently dropped: the reader is owed the row the
         # level came from when it is not the run's last one.
         if (kind == "level" and not key.startswith("rss_") and len(src) != len(run.rows)
@@ -3394,10 +3430,10 @@ def storage_table(runs: list[Run], compact: bool = False) -> str:
     table = (f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
              f'<tbody>{"".join(body)}</tbody></table></div>')
     if compact:
-        return (warn + table + '<p class="note">Peak memory is the largest across the '
-                'run; disk figures are totals over every row. Storage on disk is read '
-                'before the concurrent-write rows (W11), when an engine rewriting '
-                'segments would be caught mid-rewrite.</p>')
+        return (warn + table + '<p class="note">Peak memory and storage on disk are '
+                'read before the concurrent-write rows (W11): an engine rewriting '
+                'segments maps old and new files at once, and RSS counts each '
+                'mapping. Disk figures are totals over every row.</p>')
     return (warn + table +
             f'<p class="note">measured via {sources}. <code>proc</code> supplies '
             f'syscall counts and block-layer bytes, <code>cgroup</code> supplies '
