@@ -281,6 +281,65 @@ class RecallTests(unittest.TestCase):
             self.assertEqual(cmd[cmd.index("--quantization-rescore") + 1], "false")
 
 
+class PoolSweepTests(unittest.TestCase):
+    """Under `pool` each row sends its own oversampling, so the sweep splits
+    by parameter set and the join stays exact on the parameters."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = _reload(Path(self.tmp.name))
+        self.w = self.m["workloads"]
+        self.addCleanup(os.environ.pop, "OVERSAMPLING_POLICY", None)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_each_parameter_set_is_swept_at_its_rows_ef(self):
+        rc = self.m["recall"]
+        self.w.use_oversampling_policy("pool")
+        got = {ov: efs for (ov, _rs), efs in rc.quant_sweeps_of("bench6")}
+        self.assertEqual(got, {3.2: [32], 6.4: [64], 12.8: [128], 25.6: [256], 51.2: [512]})
+        # One row, still only its own ef: ef 32 at 12.8 would rescore 128.
+        self.assertEqual(rc.quant_sweeps_of("bench7"), [((12.8, True), [128])])
+        # The fp32 collection keeps its ordinary sweep.
+        self.assertEqual(rc.quant_sweeps_of("bench2"), [((None, None), None)])
+        # And `main` runs one sweep per set, each at its own ef.
+        calls = []
+        with mock.patch.object(rc, "sweep", lambda *a, **k: calls.append(a) or 0), \
+                mock.patch.object(rc.Path, "exists", return_value=True):
+            self.assertEqual(rc.main(["recall.py", "lbl", "--collections", "bench6"]), 0)
+        self.assertEqual(sorted((c[4], tuple(c[6])) for c in calls),
+                         [(3.2, (32,)), (6.4, (64,)), (12.8, (128,)), (25.6, (256,)),
+                          (51.2, (512,))])
+
+    def test_the_other_policies_sweep_as_before(self):
+        rc = self.m["recall"]
+        for policy, ov in (("matched", 2.0), ("defaults", None)):
+            self.w.use_oversampling_policy(policy)
+            self.assertEqual(rc.quant_sweeps_of("bench6"), [((ov, True), None)], policy)
+        self.w.use_oversampling_policy("matched")
+        self.assertEqual(rc.quant_sweeps_of("bench7"), [((4.0, True), None)])
+
+    def test_a_collections_curve_is_merged_from_every_set(self):
+        rc = self.m["recall"]
+        self.w.use_oversampling_policy("pool")
+        for (ov, rs), efs in rc.quant_sweeps_of("bench6"):
+            p = rc.recall_path("lbl", "sift1m", "bench6", oversampling=ov, rescore=rs)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            # A stray point at another ef must not leak into the curve.
+            pts = [{"ef": efs[0], "exact": False, "recall_at_10": efs[0] / 1000},
+                   {"ef": 999, "exact": False, "recall_at_10": 0.0}]
+            p.write_text(json.dumps({"collection": "bench6", "dataset": "sift1m",
+                                     "points": pts, "oversampling": ov, "rescore": rs}))
+        doc = rc.load_recall_points("lbl", "sift1m", "bench6")
+        self.assertEqual([(p["ef"], p["recall_at_10"]) for p in doc["points"]],
+                         [(32, 0.032), (64, 0.064), (128, 0.128), (256, 0.256), (512, 0.512)])
+        # A row still joins its own file only.
+        one = rc.load_recall_json("lbl", "sift1m", "bench6", 3.2, True)
+        self.assertEqual([p["ef"] for p in one["points"]], [32, 999])
+        self.assertEqual(rc.load_recall_points("lbl", "sift1m", "bench8"), {})
+
+
 class NoiseTests(unittest.TestCase):
     def test_one_definition(self):
         reg = _reload(Path(tempfile.gettempdir()))["regression"]

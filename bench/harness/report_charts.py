@@ -371,8 +371,7 @@ def chart_quantization_recall(runs: list[Run]) -> dict | None:
     for coll, name, hue in ENCODINGS:
         for j, run in enumerate(runs):
             ds = (run.meta.get("dataset") or {}).get("name") or "sift1m"
-            ov, rs = recall_mod.quant_params_of(coll)
-            pts = (recall_mod.load_recall_json(run.label, ds, coll, ov, rs)
+            pts = (recall_mod.load_recall_points(run.label, ds, coll)
                    or {}).get("points") or []
             pts = [p for p in pts if p.get("recall_at_10") is not None]
             if not pts:
@@ -1116,8 +1115,7 @@ def sq8_matched_recall_table(runs: list[Run]) -> str:
     pts = []
     for run in (a, b):
         ds = (run.meta.get("dataset") or {}).get("name") or "sift1m"
-        ov, rs = recall_mod.quant_params_of("bench6")
-        doc = recall_mod.load_recall_json(run.label, ds, "bench6", ov, rs) or {}
+        doc = recall_mod.load_recall_points(run.label, ds, "bench6") or {}
         pts.append(frontier_points(run, bfb_only=True, prefix="W6",
                                    collection="bench6", recall_doc=doc))
     if not pts[0] or not pts[1]:

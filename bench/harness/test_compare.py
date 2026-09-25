@@ -1804,6 +1804,25 @@ class HarnessBoundRowTests(unittest.TestCase):
         self.assertNotIn("monotonically", rows["W4"].note_text)
 
 
+class RescoreCauseTests(unittest.TestCase):
+    """What a quantized row's unequal recall is blamed on."""
+
+    def _cause(self, ov_a, ov_b, ef=128):
+        compare = importlib.import_module("compare")
+        row = object.__new__(compare.Row)
+        row.ra = {"quantization_rescore": True, "quantization_oversampling": ov_a, "ef": ef}
+        row.rb = {"quantization_rescore": True, "quantization_oversampling": ov_b, "ef": ef}
+        return row._rescore_cause()
+
+    def test_matched_pools_leave_the_encoders_to_blame(self):
+        """Under `pool` both engines rescore `ef` candidates; saying the pools
+        differ would send the reader after the one cause that was removed."""
+        self.assertEqual(self._cause(12.8, 12.8), "; the rescore pools match, so the encoders differ")
+        self.assertEqual(self._cause(3.2, 3.2, ef=32), "; the rescore pools match, so the encoders differ")
+        self.assertEqual(self._cause(4.0, 4.0), "; rescore pools differ (decisions §5)")
+        self.assertEqual(self._cause(2.0, None), "; rescore pools differ (decisions §5)")
+
+
 class ComparisonDocStubTests(unittest.TestCase):
     def test_a_new_comparison_doc_names_no_qdrant_version(self):
         """The stub said "Qdrant 1.19.0" above 0925's 1.19.2-dev rows."""

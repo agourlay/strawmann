@@ -2112,7 +2112,7 @@ def main(argv: list[str]) -> int:
                     help="phases to leave alone (repeatable)")
     ap.add_argument("--oversampling-policy", default="defaults",
                     choices=tuple(workloads.OversamplingPolicy),
-                    help="which of the two quantized experiments this run is. "
+                    help="which of the three quantized experiments this run is. "
                          "`defaults` (default) leaves each engine on its own "
                          "rescore pool, which is `limit`-sized for Qdrant and "
                          "`max(asked, ef)` for strawmANN, so §7.4 refuses the "
@@ -2122,8 +2122,11 @@ def main(argv: list[str]) -> int:
                          "quantized search rows that do not already name one, "
                          "which moves only Qdrant (strawmANN's pool is already "
                          "ef-sized) and takes its SQ8 recall@10 from 0.8929 to "
-                         "0.9888 against strawmANN's 0.9891 (findings 42). The "
-                         "two are different experiments and never one table, so "
+                         "0.9888 against strawmANN's 0.9891 (findings 42). "
+                         "`pool` sends ef / limit on every quantized search row, "
+                         "so Qdrant rescores ef candidates as strawmANN does, "
+                         "binary and PQ included. They are different experiments "
+                         "and never one table, so "
                          "the choice is hashed into every row and `compare.py` "
                          "refuses a ratio across them as STALE")
     ap.add_argument("--segment-policy", default="equal-work",
@@ -2246,11 +2249,16 @@ def main(argv: list[str]) -> int:
     # Same mechanism, same reason: bound here for this process and exported for
     # the per-arm subprocesses, so the two arms cannot be handed different ones.
     OVERSAMPLING_POLICY = workloads.use_oversampling_policy(args.oversampling_policy)
-    if str(workloads.OversamplingPolicy.defaults) != OVERSAMPLING_POLICY:
+    if str(workloads.OversamplingPolicy.matched) == OVERSAMPLING_POLICY:
         print(f"oversampling {OVERSAMPLING_POLICY}: the quantized search rows carry "
               f"--quantization-oversampling {workloads.MATCHED_OVERSAMPLING} on both "
               f"engines, which moves Qdrant's rescore pool and not strawmANN's. "
               f"These rows may not be ratioed against a `defaults` run (§8, STALE).")
+    elif str(workloads.OversamplingPolicy.pool) == OVERSAMPLING_POLICY:
+        print(f"oversampling {OVERSAMPLING_POLICY}: every quantized search row carries "
+              f"--quantization-oversampling ef / limit on both engines, so Qdrant "
+              f"rescores ef candidates as strawmANN does. These rows may not be "
+              f"ratioed against a `defaults` or `matched` run (§8, STALE).")
     # Both arms are given this set — `--pin --cpus` for strawmANN and
     # `--cpuset-cpus` for the container — and until now it survived only in
     # this script's own output. The engine's observed affinity cannot stand in

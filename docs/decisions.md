@@ -1618,3 +1618,33 @@ lose on the tail what it gains on the run queue. The next pair measures the
 net, under the W11 rows that were also changed today (fixed rate, sized
 search), so its run-queue wait is not 0925's to compare with directly.
 
+## A third quantized experiment: rescore pools matched to `ef`, decided 2026-09-25
+
+`matched` sends `--quantization-oversampling 2` to rows that name none, which
+takes Qdrant's SQ8 pool from 10 to 20 of a 128-node walk and recovers about
+90% of the recall gap (findings 42). It cannot do the same for binary or PQ:
+W7 names its own 4 and is left alone, W8 gets 2, and Qdrant's pools of 40 and
+20 cap its recall@10 at 0.907 (binary) and 0.962 (PQ) whatever `ef` is, while
+strawmANN's `ef`-sized pool reaches 0.986 and 0.989. So W7 and W8 stay
+refused under every policy there was.
+
+Options: `ef` sweeps on `bench7` and `bench8`, joined to the recall sweeps that
+already exist, would give a matched-recall table only where the curves
+overlap, which for binary ends at 0.907. Taken instead: a policy `pool` that
+sends `ef / limit` on every quantized search row, replacing a row's own value,
+so Qdrant takes `limit x oversampling = ef` candidates from its walk, which is
+strawmANN's `max(asked, ef)` already. The engines then rescore the same number
+of candidates at every row, and findings 42 measured the pool as the whole
+gap on SQ8, so W6, W7 and W8 should reach equal recall per row with no extra
+rows.
+
+It is a third experiment, not a change to `matched`: the stamp hashes the
+policy's name and not the rows' oversampling, so redefining `matched` would
+have joined its new rows to old ones silently. The recall sweep splits by
+parameter set (`recall.quant_sweeps_of`), each swept at its rows' `ef` only,
+so a row's join stays exact on its parameters; the recall-vs-ef chart and the
+SQ8 matched table read the merged curve (`recall.load_recall_points`). A
+quantized row whose recall still differs with matched pools names the
+encoders, not the pools (`compare.Row._rescore_cause`). The published pages
+render identically.
+

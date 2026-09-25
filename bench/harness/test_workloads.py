@@ -2966,6 +2966,30 @@ class OversamplingPolicyTests(unittest.TestCase):
         no_settle = {k: v for k, v in legacy.items() if k != "engine_settle"}
         self.assertNotEqual(self.w.stamp_hash(no_settle), self.w.stamp_hash(legacy))
 
+    def test_pool_gives_every_quantized_row_an_ef_sized_pool(self):
+        """Qdrant rescores `limit x oversampling` candidates, strawmANN
+        `max(asked, ef)`. At `ef / limit` the two are the same number, which
+        `matched`'s 2 is not for any row, and binary's 4 is not either."""
+        o = self._over("pool")
+        for wid, ef in (("W6", 128), ("W6-ef32", 32), ("W6-ef64", 64),
+                        ("W6-ef256", 256), ("W6-ef512", 512), ("W7", 128), ("W8", 128)):
+            with self.subTest(row=wid):
+                self.assertEqual(o[wid], ef / 10)
+        # W7's own 4 is replaced, not appended beside: one flag, one value.
+        w7 = {x.id: x for x in self.w.table()}["W7"]
+        self.assertEqual([str(a) for a in w7.args].count("--quantization-oversampling"), 1)
+        for wid in ("W3", "W4", "W10-ef128", "W9", "W6-upload", "W7-upload"):
+            with self.subTest(row=wid):
+                self.assertIsNone(o[wid])
+        self.assertEqual(self.w.pool_oversampling(5, 10), 1.0)   # never below 1
+
+    def test_pool_is_its_own_experiment(self):
+        self.w.use_oversampling_policy("matched")
+        m = self.w.stamp_hash(self.w.harness_stamp())
+        self.w.use_oversampling_policy("pool")
+        self.assertEqual(self.w.harness_stamp()["oversampling_policy"], "pool")
+        self.assertNotEqual(m, self.w.stamp_hash(self.w.harness_stamp()))
+
     def test_it_survives_the_subprocess_boundary(self):
         """`fullrun.py` binds it once and each arm is a separate process."""
         self.w.use_oversampling_policy("matched")

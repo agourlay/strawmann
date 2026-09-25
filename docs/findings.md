@@ -45,17 +45,16 @@ next pair's `write overlap` says whether that holds; a search that overruns
 shrinks the one after it. Item 8 is what the row shows once it measures what it
 claims to.
 
-**4. `matched` oversampling matches SQ8 and nothing else.** `W6` is licensed
-at 1.29x under the policy; `W7` (0.9474 against 0.8887) and `W8` (0.9656
-against 0.9428) stay refused. The sweeps carry the signature findings 42 named:
-Qdrant's recall@1 climbs to 0.978 (binary) and 0.989 (PQ) at `ef` 512 while
-its recall@10 flattens at 0.906 and 0.963, which is a rescore pool of `limit`
-times oversampling, 40 and 20 candidates whatever `ef` is. strawmANN's pool is
-`ef`-sized and its recall@10 rises to 0.986 and 0.989. The policy sends
-oversampling 2 only to rows that do not already name one, and `W7` names 4, so
-it never touched binary. Matching the pools means an oversampling of
-`ef / limit` per row on Qdrant's side, or `ef` sweeps on `bench7` and `bench8`
-so the matched-recall interpolation can cover them without touching the pool.
+**4. `matched` oversampling matches SQ8 and nothing else; `pool` should
+match all three.** Under `matched`, `W6` is licensed and `W7` (0.9474
+against 0.8887) and `W8` (0.9656 against 0.9428) stay refused: Qdrant's pool
+is `limit` times oversampling, 40 and 20 candidates whatever `ef` is, so its
+recall@10 flattens at 0.907 (binary) and 0.962 (PQ) while strawmANN's
+`ef`-sized pool reaches 0.986 and 0.989. Since 2026-09-25 the `pool` policy
+sends `ef / limit` on every quantized row, so both engines rescore `ef`
+candidates (`decisions.md`). A night pair run with `OVERSAMPLING_POLICY=pool`
+is the measurement: equal recall per row on all three encodings if the pool
+was the whole gap, and any gap left is the encoders'.
 
 ### P2. What the licensed numbers are made of, and what the run costs
 

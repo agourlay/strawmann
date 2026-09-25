@@ -922,6 +922,14 @@ class OversamplingPolicy(StrEnum):
                 equal-recall rule correctly refuses to ratio.
     `matched`   `--quantization-oversampling 2` on the quantized search rows
                 that do not already name one.
+    `pool`      `--quantization-oversampling ef / limit` on every quantized
+                search row, replacing the row's own: Qdrant's pool becomes
+                `ef`-sized, which is strawmANN's `max(asked, ef)` already, so
+                the two engines rescore the same number of candidates. The
+                `matched` 2 recovers ~90% of SQ8's gap and cannot reach
+                binary's or PQ's at all (findings 4: Qdrant's binary recall is
+                flat at 0.907 from `ef` 128), because a pool of 20 or 40 is not
+                a pool of 128 (decisions, 2026-09-25).
 
     The flag is sent to **both** engines and moves only one, which is the
     finding rather than an asymmetry in the harness: strawmANN's stage 1 is
@@ -933,6 +941,7 @@ class OversamplingPolicy(StrEnum):
 
     defaults = "defaults"
     matched = "matched"
+    pool = "pool"
 
 
 class SegmentPolicy(StrEnum):
@@ -1604,6 +1613,8 @@ def table() -> list[Workload]:
 
     if OVERSAMPLING_POLICY is OversamplingPolicy.matched:
         rows = [_matched_oversampling(w) for w in rows]
+    elif OVERSAMPLING_POLICY is OversamplingPolicy.pool:
+        rows = [_pool_oversampling(w) for w in rows]
 
     # The ordering is load-bearing, so assert it rather than trusting the next
     # reader to notice the comment.
@@ -2224,6 +2235,34 @@ def _matched_oversampling(w: Workload) -> Workload:
         return w
     return dataclasses.replace(
         w, args=[*w.args, "--quantization-oversampling", str(MATCHED_OVERSAMPLING)])
+
+
+def pool_oversampling(ef: int, limit: int) -> float:
+    """The oversampling that makes Qdrant's rescore pool `ef` candidates:
+    it takes `limit x oversampling` from the quantized walk."""
+    return max(1.0, ef / limit)
+
+
+def _pool_oversampling(w: Workload) -> Workload:
+    """`--quantization-oversampling ef / limit` on a quantized search row.
+
+    Replaces a row's own value, unlike `matched`: W7's 4 is binary's default
+    remedy for a `limit`-sized pool, and a pool matched to `ef` is the thing it
+    approximated. Upload rows and the fp32 collections are left alone.
+    """
+    if w.upload_only or "--search" not in [str(a) for a in w.args]:
+        return w
+    if collection_of(w) not in {f"{C}6", f"{C}7", f"{C}8"}:
+        return w
+    args = [str(a) for a in w.args]
+    ef, limit = ef_of(w), int(args[args.index("--search-limit") + 1])
+    ov = f"{pool_oversampling(ef, limit):g}"
+    if "--quantization-oversampling" in args:
+        i = args.index("--quantization-oversampling")
+        new = [*w.args[:i + 1], ov, *w.args[i + 2:]]
+    else:
+        new = [*w.args, "--quantization-oversampling", ov]
+    return dataclasses.replace(w, args=new)
 
 
 def quant_of(w: Workload) -> dict:

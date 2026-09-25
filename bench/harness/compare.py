@@ -926,7 +926,18 @@ class Row:
         if not (self.ra.get("quantization_rescore")
                 or self.rb.get("quantization_rescore")):
             return ""
+        # Under the `pool` policy both engines rescore `ef` candidates, so a
+        # recall gap left over is the encoders', and blaming the pools would
+        # send the reader after the one cause that was removed.
+        if all(self._pool_matched(r) for r in (self.ra, self.rb)):
+            return "; the rescore pools match, so the encoders differ"
         return "; rescore pools differ (decisions §5)"
+
+    @staticmethod
+    def _pool_matched(r: dict) -> bool:
+        """The row sent `ef / limit`, at §4's quantized `limit` of 10."""
+        ov, ef = r.get("quantization_oversampling"), r.get("ef")
+        return bool(ov and ef) and abs(ov * 10 - ef) < 1e-6
 
     def _rows_stamped(self) -> bool:
         """Both rows carry the harness stamp their label's `run.json` carries,

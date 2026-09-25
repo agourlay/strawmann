@@ -387,6 +387,63 @@ def quant_params_of(collection: str) -> QuantParams:
     return QuantParams()
 
 
+def quant_sweeps_of(collection: str) -> list[tuple[QuantParams, list[int] | None]]:
+    """Each distinct parameter set §4's rows send to `collection`, with the
+    `ef` values the rows that send it search.
+
+    One set is the ordinary case, and its sweep keeps §4's own `ef` list
+    (`None`). Under the `pool` oversampling policy every row sends `ef /
+    limit`, so bench6's five rows are five sets, each swept at its own `ef`
+    only: the join stays exact on the parameters, and every row finds a file
+    that measured the search it ran.
+    """
+    try:
+        import workloads
+    except ImportError:  # pragma: no cover
+        return [(QuantParams(), None)]
+    sets: dict[QuantParams, list[int]] = {}
+    for w in workloads.table():
+        if w.upload_only or workloads.collection_of(w) != collection:
+            continue
+        q = workloads.quant_of(w)
+        key = QuantParams(q["quantization_oversampling"], q["quantization_rescore"])
+        ef = workloads.ef_of(w)
+        sets.setdefault(key, [])
+        if ef is not None and ef not in sets[key]:
+            sets[key].append(ef)
+    # Under `pool` the oversampling is a function of `ef`, so a sweep at an
+    # `ef` no row searches would rescore a pool no row asked for (`ef` 32 at
+    # 12.8 is 128 candidates): each set is swept at its rows' `ef` only.
+    only = next(iter(sets), QuantParams())
+    if len(sets) <= 1 and (only.oversampling is None or workloads.OVERSAMPLING_POLICY
+                           is not workloads.OversamplingPolicy.pool):
+        return [(only, None)]
+    return [(k, sorted(v)) for k, v in sets.items()]
+
+
+def load_recall_points(label: str, dataset: str, collection: str) -> dict:
+    """Every sweep of `collection` §4's rows join to, as one document.
+
+    The first set's document, with the points of every set merged in, each
+    set's taken only at the `ef` values its rows search. A reader that wants
+    the whole curve of a collection (the recall-vs-ef chart, the SQ8
+    matched-recall table) reads this; a row's own join still reads
+    `load_recall_json` with the row's own parameters.
+    """
+    merged: dict = {}
+    points: list[dict] = []
+    for (ov, rs), efs in quant_sweeps_of(collection):
+        doc = load_recall_json(label, dataset, collection, ov, rs)
+        if not doc:
+            continue
+        merged = merged or dict(doc)
+        points += [p for p in doc.get("points") or [] if efs is None or p.get("ef") in efs]
+    if not merged:
+        return {}
+    merged["points"] = sorted(points, key=lambda p: p.get("ef") or 0)
+    return merged
+
+
 class EfSplit(NamedTuple):
     """The `ef` values that mean what they say at this `limit`, and the rest.
 
@@ -628,23 +685,29 @@ def main(argv: list[str]) -> int:
     rc = 0
     for c in args.collections.split(","):
         c = c.strip()
-        # Each flag overrides its own parameter only: `--rescore` alone keeps
-        # the collection's default oversampling.
-        ov, rs = quant_params_of(c)
-        if args.oversampling is not None:
-            ov = args.oversampling
-        if args.rescore is not None:
-            rs = args.rescore == "true"
-        efs = [int(x) for x in args.ef.split(",")] if args.ef else None
         if c == FILTERED_COLLECTION:
             # One collection, one sweep per grade: W12's two rows differ only
             # in selectivity, so they search the same `bench12` under different
             # conditions and each needs its own restricted truth.
+            ov, rs = quant_params_of(c)
+            efs = [int(x) for x in args.ef.split(",")] if args.ef else None
             for grade in FILTER_GRADES:
                 rc |= sweep(args.engine, args.label, c, args.queries, ov, rs, efs,
                             args.limit, grade=grade, base_n=args.filtered_base_n)
             continue
-        rc |= sweep(args.engine, args.label, c, args.queries, ov, rs, efs, args.limit)
+        # One sweep per parameter set the rows send (`quant_sweeps_of`). Each
+        # flag overrides its own parameter only, and either override collapses
+        # the sets to one: a hand-run sweep asks for one search.
+        sets = quant_sweeps_of(c)
+        if args.oversampling is not None or args.rescore is not None:
+            sets = sets[:1]
+        for (ov, rs), row_efs in sets:
+            if args.oversampling is not None:
+                ov = args.oversampling
+            if args.rescore is not None:
+                rs = args.rescore == "true"
+            efs = [int(x) for x in args.ef.split(",")] if args.ef else row_efs
+            rc |= sweep(args.engine, args.label, c, args.queries, ov, rs, efs, args.limit)
 
     print("\nrecall written next to the throughput rows; `compare.py` and the HTML "
           "report join them on (dataset, collection, ef).")
