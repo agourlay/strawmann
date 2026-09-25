@@ -215,8 +215,17 @@ def server_argv(arm: Arm, port: int, server_cpus: str | None = None) -> list[str
             "--no-bandwidth-probe"]
     if server_cpus:
         import fullrun
+
+        import paths
+        import workloads
         workers = max(1, fullrun.cpu_count(server_cpus) - 1)
         argv += ["--workers", str(workers), "--io-threads", "1", "--pin", "--cpus", server_cpus]
+        # The published engine's residency too: without these the arm serves
+        # from the pinned huge-page arena, and W3's cycles per query are
+        # compared with figures measured on the cached 4 KiB mapping.
+        if workloads.Placement.pinned != fullrun.PLACEMENT:
+            argv += ["--data-dir", str(paths.STRAWMANN_STORAGE),
+                     "--default-placement", str(fullrun.PLACEMENT)]
     return argv
 
 

@@ -919,6 +919,13 @@ def start_qdrant_binary(server_cpus: str, grpc: int, rest: int,
               f"storage path or ports come out wrong.", flush=True)
     env = {
         **os.environ,
+        # Qdrant's `settings.rs` defaults RUN_MODE to `development` and layers
+        # `config/development.yaml` over the base config when run from a
+        # checkout: `max_search_threads: 4`, audit logging of every request,
+        # DEBUG logs, every feature flag. The Docker image sets `production`.
+        # Unset, every native pair to 2026-09-25 measured that profile, and its
+        # 4-thread search cap was Qdrant's 4.46 busy cores on W4 (findings 5).
+        "RUN_MODE": "production",
         "QDRANT__STORAGE__STORAGE_PATH": str(QDRANT_STORAGE),
         **qdrant_segment_env(),
         "QDRANT__SERVICE__HTTP_PORT": str(rest),

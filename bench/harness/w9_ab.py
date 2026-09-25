@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import signal
 import statistics
 import subprocess
@@ -54,6 +55,15 @@ PORT = 6334
 
 #: bfb's flags every row passes, as `workloads.main` builds them.
 COMMON = ["--retry", "0", "--timeout", str(workloads.BFB_TIMEOUT_S), "--p9", "3"]
+
+
+def cpu_set(spec: str) -> set[int]:
+    """`0-3,8` as `{0, 1, 2, 3, 8}`."""
+    out: set[int] = set()
+    for part in spec.split(","):
+        lo, _, hi = part.partition("-")
+        out.update(range(int(lo), int(hi or lo) + 1))
+    return out
 
 
 def plan(reps: int) -> list[tuple[int, list[tuple[str, int]]]]:
@@ -200,6 +210,10 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv[1:])
 
     workloads.use_dataset(args.dataset)
+    # The load generator, its warm-ups and the perf sidecars are this process's
+    # children, so its affinity is theirs; the engine pins itself with
+    # `--pin --cpus`.
+    os.sched_setaffinity(0, cpu_set(args.client_cpus))
     # Warned, not refused: the rows record their own foreign load, and the
     # sessions are the user's.
     if busy := procstat.builders_alive():

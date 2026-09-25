@@ -12,7 +12,7 @@ async worker, or lock waits on the segment.
 
 One collection, uploaded once, Qdrant restarted per arm without wiping it:
 
-    default   the repository's config: `max_search_threads: 0`
+    default   the repository's config in production mode: `max_search_threads: 0`
     mst8      `QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS=8`, which sizes
               both search pools to 8 and removes the adaptive switch
 
@@ -130,11 +130,24 @@ def qdrant_pid() -> int | None:
     return found[0] if len(found) == 1 else None
 
 
-def start(arm_value: str | None, server_cpus: str, wipe: bool) -> bool:
+STARTS: list[str] = []
+
+
+def keep_log(out: Path) -> None:
+    """`start_qdrant_binary` truncates one `qdrant-server.log` per start; copy
+    it aside before the next start, so each arm's configuration is on file."""
+    src = fullrun.RESULTS / "qdrant-server.log"
+    if STARTS and src.exists():
+        (out / f"qdrant-server.{len(STARTS)}-{STARTS[-1]}.log").write_bytes(src.read_bytes())
+
+
+def start(arm_value: str | None, server_cpus: str, wipe: bool, out: Path) -> bool:
+    keep_log(out)
     if arm_value is None:
         os.environ.pop(MST_ENV, None)
     else:
         os.environ[MST_ENV] = arm_value
+    STARTS.append("mst" + arm_value if arm_value else "default")
     return fullrun.start_qdrant_binary(server_cpus, fullrun.QDRANT_GRPC,
                                        fullrun.QDRANT_REST, wipe=wipe) is not None
 
@@ -228,7 +241,7 @@ def main(argv: list[str]) -> int:
 
     rows: list[dict] = []
     try:
-        if not start(None, args.server_cpus, wipe=True):
+        if not start(None, args.server_cpus, wipe=True, out=out):
             return 1
         w2 = {w.id: w for w in workloads.table()}["W2"]
         (out / "upload").mkdir(parents=True, exist_ok=True)
@@ -241,7 +254,7 @@ def main(argv: list[str]) -> int:
         for arm, rep in plan(args.reps):
             value = dict(ARMS)[arm]
             if arm != current:
-                if not start(value, args.server_cpus, wipe=False) or \
+                if not start(value, args.server_cpus, wipe=False, out=out) or \
                         not wait_loaded(workloads.upload_n()):
                     print(f"{arm}: qdrant did not come back with the collection",
                           file=sys.stderr)
@@ -249,13 +262,14 @@ def main(argv: list[str]) -> int:
                 current = arm
             fullrun.settle(f"{arm} rep {rep}")
             rows.append(measure(out, arm, rep))
-        if current != "default" and (not start(None, args.server_cpus, wipe=False)
+        if current != "default" and (not start(None, args.server_cpus, wipe=False, out=out)
                                      or not wait_loaded(workloads.upload_n())):
             return 1
         fullrun.settle("the profile")
         profile(out)
     finally:
         fullrun.stop_qdrant()
+        keep_log(out)
         os.environ.pop(MST_ENV, None)
 
     summary = {"arms": {}, "rows": rows}

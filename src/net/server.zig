@@ -570,10 +570,11 @@ pub fn pinToCpus(cpus: []const usize) void {
     linux.sched_setaffinity(0, &set) catch {};
 }
 
-/// The nice value an index build runs at: Qdrant's, 10
-/// (`common::cpu::linux_low_thread_priority`, applied to every HNSW build
-/// thread in `hnsw/build.rs`).
-pub const build_nice: i32 = 10;
+/// The nice value an index build runs at: Qdrant's, 9. Its
+/// `linux_low_thread_priority` (applied to every HNSW build thread in
+/// `hnsw/build.rs`) asks thread-priority 3.1.1 for `Crossplatform(25)`, which
+/// maps to `(39 * (1 - 25/99)) as i8 - 20 = 9`; Qdrant's own comment says 10.
+pub const build_nice: i32 = 9;
 
 /// Lower the calling thread to `build_nice`. On Linux a nice value belongs to
 /// a thread and threads inherit their creator's, so calling this before the
