@@ -60,6 +60,68 @@ fn one_graph_optimizers(points: u64, dim: u64) -> OptimizersConfigDiffBuilder {
 pub struct Engine {
     pub label: String,
     pub client: Qdrant,
+    url: String,
+}
+
+const QDRANT_GRPC: u16 = 6334;
+const QDRANT_REST: u16 = 6333;
+
+/// One GET on the REST port beside a gRPC `url`. HTTP/1.0, so the reply is
+/// not chunked and ends when the server closes: this runs once per differ run.
+fn rest_get(url: &str, path: &str) -> anyhow::Result<serde_json::Value> {
+    use std::io::{Read, Write};
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let (host, port) = rest
+        .trim_end_matches('/')
+        .rsplit_once(':')
+        .unwrap_or((rest, ""));
+    anyhow::ensure!(
+        port == QDRANT_GRPC.to_string(),
+        "{url} is not Qdrant's gRPC port"
+    );
+    let addr = std::net::ToSocketAddrs::to_socket_addrs(&(host, QDRANT_REST))?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("{host} does not resolve"))?;
+    let timeout = std::time::Duration::from_secs(30);
+    let mut s = std::net::TcpStream::connect_timeout(&addr, timeout)?;
+    s.set_read_timeout(Some(timeout))?;
+    write!(s, "GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n")?;
+    let mut body = Vec::new();
+    s.read_to_end(&mut body)?;
+    let at = body
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| anyhow::anyhow!("no HTTP header end"))?;
+    anyhow::ensure!(
+        body.starts_with(b"HTTP/1.") && body.get(9..12) == Some(b"200".as_slice()),
+        "not a 200"
+    );
+    Ok(serde_json::from_slice(&body[at + 4..])?)
+}
+
+/// Segments of `collection` holding at least one point, in a `/telemetry`
+/// document. `None` when the document does not list the collection.
+pub fn populated_segments(doc: &serde_json::Value, collection: &str) -> Option<usize> {
+    let colls = doc.pointer("/result/collections/collections")?.as_array()?;
+    let c = colls
+        .iter()
+        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(collection))?;
+    let segments = c
+        .get("shards")?
+        .as_array()?
+        .iter()
+        .filter_map(|sh| sh.pointer("/local/segments")?.as_array())
+        .flatten();
+    Some(
+        segments
+            .filter(|seg| {
+                seg.pointer("/info/num_points")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    > 0
+            })
+            .count(),
+    )
 }
 
 pub fn to_distance(m: Metric) -> Distance {
@@ -97,6 +159,7 @@ impl Engine {
         Ok(Engine {
             label: label.to_string(),
             client,
+            url: url.to_string(),
         })
     }
 
@@ -304,6 +367,18 @@ impl Engine {
     pub async fn segments_count(&self, name: &str) -> anyhow::Result<u64> {
         let info = self.client.collection_info(name).await?;
         Ok(info.result.map(|r| r.segments_count).unwrap_or(0))
+    }
+
+    /// How many of those segments hold points, from Qdrant's REST telemetry.
+    ///
+    /// gRPC's `CollectionInfo` has no per-segment counts, so every run warned
+    /// "2 segments after load" about one graph and the empty appendable beside
+    /// it. `/telemetry` lists each segment's points; this is
+    /// `fullrun.qdrant_segments`'s reading. `None` when the engine is not on
+    /// Qdrant's gRPC port or the REST one does not answer.
+    pub fn populated_segments(&self, name: &str) -> Option<usize> {
+        let doc = rest_get(&self.url, "/telemetry?details_level=10").ok()?;
+        populated_segments(&doc, name)
     }
 
     /// What the engine says its collection actually is, not what it was asked
@@ -748,6 +823,46 @@ pub fn grpc_status_code(e: &qdrant_client::QdrantError) -> Option<i32> {
 mod tests {
     use super::*;
 
+    fn telemetry(points: &[u64]) -> serde_json::Value {
+        let segs: Vec<_> = points
+            .iter()
+            .map(|n| serde_json::json!({"info": {"num_points": n, "segment_type": "plain"}}))
+            .collect();
+        serde_json::json!({"result": {"collections": {"collections": [
+            {"id": "other", "shards": [{"local": {"segments": [{"info": {"num_points": 5}}]}}]},
+            {"id": "conformance", "shards": [{"local": {"segments": segs}}]},
+        ]}}})
+    }
+
+    #[test]
+    fn an_empty_appendable_is_not_a_populated_segment() {
+        // Every 0925 collection: one graph and the appendable Qdrant keeps
+        // for writes, which the differ warned about as two segments.
+        assert_eq!(
+            populated_segments(&telemetry(&[0, 990_000]), "conformance"),
+            Some(1)
+        );
+        // 0903's differ collection: four graphs and an empty one.
+        assert_eq!(
+            populated_segments(
+                &telemetry(&[188_200, 208_600, 251_100, 342_100, 0]),
+                "conformance"
+            ),
+            Some(4)
+        );
+        assert_eq!(populated_segments(&telemetry(&[]), "conformance"), Some(0));
+        assert_eq!(populated_segments(&telemetry(&[1]), "missing"), None);
+        assert_eq!(
+            populated_segments(&serde_json::json!({}), "conformance"),
+            None
+        );
+    }
+
+    #[test]
+    fn telemetry_is_only_asked_of_qdrants_grpc_port() {
+        assert!(rest_get("http://127.0.0.1:6335", "/telemetry").is_err());
+    }
+
     #[test]
     fn a_server_status_is_propagated_as_its_grpc_code_and_a_client_fault_is_not() {
         // §8.5 T0: the *code* is what must match between engines. Built from
@@ -799,6 +914,9 @@ mod tests {
         let narrow = max_segment_size_kb(990_000, 128);
         let wide = max_segment_size_kb(990_000, 1536);
         assert_eq!(wide, narrow * 12);
-        assert!(max_segment_size_kb(1, 1) >= 1, "never zero, whatever rounds down");
+        assert!(
+            max_segment_size_kb(1, 1) >= 1,
+            "never zero, whatever rounds down"
+        );
     }
 }

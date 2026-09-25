@@ -1595,16 +1595,25 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
         // engine searching several graphs at that `ef` reports a higher one
         // without being more accurate -- which is how the
         // dbpedia-openai-1m run failed T3 and lost its comparative licence.
-        // Said, not asserted: an empty appendable segment counts here too, so
-        // this is an upper bound on the graphs rather than a verdict.
+        // Said, not asserted. An empty appendable is a segment and not a
+        // graph, so the populated count decides where telemetry gives one.
         match e.segments_count(collection).await {
             Ok(1) => {}
-            Ok(n) => eprintln!(
-                "[{}] WARNING: {} segments after load, not 1; T3 compares recall \
-                 at a nominal ef and more graphs raise it without more accuracy. \
-                 One may be an empty appendable, so this is an upper bound.",
-                e.label, n
-            ),
+            Ok(n) => match e.populated_segments(collection) {
+                Some(p) if p <= 1 => {}
+                Some(p) => eprintln!(
+                    "[{}] WARNING: {} segments after load, {} of them populated, not 1; \
+                     T3 compares recall at a nominal ef and more graphs raise it \
+                     without more accuracy.",
+                    e.label, n, p
+                ),
+                None => eprintln!(
+                    "[{}] WARNING: {} segments after load, not 1; T3 compares recall \
+                     at a nominal ef and more graphs raise it without more accuracy. \
+                     One may be an empty appendable, so this is an upper bound.",
+                    e.label, n
+                ),
+            },
             Err(err) => eprintln!("[{}] could not read segment count back: {err}", e.label),
         }
     }
