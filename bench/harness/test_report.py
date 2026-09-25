@@ -16,6 +16,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from harness_fixtures import CONF_T2, CONF_T3, Fixture, _reload, _row, _sweep, good_stamp
 
@@ -2675,6 +2676,38 @@ class ReportReadabilityTests(unittest.TestCase):
             {"id": "W12-sel1-ef64", "desc": "filtered, ef=64", "ratio": "0.79x"}])
         self.assertEqual([(g["id"], g["ratio"], g["points"]) for g in got],
                          [("W9", "0.77x", 1), ("W12-sel1-ef64", "0.79x", 1)])
+
+    def test_a_loss_at_two_recalls_says_so(self):
+        """0925's bullet read `(W12-sel1-ef64): 0.79x` as though both engines
+        gave one answer: strawmANN's was exact (1.0000), Qdrant's 0.9963."""
+        report = self.report
+        Row = type("Row", (), {})
+
+        def row(wid, ratio, ra, rb):
+            r = Row()
+            r.id, r.ratio, r.rec_a, r.rec_b = wid, ratio, ra, rb
+            return r
+
+        runs = [report.Run(x, [], "", True, "h") for x in ("sm", "qd")]
+        joined = [row("W12-sel1-ef64", "0.79x", 1.0, 0.99634),
+                  row("W9", "0.77x", None, None),
+                  row("W6", "0.90x", 0.96391, 0.96389)]      # equal at 4 decimals
+        with mock.patch.object(report.compare, "joined", lambda *a: joined), \
+                mock.patch.object(report, "load_noise", lambda runs: {}), \
+                mock.patch.object(report, "ratio_verdict", lambda *a: "clears the band"):
+            got = {l["id"]: l["recall"] for l in report.losses(runs)}
+        self.assertEqual(got["W12-sel1-ef64"], "sm at recall 1.0000, qd at 0.9963")
+        self.assertEqual(got["W9"], "")       # exact search has no recall to state
+        self.assertEqual(got["W6"], "")
+        # One setting keeps its pair; a family of settings has one per point
+        # and states none rather than one of them.
+        grouped = {g["id"]: g["recall"] for g in report.grouped_losses([
+            {"id": "W12-sel1-ef64", "desc": "f", "ratio": "0.79x",
+             "recall": "sm at recall 1.0000, qd at 0.9963"},
+            {"id": "W12-sel10-ef32", "desc": "g", "ratio": "0.80x", "recall": "x"},
+            {"id": "W12-sel10-ef64", "desc": "g", "ratio": "0.85x", "recall": "y"}])}
+        self.assertEqual(grouped["W12-sel1-ef64"], "sm at recall 1.0000, qd at 0.9963")
+        self.assertEqual(grouped["W12-sel10"], "")
 
     def test_the_summary_latency_table_keeps_the_rows_a_latency_claim_rests_on(self):
         report = self.report

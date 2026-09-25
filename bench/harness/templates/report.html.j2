@@ -194,7 +194,7 @@
     <p><b>Where {{ runs[0].label }} is slower</b>, past the noise floor:</p>
     <ul class="slower">
       {%- for l in slower %}
-      <li>{{ l.desc }} (<code>{{ l.id }}</code>{% if l.points > 1 %}, {{ l.points }} settings{% endif %}): <b class="down">{{ l.ratio }}</b></li>
+      <li>{{ l.desc }} (<code>{{ l.id }}</code>{% if l.points > 1 %}, {{ l.points }} settings{% endif %}): <b class="down">{{ l.ratio }}</b>{% if l.recall %}, {{ l.recall }}{% endif %}</li>
       {%- endfor %}
     </ul>
     {%- endif %}

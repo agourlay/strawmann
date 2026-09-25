@@ -2641,7 +2641,13 @@ def losses(runs: list[Run]) -> list[dict]:
         # `ratio_verdict` avoids by refusing to stay silent, inverted.
         if not ratio_verdict(jr.id, v, noise).startswith("clears"):
             continue
-        out.append({"id": jr.id, "desc": describe(jr.id), "ratio": jr.ratio})
+        # A ratio inside the recall band is still two recalls: W12-sel1-ef64's
+        # 0.79x was strawmANN's exact 1.0000 against Qdrant's 0.9963, and the
+        # bullet read as the same answer delivered slower.
+        recall = (f"{runs[0].label} at recall {jr.rec_a:.4f}, {runs[1].label} at {jr.rec_b:.4f}"
+                  if jr.rec_a is not None and jr.rec_b is not None
+                  and f"{jr.rec_a:.4f}" != f"{jr.rec_b:.4f}" else "")
+        out.append({"id": jr.id, "desc": describe(jr.id), "ratio": jr.ratio, "recall": recall})
     return out
 
 
@@ -2661,6 +2667,7 @@ def grouped_losses(items: list[dict]) -> list[dict]:
                                  "desc": describe(fam) or re.sub(r",? ef=\d+", "", l["desc"])})
         g["ids"].append(l["id"])
         g["ratios"].append(ratio_value(l["ratio"]))
+        g.setdefault("recalls", []).append(l.get("recall", ""))
     for g in out.values():
         lo, hi = min(g["ratios"]), max(g["ratios"])
         g["ratio"] = f"{lo:.2f}x" if lo == hi else f"{lo:.2f} to {hi:.2f}x"
@@ -2669,6 +2676,9 @@ def grouped_losses(items: list[dict]) -> list[dict]:
         # as the base row, which the throughput table shows winning.
         if g["points"] == 1:
             g["id"] = g["ids"][0]
+        # One recall pair per bullet: a family of settings has one per point,
+        # and the throughput table beside it prints them all.
+        g["recall"] = g["recalls"][0] if g["points"] == 1 else ""
     return list(out.values())
 
 
