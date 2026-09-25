@@ -59,27 +59,54 @@ so the matched-recall interpolation can cover them without touching the pool.
 
 ### P2. What the licensed numbers are made of, and what the run costs
 
-**5. The saturating win at d=1536 is two unexplained halves.** W4 reads 1.38x,
-and the decomposition puts it at 0.85x less work per query times 1.61x cores
-busy. Each factor is a question. strawmANN's cycles per query rise from 1.66M
-at W3 to 4.01M at W4 while its DRAM per query holds at 4.4 MB and its IPC
-halves from 0.71 to 0.29; aggregate traffic is 16 GB/s against a 73 GB/s bus,
-so the seven workers are waiting on their own misses, not on the bus. The
-next-candidate prefetch (715343f) was measured on sift1m, where W4's IPC is
-1.08; it has not been measured at d=1536, where the latency it exists to hide
-is the whole cost. Qdrant, on the same row and the same client parallelism of
-64, fills 4.47 of its 8 pinned cores and holds IPC 0.60, with 0.2 s of runqueue
-wait over the row. Why its search pool leaves 3.5 cores idle under a saturating
-closed loop is not known from the files, and the 1.38x is mostly that.
+**5. The saturating win at d=1536 is two halves, one of them narrowed.** W4
+reads 1.38x, and the decomposition puts it at 0.85x less work per query times
+1.61x cores busy. strawmANN's cycles per query rise from 1.66M at W3 to 4.01M
+at W4 while its DRAM per query holds at 4.4 MB and its IPC halves from 0.71 to
+0.29; aggregate traffic is 16 GB/s against a 73 GB/s bus, so the seven workers
+are waiting on their own misses, not on the bus. The next-candidate prefetch
+(715343f) was measured on sift1m, where W4's IPC is 1.08, and not at d=1536,
+where the latency it exists to hide is the whole cost. That half is open.
 
-**6. Qdrant's single-query cost doubles at d=1536.** W3 flips between the
-tiers: 0.90x on sift1m, 1.73x here. Both engines run one core; strawmANN
-spends 1.66M cycles per query and Qdrant 3.13M at equal IPC (0.71 against
-0.68) and similar DRAM (5.9 against 4.7 MB), so Qdrant executes about 1.8x the
-instructions for the same walk at the same recall, where on d=128 the two are
-within 5%. Something Qdrant does per visited node scales with the dimension.
-The 1.73x is licensed and correct as measured; what it measures is not known,
-and if it is a setting rather than a path the ratio is being read wrongly.
+Qdrant, on the same row and the same client parallelism of 64, fills 4.47 of
+its 8 pinned cores. Read in its source at the measured commit (878843e6e) on
+2026-09-25, nothing caps its searches below 8: `max_search_threads: 0` builds
+a `search-io` blocking pool of `num_cpus x 4` = 32 threads, and
+`AdaptiveSearchHandle` moves to the 8-thread `search-cpu` pool only above 0.9
+x `num_cpus` of process CPU (7.2 cores), so at 4.46 it never does; there is no
+search semaphore and no gRPC concurrency limit. The row agrees that the
+threads are not waiting for a CPU but blocked: 0.2 s of run-queue wait over
+the row, zero major faults, and 5.85 voluntary context switches per query
+against strawmANN's 1.8. What they block on is one of two things the counters
+cannot separate: the hand-off from the gRPC runtime through the search
+runtime's single async worker to the blocking pool and back, or lock waits on
+the segment. An off-CPU profile of Qdrant's search threads under W4 decides it,
+and `max_search_threads: 8`, which removes the adaptive switch, is the A/B.
+
+**6. Qdrant's single-query cost doubles at d=1536: its fp32 kernel is 256-bit,
+which explains the instructions and not all the cycles.** W3 flips between the
+tiers: 0.90x on sift1m, 1.73x here. Qdrant spends 3.13M cycles and 2.13M
+instructions per query against strawmANN's 1.66M and 1.17M, at the same
+recall. Qdrant has no AVX-512 path for dense fp32 (read at 878843e6e: the
+only AVX-512 in `lib/` is in quantization), and the measured binary's
+`dot_similarity_avx` (sha256 `dbeb0f73dea2d371`) uses `ymm` registers only,
+while strawmANN's hot kernel is `Dot(16,8)` on `zmm`. Nothing else in Qdrant's
+path is O(dim) per node: vectors are read in place from the mmap, cosine is a
+dot on pre-normalised vectors, and each node is scored once. At 256 against
+512 bits a 1536-dim dot is about 630 instructions against 255, and over the
+~2,500 nodes a query scores that is the 0.96M gap; at d=128 the same arithmetic
+is ~70k, inside the 5% measured there. The cycles are another matter.
+strawmANN's own ISA matrix (`docs/isa-matrix.md`, measured before pinning, so
+approximate) shows its AVX2 build at 1.79x the instructions of AVX-512 at
+d=1536 but only 1.02x the cycles L1-hot and 1.25x DRAM-cold, which bounds the
+width at about 0.6M of the 1.47M-cycle gap. Two leads on the remainder:
+Qdrant's vector file carries a 4-byte header, so its vectors are 4-byte
+aligned and a share of its loads split cache lines; and its server-side p50
+is 0.63 ms longer (1.47 against 0.84 ms), about the whole remainder. W3 on
+strawmANN's AVX2 build at d=1536 is the measurement: near Qdrant's cycles and
+the ratio is the width, near its own and the rest is elsewhere. Either way the
+1.73x is correct as measured, and part of what it measures is that strawmANN
+uses the host's AVX-512 and Qdrant as shipped does not.
 
 **7. At 1% selectivity strawmANN offers only the exact answer.** On 0925,
 with trusted postings (202841c) and the ACORN-1 walk (15bddf7), `W12-sel10`
