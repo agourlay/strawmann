@@ -250,6 +250,11 @@ def main(argv: list[str], root: Path = ROOT) -> int:
     if n := len(alive.stdout.split()):
         log(f"warning: {n} claude process(es) alive; the gate counts their idle CPU "
             f"as foreign load")
+    import procstat
+    if busy := procstat.builders_alive():
+        log(f"warning: build processes alive ({', '.join(busy)}); a build in another "
+            f"session is foreign load the gate counts, and memory pressure the engine "
+            f"can be oom-killed under")
 
     python = shutil.which("python3", path=child_env()["PATH"]) or sys.executable
     cmd = [python, "bench/harness/fullrun.py",

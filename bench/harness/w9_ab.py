@@ -200,6 +200,16 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv[1:])
 
     workloads.use_dataset(args.dataset)
+    # Warned, not refused: the rows record their own foreign load, and the
+    # sessions are the user's.
+    if busy := procstat.builders_alive():
+        print(f"!! build processes alive ({', '.join(busy)}): foreign load every row "
+              f"will record, and memory pressure the engine can be oom-killed under",
+              flush=True)
+    claude = [c for _, c in procstat.processes() if c == "claude"]
+    if claude:
+        print(f"!! {len(claude)} claude process(es) alive; their idle CPU is foreign load",
+              flush=True)
     if fullrun.cpu_count(args.server_cpus) < 1 + max(w for _, w, _ in ARMS):
         print("--server-cpus must hold one I/O thread plus the widest arm's workers",
               file=sys.stderr)

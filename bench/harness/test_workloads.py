@@ -3078,3 +3078,25 @@ class W9AbTests(unittest.TestCase):
         argv = self.ab.perf_record_argv(42, Path("/tmp/x.data"))
         self.assertEqual(argv[:2], ["perf", "record"])
         self.assertIn("42", argv)
+
+
+class BuildersAliveTests(unittest.TestCase):
+    """The warning a launcher prints before measuring beside someone's build."""
+
+    def test_builders_are_counted_by_name_and_nothing_else_is(self):
+        procstat = importlib.import_module("procstat")
+        procs = [(1, "systemd"), (2, "rustc"), (3, "rustc"), (4, "cargo"),
+                 (5, "claude"), (6, "strawmann"), (7, "clippy-driver"), (8, "rustc")]
+        self.assertEqual(procstat.builders_alive(procs),
+                         ["cargo", "clippy-driver", "rustc x3"])
+        self.assertEqual(procstat.builders_alive([(1, "bash"), (2, "claude")]), [])
+        # And the real table reads without raising.
+        self.assertIsInstance(procstat.builders_alive(), list)
+
+    def test_the_night_log_names_a_running_build(self):
+        n = importlib.import_module("nightrun")
+        procstat = importlib.import_module("procstat")
+        src = Path(n.__file__).read_text()
+        self.assertIn("procstat.builders_alive()", src)
+        with mock.patch.object(procstat, "processes", lambda: [(9, "rustc"), (10, "rustc")]):
+            self.assertEqual(procstat.builders_alive(), ["rustc x2"])

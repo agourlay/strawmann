@@ -96,6 +96,39 @@ def engine_processes() -> list[tuple[int, str]]:
     return sorted(found)
 
 
+#: Compilers and linkers: a build started in another session mid-run is
+#: foreign load the gate counts and memory pressure `systemd-oomd` acts on.
+#: A daytime W9 experiment measured under 5 cores of `rustc`/`clippy-driver`
+#: from a parallel session, and its engine was then oom-killed at 7.6 GB.
+BUILDER_COMMS = ("cargo", "rustc", "clippy-driver", "cc1", "cc1plus", "ld", "ld.lld",
+                 "mold", "zig")
+
+
+def processes() -> list[tuple[int, str]]:
+    """Every process, as `(pid, comm)`."""
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            found.append((int(entry.name), (entry / "comm").read_text().strip()))
+        except OSError:
+            continue  # exited between listing and reading
+    return sorted(found)
+
+
+def builders_alive(procs: list[tuple[int, str]] | None = None) -> list[str]:
+    """Running compilers and linkers, counted by name: `["rustc x3", "cargo"]`.
+
+    Named for the operator, not acted on: they are the user's.
+    """
+    counts: dict[str, int] = {}
+    for _, comm in (processes() if procs is None else procs):
+        if comm in BUILDER_COMMS:
+            counts[comm] = counts.get(comm, 0) + 1
+    return [f"{c} x{n}" if n > 1 else c for c, n in sorted(counts.items())]
+
+
 def _proc_io(pid: int) -> dict[str, int] | None:
     """`/proc/<pid>/io`. Owner-only, so this fails for a container as root."""
     try:
