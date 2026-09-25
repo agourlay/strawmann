@@ -383,19 +383,24 @@ posting list per value, and a filter is applied on every search path. The
 graph traversal (as an admission predicate, the way tombstones are), the
 exact scan, the pending tail and the quantized stage 1.
 
-**Both engines make the same dispatch decision.** Qdrant picks the search
-path by the filter's estimated cardinality against `full_scan_threshold`
+**Both engines choose the path by selectivity, by different rules.** Qdrant
+picks it by the filter's estimated cardinality against `full_scan_threshold`
 (`read_view/dispatch.rs`, verified in source; `decisions.md`): below it,
 `search_vectors_plain` scores the matching points; above it, the graph is
-traversed under the filter. strawmann applies the same rule on the same
-threshold (`handlers.searchOne`), so which path a filtered query takes is a
-function of its selectivity, which is the whole reason for two grades rather
-than one, and is now measured rather than reasoned. At `-k 100` over 200k
-points a keyword covers about 2,000 matches: `W12-sel1` scores that set
-directly, and its recall is flat across every `ef` at ~14,800 q/s because a
-scan cannot be steered by `ef`. `W12-sel10`, at ten keywords and about 20,000
-matches, is above the threshold: it traverses the graph under the filter, loses
-recall at `ef=32` and costs seventeen times as much per query.
+traversed under the filter. strawmANN compares the two costs directly from the
+exact count its index gives (`handlers.filteredPlan`): it scans the matching
+set when that is cheaper than the walk, and above a selectivity of `1/m0`
+walks ACORN-1 style, hopping through rejected neighbours without scoring them
+(15bddf7). Either way which path a query takes is a function of its
+selectivity, which is the reason for two grades rather than one. At `-k 100`
+over 200k points a keyword covers about 2,000 matches: `W12-sel1` scores that
+set directly on both engines' cheaper side, so strawmANN's throughput and
+recall are flat across every `ef` (2,575 q/s on sift1m's `perf-0923`, 1,873 on
+dbpedia-openai-1m's `perf-0925`, recall 1.0000) because a scan cannot be
+steered by `ef`. `W12-sel10`, at ten keywords and about 20,000 matches, walks
+the graph under the filter, so its cost and recall move with `ef`: 811 q/s at
+`ef` 128 on dbpedia-openai-1m `perf-0925`, and 300 on sift1m `perf-0923`,
+which was measured before the ACORN walk.
 
 An earlier draft of this paragraph said "both score the matching set directly"
 at `-k 1000`, which was true of the single 0.1% grade the row then had and is
@@ -485,7 +490,9 @@ count of exceptions.
 
 Both grades, strawmANN alone, `bench12` at 200,000 points, 1,000 of the 10,000
 held-out queries, `ef` swept 32-512 against ground truth restricted to each
-condition:
+condition. A development reading from before the published harness (one
+engine, no gate, an earlier build); its q/s column is not comparable with the
+published rows above, and the recall columns are what it established:
 
 | grade | matching set | recall@10 at ef=32 | at ef>=64 | q/s |
 |---|--:|--:|--:|--:|

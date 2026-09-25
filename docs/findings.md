@@ -1,7 +1,8 @@
 # Open work
 
 What is still unmeasured or unexplained, in priority order, and nothing else.
-An item that closes is deleted. Why a choice was made goes to
+An item that closes is deleted, and its number is not reused, since commits
+and code cite items by number. Why a choice was made goes to
 [`decisions.md`](decisions.md); everything else lives in the commit that did it
 and in the test that holds it.
 
@@ -9,9 +10,10 @@ Ranked by what a wrong or missing number costs.
 
 ### P1. What costs a number on the headline page
 
-The d=1536 comparison is licensed since 2026-09-24 (`sm/qd-dbp1m-perf-0924`,
-T4, 1.29x to 1.40x at matched recall; the account is in `decisions.md`). What
-that page publishes wrongly, or still refuses and could not:
+The d=1536 comparison is licensed since 2026-09-24, and the current page is
+`sm/qd-dbp1m-perf-0925` (T4 with T3 passing, 1.26x to 1.44x at matched recall;
+the account of the licence is in `decisions.md`). What that page publishes
+wrongly, or still refuses and could not:
 
 **1. strawmANN's SQ8 bounds clip dbpedia's dominant dimension, and the
 score carries the loss.** T4 on both d=1536 pages: `sq8/strawmann |Δscore|
@@ -34,21 +36,6 @@ recall is unaffected, which is why W6 matched; what the clipping costs is the
 `ef`-sized rescore pool that compensates for it (3.3 MB of DRAM per SQ8 query
 against Qdrant's 0.5). The decision is whether `quantile` means what Qdrant's
 does; the measurement after it is the SQ8 sweep and W6 on both corpora.
-
-**2. The SQ8 recall controls page the collection back in on the Qdrant arm.**
-`W6-ef32` folded at a 41% spread and `W6-ef64` is refused as drift (+19%,
-monotone across passes). The rows carry the cause and the fold does not read
-it: Qdrant's passes 1 and 2 took 152,697 and 254,138 major faults on `W6-ef32`
-(9.7k and 17.8k on `ef64`, 5.4k and 8.9k on `ef128`) and pass 3 took one.
-`bench6` is evicted by `W7-upload`, `W8-upload` and `W9`'s 6 GB scan before the
-`W6-ef` sweep reaches it, so the first rows of the sweep measure a page-in on
-a row that claims `cached` residency, and `aggregate._rep_drift` reads the
-monotone slide as a trend. strawmANN's arm pins its arena and took nine.
-Two ratios refused on the headline page. The sweep now runs straight after
-`W6`, before anything can evict `bench6` (2026-09-24); the 0925 pair's
-`W6-ef` major faults and spreads say whether that was all of it. If a pass
-still pages in, the other fix remains: drop a pass whose `major_faults` on a
-cached search row exceed a floor.
 
 **3. W11's write rate is fixed, and its search is sized to fit.** The 25 s
 and 60 s spans were sized for d=128, where a 50,000-query search ends inside
@@ -102,25 +89,23 @@ within 5%. Something Qdrant does per visited node scales with the dimension.
 The 1.73x is licensed and correct as measured; what it measures is not known,
 and if it is a setting rather than a path the ratio is being read wrongly.
 
-**7. Filtered search is the licensed loss; at 10% it is the dispatch.**
-`W12-sel10` is flat at 166 qps from `ef` 64 with recall 1.0000 at every `ef`:
-strawmANN scores the 20,054 matches directly. Qdrant's curve moves with `ef`
-(2,226 to 288 qps, recall 0.76 to 0.999), so it walks the graph under the
-filter, and at matched recall strawmANN reads 0.34x to 0.59x. The scan was
-not the slow part. Profiled on 2026-09-24, 43% of W12-sel1's samples were
-`payload.Store.select` re-reading every matching blob, which the append-only
-bench12 never needed; trusting exact postings for a single-condition filter
-took sel1 from 1,194 to 1,854 qps and sel10 from 167 to 285 (one pass each,
-not a gated run), and sel1 is now 81% distance kernel. Software prefetch in
-`searchSelected` was measured in the same session and lost (0.75x to 0.80x).
-What is left at 10% is 123 MB scanned per query against Qdrant's filtered
-walk. strawmANN's walk scores every neighbour the filter rejects
-(`hnsw.zig`: the filter gates admission, not expansion), so the graph cannot
-take over from the scan until it stops doing that (ACORN-style: skip scoring
-rejected neighbours, hop through them), and `plainFilteredSearch`'s cost model
-changes with it. The next night run's W12 rows are the measurement of record.
-`docs/workloads.md` still quotes ~14,800 q/s for the 1% scan; correct it from
-that run.
+**7. At 1% selectivity strawmANN offers only the exact answer.** On 0925,
+with trusted postings (202841c) and the ACORN-1 walk (15bddf7), `W12-sel10`
+reads 811 q/s and leads at matched recall up to 0.988 (1.44x to 1.78x; not
+established above 0.994), and `W12-sel1` reads 1,873. What is left is sel1's
+sweep: strawmANN scans the ~1,900 matches at every `ef`, flat at recall
+1.0000, because below `1/m0` the walk strands (0.888 recall at twice the
+cost, in-process), while Qdrant's walk trades recall for speed and at `ef` 64
+serves 2,383 q/s at 0.9963. That point reads 0.79x and is a trade strawmANN
+has no setting for; at equal recall it leads (1.61x at 0.9999). The query is
+latency-bound at the client's two in flight, 0.96 ms on one core reading 11.7
+MB of scattered rows at about 12 GB/s. Two ways to offer the trade were looked
+at on 2026-09-25 and not taken: an SQ8 pre-score needs codes `bench12` does not
+have (it is unquantized) and a first stage that item 1 has not fixed yet;
+splitting one query's scan across the idle workers would cut the latency but
+is an occupancy choice, not a cheaper scan, and is the user's call. Software
+prefetch in `searchSelected` was measured on 2026-09-24 and lost (0.75x to
+0.80x).
 
 **8. The exhaustive pending tail costs 15x at d=1536.** `W11-steady` is refused
 (item 3), but its counters are readable: during a 5% append strawmANN's search
@@ -133,12 +118,26 @@ insertion on exactly this ground. Live insertion exists behind `-Dlive-insert`
 `W11-steady` at d=1536 with it on, once item 3 makes the row measure a
 concurrent write.
 
-**9. Qdrant's published `W2` was measured beside `bench1`'s index build.**
-The settle after `W1` timed out at 180 s on every pass with Qdrant still on
-7.0 cores, building the index of a collection nothing reads again, and `W2`
-started under it: Qdrant's 657.7 s Time-to-Green and the 2.63x upload-and-index
-ratio include that. `fullrun` now drops `bench1` between `W1` and `W2` instead
-of settling (`workloads.rows_writing_dead_collections`), and the settle stamp
-records it, so the next pair is STALE against 0924 by design. That pair's `W2`
-is the clean figure; until then read 657.7 s as an upper bound on Qdrant's
-build and the 2.63x as an upper bound on strawmANN's lead.
+**10. Exact search loses at d=1536, on memory, not compute.** `W9` is 1.31x on
+sift1m and 0.77x on dbpedia-openai-1m. strawmANN's IPC falls from 2.06 to
+0.26 on 7 cores and 9.8 q/s x the 6.08 GB arena is about 60 GB/s against a
+65 GB/s bus: each query streams the whole arena from DRAM, where on sift1m's
+0.5 GB the concurrent scans shared lines (118 GB/s implied against 73). Qdrant
+implies ~78 GB/s from 4 cores. The 2026-09-22 decision against a cross-request
+gather rested on that sharing, which is gone at 6 GB, and it tested only a
+gather onto one worker. `bench/harness/w9_ab.py` measures three arms (7
+workers, 4 workers, and 8 queries per request as the ceiling of a gather split
+across workers) plus a profile; a 100K smoke run read 101 / 136 / 470 q/s and
+90% of cycles in the dot kernel. The 1M run is scheduled; it says whether
+fewer streams or one shared pass is the lever, and whether 09-22 reopens for
+d=1536.
+
+**11. strawmANN's index build competes with its own search during `W11`.** On
+0925 strawmANN's `W11` served 102 q/s against Qdrant's 216, with 1,568 s of
+run-queue wait and 528,701 involuntary context switches over the row.
+`server.log` shows the rebuilds the append provoked running `threads=8` on the
+same 8 CPUs as the 7 search workers (`buildIndex` takes its thread count from
+its caller). Capping an extending build's threads, or its priority, while
+queries are in flight trades a longer pending tail (item 8) against less
+contention; which way it nets is an in-process measurement and then a night
+run. Not a harness question: it changes `engine_binary`, not the stamp.

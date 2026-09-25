@@ -1400,7 +1400,9 @@ def table() -> list[Workload]:
     # file-backed `bench6` out of the page cache: on qd-dbp1m-perf-0924 passes
     # 1 and 2 took 152,697 and 254,138 major faults on W6-ef32 and pass 3 took
     # one, so the first rows of the sweep measured a page-in and two ratios
-    # were refused as drift (findings 2). strawmANN pins its arena and took nine.
+    # were refused as drift. strawmANN pins its arena and took nine. On
+    # qd-dbp1m-perf-0925, the first pair with this order, both rows took zero
+    # major faults and folded at 0.3% and 0.2% (findings 2, closed).
     for ef in (32, 64, 128, 256, 512):
         rows.append(Workload(
             f"W6-ef{ef}", f"SQ8 recall control, ef={ef} (latency only)",
