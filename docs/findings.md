@@ -56,6 +56,22 @@ candidates (`decisions.md`). A night pair run with `OVERSAMPLING_POLICY=pool`
 is the measurement: equal recall per row on all three encodings if the pool
 was the whole gap, and any gap left is the encoders'.
 
+**12. Every published native-Qdrant pair ran Qdrant's development profile.**
+`fullrun.start_qdrant_binary` never set `RUN_MODE`, Qdrant's `settings.rs`
+defaults it to `development`, and started from its checkout it merged
+`config/development.yaml`: `max_search_threads: 4`, audit logging of every
+request to `./storage/audit` (5.6M lines during the 0925 night), `log_level:
+DEBUG`, and `feature_flags: all`. Qdrant's Docker image sets `production`,
+which is what a user runs. Found by the 2026-09-25 review; fixed the same day
+(3cd5588). It affects the sift1m 0923 and dbpedia-openai-1m 0924 and 0925
+pages, and every ratio on them leans toward strawmANN by an amount not yet
+measured: most on the rows that run many requests at once (W4, W5, W9, the
+open-loop arms), where four search threads cap Qdrant outright, and some on
+every row, which paid an audit write and debug logging per request (a lead
+for item 6's 0.63 ms of server p50). The next production-mode pair of each
+corpus is the measurement, and until then those pages' Qdrant figures
+describe a development build's configuration, not Qdrant's.
+
 ### P2. What the licensed numbers are made of, and what the run costs
 
 **5. The saturating win at d=1536 is two halves, one of them narrowed.** W4
@@ -68,19 +84,15 @@ are waiting on their own misses, not on the bus. The next-candidate prefetch
 where the latency it exists to hide is the whole cost. That half is open.
 
 Qdrant, on the same row and the same client parallelism of 64, fills 4.47 of
-its 8 pinned cores. Read in its source at the measured commit (878843e6e) on
-2026-09-25, nothing caps its searches below 8: `max_search_threads: 0` builds
-a `search-io` blocking pool of `num_cpus x 4` = 32 threads, and
-`AdaptiveSearchHandle` moves to the 8-thread `search-cpu` pool only above 0.9
-x `num_cpus` of process CPU (7.2 cores), so at 4.46 it never does; there is no
-search semaphore and no gRPC concurrency limit. The row agrees that the
-threads are not waiting for a CPU but blocked: 0.2 s of run-queue wait over
-the row, zero major faults, and 5.85 voluntary context switches per query
-against strawmANN's 1.8. What they block on is one of two things the counters
-cannot separate: the hand-off from the gRPC runtime through the search
-runtime's single async worker to the blocking pool and back, or lock waits on
-the segment. An off-CPU profile of Qdrant's search threads under W4 decides it,
-and `max_search_threads: 8`, which removes the adaptive switch, is the A/B.
+its 8 pinned cores. This file said on 2026-09-25 that its threads block; that
+was wrong. Read in its source (878843e6e), `max_search_threads: 0` would build
+a 32-thread `search-io` pool, but the harness never set `RUN_MODE`, which
+Qdrant defaults to `development`, and run from its checkout it layered
+`config/development.yaml`'s `max_search_threads: 4` over that (item 12). Four
+search threads and the gRPC runtime are the 4.46 cores, and W9's 4.01 is the
+same cap. The half of the 1.38x that is "Qdrant leaves cores idle" is
+therefore the harness's, not Qdrant's, until a production-mode pair says what
+Qdrant does with eight.
 
 **6. Qdrant's single-query cost doubles at d=1536: its fp32 kernel is 256-bit,
 which explains the instructions and not all the cycles.** W3 flips between the
@@ -101,7 +113,8 @@ d=1536 but only 1.02x the cycles L1-hot and 1.25x DRAM-cold, which bounds the
 width at about 0.6M of the 1.47M-cycle gap. Two leads on the remainder:
 Qdrant's vector file carries a 4-byte header, so its vectors are 4-byte
 aligned and a share of its loads split cache lines; and its server-side p50
-is 0.63 ms longer (1.47 against 0.84 ms), about the whole remainder. W3 on
+is 0.63 ms longer (1.47 against 0.84 ms), about the whole remainder, and
+that server ran with audit logging and DEBUG logs on (item 12). W3 on
 strawmANN's AVX2 build at d=1536 is the measurement: near Qdrant's cycles and
 the ratio is the width, near its own and the rest is elsewhere. Either way the
 1.73x is correct as measured, and part of what it measures is that strawmANN
