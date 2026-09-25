@@ -1475,15 +1475,30 @@ not buying anything there either.
   bounds undo: a stage 1 that orders at 0.947 needs less of it than one at
   0.810. How much less is a measurement, not a deduction.
 
-### Not changed here
+### Changed, 2026-09-25
 
-The fix is a semantics choice, not a kernel change: read `quantile` as Qdrant
-reads it, cutting `⌊vectors·(1-q)/2⌋` values per end, so the same request
-builds the same bounds on both engines and the comparison is of encoders
-rather than of two meanings of one word. It changes the SQ8 store of every
-quantized collection and the sweep behind W6, so it goes in with the sweep
-re-run on both corpora and a test that holds a shared dominant dimension.
-`findings.md` item 1 carries it.
+The fix is a semantics choice, not a kernel change: `quantile` is now read as
+Qdrant reads it, so the same request builds the same bounds on both engines
+and the comparison is of encoders rather than of two meanings of one word.
+`scalar.train` ports `find_quantile_interval` (`lib/quantization/src/
+quantile.rs`, read at `cca901aae`) to the digit: the cut is
+`(vectors as f32 · (1 − q) / 2) as usize`, so 5,000 vectors at 0.99 cut 24
+rather than the 25 above (`1 − 0.99` is 0.00999999 in f32); it is at least 1;
+the bounds are the range strictly inside `(s[cut], s[len − cut])`; and under
+127 vectors or at `q ≥ 1` there is no interval and the bounds are the range.
+
+Considered and not taken: keeping the rule and documenting it (T4 keeps a
+0.49 offset and the knob keeps two meanings, and the rule costs overlap on
+sift1m too, 0.972 against 0.985), and per-dimension bounds (the best fidelity,
+but a different encoder from Qdrant's by design, and it breaks the single-`lo`
+identity `SymmetricQuery.dot` reconstructs with).
+
+Two tests hold it: the cut indices against Qdrant's arithmetic, and a
+dimension every vector shares surviving training; both fail on the old rule.
+What it does to the rows is the next pair's to say, on both corpora: T4's
+`|Δscore|` should fall to about 0.001 and the stage-1 overlap rise, recall
+should not move (rescore stays on), and W6's throughput may move either way,
+since the walk navigates on the codes. `findings.md` item 1 carries that.
 
 ## W11's write rate is the row, and the search is sized to it, decided 2026-09-25
 

@@ -23,18 +23,21 @@
 //! ## How this SQ8 differs from Qdrant 1.19's
 //!
 //! A recall-matched SQ8 comparison against Qdrant is **not** like-for-like;
-//! two choices differ, both deliberate (§6.7 asks for quantile bounds and
-//! for both query-side variants to be measured), neither numerically equal to
-//! Qdrant's:
+//! the levels differ on purpose (§6.7 asks for both query-side variants to be
+//! measured), and the bounds are now trained as Qdrant trains them:
 //!
 //! | | strawmann | Qdrant 1.19 (`lib/quantization/src/encoded_vectors_u8.rs`) |
 //! |---|---|---|
 //! | levels | 256: `alpha = (hi − lo) / 255`, codes 0..255 | 127: `alpha = (hi − lo) / 127`, codes 0..127 (an `i8`-safe range) |
 //! | query side | `SymmetricQuery`: the query is quantized once with the same bounds and stage 1 is integer (`vpdpbusd`), which is what the store serves; `AsymmetricQuery` keeps the query in fp32 and is the measured alternative | query is quantized with the same bounds, so both sides carry quantization error |
-//! | bounds | true order statistics: the `0.5%`/`99.5%` values of the training sample | `quantile.rs::find_quantile_interval` cuts `⌊vectors·(1−q)/2⌋` *values* off each end of a `vectors × dim` sample (5 of ~768k at q=0.99, 1000 vectors, d=768), then min/max of the rest, so the bounds are effectively min/max |
+//! | bounds | Qdrant's rule, ported (`train`): `⌊vectors·(1−q)/2⌋` *values* off each end of the pooled sample, then the range of the rest | `quantile.rs::find_quantile_interval`: the same, so the bounds are effectively min/max |
 //!
+//! The bounds were the order statistics at `0.5%`/`99.5%` of the *values*
+//! until 2026-09-25. "Tighter on heavy-tailed data", as this said, and on
+//! dbpedia-openai-1m, whose tails are whole dimensions every vector shares,
+//! tighter meant three dimensions clipped out of every vector (`train`).
 //! So per comparison strawmann's SQ8 carries less rounding than Qdrant's
-//! (twice the levels) and its bounds are tighter on heavy-tailed data. Read an
+//! (twice the levels) over the same bounds. Read an
 //! SQ8-vs-SQ8 row as "each engine's scalar quantization at the same recall",
 //! not as the same algorithm on two engines. The query side used to differ
 //! too (fp32 asymmetric); it was switched (findings 29), and
@@ -94,27 +97,43 @@ pub const default_quantile: f32 = 0.99;
 
 /// Train global bounds from a sample of vectors.
 ///
-/// `quantile` is the *central* fraction retained: 0.99 clips the extreme 0.5%
-/// at each end. `scratch` must hold at least `sample.len` floats and is used
-/// for the selection; the caller owns it so training allocates nothing.
+/// `quantile` is read as Qdrant reads it (`find_quantile_interval`,
+/// `lib/quantization/src/quantile.rs`, verified in source): from the pooled
+/// values of the sample, cut `⌊vectors·(1 − q)/2⌋` at each end, a count of
+/// *vectors* and not of values, and take the range of what is left. At
+/// d=1536 that is 24 values of a 5,000-vector sample's 7.7 million.
+///
+/// It was the order statistics at `(1 − q)/2` of the *values*, 0.5% at each
+/// end, which on dbpedia-openai-1m clipped three dimensions every vector
+/// shares (component 194 sits at -0.64 in all of them): the bounds landed at
+/// ±0.05, the reconstruction lost 0.49 of a 0.81 top-10 dot, and the same
+/// `quantile: 0.99` on the wire meant two encoders (decisions, 2026-09-25).
+///
+/// `scratch` must hold at least `sample.len` floats and is used for the
+/// selection; the caller owns it so training allocates nothing.
 pub fn train(sample: []const f32, quantile: f32, dim: usize, scratch: []f32) Params {
     std.debug.assert(scratch.len >= sample.len);
     @memcpy(scratch[0..sample.len], sample);
     const s = scratch[0..sample.len];
     std.mem.sort(f32, s, {}, std.sort.asc(f32));
 
-    // One `clip` count applied at both ends, so `quantile` means what the doc
-    // says: deriving `hi_idx` separately as `⌈(1 − tail)·n⌉` clipped one fewer
-    // at the top than `⌊tail·n⌋` did at the bottom. Rounded, in f64, because
-    // the f32 `0.99` sits slightly above 0.99 and a floor of `tail·n` computed
-    // in f32 lands just under 1 at n = 200, clipping nothing.
-    const tail: f64 = (1.0 - @as(f64, quantile)) / 2.0;
-    const clip: usize = @intFromFloat(@max(0.0, @round(tail * @as(f64, @floatFromInt(s.len)))));
-    var lo_idx: usize = clip;
-    var hi_idx: usize = s.len - 1 -| clip;
-    if (lo_idx >= hi_idx) {
-        lo_idx = 0;
-        hi_idx = s.len - 1;
+    // Qdrant's arithmetic to the digit, since the bounds are what the two
+    // engines are compared on: the cut in f32, truncated, so 5,000 vectors at
+    // 0.99 cut 24 and not 25; at least one; and the range of the values
+    // strictly inside `(s[cut], s[len - cut])`, which keeps `s[cut + 1]` at
+    // the bottom and `s[len - 1 - cut]` at the top. Under 127 vectors, or at
+    // `quantile >= 1`, Qdrant has no interval and the bounds are the range.
+    const vectors = if (dim > 0) s.len / dim else s.len;
+    var lo_idx: usize = 0;
+    var hi_idx: usize = s.len -| 1;
+    if (vectors >= 127 and quantile < 1.0 and s.len >= 4) {
+        const cut_f = @as(f32, @floatFromInt(vectors)) * (1.0 - quantile) / 2.0;
+        var cut: usize = @intFromFloat(@max(0.0, cut_f));
+        cut = @max(@min((s.len - 1) / 2, cut), 1);
+        if (s.len - 2 * cut - 1 >= 2) {
+            lo_idx = cut + 1;
+            hi_idx = s.len - 1 - cut;
+        }
     }
 
     const lo = s[lo_idx];
@@ -331,7 +350,8 @@ test "training clips outliers rather than letting them stretch the range" {
     values[0] = 1000.0;
     values[1] = -1000.0;
 
-    const p = try trainOn(testing.allocator, &values, 128);
+    // 1,250 vectors of 8: enough for an interval (Qdrant's floor is 127).
+    const p = try trainOn(testing.allocator, &values, 8);
 
     // The bounds must reflect the bulk of the distribution, not the outliers.
     try testing.expect(p.lo > -10.0);
@@ -340,22 +360,62 @@ test "training clips outliers rather than letting them stretch the range" {
     try testing.expect(p.maxComponentError() < 0.05);
 }
 
-test "training clips the same number of values at each end" {
-    // Ascending ramp, so the index of the chosen bound is readable off the
-    // value. `hi` must sit as far from the top as `lo` sits from the bottom;
-    // the old `⌈(1 − tail)·n⌉` clipped one fewer at the top.
-    inline for (.{ .{ 200, 1 }, .{ 10000, 50 } }) |case| {
+test "training cuts what Qdrant's find_quantile_interval cuts" {
+    // Ascending ramp, so the index of each chosen bound is readable off its
+    // value. `(values, dim, lo index, hi index)`: 1,250 vectors cut
+    // `trunc(1250 · (1 − 0.99f32) / 2) = 6`, keeping s[7] and s[len − 7]; 200
+    // vectors cut 0, raised to 1; under 127 vectors there is no interval.
+    inline for (.{
+        .{ 10000, 8, 7, 9993 },
+        .{ 800, 4, 2, 798 },
+        .{ 400, 4, 0, 399 },
+    }) |case| {
         const n = case[0];
-        const expect_clip = case[1];
         const values = try testing.allocator.alloc(f32, n);
         defer testing.allocator.free(values);
         const scratch = try testing.allocator.alloc(f32, n);
         defer testing.allocator.free(scratch);
         for (values, 0..) |*v, i| v.* = @floatFromInt(i);
-        const p = train(values, 0.99, 8, scratch);
-        try testing.expectEqual(@as(f32, expect_clip), p.lo);
-        try testing.expectApproxEqAbs(@as(f32, n - 1 - expect_clip), p.lo + p.alpha * 255.0, 1e-3);
+        const p = train(values, 0.99, case[1], scratch);
+        try testing.expectEqual(@as(f32, case[2]), p.lo);
+        try testing.expectApproxEqAbs(@as(f32, case[3]), p.lo + p.alpha * 255.0, 1e-3);
     }
+    // In f32, `1 − 0.99` is 0.00999999, so 5,000 vectors cut 24, not 25.
+    const cut_f = @as(f32, 5000.0) * (1.0 - @as(f32, 0.99)) / 2.0;
+    try testing.expectEqual(@as(usize, 24), @as(usize, @intFromFloat(cut_f)));
+}
+
+test "a dimension every vector shares survives training" {
+    // dbpedia-openai-1m's component 194 is -0.64 in every vector. At d=256 it
+    // is 0.39% of the pooled values, under the 0.5% the old rule clipped, so
+    // the old bounds cut it to the bulk's range and every vector lost it.
+    const dim = 256;
+    const n = 400;
+    const values = try testing.allocator.alloc(f32, n * dim);
+    defer testing.allocator.free(values);
+    const scratch = try testing.allocator.alloc(f32, n * dim);
+    defer testing.allocator.free(scratch);
+    var prng = std.Random.DefaultPrng.init(0x5c3);
+    const rnd = prng.random();
+    for (0..n) |v| {
+        for (0..dim) |d| values[v * dim + d] = rnd.floatNorm(f32) * 0.03;
+        values[v * dim] = -0.64 + rnd.floatNorm(f32) * 0.01;
+    }
+    const p = train(values, 0.99, dim, scratch);
+    try testing.expect(p.lo < -0.6);
+    // Every vector keeps the dimension to half a step, except the two lowest
+    // samples the rule clips by design (400 vectors cut 1, keeping s[2]).
+    var clipped: usize = 0;
+    for (0..n) |v| {
+        const x = values[v * dim];
+        const back = p.dequantize(p.quantizeOne(x));
+        if (x < p.lo) {
+            clipped += 1;
+            continue;
+        }
+        try testing.expect(@abs(back - x) <= p.maxComponentError() + 1e-6);
+    }
+    try testing.expect(clipped <= 2);
 }
 
 test "min/max bounds would be far worse, which is why quantiles are used" {

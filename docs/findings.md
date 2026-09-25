@@ -15,27 +15,19 @@ The d=1536 comparison is licensed since 2026-09-24, and the current page is
 the account of the licence is in `decisions.md`). What that page publishes
 wrongly, or still refuses and could not:
 
-**1. strawmANN's SQ8 bounds clip dbpedia's dominant dimension, and the
-score carries the loss.** T4 on both d=1536 pages: `sq8/strawmann |Δscore|
-p50=4.866e-1` against the fp64 oracle, Qdrant's SQ8 `1.943e-3`, and 38% of
-strawmANN's stage-1 top-10 ids are not the fp32 top-10 against Qdrant's 21%.
-The differ measures with `rescore=false`, so this is the quantized score
-itself, and the cause is measured (`decisions.md`, 2026-09-24): `scalar.train`
-clips the 0.5% and 99.5% *values* of the pooled sample, and dbpedia's
-component 194 sits at -0.64 in every vector (std 0.013), with 954 at +0.20 and
-1120 at -0.16. Three dimensions carry 0.48 of a typical 0.81 top-10 dot, each
-is 0.065% of the values, so all three are clipped to `lo=-0.050`, and the
-reconstruction loses the 0.4876 they carried. Qdrant reads the same
-`quantile: 0.99` as "cut `⌊vectors·(1-q)/2⌋` values per end", 25 of 7.7
-million, keeps the dimension, and lands at `lo=-0.67`. Simulated on 50,000
-vectors, Qdrant's rule takes strawmANN's SQ8 to `|Δ|` 0.0010 and the stage-1
-top-10 overlap from 0.810 to 0.947; on sift1m the same change moves overlap
-from 0.972 to 0.985. One knob, two semantics, so the "same configuration" was
-never the same. With `rescore` on (the default) the returned score is fp32 and
-recall is unaffected, which is why W6 matched; what the clipping costs is the
-`ef`-sized rescore pool that compensates for it (3.3 MB of DRAM per SQ8 query
-against Qdrant's 0.5). The decision is whether `quantile` means what Qdrant's
-does; the measurement after it is the SQ8 sweep and W6 on both corpora.
+**1. strawmANN's SQ8 bounds now follow Qdrant's rule; the rows have not been
+measured under it.** T4 on both d=1536 pages read `sq8/strawmann |Δscore|
+p50=4.866e-1` against Qdrant's `1.943e-3`: `scalar.train` clipped 0.5% of the
+pooled *values*, and dbpedia's component 194 sits at -0.64 in every vector, so
+it and two others were clipped out of every vector. Since 2026-09-25
+`scalar.train` ports Qdrant's `find_quantile_interval`, a cut counted in
+vectors (`decisions.md`, 2026-09-25). Simulated, that takes `|Δ|` to 0.0010
+and the stage-1 top-10 overlap from 0.810 to 0.947 on dbpedia and 0.972 to
+0.985 on sift1m. The next pair on each corpus is the measurement: T4's
+`|Δscore|`, the SQ8 recall sweep (which should not move, rescore being on),
+and W6 and its `ef` sweep, whose throughput may move either way because the
+walk navigates on the codes. Until then the published W6 rows are the old
+encoder's.
 
 **3. W11's write rate is fixed, and its search is sized to fit.** The 25 s
 and 60 s spans were sized for d=128, where a 50,000-query search ends inside
