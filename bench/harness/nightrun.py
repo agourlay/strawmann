@@ -35,6 +35,7 @@ import argparse
 import contextlib
 import datetime as dt
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -259,6 +260,8 @@ def main(argv: list[str], root: Path = ROOT) -> int:
            "--perf", "--qdrant-binary", str(binary),
            "--wait-for-gate", f"{WAIT_FOR_GATE_MIN:g}",
            "--strawmann-label", sm, "--qdrant-label", qd]
+    # The one line an analysis otherwise has to reconstruct from this file.
+    log("command: " + shlex.join(cmd))
     out = night / "fullrun.out"
     start = time.monotonic()
     with out.open("w") as f:

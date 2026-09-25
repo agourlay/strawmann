@@ -303,8 +303,10 @@ W11_SPAN_S = float(os.environ.get("W11_SPAN_S", 60.0))
 
 
 def w11_throttle(points: int, span_s: float) -> int:
-    """bfb's `-T`, in batches per second, so `points` take `span_s` to append."""
-    return max(1, round(points / W11_BATCH / span_s))
+    """bfb's `-T`, in batches per second, so `points` take at least `span_s`
+    to append. Rounded down: a rate rounded up ends the append before the
+    span, and the search it was sized for outlives the writer."""
+    return max(1, math.floor(points / W11_BATCH / span_s))
 
 
 #: W11-steady's write volume, as a fraction of the corpus, and below
@@ -466,6 +468,42 @@ def required_capacity() -> int:
     last row needs, and the server refuses the row rather than growing.
     """
     return max(upload_n() + w11_n() + w11_steady_n(), w12_n())
+
+def strawmann_start_requirements(comm: str, wanted: set[str]) -> list[str]:
+    """What strawmANN must have been started with for the rows about to run.
+
+    Printed on every invocation until 0925, including Qdrant's nine and the
+    ones that ran neither W4 nor W11, and with a sum that left W11-steady out
+    of a total that included it.
+    """
+    if not comm.startswith("strawmann"):
+        return []
+    runs = lambda pred: not wanted or any(pred(r) for r in wanted)
+    out = []
+    # The socket demand, stated before the run rather than discovered as a
+    # bare "transport error" on W4. bfb opens roughly `threads x
+    # connections`; a server with fewer closes the excess before the HTTP/2
+    # preface, and the client cannot tell that from an engine fault.
+    if runs(lambda r: r == "W4" or r.startswith("W4-")):
+        want_sockets = 16 * W4_CONNS
+        out.append(f"  -> W4 will open ~{want_sockets} sockets (-t 16 -c {W4_CONNS}). "
+                   f"strawmann must be started with io_threads x connections >= "
+                   f"{want_sockets}, e.g. --connections {want_sockets}")
+    # Name the collection that actually binds, not one of the two. The
+    # message used to explain the requirement with W11's arithmetic
+    # regardless, so at a smoke scale it printed a correct number beside a
+    # reason that did not produce it.
+    if runs(lambda r: r in ("W2", "W11", "W11-steady", "W12-upload")):
+        need = required_capacity()
+        why = (f"W11-steady and W11 append {w11_steady_n():,} + {w11_n():,} on top of "
+               f"W2's {upload_n():,} in bench2"
+               if upload_n() + w11_n() + w11_steady_n() >= w12_n()
+               else f"W12 loads {w12_n():,} into bench12")
+        out.append(f"  -> {why}, so the largest single collection reaches {need:,}. "
+                   f"strawmann must be started with --capacity {need} or that row "
+                   f"fails with RESOURCE_EXHAUSTED")
+    return out
+
 
 #: bfb opens roughly `threads x connections` sockets. `-t 16 -c 8` wants ~128;
 #: a server with fewer closes the excess *before* the HTTP/2 preface, so the
@@ -2018,8 +2056,9 @@ class Result:
     #: filtered queries scanned.
     payload_index_suppressed: bool = False
     #: W11: how much of the search phase (bfb's `duration_secs`) the append
-    #: was in flight for. Below `W11_MIN_OVERLAP` the row is mostly a search of a quiet
-    #: collection and is not the row §4 describes; `compare` refuses it.
+    #: was in flight for. Below `W11_MIN_OVERLAP` the rest of the search ran
+    #: against the rebuild the append provoked, not a concurrent write, and is
+    #: not the row §4 describes; `compare` refuses it.
     write_overlap_pct: float | None = None
 
 
@@ -3416,25 +3455,8 @@ def main(argv: list[str]) -> int:
             else:
                 print("  -> storage directory unknown, reported as such rather "
                       "than as zero. Pass --storage <path> or set STORAGE_DIR")
-        # The socket demand, stated before the run rather than discovered as a
-        # bare "transport error" on W4. bfb opens roughly `threads x
-        # connections`; a server with fewer closes the excess before the HTTP/2
-        # preface, and the client cannot tell that from an engine fault.
-        want_sockets = 16 * W4_CONNS
-        print(f"  -> W4 will open ~{want_sockets} sockets (-t 16 -c {W4_CONNS}). "
-              f"strawmann must be started with io_threads x connections >= "
-              f"{want_sockets}, e.g. --connections {want_sockets}")
-        # Name the collection that actually binds, not one of the two. The
-        # message used to explain the requirement with W11's arithmetic
-        # regardless, so at a smoke scale it printed a correct number beside a
-        # reason that did not produce it.
-        need = required_capacity()
-        why = (f"W11 appends {w11_n():,} on top of W2's {upload_n():,} in bench2"
-               if upload_n() + w11_n() >= w12_n()
-               else f"W12 loads {w12_n():,} into bench12")
-        print(f"  -> {why}, so the largest single collection reaches {need:,}. "
-              f"strawmann must be started with --capacity {need} or that row "
-              f"fails with RESOURCE_EXHAUSTED")
+        for line in strawmann_start_requirements(probe.comm, wanted):
+            print(line)
 
     if perf_set:
         # Before the rows, not discovered as a table of blanks after them.

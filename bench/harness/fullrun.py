@@ -1284,7 +1284,8 @@ def settle(what: str) -> None:
     to report.
     """
     cores = os.cpu_count() or 1
-    deadline = time.monotonic() + SETTLE_TIMEOUT_S
+    t0 = time.monotonic()
+    deadline = t0 + SETTLE_TIMEOUT_S
     recent: list[float] = []
     announced = False
     while True:
@@ -1299,7 +1300,8 @@ def settle(what: str) -> None:
             # the same instrument the gate uses for the one that matters.
             if not (busy := foreign_load()):
                 if announced:
-                    print(f"  settled at load {load1} ({pct}% per core)", flush=True)
+                    print(f"  settled at load {load1} ({pct}% per core) after "
+                          f"{time.monotonic() - t0:.0f} s", flush=True)
                 return
             if not announced:
                 print(f"  waiting for {' '.join(busy)} before {what}: the load "
@@ -1320,8 +1322,9 @@ def settle(what: str) -> None:
                 # went into six rows' stamps. So the plateau test asks the
                 # gate's own instrument before believing itself.
                 if not (busy := foreign_load()):
-                    print(f"  load has stopped falling at {load1} ({pct}% per core); "
-                          f"that is this machine's floor, measuring {what}", flush=True)
+                    print(f"  load has stopped falling at {load1} ({pct}% per core) "
+                          f"after {time.monotonic() - t0:.0f} s; that is this "
+                          f"machine's floor, measuring {what}", flush=True)
                     return
                 if not announced:
                     print(f"  waiting for {' '.join(busy)} before {what}: a plateau "

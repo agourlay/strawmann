@@ -522,10 +522,49 @@ class WorkloadTests(unittest.TestCase):
             self.assertIn("-T", bg, f"{wid} throttles its appender")
             rate = int(bg[bg.index("-T") + 1])
             batches = volume / int(bg[bg.index("-b") + 1])
-            self.assertAlmostEqual(batches / rate, span, delta=0.05 * span,
-                                   msg=f"{wid} should append over ~{span:.0f} s")
+            self.assertGreaterEqual(batches / rate, span,
+                                    msg=f"{wid} should append over at least {span:.0f} s")
+            self.assertLess(batches / rate, 2 * span,
+                            msg=f"{wid} should append over about {span:.0f} s")
             self.assertEqual(int(bg[bg.index("-n") + 1]), volume,
                              f"{wid}'s write volume is untouched")
+
+    def test_start_requirements_are_strawmanns_and_only_for_rows_that_need_them(self):
+        """0925 printed both lines on all 18 invocations, Qdrant's included,
+        and "appends 198,000 on top of W2's 990,000 ... reaches 1,237,500",
+        a sum that left out W11-steady's 49,500."""
+        w = self.w
+        self.assertEqual(w.strawmann_start_requirements("qdrant", set()), [])
+        self.assertEqual(w.strawmann_start_requirements("qdrant", {"W4", "W11"}), [])
+        full = w.strawmann_start_requirements("strawmann", set())
+        self.assertEqual(len(full), 2)
+        self.assertIn("--connections", full[0])
+        cap = full[1]
+        self.assertIn(f"--capacity {w.required_capacity()}", cap)
+        # The sum it states is the total it names.
+        self.assertIn(f"{w.w11_steady_n():,} + {w.w11_n():,} on top of W2's {w.upload_n():,}", cap)
+        self.assertEqual(w.w11_steady_n() + w.w11_n() + w.upload_n(), w.required_capacity())
+        self.assertEqual(w.strawmann_start_requirements("strawmann-avx5", {"W3", "W10-ef64"}), [])
+        only_w4 = w.strawmann_start_requirements("strawmann", {"W4-sat50"})
+        self.assertEqual(len(only_w4), 1)
+        self.assertIn("sockets", only_w4[0])
+        only_w11 = w.strawmann_start_requirements("strawmann", {"W11-steady"})
+        self.assertEqual(len(only_w11), 1)
+        self.assertIn("--capacity", only_w11[0])
+
+    def test_the_throttle_never_ends_the_append_before_its_span(self):
+        """0925 resolved W11 at 431 s and ran it at 396 s: `-T` was rounded
+        up from 4.59 to 5, and strawmANN's 490 s search outlived the writer
+        (82% overlap)."""
+        w = self.w
+        self.assertEqual(w.w11_throttle(198_000, 431.0), math.floor(198_000 / w.W11_BATCH / 431.0))
+        for points in (1, 49_500, 50_000, 198_000, 200_000):
+            for span in (1.0, 19.0, 25.0, 60.0, 247.0, 256.0, 431.0, 612.0, 5_000.0):
+                rate = w.w11_throttle(points, span)
+                self.assertGreaterEqual(rate, 1)
+                if points / w.W11_BATCH / span >= 1:
+                    self.assertGreaterEqual(points / w.W11_BATCH / rate, span,
+                                            f"{points} points over {span} s")
 
     def test_w11_policy_and_min_duration_exclusion(self):
         w = self.w
@@ -1745,6 +1784,38 @@ class FullrunRowInvocationTests(unittest.TestCase):
                 self.assertEqual(self.f.foreign_load(), expected)
 
 
+    def _settle(self, loads: list[str], busy=()) -> str:
+        """`settle` over a scripted `/proc/loadavg`, a clock that advances a
+        poll per reading of it, and the gate's instrument saying `busy`."""
+        f = self.f
+        clock = itertools.count(0.0, f.SETTLE_POLL_S)
+        reads = iter(loads)
+        out = io.StringIO()
+        with mock.patch.object(f.Path, "read_text", lambda _self: next(reads)), \
+                mock.patch.object(f.time, "monotonic", lambda: next(clock)), \
+                mock.patch.object(f.time, "sleep", lambda _s: None), \
+                mock.patch.object(f, "foreign_load", lambda: list(busy)), \
+                mock.patch.object(f.os, "cpu_count", lambda: 24), \
+                contextlib.redirect_stdout(out):
+            f.settle("lbl rows")
+        return out.getvalue()
+
+    def test_settle_says_how_long_it_waited(self):
+        """0925's strawmANN W1-to-W2 gap went from 3 s to ~6 min, and the log
+        could not say how much of it was the settle: it printed the load it
+        settled at and nothing about the time."""
+        text = self._settle(["8.0 1 1 1/1 1\n", "4.0 1 1 1/1 1\n", "1.2 1 1 1/1 1\n"])
+        self.assertRegex(text, r"settled at load 1\.2 \(5% per core\) after [1-9]\d* s")
+        # Already quiet: nothing is announced, so nothing is timed either.
+        self.assertEqual(self._settle(["0.5 1 1 1/1 1\n"]), "")
+
+    def test_a_plateau_says_how_long_it_waited(self):
+        f = self.f
+        loads = ["3.0 1 1 1/1 1\n"] * (f.SETTLE_PLATEAU_POLLS + 1)
+        text = self._settle(loads)
+        self.assertRegex(text, r"load has stopped falling at 3\.0 \(12% per core\) after \d+ s")
+
+
 class FullrunPreflightTests(unittest.TestCase):
     """What `fullrun.py` refuses before it spends the hours.
 
@@ -2714,6 +2785,10 @@ class NightrunTests(unittest.TestCase):
         self.assertIn("--segment-policy equal-work --oversampling-policy defaults --perf", out)
         self.assertIn("--wait-for-gate 120", out)
         self.assertIn("oversampling defaults", log)
+        # The command as run, so the analysis need not rebuild it from source.
+        self.assertRegex(log, r"command: \S+ bench/harness/fullrun\.py .*"
+                              r"--oversampling-policy defaults --perf .*"
+                              r"--strawmann-label sm-sift-perf-0924 --qdrant-label qd-sift-perf-0924\n")
         # The reference is `fullrun`'s `auto`, not a number decided here.
         self.assertNotIn("--rps-reference", out)
         self.assertTrue((night / "report-sift1m-sm-sift-perf-0924-vs-qd-sift-perf-0924-"
