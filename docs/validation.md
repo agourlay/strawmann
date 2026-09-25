@@ -207,7 +207,7 @@ reporting bug, every one was correct about the run it described, and none
 could be removed by editing anything, because each was a property of how that
 run was measured. The causes were tracked down 2026-08-26, the fixes went into
 the harness, and a `--reps 3` run on 2026-09-03
-(`sm/qd-dbp1m-perf-rel-0903`, archived in [`reports/`](reports/)) is the one
+(`sm/qd-dbp1m-perf-rel-0903`, its page retired from [`reports/`](reports/) to git history) is the one
 that tested them. **Four came off. The two that matter did not**, and a
 third run on 2026-09-24 (`sm/qd-dbp1m-perf-0924`, archived) took those off
 too.
