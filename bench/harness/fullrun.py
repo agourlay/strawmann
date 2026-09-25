@@ -865,7 +865,8 @@ def wipe_qdrant_storage() -> bool:
     return True
 
 
-def start_qdrant_binary(server_cpus: str, grpc: int, rest: int) -> str | None:
+def start_qdrant_binary(server_cpus: str, grpc: int, rest: int,
+                        wipe: bool = True) -> str | None:
     """Start a Qdrant *binary* on the same cores, instead of the container.
 
     Same configuration expressed natively: `taskset` for `--cpuset-cpus`,
@@ -883,6 +884,10 @@ def start_qdrant_binary(server_cpus: str, grpc: int, rest: int) -> str | None:
     Run from the root of its own checkout, because Qdrant reads
     `config/config.yaml` relative to the working directory — without that it starts
     on built-in defaults and a storage path the harness never wipes.
+
+    `wipe=False` keeps the storage for a restart of the same binary within one
+    experiment, which reloads its segments instead of paying a full ingest:
+    `qdrant_w4_probe.py` restarts it per arm to change one setting.
     """
     global QDRANT_PROC
     if QDRANT_BINARY is None or not QDRANT_BINARY.exists():
@@ -904,7 +909,7 @@ def start_qdrant_binary(server_cpus: str, grpc: int, rest: int) -> str | None:
         print("  refusing rather than measuring whatever answers there",
               file=sys.stderr)
         return None
-    if not wipe_qdrant_storage():
+    if wipe and not wipe_qdrant_storage():
         return None
 
     cwd = Path(os.environ.get("QDRANT_CWD") or QDRANT_BINARY.parent.parent.parent)

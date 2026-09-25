@@ -199,7 +199,41 @@ def confirm_arm(out: Path, arm: Arm) -> None:
                          f"numbers to this arm.")
 
 
-def run_arm(arm: Arm, rows: list[str], rep: int, port: int) -> Path:
+def server_argv(arm: Arm, port: int, server_cpus: str | None = None) -> list[str]:
+    """The arm's server, pinned to `server_cpus` when given.
+
+    Unpinned, as every table in `docs/isa-matrix.md` was measured, an arm on
+    this hybrid host could land on the Zen 5 or the Zen 5c cluster, whose
+    clocks and L3 differ: a cycles difference that has nothing to do with the
+    ISA. Pinned as `fullrun` pins the published engine: one I/O thread plus
+    the workers inside the set.
+    """
+    argv = [str(arm.binary), "--port", str(port), "--capacity", "1100000",
+            "--max-dim", "2048", "--connections", "64", "--streams", "16",
+            # The probe would run once per arm start and add nothing: it
+            # measures the host, which does not vary across arms.
+            "--no-bandwidth-probe"]
+    if server_cpus:
+        import fullrun
+        workers = max(1, fullrun.cpu_count(server_cpus) - 1)
+        argv += ["--workers", str(workers), "--io-threads", "1", "--pin", "--cpus", server_cpus]
+    return argv
+
+
+def client_argv(port: int, name: str, rows: list[str], client_cpus: str | None = None,
+                perf: str | None = None) -> list[str]:
+    """`workloads.py run` for the arm's rows, on `client_cpus` when given,
+    with the `perf stat` sidecar when asked: an ISA question is a cycles and
+    instructions question, and qps alone cannot say which moved."""
+    argv = [sys.executable, "-u", str(ROOT / "bench/harness/workloads.py"),
+            "run", f"http://localhost:{port}", name,
+            *(["--perf", perf] if perf else []), *rows]
+    return (["taskset", "-c", client_cpus] if client_cpus else []) + argv
+
+
+def run_arm(arm: Arm, rows: list[str], rep: int, port: int,
+            server_cpus: str | None = None, client_cpus: str | None = None,
+            perf: str | None = None) -> Path:
     out = RESULTS / f"{arm.name}-rep{rep}"
     out.mkdir(parents=True, exist_ok=True)
     stale = kill_stale_servers()
@@ -209,13 +243,8 @@ def run_arm(arm: Arm, rows: list[str], rep: int, port: int) -> Path:
         raise SystemExit(f"port {port} is still in use; refusing to run, because "
                          f"bfb would measure whatever is listening there and the "
                          f"numbers would be filed under {arm.name!r}")
-    srv = subprocess.Popen(
-        [str(arm.binary), "--port", str(port), "--capacity", "1100000",
-         "--max-dim", "2048", "--connections", "64", "--streams", "16",
-         # The probe would run once per arm start and add nothing: it measures
-         # the host, which does not vary across arms.
-         "--no-bandwidth-probe"],
-        stdout=(out / "server.log").open("w"), stderr=subprocess.STDOUT)
+    srv = subprocess.Popen(server_argv(arm, port, server_cpus),
+                           stdout=(out / "server.log").open("w"), stderr=subprocess.STDOUT)
     try:
         time.sleep(3)
         if srv.poll() is not None:
@@ -231,8 +260,7 @@ def run_arm(arm: Arm, rows: list[str], rep: int, port: int) -> Path:
         if any(r in rows for r in ("W6", "W7", "W8")):
             setup += [f"W{n}-upload" for n in (6, 7, 8) if f"W{n}" in rows]
         env = dict(os.environ, RESULTS_DIR=str(out), STRAWMANN_ROOT=str(ROOT))
-        r = subprocess.run([sys.executable, "-u", str(ROOT / "bench/harness/workloads.py"),
-                            "run", f"http://localhost:{port}", arm.name, *setup, *rows],
+        r = subprocess.run(client_argv(port, arm.name, [*setup, *rows], client_cpus, perf),
                            env=env, stdout=(out / "run.log").open("w"),
                            stderr=subprocess.STDOUT, timeout=7200)
         # A failed arm used to leave an empty result directory while the sweep
@@ -268,7 +296,7 @@ def cmd_run(args) -> int:
         for a in todo:
             waited = wait_quiet()
             print(f"  [rep {rep}] {a.name:<16} (quiet after {waited}s)", flush=True)
-            run_arm(a, rows, rep, args.port)
+            run_arm(a, rows, rep, args.port, args.server_cpus, args.client_cpus, args.perf)
     print("\nsweep complete")
     return cmd_table(args)
 
@@ -365,13 +393,24 @@ def main(argv: list[str]) -> int:
         p.add_argument("--arms", nargs="*", help="limit to these arms")
         p.add_argument("--rows", nargs="*", help="limit to these workload rows")
         p.add_argument("--vs", default="baseline", help="arm to compare against")
+        p.add_argument("--results", default=None,
+                       help="where the arms' results go (default bench/results/isa)")
         if name == "run":
             p.add_argument("--reps", type=int, default=1)
             p.add_argument("--port", type=int, default=6334)
+            p.add_argument("--server-cpus", default=None,
+                           help="pin each arm's server to this set, e.g. 4-11")
+            p.add_argument("--client-cpus", default=None,
+                           help="run the load generator on this set, e.g. 0-3")
+            p.add_argument("--perf", nargs="?", const="default", default=None,
+                           help="the perf stat sidecar's event set, per row")
     paths.add_data_argument(ap)
     args = ap.parse_args(argv[1:])
     # Exported, so the `workloads.py` this spawns per arm reads the same root.
     paths.use_data_dir(args.data_dir)
+    if args.cmd in ("run", "table") and args.results:
+        global RESULTS
+        RESULTS = Path(args.results).resolve()
     if not args.cmd:
         return cmd_list(args)
     return {"list": cmd_list, "run": cmd_run, "table": cmd_table}[args.cmd](args)

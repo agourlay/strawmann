@@ -3124,3 +3124,57 @@ class BuildersAliveTests(unittest.TestCase):
         self.assertIn("procstat.builders_alive()", src)
         with mock.patch.object(procstat, "processes", lambda: [(9, "rustc"), (10, "rustc")]):
             self.assertEqual(procstat.builders_alive(), ["rustc x2"])
+
+
+class IsaSweepArgvTests(unittest.TestCase):
+    """The forced-ISA sweep, pinned and counted as the published engine is."""
+
+    def setUp(self):
+        self.isa = importlib.reload(importlib.import_module("isa_sweep"))
+
+    def test_an_arm_is_pinned_only_when_asked(self):
+        arm = self.isa.arms(["avx512-256"])[0]
+        bare = self.isa.server_argv(arm, 6334)
+        self.assertNotIn("--pin", bare)
+        pinned = self.isa.server_argv(arm, 6334, "4-11")
+        self.assertEqual(pinned[pinned.index("--cpus") + 1], "4-11")
+        self.assertEqual(pinned[pinned.index("--workers") + 1], "7")   # one I/O thread
+        self.assertTrue(pinned[0].endswith("strawmann-avx512-256"))
+
+    def test_the_client_is_placed_and_counted_when_asked(self):
+        argv = self.isa.client_argv(6334, "avx2", ["W2", "W3"], "0-3", "default")
+        self.assertEqual(argv[:3], ["taskset", "-c", "0-3"])
+        self.assertEqual(argv[argv.index("--perf") + 1], "default")
+        self.assertEqual(argv[-2:], ["W2", "W3"])
+        plain = self.isa.client_argv(6334, "avx2", ["W3"])
+        self.assertNotIn("taskset", plain)
+        self.assertNotIn("--perf", plain)
+
+
+class QdrantW4ProbeTests(unittest.TestCase):
+    """The Qdrant W4 probe's plan and its thread-state arithmetic."""
+
+    def setUp(self):
+        self.p = importlib.reload(importlib.import_module("qdrant_w4_probe"))
+
+    def test_arms_alternate(self):
+        self.assertEqual(self.p.plan(2), [("default", 1), ("mst8", 1), ("default", 2), ("mst8", 2)])
+
+    def test_threads_group_by_pool(self):
+        self.assertEqual(self.p.pool_of("search-io-12"), "search-io")
+        self.assertEqual(self.p.pool_of("search-io-3"), "search-io")
+        self.assertEqual(self.p.pool_of("general"), "general")
+        self.assertEqual(self.p.pool_of("tokio-runtime-w"), "tokio-runtime-w")
+
+    def test_states_are_mean_threads_per_pool(self):
+        samples = [[("search-io-1", "S"), ("search-io-2", "R"), ("general-1", "R")],
+                   [("search-io-1", "S"), ("search-io-2", "S"), ("general-1", "R")]]
+        got = self.p.summarise_states(samples)
+        self.assertEqual(got["search-io"], {"R": 0.5, "S": 1.5})
+        self.assertEqual(got["general"], {"R": 1.0})
+        self.assertEqual(self.p.summarise_states([]), {})
+
+    def test_thread_states_read_this_process(self):
+        states = self.p.thread_states(os.getpid())
+        self.assertTrue(states)
+        self.assertTrue(all(len(st) == 1 for _, st in states))
