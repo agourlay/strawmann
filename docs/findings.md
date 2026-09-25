@@ -50,15 +50,21 @@ Two ratios refused on the headline page. The sweep now runs straight after
 still pages in, the other fix remains: drop a pass whose `major_faults` on a
 cached search row exceed a floor.
 
-**3. W11's append spans are sift1m's.** `W11_STEADY_SPAN_S` 25 s and
-`W11_SPAN_S` 60 s were sized for d=128. At d=1536 the search covered 12 to 23%
-of the append on every pass of both engines, so both mixed rows measured the
-rebuild the append provoked rather than a concurrent write, as their own note
-says, and both are refused. Since 2026-09-24 `fullrun.resolve_w11_spans`
-reads each row's span off the previous pair, the slower engine's search times
-1.25 (256 s and 431 s for the 0925 pair), and gives both arms the same value.
-The 0925 pair's `write overlap` says whether that holds; item 8 is what the
-row shows once it measures what it claims to.
+**3. W11's write rate is fixed, and its search is sized to fit.** The 25 s
+and 60 s spans were sized for d=128, where a 50,000-query search ends inside
+them. At d=1536 it did not: the writer covered 12 to 23% of the search on every
+pass of both engines, so both mixed rows measured the rebuild the append
+provoked, and both were refused. 0a3de76 stretched the span to the previous
+search instead, which set the write rate from a search the rate had set:
+2,000 and 3,300 points/s on 0924, 200 and 500 on 0925 (W11-steady +803% on
+strawmANN with no engine change), about 1,100 and 300 next. Since 2026-09-25
+the spans are the constants again, so the rate is fixed (1,900 and 3,300
+points/s at 1M) and hashed into the stamp, and `fullrun.resolve_w11_queries`
+shortens the search instead: 4,840 and 6,965 queries for the next dbpedia pair,
+read off 0924, the newest pair at that rate (`decisions.md`, 2026-09-25). The
+next pair's `write overlap` says whether that holds; a search that overruns
+shrinks the one after it. Item 8 is what the row shows once it measures what it
+claims to.
 
 **4. `matched` oversampling matches SQ8 and nothing else.** `W6` is licensed
 at 1.29x under the policy; `W7` (0.9474 against 0.8887) and `W8` (0.9656

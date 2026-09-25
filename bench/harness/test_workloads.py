@@ -529,6 +529,18 @@ class WorkloadTests(unittest.TestCase):
             self.assertEqual(int(bg[bg.index("-n") + 1]), volume,
                              f"{wid}'s write volume is untouched")
 
+    def test_the_mixed_rows_search_the_count_fullrun_sized(self):
+        w = self.w
+        with mock.patch.object(w, "W11_STEADY_QUERIES", 4_840), \
+                mock.patch.object(w, "W11_QUERIES", 6_965):
+            t = {x.id: x for x in w.table()}
+            for wid, n in (("W11-steady", 4_840), ("W11", 6_965)):
+                fg = list(t[wid].args)
+                self.assertEqual(int(fg[fg.index("-n") + 1]), n)
+            # Every other search row keeps QUERIES.
+            fg = list(t["W3"].args)
+            self.assertEqual(int(fg[fg.index("-n") + 1]), w.QUERIES)
+
     def test_start_requirements_are_strawmanns_and_only_for_rows_that_need_them(self):
         """0925 printed both lines on all 18 invocations, Qdrant's included,
         and "appends 198,000 on top of W2's 990,000 ... reaches 1,237,500",
@@ -1598,34 +1610,104 @@ class FullrunRowInvocationTests(unittest.TestCase):
             self.assertEqual(
                 self.f.resolve_rps_reference("auto", ["prev-sm", "prev-qd"]), 3484.0)
 
-    def test_the_mixed_rows_append_over_the_previous_pairs_slower_search(self):
-        """The 25 s and 60 s spans were sift1m's. At d=1536 the searches ran
-        117 to 345 s, the writer covered 12 to 23% of them, and both mixed rows
-        were refused. The span is read off the previous pair instead."""
-        f = self.f
-        # qd-dbp1m-perf-0924's own figures: sm 244 / 166 qps, qd 427 / 145.
-        for lbl, steady, w11 in (("sm-dbp1m-perf-0924", 244.0, 166.0),
-                                 ("qd-dbp1m-perf-0924", 427.0, 145.0)):
-            d = f.ROOT / "bench/results" / lbl
+    def _w11_pair(self, date, spans, rows, rates=None):
+        """A dbpedia pair measured at `spans` (None: before spans were
+        recorded), with `rows` = {engine: {wid: (qps, n_queries, overlap)}}."""
+        for eng, got in rows.items():
+            d = self.f.ROOT / "bench/results" / f"{eng}-dbp1m-perf-{date}"
             d.mkdir(parents=True)
+            h = {"upload_n": 990_000, "w11_n": 198_000}
+            if spans:
+                h["w11_spans_s"] = spans
+            if rates:
+                h["w11_append_rate"] = rates
+            (d / "run.json").write_text(json.dumps({"harness": h}))
             (d / "rows.json").write_text(json.dumps([
-                {"id": "W11-steady", "qps": steady, "n_queries": 50_000},
-                {"id": "W11", "qps": w11, "n_queries": 50_000}]))
-        spans = f.resolve_w11_spans(["sm-dbp1m-perf-0925", "qd-dbp1m-perf-0925"])
-        # The slower engine's search plus a quarter: 50,000 / 244 = 205 s and
-        # 50,000 / 145 = 345 s.
-        self.assertEqual(spans, {"W11_STEADY_SPAN_S": float(math.ceil(50_000 / 244 * 1.25)),
-                                 "W11_SPAN_S": float(math.ceil(50_000 / 145 * 1.25))})
-        # Never below the constant: a fast corpus keeps sift1m's span.
-        for lbl in ("sm-sift-perf-0920", "qd-sift-perf-0920"):
-            d = f.ROOT / "bench/results" / lbl
-            d.mkdir(parents=True)
-            (d / "rows.json").write_text(json.dumps([
-                {"id": "W11-steady", "qps": 50_000.0, "n_queries": 50_000}]))
-        self.assertEqual(f.resolve_w11_spans(["sm-sift-perf-0921", "qd-sift-perf-0921"]),
-                         {"W11_STEADY_SPAN_S": f.workloads.W11_STEADY_SPAN_S})
-        # Nothing to read: nothing changes.
-        self.assertEqual(f.resolve_w11_spans(["strawmann", "qdrant"]), {})
+                {"id": wid, "qps": q, "n_queries": n, "write_overlap_pct": c}
+                for wid, (q, n, c) in got.items()]))
+
+    def test_the_mixed_rows_search_ends_inside_a_fixed_rate_append(self):
+        """0a3de76 stretched the append to the previous search, and the search
+        was as long as the write rate let it be: 2,000 points/s on 0924, 200 on
+        0925, about 1,100 next. The rate is now fixed and the search is sized
+        from the newest pair measured at that rate (decisions, 2026-09-25)."""
+        f, w = self.f, self.f.workloads
+        with mock.patch.object(w, "upload_n", lambda: 990_000), \
+                mock.patch.object(w, "w11_n", lambda: 198_000):
+            want = {"W11-steady": w.w11_append_rate(w.w11_steady_n(), w.W11_STEADY_SPAN_S),
+                    "W11": w.w11_append_rate(w.w11_n(), w.W11_SPAN_S)}
+            self.assertEqual(want, {"W11-steady": 1_900, "W11": 3_300})
+            # 0924: the constants, before spans were recorded. Its searches ran
+            # 117 to 345 s against a 26 s and 60 s append.
+            self._w11_pair("0924", None, {
+                "sm": {"W11-steady": (244.0, 50_000, 12.1), "W11": (166.0, 50_000, 19.9)},
+                "qd": {"W11-steady": (427.0, 50_000, 21.2), "W11": (145.0, 50_000, 21.6)}})
+            # 0925: a tenth of the rate, so a search nine times faster. Its
+            # speed says nothing about a search against 1,900 points/s.
+            self._w11_pair("0925", {"W11-steady": 256.0, "W11": 431.0}, {
+                "sm": {"W11-steady": (2206.0, 50_000, 100.0), "W11": (102.0, 50_000, 82.0)},
+                "qd": {"W11-steady": (1382.0, 50_000, 100.0), "W11": (216.0, 50_000, 100.0)}})
+            self.assertEqual(f.w11_append_rates_of("sm-dbp1m-perf-0925"),
+                             {"W11-steady": 100, "W11": 400})
+            got = f.resolve_w11_queries(["sm-dbp1m-perf-0926", "qd-dbp1m-perf-0926"])
+            append = {k: n / want[k] for k, n in (("W11-steady", 49_500), ("W11", 198_000))}
+            # Read off 0924, the conservative of the two estimates per engine:
+            # the rate times the append, or the queries the writer covered.
+            steady = min(244.0 * append["W11-steady"], 50_000 * 0.121)
+            self.assertEqual(got, {
+                "W11_STEADY_QUERIES": math.floor(steady / f.W11_SPAN_MARGIN),
+                "W11_QUERIES": math.floor(145.0 * append["W11"] / f.W11_SPAN_MARGIN)})
+            # And the slower engine's search then ends inside the append.
+            self.assertLess(got["W11_STEADY_QUERIES"] / 244.0, append["W11-steady"])
+            self.assertLess(got["W11_QUERIES"] / 145.0, append["W11"])
+
+    def test_a_search_that_outran_its_writer_shrinks_the_next_one(self):
+        """A qps averaged over a search that outlived its writer includes the
+        faster quiet tail, so sizing from it alone would overrun again, every
+        night. The covered share shrinks it by the margin until it fits."""
+        f, w = self.f, self.f.workloads
+        rates = {"W11-steady": 1_900, "W11": 3_300}
+        with mock.patch.object(w, "upload_n", lambda: 990_000), \
+                mock.patch.object(w, "w11_n", lambda: 198_000):
+            self._w11_pair("0926", None, {
+                "sm": {"W11-steady": (240.0, 4_840, 80.0), "W11": (150.0, 6_965, 100.0)},
+                "qd": {"W11-steady": (420.0, 4_840, 100.0), "W11": (140.0, 6_965, 100.0)}},
+                rates=rates)
+            got = f.resolve_w11_queries(["sm-dbp1m-perf-0927", "qd-dbp1m-perf-0927"])
+            self.assertEqual(got["W11_STEADY_QUERIES"], math.floor(4_840 * 0.80 / f.W11_SPAN_MARGIN))
+            # Covered fully: the rate is the rate under the write, and exact.
+            self.assertEqual(got["W11_QUERIES"], math.floor(140.0 * 60.0 / f.W11_SPAN_MARGIN))
+
+    def test_the_search_is_never_longer_than_queries_nor_shorter_than_a_row(self):
+        f, w = self.f, self.f.workloads
+        rates = {"W11-steady": 1_900, "W11": 3_300}
+        with mock.patch.object(w, "upload_n", lambda: 990_000), \
+                mock.patch.object(w, "w11_n", lambda: 198_000):
+            # sift1m-fast: QUERIES already fits inside the append.
+            self._w11_pair("0926", None, {
+                "sm": {"W11-steady": (9_000.0, 50_000, 100.0), "W11": (3.0, 50_000, 100.0)},
+                "qd": {"W11-steady": (8_000.0, 50_000, 100.0), "W11": (900.0, 50_000, 100.0)}},
+                rates=rates)
+            got = f.resolve_w11_queries(["sm-dbp1m-perf-0927", "qd-dbp1m-perf-0927"])
+            self.assertEqual(got["W11_STEADY_QUERIES"], w.QUERIES)
+            # An absurdly slow engine does not cut the faster one below MIN_ROW_S.
+            self.assertEqual(got["W11_QUERIES"], math.ceil(900.0 * w.MIN_ROW_S))
+        # Nothing to read, or nothing at this rate: QUERIES stands.
+        self.assertEqual(f.resolve_w11_queries(["strawmann", "qdrant"]), {})
+
+    def test_the_write_rate_is_in_the_hash_and_old_stamps_keep_theirs(self):
+        w = self.f.workloads
+        stamp = w.harness_stamp()
+        self.assertIn("w11_append_rate", w.STAMP_KEYS)
+        moved = {**stamp, "w11_append_rate": {"W11-steady": 100, "W11": 400}}
+        self.assertNotEqual(w.stamp_hash(stamp), w.stamp_hash(moved))
+        # A stamp from before the key hashes as its rows were hashed.
+        old = {k: v for k, v in stamp.items() if k != "w11_append_rate"}
+        key = {k: old.get(k) for k in w.STAMP_KEYS if k != "w11_append_rate"
+               and (k in old or k not in w.STAMP_KEYS_SINCE)}
+        import hashlib
+        self.assertEqual(w.stamp_hash(old), hashlib.sha256(
+            json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:12])
 
     def _dirs(self, *names):
         for n in names:

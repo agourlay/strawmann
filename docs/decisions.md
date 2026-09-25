@@ -1485,3 +1485,55 @@ quantized collection and the sweep behind W6, so it goes in with the sweep
 re-run on both corpora and a test that holds a shared dominant dimension.
 `findings.md` item 1 carries it.
 
+## W11's write rate is the row, and the search is sized to it, decided 2026-09-25
+
+The two mixed rows search `bench2` while synthetic points append to it. The
+volume is fixed by construction (W11-steady 5% of the corpus, below
+`rebuild_ratio`; W11 20%, above it). What the throttle sets is the rate, and
+the rate is what a reader takes the row to mean: "search while 2,000
+points/s land" is a different row from "while 200 land".
+
+### What went wrong
+
+At d=1536 a 50,000-query search outlived sift1m's 25 s and 60 s appends, the
+writer covered 12 to 23% of it, and both rows were refused. 0a3de76 read each
+span off the previous pair's slower search instead. The search is faster
+against a slower writer, so the span fed on itself: 0924 appended at 2,000
+and 3,300 points/s, 0925 at 200 and 500, and the 0925 rows would have given
+the next pair about 1,100 and 300. W11-steady moved +803% on strawmANN and
++224% on Qdrant with the same engines, and nothing in the stamp said so,
+because the spans were recorded as provenance and not hashed.
+
+### Options
+
+- **Fix the rate, size the search** (taken). The spans are the constants
+  again, which at 1M make 1,900 and 3,300 points/s, and the search length
+  moves instead. The rate never moves, so the search speed the next pair
+  reads is the one it will meet, and `-n` converges.
+- Fix a span per corpus in `datasets.json`. No feedback, but at d=1536 the
+  span has to be 300 s or more to cover a 50,000-query search, which puts the
+  rate back at 0925's.
+- Keep the feedback and only ever raise the span. The rate still drifts down
+  a step per night.
+
+### What it is
+
+- `workloads.W11_STEADY_QUERIES` and `W11_QUERIES`, `QUERIES` by default,
+  are each mixed row's `-n`.
+- `fullrun.resolve_w11_queries` sizes them from the newest pair of the family
+  measured at today's rate (`w11_append_rate`, or for a run before it,
+  rebuilt from its spans and volumes): the slower engine's queries inside the
+  append, over 1.25. Where that pair's writer finished first, its qps averages
+  in a faster quiet tail, so the estimate is the smaller of rate times append
+  and the covered share of its queries: a search that overruns shrinks the
+  next by the margin until it fits. Capped at `QUERIES` (sift1m is unchanged)
+  and floored at `MIN_ROW_S` on the faster engine.
+- `w11_append_rate` is in `STAMP_KEYS`, and in `STAMP_KEYS_SINCE` so the
+  pages measured before it keep their ratios. The next pair is STALE against
+  0925 by design.
+
+For the next dbpedia-openai-1m pair: 4,840 and 6,965 queries, about 20 s and
+48 s at 0924's slower engine, inside a 26 s and 60 s append. The row waits for its appender, so the
+six arms' mixed rows take about 520 s against 0925's 2,262 s. The first night reads 0924, whose
+under-write speed is an estimate; its `write overlap` is the check.
+

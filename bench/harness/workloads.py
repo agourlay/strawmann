@@ -293,13 +293,27 @@ W11_BATCH = 100
 #: how many.
 #:
 #: One span per row, taken from the slower engine's measured search on sift1m
-#: plus margin: W11-steady ran 19.0 s and W11 51.3 s. The appender is started
-#: before the search and the row waits for it, so a span that overshoots costs
-#: wall clock and keeps the coverage at 100%, while one that undershoots puts
-#: the caveat straight back. Raise them for a corpus whose mixed rows run
-#: longer than sift1m's; the row says so whenever a span is too short.
+#: plus margin: W11-steady ran 19.0 s and W11 51.3 s. Fixed, and so is the
+#: write rate they make at a given corpus size (1,900 and 3,300 points/s at
+#: 1M): the rate is what the row measures. A corpus whose searches run longer
+#: gets a shorter search (`W11_STEADY_QUERIES`, `W11_QUERIES`), not a longer
+#: append. Reading the span back off the previous search, as 0a3de76 did, set
+#: the rate from a search the rate itself had set: 2,000 points/s on 0924,
+#: 200 on 0925, and about 1,100 next (decisions, 2026-09-25).
 W11_STEADY_SPAN_S = float(os.environ.get("W11_STEADY_SPAN_S", 25.0))
 W11_SPAN_S = float(os.environ.get("W11_SPAN_S", 60.0))
+
+
+#: Each mixed row's search, in queries. `QUERIES` unless `fullrun` sizes it
+#: to end inside the append from the previous pair's search rate at this
+#: write rate (`fullrun.resolve_w11_queries`).
+W11_STEADY_QUERIES = int(os.environ.get("W11_STEADY_QUERIES", QUERIES))
+W11_QUERIES = int(os.environ.get("W11_QUERIES", QUERIES))
+
+
+def w11_append_rate(points: int, span_s: float) -> int:
+    """Points per second the appender writes: `-T` batches of `W11_BATCH`."""
+    return w11_throttle(points, span_s) * W11_BATCH
 
 
 def w11_throttle(points: int, span_s: float) -> int:
@@ -746,10 +760,14 @@ def harness_stamp() -> dict:
                           # is part of what a settle *is*.
                           "dropped_not_settled": rows_writing_dead_collections()},
         "filtered_queries": FILTERED_QUERIES,
-        # Provenance, not hashed: `fullrun` derives both from the previous pair
-        # and gives both arms the same pair of values, and the mixed rows are
-        # refused a ratio by policy whatever they are.
+        # Hashed: the write rate is what the mixed rows measure, and 0925's
+        # moved 10x on a harness change with nothing in the stamp to say so.
+        "w11_append_rate": {"W11-steady": w11_append_rate(w11_steady_n(), W11_STEADY_SPAN_S),
+                            "W11": w11_append_rate(w11_n(), W11_SPAN_S)},
+        # Provenance, not hashed: the spans make the rate above, and the
+        # search length is a rate's denominator, as `-n` is on every row.
         "w11_spans_s": {"W11-steady": W11_STEADY_SPAN_S, "W11": W11_SPAN_S},
+        "w11_queries": {"W11-steady": W11_STEADY_QUERIES, "W11": W11_QUERIES},
         "bfb_pin": BFB_PIN, "bfb_timeout_s": BFB_TIMEOUT_S,
         "collection": collection_settings(),
         # Hashed, so the two quantized experiments can never share a table.
@@ -777,7 +795,7 @@ def harness_stamp() -> dict:
 #: serves a 28.16% floor over rows whose spread is 0.66%.
 STAMP_KEYS = ["metric", "query_source", "upload_n", "w11_n", "queries",
               "exact_queries", "collection", "ef", "bfb_pin", "engine_settle",
-              "oversampling_policy"]
+              "oversampling_policy", "w11_append_rate"]
 
 #: Keys that did *not* earn the invalidation above, so a stamp from before one
 #: of them hashes exactly as its rows were hashed when they were measured.
@@ -787,7 +805,9 @@ STAMP_KEYS = ["metric", "query_source", "upload_n", "w11_n", "queries",
 #: "re-run under a different harness" against its own `run.json`, and the
 #: 0921 and 0908 sift1m pages lost every ratio on re-render. Across eras the
 #: label-level check still refuses: `None` against `defaults` is STALE.
-STAMP_KEYS_SINCE = ("oversampling_policy",)
+#: `w11_append_rate` likewise: every run before it recorded no rate, and its
+#: rows are still its rows.
+STAMP_KEYS_SINCE = ("oversampling_policy", "w11_append_rate")
 
 
 def stamp_hash(stamp: dict) -> str:
@@ -1551,8 +1571,8 @@ def table() -> list[Workload]:
         # 0.39x against W11's 0.47x.
         Workload("W11-steady", f"mixed read/write below the rebuild threshold: search "
                                f"bench2 while {w11_steady_n():,} synthetic points append",
-                 flags("--collection-name", f"{C}2", "--skip-setup", "-n", QUERIES, "--search",
-                       "--search-limit", 10, "--search-hnsw-ef", 128, "-p", 8),
+                 flags("--collection-name", f"{C}2", "--skip-setup", "-n", W11_STEADY_QUERIES,
+                       "--search", "--search-limit", 10, "--search-hnsw-ef", 128, "-p", 8),
                  query_collection=f"{C}2", recall_joinable=False,
                  ratio_policy="search-during-write; no recall join",
                  background=flags("--collection-name", f"{C}2", "-n", w11_steady_n(),
@@ -1569,8 +1589,8 @@ def table() -> list[Workload]:
         # rather than a private collection.
         Workload("W11", f"mixed read/write: search bench2 while {w11_n():,} synthetic "
                         f"points append (runs last)",
-                 flags("--collection-name", f"{C}2", "--skip-setup", "-n", QUERIES, "--search",
-                       "--search-limit", 10, "--search-hnsw-ef", 128, "-p", 8),
+                 flags("--collection-name", f"{C}2", "--skip-setup", "-n", W11_QUERIES,
+                       "--search", "--search-limit", 10, "--search-hnsw-ef", 128, "-p", 8),
                  query_collection=f"{C}2", recall_joinable=False,
                  ratio_policy="search-during-write; no recall join",
                  background=flags("--collection-name", f"{C}2", "-n", w11_n(), "-d", DIM,
