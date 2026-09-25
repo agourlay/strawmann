@@ -92,6 +92,13 @@ def steps() -> list[Step]:
              ["cargo", "clippy", "--all-targets", "--quiet", "--", "-D", "warnings"],
              cwd=ROOT / "conformance"),
 
+        # Checked rather than trusted: two files sat unformatted on main, so
+        # every `cargo fmt` of a change reformatted them too and the diff
+        # carried someone else's whitespace.
+        Step("rust-fmt", "the conformance crate is rustfmt-clean, so a formatted change "
+                         "diffs as its own lines",
+             ["cargo", "fmt", "--check"], cwd=ROOT / "conformance"),
+
         Step("python-syntax", "the experiment drivers must at least parse",
              [sys.executable, str(Path(__file__).resolve()), "--check-syntax"]),
 

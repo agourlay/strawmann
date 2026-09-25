@@ -578,7 +578,14 @@ pub fn compute_filtered(
     matching: &[u32],
 ) -> GroundTruth {
     let mut gt = compute_over(
-        metric, base, n_base, queries, n_queries, dim, k, Some(matching),
+        metric,
+        base,
+        n_base,
+        queries,
+        n_queries,
+        dim,
+        k,
+        Some(matching),
     );
     gt.condition = Some(condition.to_string());
     gt.n_matching = Some(matching.iter().filter(|&&i| (i as usize) < n_base).count());
@@ -632,9 +639,7 @@ fn compute_over(
             let q = preprocess(metric, &queries[qi * dim..(qi + 1) * dim]);
             let top = match matching {
                 None => top_k_into(metric, &base_pre, n_base, dim, &q, k, scratch),
-                Some(ids) => {
-                    top_k_of_into(metric, &base_pre, n_base, dim, &q, ids, k, scratch)
-                }
+                Some(ids) => top_k_of_into(metric, &base_pre, n_base, dim, &q, ids, k, scratch),
             };
             let mut row_ids = Vec::with_capacity(k);
             let mut row_scores = Vec::with_capacity(k);
@@ -1184,8 +1189,7 @@ mod tests {
         let queries: Vec<f32> = (0..3 * dim).map(|i| (i % 7) as f32).collect();
         let all: Vec<u32> = (0..n as u32).collect();
         let plain = compute(Metric::Euclid, &base, n, &queries, 3, dim, k);
-        let filtered =
-            compute_filtered(Metric::Euclid, &base, n, &queries, 3, dim, k, "all", &all);
+        let filtered = compute_filtered(Metric::Euclid, &base, n, &queries, 3, dim, k, "all", &all);
         assert_eq!(plain.ids, filtered.ids);
         assert_eq!(plain.scores, filtered.scores);
         assert_eq!(filtered.n_matching, Some(n));
@@ -1205,7 +1209,15 @@ mod tests {
         let queries = [0.0f32, 0.0];
         let matching: Vec<u32> = (0..n as u32).filter(|i| i % 10 == 9).collect();
         let gt = compute_filtered(
-            Metric::Euclid, &base, n, &queries, 1, dim, k, "i%10==9", &matching,
+            Metric::Euclid,
+            &base,
+            n,
+            &queries,
+            1,
+            dim,
+            k,
+            "i%10==9",
+            &matching,
         );
         assert_eq!(gt.neighbours(0), &[9, 19, 29]);
         assert_eq!(gt.n_matching, Some(5));
@@ -1224,7 +1236,15 @@ mod tests {
         let base: Vec<f32> = (0..n).flat_map(|i| [i as f32, 0.0]).collect();
         let queries = [0.0f32, 0.0];
         let gt = compute_filtered(
-            Metric::Euclid, &base, n, &queries, 1, dim, k, "two", &[3u32, 7],
+            Metric::Euclid,
+            &base,
+            n,
+            &queries,
+            1,
+            dim,
+            k,
+            "two",
+            &[3u32, 7],
         );
         assert_eq!(gt.n_matching, Some(2));
         assert_eq!(&gt.neighbours(0)[..2], &[3, 7]);
@@ -1239,7 +1259,15 @@ mod tests {
         let base: Vec<f32> = (0..n).flat_map(|i| [i as f32, 0.0]).collect();
         let queries = [0.0f32, 0.0];
         let gt = compute_filtered(
-            Metric::Euclid, &base, n, &queries, 1, dim, k, "oob", &[1u32, 99, 2],
+            Metric::Euclid,
+            &base,
+            n,
+            &queries,
+            1,
+            dim,
+            k,
+            "oob",
+            &[1u32, 99, 2],
         );
         assert_eq!(gt.n_matching, Some(2));
         assert_eq!(&gt.neighbours(0)[..2], &[1, 2]);
@@ -1250,9 +1278,20 @@ mod tests {
         // 24 MiB of sift1m ground truth is already on disk without these
         // fields; a schema change that stopped reading it would recompute
         // every corpus.
-        let gt = compute(Metric::Euclid, &[0.0, 0.0, 1.0, 1.0], 2, &[0.0, 0.0], 1, 2, 1);
+        let gt = compute(
+            Metric::Euclid,
+            &[0.0, 0.0, 1.0, 1.0],
+            2,
+            &[0.0, 0.0],
+            1,
+            2,
+            1,
+        );
         let json = serde_json::to_string(&gt).expect("serialises");
-        assert!(!json.contains("condition"), "no condition on an unfiltered truth");
+        assert!(
+            !json.contains("condition"),
+            "no condition on an unfiltered truth"
+        );
         assert!(!json.contains("n_matching"));
         let back: GroundTruth = serde_json::from_str(&json).expect("round-trips");
         assert!(back.condition.is_none() && back.n_matching.is_none());

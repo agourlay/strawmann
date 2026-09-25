@@ -624,11 +624,13 @@ pub fn validate_condition(
         _ => {}
     }
     if asked.is_some() && quantized {
-        return Err("a filtered sweep of a quantized collection is not implemented: \
+        return Err(
+            "a filtered sweep of a quantized collection is not implemented: \
                     the restricted truth is fp32, and what the rescore pool contains \
                     under a filter is a second question. Sweep the fp32 collection, \
                     or drop --filter-values."
-            .into());
+                .into(),
+        );
     }
     Ok(())
 }
@@ -641,7 +643,10 @@ mod tests {
     fn a_sweep_and_its_truth_must_share_one_condition() {
         // W12 point 3. The pairs that are fine:
         assert!(validate_condition(None, None, false).is_ok());
-        assert!(validate_condition(None, None, true).is_ok(), "quantized, unfiltered");
+        assert!(
+            validate_condition(None, None, true).is_ok(),
+            "quantized, unfiltered"
+        );
         assert!(validate_condition(Some("a in {k0}"), Some("a in {k0}"), false).is_ok());
 
         // An unfiltered search against a restricted truth: every neighbour the
