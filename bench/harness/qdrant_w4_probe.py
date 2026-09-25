@@ -36,7 +36,6 @@ import dataclasses
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 import threading
@@ -45,6 +44,7 @@ from pathlib import Path
 
 import fullrun
 import perfstat
+import w9_ab
 
 import procstat
 import workloads
@@ -177,6 +177,7 @@ def measure(out: Path, arm: str, rep: int) -> dict:
     w4 = {w.id: w for w in workloads.table()}["W4"]
     d = out / f"{arm}-r{rep}"
     d.mkdir(parents=True, exist_ok=True)
+    w9_ab.warn_other_engines()
     pid = qdrant_pid()
     smp = Sampler(pid) if pid else None
     with smp or contextlib.nullcontext():
@@ -213,8 +214,7 @@ def profile(out: Path) -> None:
         w4 = {w.id: w for w in workloads.table()}["W4"]
         workloads.run_one(w4, f"http://localhost:{fullrun.QDRANT_GRPC}", d, COMMON)
     finally:
-        rec.send_signal(signal.SIGINT)
-        rec.wait(timeout=300)
+        w9_ab.stop_perf(rec, 300)
     rep = subprocess.run(["perf", "report", "-i", str(data), "--stdio", "--no-children",
                           "--sort", "comm,sym", "--percent-limit", "1"],
                          capture_output=True, text=True)
@@ -241,37 +241,45 @@ def main(argv: list[str]) -> int:
 
     rows: list[dict] = []
     try:
-        if not start(None, args.server_cpus, wipe=True, out=out):
-            return 1
-        w2 = {w.id: w for w in workloads.table()}["W2"]
-        (out / "upload").mkdir(parents=True, exist_ok=True)
-        up = workloads.run_one(w2, f"http://localhost:{fullrun.QDRANT_GRPC}",
-                               out / "upload", COMMON)
-        if up.status != workloads.Status.ok:
-            print(f"upload failed: {up.status}", file=sys.stderr)
-            return 1
-        current = "default"
-        for arm, rep in plan(args.reps):
-            value = dict(ARMS)[arm]
-            if arm != current:
-                if not start(value, args.server_cpus, wipe=False, out=out) or \
-                        not wait_loaded(workloads.upload_n()):
-                    print(f"{arm}: qdrant did not come back with the collection",
-                          file=sys.stderr)
-                    return 1
-                current = arm
-            fullrun.settle(f"{arm} rep {rep}")
-            rows.append(measure(out, arm, rep))
-        if current != "default" and (not start(None, args.server_cpus, wipe=False, out=out)
-                                     or not wait_loaded(workloads.upload_n())):
-            return 1
-        fullrun.settle("the profile")
-        profile(out)
+        return run_arms(args, out, rows)
     finally:
         fullrun.stop_qdrant()
         keep_log(out)
         os.environ.pop(MST_ENV, None)
+        write_summary(out, rows)
 
+
+def run_arms(args, out: Path, rows: list[dict]) -> int:
+    if not start(None, args.server_cpus, wipe=True, out=out):
+        return 1
+    w2 = {w.id: w for w in workloads.table()}["W2"]
+    (out / "upload").mkdir(parents=True, exist_ok=True)
+    up = workloads.run_one(w2, f"http://localhost:{fullrun.QDRANT_GRPC}",
+                           out / "upload", COMMON)
+    if up.status != workloads.Status.ok:
+        print(f"upload failed: {up.status}", file=sys.stderr)
+        return 1
+    current = "default"
+    for arm, rep in plan(args.reps):
+        value = dict(ARMS)[arm]
+        if arm != current:
+            if not start(value, args.server_cpus, wipe=False, out=out) or \
+                    not wait_loaded(workloads.upload_n()):
+                print(f"{arm}: qdrant did not come back with the collection",
+                      file=sys.stderr)
+                return 1
+            current = arm
+        fullrun.settle(f"{arm} rep {rep}")
+        rows.append(measure(out, arm, rep))
+    if current != "default" and (not start(None, args.server_cpus, wipe=False, out=out)
+                                 or not wait_loaded(workloads.upload_n())):
+        return 1
+    fullrun.settle("the profile")
+    profile(out)
+    return 0
+
+
+def write_summary(out: Path, rows: list[dict]) -> None:
     summary = {"arms": {}, "rows": rows}
     for arm, _ in ARMS:
         got = [r for r in rows if r["arm"] == arm and r.get("qps")]
@@ -294,7 +302,6 @@ def main(argv: list[str]) -> int:
                 lines.append(f"    {pool:<28} " + "  ".join(f"{k} {v:.1f}" for k, v in st.items()))
     (out / "summary.txt").write_text("\n".join(lines) + "\n")
     print("\n" + "\n".join(lines), flush=True)
-    return 0
 
 
 if __name__ == "__main__":

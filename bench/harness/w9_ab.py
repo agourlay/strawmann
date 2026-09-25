@@ -102,6 +102,26 @@ def strawmann_pid() -> int | None:
     return found[0] if len(found) == 1 else None
 
 
+def warn_other_engines() -> None:
+    """`run_one` attaches its counters to the lowest-pid engine process, so
+    a second one alive at measurement time would be the row's engine."""
+    procs = procstat.engine_processes()
+    if len(procs) > 1:
+        print(f"  !! {len(procs)} engine processes alive "
+              f"({', '.join(f'{c}:{p}' for p, c in procs)}); the row's counters "
+              f"describe the lowest pid", flush=True)
+
+
+def stop_perf(rec: subprocess.Popen, timeout_s: int) -> None:
+    """SIGINT so perf writes its file, and a kill if it will not stop."""
+    rec.send_signal(signal.SIGINT)
+    try:
+        rec.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        rec.kill()
+        rec.wait(timeout=30)
+
+
 def perf_record_argv(pid: int, out: Path) -> list[str]:
     """A flat profile of the engine: where the cycles are, not who called."""
     return ["perf", "record", "-F", "499", "-p", str(pid), "-o", str(out), "--quiet"]
@@ -164,7 +184,10 @@ def table_text(summary: list[dict], bus: str) -> str:
 def measure(w: workloads.Workload, uri: str, label: str, arm: str, rep: int) -> dict:
     results = fullrun.RESULTS / label
     results.mkdir(parents=True, exist_ok=True)
-    res = workloads.run_one(w, uri, results, COMMON, perf="default")
+    warn_other_engines()
+    # No warm-up: at 1,000 queries it is as long as the row itself, and a
+    # full-arena scan has nothing to warm that the row's own start does not.
+    res = workloads.run_one(w, uri, results, COMMON, perf="default", warmup=False)
     row = dataclasses.asdict(res)
     row.update(perfstat.derive(row))
     row.update({"arm": arm, "rep": rep})
@@ -187,8 +210,7 @@ def profile(w: workloads.Workload, uri: str, label: str) -> None:
     try:
         workloads.run_one(w, uri, results, COMMON)
     finally:
-        rec.send_signal(signal.SIGINT)
-        rec.wait(timeout=120)
+        stop_perf(rec, 120)
     rep = subprocess.run(["perf", "report", "-i", str(data), "--stdio", "--no-children",
                           "--percent-limit", "0.5", "--sort", "symbol"],
                          capture_output=True, text=True)
@@ -239,6 +261,26 @@ def main(argv: list[str]) -> int:
     corpus_bytes = workloads.upload_n() * workloads.DIM * 4
 
     rows: list[dict] = []
+    try:
+        return run_sessions(args, out, rows)
+    finally:
+        # Whatever was measured, summarised: a session that fails later used
+        # to take the earlier sessions' summary with it.
+        write_summary(out, rows, bus, corpus_bytes, args.queries)
+
+
+def write_summary(out: Path, rows: list[dict], bus: str, corpus_bytes: int,
+                  queries: int) -> None:
+    summary = summarise(rows, corpus_bytes)
+    (out / "summary.json").write_text(json.dumps(
+        {"bus": bus, "corpus_bytes": corpus_bytes, "queries": queries,
+         "arms": summary, "rows": rows}, indent=2, default=str) + "\n")
+    text = table_text(summary, bus)
+    (out / "summary.txt").write_text(text)
+    print("\n" + text, flush=True)
+
+
+def run_sessions(args, out: Path, rows: list[dict]) -> int:
     batch_of = {arm: batch for arm, _, batch in ARMS}
     uri = f"http://localhost:{PORT}"
     for workers, runs in plan(args.reps):
@@ -266,14 +308,6 @@ def main(argv: list[str]) -> int:
                 profile(w9_row("profile", 1, args.queries), uri, f"{args.tag}-stream7-profile")
         finally:
             fullrun.stop_strawmann(engine)
-
-    summary = summarise(rows, corpus_bytes)
-    (out / "summary.json").write_text(json.dumps(
-        {"bus": bus, "corpus_bytes": corpus_bytes, "queries": args.queries,
-         "arms": summary, "rows": rows}, indent=2, default=str) + "\n")
-    text = table_text(summary, bus)
-    (out / "summary.txt").write_text(text)
-    print("\n" + text, flush=True)
     return 0
 
 

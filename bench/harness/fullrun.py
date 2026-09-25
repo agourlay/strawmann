@@ -352,7 +352,7 @@ def resolve_w11_queries(labels: list[str]) -> dict[str, int]:
         for wid, env in W11_QUERIES_ENV.items():
             if env in out:
                 continue
-            qps, fits = [], []
+            qps, fits, sent = [], [], []
             for label in pair:
                 if (w11_append_rates_of(label) or {}).get(wid) != want[wid]:
                     break
@@ -362,10 +362,20 @@ def resolve_w11_queries(labels: list[str]) -> dict[str, int]:
                 except (OSError, json.JSONDecodeError):
                     break
                 r = got.get(wid) or {}
+                # The rate came from `run.json`, which any later `workloads.py
+                # run` of the label rewrites; it describes this row only if
+                # the row was measured under that stamp.
+                if not stamped_by_run_json(label, r):
+                    break
                 q, n, cover = r.get("qps"), r.get("n_queries"), r.get("write_overlap_pct")
                 if not (isinstance(q, (int, float)) and q > 0):
                     break
                 qps.append(q)
+                # Only a search that was itself sized is a step to damp from:
+                # 0924 ran `QUERIES` and says nothing about where the last
+                # estimate landed.
+                if n and label_sized_w11(label):
+                    sent.append(n)
                 # A search that outlived its writer ran its tail against a
                 # quiet collection, faster, so its qps overstates the search
                 # under the write and would size the next one too long again.
@@ -376,10 +386,42 @@ def resolve_w11_queries(labels: list[str]) -> dict[str, int]:
                 fits.append(fit)
             if len(qps) == len(pair):
                 n = math.floor(min(fits) / W11_SPAN_MARGIN)
+                # Halfway, in log, from what that pair ran to what its rate
+                # says. The rate is not uniform over the append: strawmANN's
+                # queries slow as the unindexed tail grows, so 0924's average
+                # sized a search that would end in the append's first 8%, and
+                # the undamped step from each night's short search to the
+                # next's long one oscillated (4,840, 29,178, 6,918, 29,178).
+                # The geometric mean converges on any monotone response.
+                if sent:
+                    n = math.floor(math.sqrt(n * min(sent)))
                 n = max(n, math.ceil(max(qps) * workloads.MIN_ROW_S))
                 out[env] = min(workloads.QUERIES, n)
         pair = previous_pair(pair)
     return out
+
+
+def label_sized_w11(label: str) -> bool:
+    """Whether the label's stamp records a sized mixed-row search."""
+    try:
+        h = json.loads((ROOT / "bench/results" / label / "run.json").read_text()).get("harness")
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool((h or {}).get("w11_queries"))
+
+
+def stamped_by_run_json(label: str, row: dict) -> bool:
+    """Whether `row` was measured under the harness stamp `label`'s
+    `run.json` holds now. A row without a hash predates row hashing and is
+    taken as the stamp's, as `compare` takes it."""
+    got = row.get("harness_hash")
+    if not got:
+        return True
+    try:
+        h = json.loads((ROOT / "bench/results" / label / "run.json").read_text()).get("harness")
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(h) and workloads.stamp_hash(h) == got
 
 
 def previous_pair(labels: list[str]) -> list[str] | None:
@@ -399,10 +441,14 @@ def previous_pair(labels: list[str]) -> list[str] | None:
     if {m.group(1) for m in dated} != {"sm", "qd"} or len({m.group(2) for m in dated}) != 1:
         return None
     stem = "sm-" + dated[0].group(2)
+    # Strictly earlier than these labels, as the name says. "Newest other
+    # than these" let a walk over pairs (`resolve_w11_queries`) step from the
+    # newest pair to the second and back to the newest, and stop there.
+    own = min(int(x[-4:]) for x in labels)
     found = []
     for d in (ROOT / "bench/results").glob(f"{stem}-*"):
         m = re.fullmatch(re.escape(stem) + r"(-rel)?-(\d{4})", d.name)
-        if m and d.is_dir() and d.name not in labels:
+        if m and d.is_dir() and d.name not in labels and int(m.group(2)) < own:
             found.append((int(m.group(2)), d.name))
     if not found:
         return None

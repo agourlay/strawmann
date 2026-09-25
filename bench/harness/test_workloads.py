@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1610,7 +1611,7 @@ class FullrunRowInvocationTests(unittest.TestCase):
             self.assertEqual(
                 self.f.resolve_rps_reference("auto", ["prev-sm", "prev-qd"]), 3484.0)
 
-    def _w11_pair(self, date, spans, rows, rates=None):
+    def _w11_pair(self, date, spans, rows, rates=None, sized=False):
         """A dbpedia pair measured at `spans` (None: before spans were
         recorded), with `rows` = {engine: {wid: (qps, n_queries, overlap)}}."""
         for eng, got in rows.items():
@@ -1621,6 +1622,8 @@ class FullrunRowInvocationTests(unittest.TestCase):
                 h["w11_spans_s"] = spans
             if rates:
                 h["w11_append_rate"] = rates
+            if sized:
+                h["w11_queries"] = {wid: n for wid, (_q, n, _c) in got.items()}
             (d / "run.json").write_text(json.dumps({"harness": h}))
             (d / "rows.json").write_text(json.dumps([
                 {"id": wid, "qps": q, "n_queries": n, "write_overlap_pct": c}
@@ -1660,6 +1663,59 @@ class FullrunRowInvocationTests(unittest.TestCase):
             # And the slower engine's search then ends inside the append.
             self.assertLess(got["W11_STEADY_QUERIES"] / 244.0, append["W11-steady"])
             self.assertLess(got["W11_QUERIES"] / 145.0, append["W11"])
+
+    def test_the_walk_reaches_an_older_pair_at_this_rate(self):
+        """`previous_pair` returned the newest pair other than its argument,
+        so from 0925 the walk went to 0924... and from 0924 back to 0925."""
+        f, w = self.f, self.f.workloads
+        with mock.patch.object(w, "upload_n", lambda: 990_000), \
+                mock.patch.object(w, "w11_n", lambda: 198_000):
+            # The only pair at today's rate is the third-newest.
+            self._w11_pair("0923", None, {
+                "sm": {"W11-steady": (244.0, 50_000, 12.1), "W11": (166.0, 50_000, 19.9)},
+                "qd": {"W11-steady": (427.0, 50_000, 21.2), "W11": (145.0, 50_000, 21.6)}})
+            for date in ("0924", "0925"):
+                self._w11_pair(date, {"W11-steady": 256.0, "W11": 431.0}, {
+                    "sm": {"W11-steady": (2206.0, 50_000, 100.0), "W11": (102.0, 50_000, 82.0)},
+                    "qd": {"W11-steady": (1382.0, 50_000, 100.0), "W11": (216.0, 50_000, 100.0)}})
+            self.assertEqual(f.previous_pair(["sm-dbp1m-perf-0925", "qd-dbp1m-perf-0925"]),
+                             ["sm-dbp1m-perf-0924", "qd-dbp1m-perf-0924"])
+            self.assertIsNone(f.previous_pair(["sm-dbp1m-perf-0923", "qd-dbp1m-perf-0923"]))
+            got = f.resolve_w11_queries(["sm-dbp1m-perf-0926", "qd-dbp1m-perf-0926"])
+            self.assertEqual(set(got), {"W11_STEADY_QUERIES", "W11_QUERIES"})
+
+    def test_a_rewritten_run_json_does_not_speak_for_older_rows(self):
+        """A subset re-run rewrites `run.json` with today's rate while the W11
+        rows it did not re-run are still the old rate's."""
+        f, w = self.f, self.f.workloads
+        rates = {"W11-steady": 1_900, "W11": 3_300}
+        with mock.patch.object(w, "upload_n", lambda: 990_000), \
+                mock.patch.object(w, "w11_n", lambda: 198_000):
+            self._w11_pair("0925", None, {
+                "sm": {"W11-steady": (2206.0, 50_000, 100.0), "W11": (102.0, 50_000, 82.0)},
+                "qd": {"W11-steady": (1382.0, 50_000, 100.0), "W11": (216.0, 50_000, 100.0)}},
+                rates=rates)
+            for eng in ("sm", "qd"):
+                p = f.ROOT / "bench/results" / f"{eng}-dbp1m-perf-0925" / "rows.json"
+                rows = json.loads(p.read_text())
+                for r in rows:
+                    r["harness_hash"] = "measured-before"
+                p.write_text(json.dumps(rows))
+            self.assertEqual(f.resolve_w11_queries(["sm-dbp1m-perf-0926", "qd-dbp1m-perf-0926"]), {})
+
+    def test_the_step_is_damped_toward_what_the_pair_ran(self):
+        """Halfway in log from the pair's own -n to what its rate implies."""
+        f, w = self.f, self.f.workloads
+        rates = {"W11-steady": 1_900, "W11": 3_300}
+        with mock.patch.object(w, "upload_n", lambda: 990_000), \
+                mock.patch.object(w, "w11_n", lambda: 198_000):
+            self._w11_pair("0926", None, {
+                "sm": {"W11-steady": (240.0, 4_840, 100.0), "W11": (150.0, 6_965, 100.0)},
+                "qd": {"W11-steady": (420.0, 4_840, 100.0), "W11": (140.0, 6_965, 100.0)}},
+                rates=rates, sized=True)
+            got = f.resolve_w11_queries(["sm-dbp1m-perf-0927", "qd-dbp1m-perf-0927"])
+            raw = math.floor(140.0 * 60.0 / f.W11_SPAN_MARGIN)
+            self.assertEqual(got["W11_QUERIES"], math.floor(math.sqrt(raw * 6_965)))
 
     def test_a_search_that_outran_its_writer_shrinks_the_next_one(self):
         """A qps averaged over a search that outlived its writer includes the
@@ -3255,3 +3311,31 @@ class RunContextTests(unittest.TestCase):
         self.w.use_oversampling_policy("pool")
         self.w.use_run_context({"dataset": "sift1m"})
         self.assertIs(self.w.OVERSAMPLING_POLICY, self.w.OversamplingPolicy.defaults)
+
+
+class DriverRobustnessTests(unittest.TestCase):
+    def test_a_perf_that_will_not_stop_is_killed(self):
+        ab = importlib.import_module("w9_ab")
+        rec = subprocess.Popen(["sh", "-c", "trap '' INT; sleep 30"])
+        time.sleep(0.2)
+        t0 = time.monotonic()
+        ab.stop_perf(rec, 1)
+        self.assertIsNotNone(rec.returncode)
+        self.assertLess(time.monotonic() - t0, 10)
+
+    def test_the_summary_is_written_when_a_session_fails(self):
+        ab = importlib.import_module("w9_ab")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            rows = [{"arm": "stream7", "qps": 9.8, "n_queries": 1000, "duration_s": 102.0}]
+            ab.write_summary(out, rows, "65 GB/s", 990_000 * 1536 * 4, 1000)
+            self.assertIn("stream7", (out / "summary.txt").read_text())
+
+    def test_a_second_engine_process_is_named(self):
+        ab = importlib.import_module("w9_ab")
+        out = io.StringIO()
+        with mock.patch.object(ab.procstat, "engine_processes",
+                               lambda: [(10, "qdrant-3c4f"), (42, "strawmann")]), \
+                contextlib.redirect_stdout(out):
+            ab.warn_other_engines()
+        self.assertIn("2 engine processes alive", out.getvalue())
