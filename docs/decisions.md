@@ -1588,3 +1588,33 @@ before the writers (0925: strawmANN 29.5 GiB, Qdrant 133.9) and say what the
 writers added (1.4 and 125.4 GiB), and the full table and `compare.py` keep
 the whole run's total.
 
+## Index builds run below the search workers, as Qdrant's do, decided 2026-09-25
+
+On 0925's W11 strawmANN served 102 q/s against Qdrant's 216, with 1,568 s of
+run-queue wait and 528,701 involuntary context switches over the row. The
+append provoked two extending builds (99,200 and 109,600 points into the
+existing graph, 103 s and 120 s, under 1,000 inserts a second), each on eight
+threads at the search workers' own priority on the same eight CPUs, so the
+scheduler split the cores between building and serving.
+
+Qdrant does not. Every HNSW build thread calls
+`common::cpu::linux_low_thread_priority` (nice 10, `hnsw/build.rs`), and its
+default optimizer budget keeps one CPU unallocated below 33 CPUs. Taken:
+strawmANN's background build task lowers itself to nice 10 before it spawns
+its pool (`net.server.lowerThreadPriority`), and on Linux the pool inherits
+it. A unit test holds the inheritance and that the spawning thread is
+untouched; on a live 200,000-point build the five build threads read nice 10
+and the six others 0. The initial bulk build has nothing to compete with, so
+W2 should not move.
+
+Not taken: capping an extending build's threads while queries are in flight,
+which frees cores deterministically but is a policy Qdrant does not have and a
+count to tune; and leaving it, which charges strawmANN for a scheduling choice
+the comparison target makes the other way.
+
+The cost it can carry: a build that yields finishes later, and until it does
+every query scans the pending tail exhaustively (findings 8), so W11 could
+lose on the tail what it gains on the run queue. The next pair measures the
+net, under the W11 rows that were also changed today (fixed rate, sized
+search), so its run-queue wait is not 0925's to compare with directly.
+

@@ -570,6 +570,57 @@ pub fn pinToCpus(cpus: []const usize) void {
     linux.sched_setaffinity(0, &set) catch {};
 }
 
+/// The nice value an index build runs at: Qdrant's, 10
+/// (`common::cpu::linux_low_thread_priority`, applied to every HNSW build
+/// thread in `hnsw/build.rs`).
+pub const build_nice: i32 = 10;
+
+/// Lower the calling thread to `build_nice`. On Linux a nice value belongs to
+/// a thread and threads inherit their creator's, so calling this before the
+/// build pool spawns covers the whole pool. Search then preempts the build
+/// rather than splitting the cores with it: on 0925's W11 the eight build
+/// threads ran at the search workers' weight on the same eight CPUs, and the
+/// search spent 1,568 s waiting in the run queue. Soft-fails, as Qdrant's
+/// does: a build at normal priority is slower search, not a wrong answer.
+pub fn lowerThreadPriority() void {
+    const PRIO_PROCESS = 0;
+    const tid: usize = @intCast(linux.gettid());
+    _ = linux.syscall3(.setpriority, PRIO_PROCESS, tid, @as(usize, @bitCast(@as(isize, build_nice))));
+}
+
+/// The calling thread's nice value, from `getpriority`, which returns
+/// `20 - nice` so that success is never negative.
+pub fn threadNice() i32 {
+    const PRIO_PROCESS = 0;
+    const tid: usize = @intCast(linux.gettid());
+    const r = linux.syscall2(.getpriority, PRIO_PROCESS, tid);
+    return 20 - @as(i32, @intCast(r));
+}
+
+test "a lowered thread and the threads it spawns run at the build nice value" {
+    const Probe = struct {
+        child_nice: i32 = 0,
+        own_nice: i32 = 0,
+        fn child(self: *@This()) void {
+            self.child_nice = threadNice();
+        }
+        fn run(self: *@This()) void {
+            lowerThreadPriority();
+            self.own_nice = threadNice();
+            const t = std.Thread.spawn(.{}, child, .{self}) catch return;
+            t.join();
+        }
+    };
+    const before = threadNice();
+    var probe: Probe = .{};
+    const t = try std.Thread.spawn(.{}, Probe.run, .{&probe});
+    t.join();
+    try std.testing.expectEqual(build_nice, probe.own_nice);
+    try std.testing.expectEqual(build_nice, probe.child_nice);
+    // Per thread: the one that spawned the build is untouched.
+    try std.testing.expectEqual(before, threadNice());
+}
+
 // =========================================================================
 // The event loop
 // =========================================================================

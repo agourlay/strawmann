@@ -124,12 +124,10 @@ across workers) plus a profile; a 100K smoke run read 101 / 136 / 470 q/s and
 fewer streams or one shared pass is the lever, and whether 09-22 reopens for
 d=1536.
 
-**11. strawmANN's index build competes with its own search during `W11`.** On
-0925 strawmANN's `W11` served 102 q/s against Qdrant's 216, with 1,568 s of
-run-queue wait and 528,701 involuntary context switches over the row.
-`server.log` shows the rebuilds the append provoked running `threads=8` on the
-same 8 CPUs as the 7 search workers (`buildIndex` takes its thread count from
-its caller). Capping an extending build's threads, or its priority, while
-queries are in flight trades a longer pending tail (item 8) against less
-contention; which way it nets is an in-process measurement and then a night
-run. Not a harness question: it changes `engine_binary`, not the stamp.
+**11. strawmANN's index build ran at the search workers' priority during
+`W11`.** On 0925 strawmANN's `W11` served 102 q/s against Qdrant's 216, with
+1,568 s of run-queue wait over the row: the append's extending builds ran
+eight threads at normal priority on the search workers' eight CPUs. Since
+2026-09-25 builds run at nice 10, as Qdrant's HNSW builds do (`decisions.md`).
+The next pair says whether that nets out ahead once the slower build's longer
+pending tail (item 8) is counted.

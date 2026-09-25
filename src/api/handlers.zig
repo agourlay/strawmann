@@ -216,6 +216,9 @@ pub const Engine = struct {
                 // on that one core — §6.3 pins a worker to a core, it does not
                 // pin the *engine* to one.
                 if (cpus) |set| net.server.pinToCpus(set);
+                // Below the search workers, as Qdrant runs its HNSW builds:
+                // inherited by every thread the build spawns.
+                net.server.lowerThreadPriority();
                 core.collection.buildIndex(c, mode, threads) catch {
                     // A failed build must not leave the collection wedged in
                     // `building` forever; returning it to `absent` lets the
