@@ -3011,3 +3011,70 @@ class VisitedSetProvenanceTests(unittest.TestCase):
                        "isa_build": "native", "optimize": "ReleaseFast",
                        "profile": "as-deployed", "visited_set": "bitmap"}}
         self.assertEqual(len(compare.build_identities(rows)), 2)
+
+
+class W9AbTests(unittest.TestCase):
+    """The W9 experiment's plan and arithmetic, without an engine."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ab = importlib.import_module("w9_ab")
+
+    def test_arms_that_share_a_worker_count_share_a_session_and_alternate(self):
+        self.assertEqual(self.ab.plan(2), [
+            (7, [("stream7", 1), ("batch8", 1), ("stream7", 2), ("batch8", 2)]),
+            (4, [("stream4", 1), ("stream4", 2)])])
+
+    def test_each_arm_is_the_tables_w9_with_one_thing_changed(self):
+        w9 = {w.id: w for w in workloads.table()}["W9"]
+        for arm, batch in (("stream7", 1), ("batch8", 8)):
+            w = self.ab.w9_row(arm, batch, 1000)
+            args = list(w.args)
+            self.assertEqual(w.id, f"W9-{arm}")
+            self.assertEqual(args[args.index("-n") + 1], "1000")
+            self.assertEqual(workloads.batch_size_of(w), batch)
+            # Everything else is W9's own invocation.
+            rest = list(args)
+            if "--search-batch-size" in rest:
+                i = rest.index("--search-batch-size")
+                del rest[i:i + 2]
+            self.assertEqual(self.ab.set_n(rest, workloads.n_of(w9)), list(w9.args))
+            self.assertIn("--search-exact", args)
+
+    def test_the_summary_says_how_much_of_the_bus_each_arm_implies(self):
+        corpus = 990_000 * 1536 * 4
+        rows = [
+            {"arm": "stream7", "qps": q, "n_queries": 1000, "duration_s": 1000 / q,
+             "perf_task_clock_s": 7.0 * 1000 / q, "perf_cycles": 1.43e9 * 1000,
+             "ipc": 0.26, "dram_bytes": 1.633e9 * 1000, "foreign": ""}
+            for q in (9.7, 9.8, 9.9)] + [
+            {"arm": "batch8", "qps": 30.0, "n_queries": 1000, "duration_s": 33.3,
+             "foreign": "Xorg(6%)"}]
+        got = {s["arm"]: s for s in self.ab.summarise(rows, corpus)}
+        s7 = got["stream7"]
+        self.assertEqual(s7["reps"], 3)
+        self.assertAlmostEqual(s7["qps"], 9.8)
+        self.assertAlmostEqual(s7["qps_spread"], 0.2)
+        self.assertAlmostEqual(s7["cores"], 7.0)
+        self.assertAlmostEqual(s7["cycles_per_q"], 1.43e9)
+        self.assertAlmostEqual(s7["dram_mb_per_q"], 1633.0)
+        self.assertAlmostEqual(s7["implied_gbs"], 9.8 * corpus / 1e9)   # ~59.6
+        # A row without counters still gives its rate, and says what was busy.
+        self.assertIsNone(got["batch8"]["ipc"])
+        self.assertEqual(got["batch8"]["foreign"], ["Xorg(6%)"])
+        self.assertNotIn("stream4", got)
+        text = self.ab.table_text(self.ab.summarise(rows, corpus), "65.2 GB/s")
+        self.assertIn("stream7", text)
+        self.assertIn("59.6", text)
+
+    def test_the_profile_attaches_to_the_engine_not_its_scope(self):
+        with mock.patch.object(self.ab.procstat, "engine_processes",
+                               lambda: [(10, "systemd-run"), (42, "strawmann")]):
+            self.assertEqual(self.ab.strawmann_pid(), 42)
+        # Two engines up is not a profile of either.
+        with mock.patch.object(self.ab.procstat, "engine_processes",
+                               lambda: [(42, "strawmann"), (43, "qdrant"), (44, "strawmann")]):
+            self.assertIsNone(self.ab.strawmann_pid())
+        argv = self.ab.perf_record_argv(42, Path("/tmp/x.data"))
+        self.assertEqual(argv[:2], ["perf", "record"])
+        self.assertIn("42", argv)
