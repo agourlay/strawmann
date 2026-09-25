@@ -2666,6 +2666,7 @@ def grouped_losses(items: list[dict]) -> list[dict]:
         g = out.setdefault(fam, {"id": fam, "ids": [], "ratios": [],
                                  "desc": describe(fam) or re.sub(r",? ef=\d+", "", l["desc"])})
         g["ids"].append(l["id"])
+        g.setdefault("descs", []).append(l.get("desc") or "")
         g["ratios"].append(ratio_value(l["ratio"]))
         g.setdefault("recalls", []).append(l.get("recall", ""))
     for g in out.values():
@@ -2676,6 +2677,13 @@ def grouped_losses(items: list[dict]) -> list[dict]:
         # as the base row, which the throughput table shows winning.
         if g["points"] == 1:
             g["id"] = g["ids"][0]
+            # Its own description too: under the family's it read as the base
+            # row, "filtered search, one keyword (W12-sel1-ef64)".
+            g["desc"] = g["descs"][0] or g["desc"]
+        elif g["id"] not in g["ids"]:
+            # Points of a sweep without their base row: name them, since the
+            # base row's id reads as the row the table shows a verdict for.
+            g["id"] = ", ".join(g["ids"])
         # One recall pair per bullet: a family of settings has one per point,
         # and the throughput table beside it prints them all.
         g["recall"] = g["recalls"][0] if g["points"] == 1 else ""

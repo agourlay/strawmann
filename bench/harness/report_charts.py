@@ -369,6 +369,7 @@ def chart_quantization_recall(runs: list[Run]) -> dict | None:
     fig = go.Figure()
     drawn = 0
     for coll, name, hue in ENCODINGS:
+        name = encoding_name(coll, name)
         for j, run in enumerate(runs):
             ds = (run.meta.get("dataset") or {}).get("name") or "sift1m"
             pts = (recall_mod.load_recall_points(run.label, ds, coll)
@@ -1055,8 +1056,11 @@ def filtered_matched_recall_table(runs: list[Run]) -> str:
         # written and would answer a different question if it were.
         doc = recall_mod.load_recall_json(run.label, ds, "bench12",
                                           grade=grade) or {}
+        # No graded sweep, no table: an empty document made `frontier_points`
+        # fall back to the run's unfiltered bench2 recall and pair it with the
+        # filtered throughput, with nothing on the page to say so.
         pts.append(frontier_points(run, bfb_only=True, prefix=f"W12-{grade}",
-                                   collection="bench12", recall_doc=doc))
+                                   collection="bench12", recall_doc=doc) if doc else [])
     if not pts[0] or not pts[1]:
         return ""
     inner = _matched_table(a, b, pts[0], pts[1], sweep="W12-sel10",
@@ -1116,19 +1120,26 @@ def sq8_matched_recall_table(runs: list[Run]) -> str:
     for run in (a, b):
         ds = (run.meta.get("dataset") or {}).get("name") or "sift1m"
         doc = recall_mod.load_recall_points(run.label, ds, "bench6") or {}
+        # As for the filtered table: no SQ8 sweep is no SQ8 table, not fp32's.
         pts.append(frontier_points(run, bfb_only=True, prefix="W6",
-                                   collection="bench6", recall_doc=doc))
+                                   collection="bench6", recall_doc=doc) if doc else [])
     if not pts[0] or not pts[1]:
         return ""
     inner = _matched_table(a, b, pts[0], pts[1], sweep="W6", caveat=False)
     if not inner:
         return ""
+    import workloads
+    why = ("Under the `pool` policy both engines rescore `ef` candidates, so W6 "
+           "is compared row by row as well; held at equal recall, the reading "
+           "does not depend on the rows landing in one recall band"
+           if workloads.OVERSAMPLING_POLICY is workloads.OversamplingPolicy.pool else
+           "W6 itself is refused a ratio because the engines rescore differently "
+           "sized pools (decisions §5); held at equal recall instead, that "
+           "divergence becomes an operating point rather than a refusal")
     return ('<h3 style="margin-top:28px">At matched recall, SQ8</h3>'
             '<p class="note">The same reading over the scalar-quantized '
-            'collection. W6 itself is refused a ratio because the engines '
-            'rescore differently sized pools (decisions §5); held at equal '
-            'recall instead, that divergence becomes an operating point rather '
-            'than a refusal — and note where each engine\'s curve stops, '
+            f'collection. {why}. '
+            'Note where each engine\'s curve stops, '
             'because a recall only one of them reaches is the more useful '
             'fact about an encoding than any ratio.</p>' + inner)
 
@@ -1191,6 +1202,16 @@ def _matched_table(a: Run, b: Run, pa: list, pb: list, sweep: str = "W10",
             f'{behind}.</p>' if caveat else
                '<p class="note">The last column reads as it does in the fp32 table '
                'above.</p>') + '</details>')
+
+def encoding_name(collection: str, default: str) -> str:
+    """A curve's legend, with the oversampling its rows sent under the run's
+    policy: under `pool` binary is not "4x", it is `ef / limit` per row."""
+    import workloads
+    if workloads.OVERSAMPLING_POLICY is workloads.OversamplingPolicy.pool and \
+            collection in ("bench6", "bench7", "bench8"):
+        return default.split(",")[0] + ", rescore pool matched to ef"
+    return default
+
 
 def chart_frontier(runs: list[Run]) -> dict | None:
     """Throughput against recall: the only comparison `ef` does not distort.

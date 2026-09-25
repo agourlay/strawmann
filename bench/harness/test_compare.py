@@ -1804,6 +1804,15 @@ class HarnessBoundRowTests(unittest.TestCase):
         self.assertNotIn("monotonically", rows["W4"].note_text)
 
 
+class FoldedOverlapTests(unittest.TestCase):
+    def test_the_note_carries_the_folded_figure(self):
+        compare = importlib.import_module("compare")
+        row = {"write_overlap_pct": 81.0,
+               "notes": "concurrent append; write overlap 82%; append 500 points/s"}
+        self.assertIn("write overlap 81%", compare.with_folded_overlap(row["notes"], row))
+        self.assertEqual(compare.with_folded_overlap("x", {"write_overlap_pct": None}), "x")
+
+
 class RescoreCauseTests(unittest.TestCase):
     """What a quantized row's unequal recall is blamed on."""
 

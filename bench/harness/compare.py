@@ -579,7 +579,7 @@ class Row:
         # same sentence twice: W5's "per-batch latency (16 queries/request)"
         # was printed under each label in the front-page block. Identical
         # notes are said once, without a label.
-        na, nb = trim_row_note(ra.get("notes") or ""), trim_row_note(rb.get("notes") or "")
+        na, nb = (trim_row_note(with_folded_overlap(r.get("notes") or "", r)) for r in (ra, rb))
         if na and na == nb:
             self.notes.append(f"[{na}]")
         else:
@@ -1534,6 +1534,19 @@ _COVERAGE = re.compile(r"(;?\s*)search finished [\d.]+ s before the append did"
                        r"\s*\((\d+)% of the append was covered\)")
 _COVERAGE_ANY = re.compile(r";?\s*search finished [\d.]+ s before the append did"
                            r"(\s*\([^)]*\))?")
+
+
+def with_folded_overlap(note: str, row: dict) -> str:
+    """The note's `write overlap N%` as the row's own `write_overlap_pct`.
+
+    A folded row keeps pass 1's note text and medians the number, so 0925's
+    strawmANN W11 printed "write overlap 82%" (pass 1) beside "the last 19%"
+    (100 minus the median, 81.0): 101% of one row.
+    """
+    pct = row.get("write_overlap_pct")
+    if pct is None:
+        return note
+    return re.sub(r"write overlap \d+(?:\.\d+)?%", f"write overlap {pct:.0f}%", note)
 
 
 def trim_row_note(note: str) -> str:

@@ -288,6 +288,11 @@ class ReportHostTests(unittest.TestCase):
                                           sw_a=sw, sw_b=sw_b, colls=colls)
             html = report.matched_recall_table(runs)
             self.assertIn("19,936 in a and 19,796 in b", html)
+            # One engine's graded sweep missing: no filtered table at all,
+            # rather than that engine's unfiltered bench2 recall under it.
+            report, runs, df = self._pair(Path(tmp), rows_a, rows_b,
+                                          sw_a=sw, sw_b=sw[:1], colls=colls)
+            self.assertNotIn("filtered to 10%", report.matched_recall_table(runs))
 
     def test_recall_ci_widens_the_matched_ratio(self):
         """The headline range treats each measured recall as exact; the recall
@@ -2676,6 +2681,13 @@ class ReportReadabilityTests(unittest.TestCase):
             {"id": "W12-sel1-ef64", "desc": "filtered, ef=64", "ratio": "0.79x"}])
         self.assertEqual([(g["id"], g["ratio"], g["points"]) for g in got],
                          [("W9", "0.77x", 1), ("W12-sel1-ef64", "0.79x", 1)])
+        self.assertEqual(got[1]["desc"], "filtered, ef=64")
+        # Two points of a sweep, no base row: named, not filed under it.
+        two = self.report.grouped_losses([
+            {"id": "W12-sel10-ef256", "desc": "f, ef=256", "ratio": "0.34x"},
+            {"id": "W12-sel10-ef512", "desc": "f, ef=512", "ratio": "0.58x"}])
+        self.assertEqual(two[0]["id"], "W12-sel10-ef256, W12-sel10-ef512")
+        self.assertEqual(two[0]["points"], 2)
 
     def test_a_loss_at_two_recalls_says_so(self):
         """0925's bullet read `(W12-sel1-ef64): 0.79x` as though both engines
@@ -2707,7 +2719,7 @@ class ReportReadabilityTests(unittest.TestCase):
             {"id": "W12-sel10-ef32", "desc": "g", "ratio": "0.80x", "recall": "x"},
             {"id": "W12-sel10-ef64", "desc": "g", "ratio": "0.85x", "recall": "y"}])}
         self.assertEqual(grouped["W12-sel1-ef64"], "sm at recall 1.0000, qd at 0.9963")
-        self.assertEqual(grouped["W12-sel10"], "")
+        self.assertEqual(grouped["W12-sel10-ef32, W12-sel10-ef64"], "")
 
     def test_the_summary_latency_table_keeps_the_rows_a_latency_claim_rests_on(self):
         report = self.report
@@ -2812,3 +2824,21 @@ class ReportReadabilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PoolWordingTests(unittest.TestCase):
+    """What the page says of the quantized rows under the `pool` policy."""
+
+    def test_the_legend_and_the_sq8_lede_follow_the_policy(self):
+        import workloads
+        charts = importlib.import_module("report_charts")
+        self.addCleanup(os.environ.pop, "OVERSAMPLING_POLICY", None)
+        workloads.use_oversampling_policy("matched")
+        self.assertEqual(charts.encoding_name("bench7", "binary, 4x oversampling"),
+                         "binary, 4x oversampling")
+        workloads.use_oversampling_policy("pool")
+        self.assertEqual(charts.encoding_name("bench7", "binary, 4x oversampling"),
+                         "binary, rescore pool matched to ef")
+        self.assertEqual(charts.encoding_name("bench2", "fp32 (no quantization)"),
+                         "fp32 (no quantization)")
+        workloads.use_oversampling_policy("defaults")
