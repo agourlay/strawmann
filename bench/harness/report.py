@@ -4184,6 +4184,9 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv[1:])
 
     runs = [load_run(x) for x in args.labels]
+    # The context the rows were measured under, not the shell's
+    # (`workloads.use_run_context`); both arms share it or the page says STALE.
+    workloads.use_run_context((runs[0].meta or {}).get("harness"))
     names = datasets_of(runs)
     if len(names) > 1:
         # Not a comparison. Two engines on two corpora share a page and a set

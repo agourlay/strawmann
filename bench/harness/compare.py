@@ -2082,6 +2082,13 @@ def main(argv: list[str]) -> int:
         return int(e.code or 0)
 
     a_label, b_label = args.a_label, args.b_label
+    # The context the rows were measured under, not the shell's.
+    import workloads
+    try:
+        workloads.use_run_context(json.loads(
+            (ROOT / "bench/results" / a_label / "run.json").read_text()).get("harness"))
+    except (OSError, json.JSONDecodeError):
+        pass
     lenient = args.check_readme
     a, b = load(a_label, not lenient), load(b_label, not lenient)
 

@@ -3141,6 +3141,15 @@ class IsaSweepArgvTests(unittest.TestCase):
         self.assertEqual(pinned[pinned.index("--workers") + 1], "7")   # one I/O thread
         self.assertTrue(pinned[0].endswith("strawmann-avx512-256"))
 
+    def test_a_pinned_arm_serves_from_the_published_placement(self):
+        """Unpinned-and-unplaced, the arm served from the huge-page arena while
+        the figures it is compared with were taken on the cached mapping."""
+        arm = self.isa.arms(["avx2"])[0]
+        argv = self.isa.server_argv(arm, 6334, "4-11")
+        self.assertEqual(argv[argv.index("--default-placement") + 1], "cached")
+        self.assertIn("--data-dir", argv)
+        self.assertNotIn("--data-dir", self.isa.server_argv(arm, 6334))
+
     def test_the_client_is_placed_and_counted_when_asked(self):
         argv = self.isa.client_argv(6334, "avx2", ["W2", "W3"], "0-3", "default")
         self.assertEqual(argv[:3], ["taskset", "-c", "0-3"])
@@ -3205,3 +3214,44 @@ class IdenticalInvocationTests(unittest.TestCase):
         # A member the floor does not cover stays uncovered.
         self.assertEqual(got["W6"], 0.003)
         self.assertNotIn("W6-ef128", got)
+
+
+class QdrantRunModeTests(unittest.TestCase):
+    def test_a_native_qdrant_runs_in_production_mode(self):
+        """Unset, Qdrant's RUN_MODE is `development`: 4 search threads, audit
+        logging of every request, DEBUG logs, every feature flag."""
+        import fullrun
+        src = Path(fullrun.__file__).read_text()
+        body = src[src.index("def start_qdrant_binary("):src.index("def await_qdrant(")]
+        self.assertIn('"RUN_MODE": "production"', body)
+
+
+class W9CpuSetTests(unittest.TestCase):
+    def test_cpu_lists_parse(self):
+        ab = importlib.import_module("w9_ab")
+        self.assertEqual(ab.cpu_set("0-3"), {0, 1, 2, 3})
+        self.assertEqual(ab.cpu_set("0-1,8,10-11"), {0, 1, 8, 10, 11})
+
+
+class RunContextTests(unittest.TestCase):
+    """A render binds the run's own dataset and policies."""
+
+    def setUp(self):
+        self.w = importlib.reload(workloads)
+        self.addCleanup(os.environ.pop, "OVERSAMPLING_POLICY", None)
+
+    def test_a_matched_run_renders_as_matched_whatever_the_shell_says(self):
+        os.environ["OVERSAMPLING_POLICY"] = "defaults"
+        self.w.use_oversampling_policy("defaults")
+        self.w.use_run_context({"dataset": "dbpedia-openai-1m",
+                                "oversampling_policy": "matched",
+                                "collection": {"segment_policy": "equal-work"}})
+        self.assertIs(self.w.OVERSAMPLING_POLICY, self.w.OversamplingPolicy.matched)
+        self.assertEqual(self.w.DATASET, "dbpedia-openai-1m")
+        w6 = {x.id: x for x in self.w.table()}["W6"]
+        self.assertEqual(self.w.quant_of(w6)["quantization_oversampling"], 2.0)
+
+    def test_a_run_before_the_policy_key_measured_the_defaults(self):
+        self.w.use_oversampling_policy("pool")
+        self.w.use_run_context({"dataset": "sift1m"})
+        self.assertIs(self.w.OVERSAMPLING_POLICY, self.w.OversamplingPolicy.defaults)

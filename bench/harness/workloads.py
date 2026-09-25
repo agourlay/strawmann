@@ -135,6 +135,27 @@ def use_oversampling_policy(name: str) -> str:
     return str(OVERSAMPLING_POLICY)
 
 
+def use_run_context(harness: dict | None) -> None:
+    """Bind the dataset and both policies a run was measured under, from its
+    `run.json` harness stamp, so a render describes the run and not the shell.
+
+    Every reader of `table()` sees these globals, and a render took them from
+    the rendering process's environment: re-rendering the 0925 dbpedia page
+    without `OVERSAMPLING_POLICY=matched` looked `bench6` up as the defaults'
+    sweep, found none, and printed bench2's fp32 recalls in the SQ8
+    matched-recall table; `compare.py` without the dataset described W11 with
+    sift1m's volumes. A run from before the oversampling key measured the
+    defaults.
+    """
+    h = harness or {}
+    if h.get("dataset"):
+        use_dataset(h["dataset"])
+    use_oversampling_policy(h.get("oversampling_policy") or str(OversamplingPolicy.defaults))
+    seg = (h.get("collection") or {}).get("segment_policy")
+    if seg:
+        use_segment_policy(seg)
+
+
 def use_segment_policy(name: str) -> str:
     """Bind the segment policy for this process and everything it spawns.
 
