@@ -58,9 +58,18 @@
 
   <ul>
     <li>
+      <div class="name"><a href="report-dbpedia-openai-1m-sm-dbp1m-perf-0925-vs-qd-dbp1m-perf-0925-2026-09-24-2152.html">dbpedia-openai-1m, 2026-09-25</a></div>
+      <div class="what">The current dbpedia-openai-1m comparison, and the source of
+      <code>comparison-dbpedia-openai-1m.md</code>. T4 with T3 passing, gate <code>pass</code>
+      both arms, 3 passes, equal-work, matched oversampling, <code>--perf</code>, the same
+      Qdrant binary as the 09-24 page. No contaminated or drifting row. At matched recall
+      strawmANN serves 1.26x to 1.44x Qdrant's throughput. First page with ACORN-1 filtered
+      search; its W11 rows append 10x slower than 09-24's, so no ratio crosses the two pages.</div>
+    </li>
+    <li>
       <div class="name"><a href="report-dbpedia-openai-1m-sm-dbp1m-perf-0924-vs-qd-dbp1m-perf-0924-2026-09-23-1816.html">dbpedia-openai-1m, 2026-09-24</a></div>
-      <div class="what">The current dbpedia-openai-1m comparison, the headline tier at d=1536
-      and 1M, and the source of <code>comparison-dbpedia-openai-1m.md</code>. T4 with T3
+      <div class="what">The pair the headline tier had until 2026-09-25, and the first licensed
+      comparison at d=1536 and 1M. T4 with T3
       passing, the first licensed comparison at that width and scale. Gate <code>pass</code>
       both arms, 3 passes, equal-work, matched oversampling, <code>--perf</code>, Qdrant's
       release binary. No contaminated row in any pass. Qdrant's SQ8 recall controls at ef 32

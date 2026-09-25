@@ -1,4 +1,4 @@
-# strawmann vs Qdrant 1.19.0 — dbpedia-openai-100K-1536-angular
+# strawmann vs Qdrant: dbpedia-openai-100K-1536-angular
 
 The table below is generated from the last full run that measured this dataset. Anything written under it by hand is not, and is not re-derived when the table is.
 
