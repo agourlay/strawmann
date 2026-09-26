@@ -42,16 +42,16 @@ next pair's `write overlap` says whether that holds; a search that overruns
 shrinks the one after it. Item 8 is what the row shows once it measures what it
 claims to.
 
-**4. `matched` oversampling matches SQ8 and nothing else; `pool` should
-match all three.** Under `matched`, `W6` is licensed and `W7` (0.9474
-against 0.8887) and `W8` (0.9656 against 0.9428) stay refused: Qdrant's pool
-is `limit` times oversampling, 40 and 20 candidates whatever `ef` is, so its
-recall@10 flattens at 0.907 (binary) and 0.962 (PQ) while strawmANN's
-`ef`-sized pool reaches 0.986 and 0.989. Since 2026-09-25 the `pool` policy
-sends `ef / limit` on every quantized row, so both engines rescore `ef`
-candidates (`decisions.md`). A night pair run with `OVERSAMPLING_POLICY=pool`
-is the measurement: equal recall per row on all three encodings if the pool
-was the whole gap, and any gap left is the encoders'.
+**4. `pool` matches the rescore pools; binary fails on SIFT at any pool.**
+Under `matched`, Qdrant's pool is `limit` times oversampling, 40 and 20
+candidates whatever `ef` is, so its dbpedia recall@10 flattened at 0.907
+(binary) and 0.962 (PQ) and `W7` and `W8` stayed refused. Since 2026-09-25 the
+`pool` policy sends `ef / limit` on every quantized row (`decisions.md`).
+sift1m's 0926 pair ran it: Qdrant's PQ recall went from 0.698 to 0.978 and `W8`
+is licensed for the first time, at 0.73x; its SQ8 ceiling rose from 0.974 to
+0.999. `W7` stays refused because binary quantization itself fails on SIFT
+(recall@10 0.06 on both engines), which no pool fixes. The 0927 dbpedia pair
+is the test that matters for binary, where both engines' recall was usable.
 
 **12. Every native-Qdrant pair before 2026-09-26 ran Qdrant's development
 profile; sift1m is re-measured, dbpedia is not.** `fullrun.start_qdrant_binary`
