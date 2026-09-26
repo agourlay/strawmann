@@ -2095,6 +2095,19 @@ class LandingBlockTests(unittest.TestCase):
         self.assertNotIn("Batched", block)
         self.assertIn("docs/comparison-sift1m.md", block)
 
+    def test_the_panel_links_its_report_once_it_is_published(self):
+        cmp, a, b = self._pair([_row("W4", 4000)], [_row("W4", 2000)])
+        self.assertNotIn("report-link", cmp.landing_block("a", "b", a, b))
+        reports = cmp.ROOT / "docs/reports"
+        reports.mkdir(parents=True, exist_ok=True)
+        for stamp in ("2026-09-20-1000", "2026-09-21-1000"):
+            (reports / f"report-sift1m-a-vs-b-{stamp}.html").write_text("")
+        # Another pair's page is not this panel's report.
+        (reports / "report-sift1m-a-vs-c-2026-09-22-1000.html").write_text("")
+        block = cmp.landing_block("a", "b", a, b)
+        self.assertIn('href="reports/report-sift1m-a-vs-b-2026-09-21-1000.html"', block)
+        self.assertNotIn("a-vs-c", block)
+
     def test_write_readme_splices_the_panel_and_the_gate_accepts_it(self):
         cmp, a, b = self._pair([_row("W4", 4000)], [_row("W4", 2000)])
         blocks = cmp.blocks_for("a", "b", a, b)

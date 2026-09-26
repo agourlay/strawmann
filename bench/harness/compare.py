@@ -1701,6 +1701,19 @@ def landing_ratio_cell(ratio: str) -> str:
             f'<i style="width:{width:.1f}%"></i></span><b>{html.escape(ratio)}</b></div></td>')
 
 
+def published_report(dataset: str, a_label: str, b_label: str) -> str | None:
+    """The file name of this pair's page in `docs/reports/`, or `None`.
+
+    Found rather than derived: `report.default_out` stamps the name with the
+    render time, and a night run writes its panel before anyone has copied its
+    page into `docs/reports/`. That panel has no link until the page is
+    published and `--write-readme` runs again. The newest wins if a pair was
+    published twice.
+    """
+    pages = sorted((ROOT / "docs/reports").glob(f"report-{dataset}-{a_label}-vs-{b_label}-*.html"))
+    return pages[-1].name if pages else None
+
+
 def landing_block(a_label: str, b_label: str,
                   a: dict[str, dict], b: dict[str, dict]) -> str:
     """One dataset's panel on the published landing page.
@@ -1746,11 +1759,10 @@ def landing_block(a_label: str, b_label: str,
     if anchors:
         best, top, n = anchors
         out += ["      <tr>",
-                (f"        <td class=\"what\">At equal recall<small>§7.4's comparison, over {n} "
-                 f"anchors: {best['ratio']:,.2f}x at recall {best['recall']:.4f}, falling to "
-                 f"{top['ratio']:,.2f}x at {top['recall']:.4f}</small></td>"),
-                (f'        <td class="num span" colspan="2">recall {best["recall"]:.4f} '
-                 f'to {top["recall"]:.4f}</td>'),
+                (f"        <td class=\"what\">At equal recall<small>§7.4's comparison, "
+                 f"over {n} anchors</small></td>"),
+                (f'        <td class="num span" colspan="2">best at recall {best["recall"]:.4f}, '
+                 f'falling to {top["ratio"]:,.2f}x at {top["recall"]:.4f}</td>'),
                 "        " + landing_ratio_cell(f"{best['ratio']:,.2f}x"),
                 "      </tr>"]
     for wid, title, fixed in LANDING_ROWS:
@@ -1777,6 +1789,10 @@ def landing_block(a_label: str, b_label: str,
             "    These ratios are this dimension's and do not carry to another."]
     for bnr in banners(a_label, b_label):
         out.append(f'    <p class="warn">{html.escape(bnr)}</p>')
+    report = published_report(name, a_label, b_label)
+    if report:
+        out.append(f'    <a class="report-link" href="reports/{html.escape(report)}">'
+                   f"Full report for this run</a>")
     out += ["  </div>", "</div>"]
     return "\n".join(out)
 

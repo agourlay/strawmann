@@ -43,7 +43,7 @@
     background: var(--bg); color: var(--fg); margin: 0;
     font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
   }
-  main { max-width: 920px; margin: 0 auto; padding: 40px 16px 64px; }
+  main { max-width: 1200px; margin: 0 auto; padding: 40px 16px 64px; }
   a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: 2px; }
   code {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -69,23 +69,26 @@
   .actions img { height: 20px; display: block; }
 
   h2 { font-size: 1.25rem; margin: 0 0 4px; letter-spacing: -0.01em; }
-  .section-note { color: var(--muted); margin: 0 0 16px; font-size: 0.95rem; }
+  .section-note { color: var(--muted); margin: 0 0 16px; font-size: 0.95rem; max-width: 80ch; }
   section { margin-bottom: 44px; }
 
   /* results table */
+  /* One panel per dataset, side by side while each keeps room for its bars. */
+  .results { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); align-items: stretch; }
   .panel {
     background: var(--card); border: 1px solid var(--line); border-radius: 12px;
-    box-shadow: var(--shadow); overflow: hidden;
+    box-shadow: var(--shadow); overflow: hidden; display: flex; flex-direction: column;
   }
+  .panel .scroll { flex: 1; }
   .panel-head {
-    display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 16px;
-    padding: 14px 18px; border-bottom: 1px solid var(--line); font-size: 0.92rem;
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 14px 16px; border-bottom: 1px solid var(--line); font-size: 0.9rem;
   }
   .panel-head strong { font-size: 1rem; }
   .panel-head span { color: var(--muted); }
   .scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
-  th, td { padding: 10px 18px; text-align: right; white-space: nowrap; }
+  th, td { padding: 10px 14px; text-align: right; white-space: nowrap; }
   th:first-child, td:first-child { text-align: left; white-space: normal; }
   thead th {
     font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.05em;
@@ -93,6 +96,7 @@
   }
   tbody tr + tr td { border-top: 1px solid var(--line); }
   td.num { font-variant-numeric: tabular-nums; }
+  td.span { white-space: normal; color: var(--muted); font-size: 0.86rem; }
   .what { font-weight: 600; }
   .what small { display: block; font-weight: 400; color: var(--muted); font-size: 0.82rem; }
   .ratio { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
@@ -100,21 +104,22 @@
   .ratio.win b { color: var(--win); }
   .ratio.lose b { color: var(--lose); font-weight: 600; }
   /* The track spans 0x to 5x; the tick marks 1x (parity). */
-  .track { position: relative; width: 120px; height: 8px; border-radius: 4px; background: var(--bar); }
+  .track { position: relative; width: 64px; height: 8px; border-radius: 4px; background: var(--bar); }
   .track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--straw); }
   .ratio.lose .track i { background: var(--muted); }
   .ratio.even b { color: var(--muted); font-weight: 600; }
   .track::after { content: ""; position: absolute; left: 20%; top: -3px; bottom: -3px; width: 2px; background: var(--fg); opacity: .55; }
-  .panel-foot { padding: 12px 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.86rem; }
+  .panel-foot { padding: 12px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.86rem; }
   .panel-foot .warn { margin: 8px 0 0; color: var(--fg); font-weight: 600; }
-  .panel + .panel, .panel + .pending, .pending + .panel { margin-top: 18px; }
-  .pending {
-    padding: 12px 16px; border-radius: 10px; font-size: 0.92rem;
-    background: var(--straw-soft); border: 1px solid var(--line);
+  .report-link {
+    display: block; margin-top: 12px; padding: 9px 14px; border-radius: 8px; text-align: center;
+    background: var(--straw-soft); border: 1px solid var(--straw); color: var(--fg);
+    font-weight: 600; text-decoration: none;
   }
+  .report-link:hover { background: var(--straw); color: #1b1b1b; }
 
   /* report cards */
-  .cards { display: grid; gap: 14px; }
+  .cards { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); }
   .card {
     background: var(--card); border: 1px solid var(--line); border-radius: 12px;
     padding: 16px 18px; box-shadow: var(--shadow);
@@ -139,7 +144,6 @@
     .logo, .logo img { width: 72px; height: 72px; }
     table { font-size: 0.88rem; }
     .what small { display: none; }
-    td.span { white-space: normal; }
     h1 { font-size: 2.1rem; }
     th, td { padding: 9px 8px; }
     thead th { white-space: normal; letter-spacing: 0.02em; }
@@ -179,6 +183,7 @@
     <h2>Headline results</h2>
     <p class="section-note">Queries per second, higher is better. A ratio above 1x means strawmANN serves more.</p>
 
+    <div class="results">
     <!-- BEGIN landing-sift1m (generated by bench/harness/compare.py --write-readme) -->
 <div class="panel" id="sift1m">
   <div class="panel-head">
@@ -192,8 +197,8 @@
     </thead>
     <tbody>
       <tr>
-        <td class="what">At equal recall<small>§7.4's comparison, over 8 anchors: 2.14x at recall 0.9887, falling to 1.78x at 0.9993</small></td>
-        <td class="num span" colspan="2">recall 0.9887 to 0.9993</td>
+        <td class="what">At equal recall<small>§7.4's comparison, over 8 anchors</small></td>
+        <td class="num span" colspan="2">best at recall 0.9887, falling to 1.78x at 0.9993</td>
         <td><div class="ratio win"><span class="track"><i style="width:42.8%"></i></span><b>2.14x</b></div></td>
       </tr>
       <tr>
@@ -229,17 +234,66 @@
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-sift1m.md"><code>comparison-sift1m.md</code></a>.
     These ratios are this dimension's and do not carry to another.
+    <a class="report-link" href="reports/report-sift1m-sm-sift-perf-0926-vs-qd-sift-perf-0926-2026-09-25-2021.html">Full report for this run</a>
   </div>
 </div>
 <!-- END landing-sift1m -->
 
     <!-- BEGIN landing-dbpedia-openai-1m (generated by bench/harness/compare.py --write-readme) -->
-    <div class="pending">
-      <strong>dbpedia-openai-1m (d=1536) is being re-measured.</strong> Its published page ran
-      Qdrant's development profile, whose 4 search threads cap it. The pair with Qdrant in
-      production mode runs on 2026-09-27 and replaces it here.
-    </div>
+<div class="panel" id="dbpedia-openai-1m">
+  <div class="panel-head">
+    <strong>dbpedia-openai-1m <span>· d=1536, cosine, 1M vectors</span></strong>
+    <span>measured 2026-09-24 · 3 passes · gate <code>pass</code> both arms</span>
+  </div>
+  <div class="scroll">
+  <table>
+    <thead>
+      <tr><th scope="col">workload</th><th scope="col">strawmann</th><th scope="col">qdrant 1.19</th><th scope="col">ratio</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="what">At equal recall<small>§7.4's comparison, over 8 anchors</small></td>
+        <td class="num span" colspan="2">best at recall 0.8936, falling to 1.32x at 0.9893</td>
+        <td><div class="ratio win"><span class="track"><i style="width:28.8%"></i></span><b>1.44x</b></div></td>
+      </tr>
+      <tr>
+        <td class="what">Saturating<small>closed loop, every core busy</small></td>
+        <td class="num">3,552</td><td class="num">2,580</td>
+        <td><div class="ratio win"><span class="track"><i style="width:27.6%"></i></span><b>1.38x</b></div></td>
+      </tr>
+      <tr>
+        <td class="what">Batched<small>16 queries per request</small></td>
+        <td class="num">3,517</td><td class="num">1,318</td>
+        <td><div class="ratio win"><span class="track"><i style="width:53.4%"></i></span><b>2.67x</b></div></td>
+      </tr>
+      <tr>
+        <td class="what">Exact<small>brute force, no index</small></td>
+        <td class="num">10</td><td class="num">13</td>
+        <td><div class="ratio lose"><span class="track"><i style="width:15.4%"></i></span><b>0.77x</b></div></td>
+      </tr>
+      <tr>
+        <td class="what">One query at a time<small>single client, latency bound</small></td>
+        <td class="num">1,069</td><td class="num">621</td>
+        <td><div class="ratio win"><span class="track"><i style="width:34.4%"></i></span><b>1.72x</b></div></td>
+      </tr>
+      <tr>
+        <td class="what">Quantized, PQ<small>recall 0.9651 against 0.9419; not compared, the full table says why</small></td>
+        <td class="num">1,095</td><td class="num">1,164</td>
+        <td><div class="ratio even"><b>-</b></div></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="panel-foot">
+    <span class="bar-note">The bar runs from 0x to 5x; the tick marks parity.</span>
+    Every row, with its latency percentiles, recall and the rows the comparison
+    refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-dbpedia-openai-1m.md"><code>comparison-dbpedia-openai-1m.md</code></a>.
+    These ratios are this dimension's and do not carry to another.
+    <a class="report-link" href="reports/report-dbpedia-openai-1m-sm-dbp1m-perf-0925-vs-qd-dbp1m-perf-0925-2026-09-24-2152.html">Full report for this run</a>
+  </div>
+</div>
 <!-- END landing-dbpedia-openai-1m -->
+    </div>
   </section>
 
   <section>
