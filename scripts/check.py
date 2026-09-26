@@ -120,6 +120,14 @@ def steps() -> list[Step]:
              [str(ROOT / "bench/harness/compare.py"), "strawmann", "qdrant",
               "--check-readme"]),
 
+        # Unlike the step above, this one bites in CI: its source is the
+        # committed report pages, not the gitignored results. A page copied
+        # into docs/reports/ or retired from it without regenerating the
+        # cards leaves the landing page describing an archive that is gone.
+        Step("landing-cards-current", "the report cards on docs/reports/index.html must "
+                                      "match the pages in docs/reports/",
+             [sys.executable, str(ROOT / "bench/harness/landing_cards.py"), "--check"]),
+
         # The stdlib half of the harness has unit tests that need no engine,
         # dataset or measured results: the recall-equality rule on ratios, the
         # staleness refusal, the licence banner, wall-clock qps, W11's command

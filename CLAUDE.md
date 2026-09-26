@@ -4,7 +4,7 @@
 
 - The Python harness runs under `bench/.venv/bin/python`. The system and pyenv
   interpreters have no pandas, and the report tests fail to import under them.
-  - Harness tests: `cd bench/harness && ../.venv/bin/python -m unittest -q test_report test_workloads test_compare test_results test_paths`
+  - Harness tests: `cd bench/harness && ../.venv/bin/python -m unittest -q test_report test_workloads test_compare test_results test_paths test_landing_cards`
   - Lint: `bench/.venv/bin/ruff check bench/harness`
 - The full local gate is `scripts/check.py`; `--only '<step>'` runs one step,
   and CI runs the same steps by name.
