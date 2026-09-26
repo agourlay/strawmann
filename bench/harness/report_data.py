@@ -54,6 +54,10 @@ SERIES_DARK = {"strawmann": "#FFC65C", "qdrant": "#E8446A"}
 FALLBACK = ("#4C9AFF", "#2EA44F", "#A970FF")
 
 
+#: Upload and index rows: a duration, not a query rate.
+UPLOAD_ROWS = ("W0-upload", "W1", "W2", "W6-upload", "W7-upload", "W8-upload",
+               "W12-upload")
+
 def colour(label: str, i: int = 0) -> str:
     return SERIES.get(label.lower(), FALLBACK[i % len(FALLBACK)])
 

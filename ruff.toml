@@ -88,4 +88,5 @@ ignore = [
 known-first-party = ["paths", "workloads", "compare", "recall", "regression",
                      "procstat", "provenance", "report", "report_data",
                      "report_charts", "results", "aggregate", "setup",
-                     "row_schema", "bfb_output", "host_load"]
+                     "row_schema", "bfb_output", "host_load",
+                     "report_noise", "report_counters"]
