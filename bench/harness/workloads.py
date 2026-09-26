@@ -63,12 +63,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import contextlib
 
 import perfstat
-from row_schema import Gate, LoadMode, Result, Status
 
 import paths
 import procstat
 import provenance
 import setup
+from row_schema import Gate, LoadMode, Result, Status
 
 ROOT = Path(os.environ.get("STRAWMANN_ROOT", Path(__file__).resolve().parents[2]))
 
