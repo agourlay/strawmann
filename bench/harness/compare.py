@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import html
 import json
 import os
 import re
@@ -1628,6 +1629,8 @@ def blocks_targets(dataset: str) -> list[tuple[str, str]]:
     if dataset == HEADLINE_DATASET:
         out.append(("README.md", "compare-table"))
     out.append((f"docs/comparison-{dataset}.md", "compare-full"))
+    if dataset in LANDING_DATASETS:
+        out.append((LANDING_PAGE, landing_kind(dataset)))
     return out
 
 
@@ -1639,6 +1642,143 @@ def blocks_targets(dataset: str) -> list[tuple[str, str]]:
 #: under a caption naming SIFT1M, and the restore was a hand-run `compare.py`
 #: afterwards — a step nobody would know to take.
 HEADLINE_DATASET = "sift1m"
+
+
+#: The published landing page, and the datasets that have a panel on it.
+#:
+#: A list rather than every dataset: the page carries a marker pair per panel,
+#: and a dataset without one would make `--write-readme` fail at the end of a
+#: night's run for a page nobody asked it to appear on. Adding a dataset here
+#: means adding its marker pair to the page in the same commit.
+LANDING_PAGE = "docs/reports/index.html"
+LANDING_DATASETS = ("sift1m", "dbpedia-openai-1m")
+
+#: The rows each landing panel shows, in order, with a caption for a reader
+#: who has not read §4, or `None` for the row's recall pair. The equal-recall
+#: row leads and is not a workload row.
+LANDING_ROWS = [
+    ("W4", "Saturating", "closed loop, every core busy"),
+    ("W5", "Batched", "16 queries per request"),
+    ("W9", "Exact", "brute force, no index"),
+    ("W3", "One query at a time", "single client, latency bound"),
+    # No fixed caption: the row's two recalls are the caption, because a
+    # quantized ratio means little without them.
+    ("W8", "Quantized, PQ", None),
+]
+
+#: The ratio a landing bar spans end to end. Parity sits at a fifth of it.
+LANDING_BAR_MAX = 5.0
+
+
+def landing_kind(dataset: str) -> str:
+    return f"landing-{dataset}"
+
+
+def human_count(n: int | None) -> str:
+    """1,000,000 as `1M`, 100,000 as `100K`: a caption, not a measurement."""
+    if not n:
+        return ""
+    for div, suffix in ((1_000_000, "M"), (1_000, "K")):
+        if n >= div and n % div == 0:
+            return f"{n // div}{suffix}"
+    return f"{n:,}"
+
+
+def landing_ratio_cell(ratio: str) -> str:
+    """A ratio with its bar, or the refusal text alone.
+
+    Only a number gets a bar. `parity`, `-` and `offered` are the table's
+    refusals and keep their words: a bar drawn for them would be a number the
+    comparison declined to print.
+    """
+    try:
+        x = float(ratio.removesuffix("x"))
+    except ValueError:
+        return f'<td><div class="ratio even"><b>{html.escape(ratio)}</b></div></td>'
+    cls = "win" if x > 1 else "lose"
+    width = min(x / LANDING_BAR_MAX, 1.0) * 100
+    return (f'<td><div class="ratio {cls}"><span class="track">'
+            f'<i style="width:{width:.1f}%"></i></span><b>{html.escape(ratio)}</b></div></td>')
+
+
+def landing_block(a_label: str, b_label: str,
+                  a: dict[str, dict], b: dict[str, dict]) -> str:
+    """One dataset's panel on the published landing page.
+
+    Generated for the reason `header_block` is: the page's table was typed in
+    by hand from `comparison-sift1m.md`, and the next published pair would
+    have left it quoting the last one. It takes the same joined rows, so a
+    refused ratio reads as refused here too, and the equal-recall row comes
+    from the same frontier as the README's line.
+    """
+    rows = {r.id: r for r in joined(a_label, b_label, a, b)}
+    spec = dataset_spec_of(a_label, b_label)
+    name = spec.get("name") or "unknown"
+    what = [f"d={spec['dim']}"] if spec.get("dim") else []
+    if spec.get("metric"):
+        what.append(str(spec["metric"]).lower())
+    if human_count(spec.get("n")):
+        what.append(f"{human_count(spec.get('n'))} vectors")
+    meta = read_json(a_label, "run.json")
+    when = []
+    if meta.get("started"):
+        when.append(f"measured {str(meta['started'])[:10]}")
+    passes = len(meta.get("passes") or []) or 1
+    when.append(f"{passes} pass{'es' if passes > 1 else ''}")
+    ga, gb = gate_of(a_label), gate_of(b_label)
+    when.append(f"gate <code>{html.escape(str(ga))}</code> both arms" if ga == gb else
+                f"gate <code>{html.escape(str(ga))}</code> / <code>{html.escape(str(gb))}</code>")
+    col_a, col_b = (html.escape(column_title(lab)) for lab in (a_label, b_label))
+
+    out = [f'<div class="panel" id="{html.escape(name)}">',
+           '  <div class="panel-head">',
+           f"    <strong>{html.escape(name)} <span>· {html.escape(', '.join(what))}</span></strong>",
+           f"    <span>{' · '.join(when)}</span>",
+           "  </div>",
+           '  <div class="scroll">',
+           "  <table>",
+           "    <thead>",
+           (f'      <tr><th scope="col">workload</th><th scope="col">{col_a}</th>'
+            f'<th scope="col">{col_b}</th><th scope="col">ratio</th></tr>'),
+           "    </thead>",
+           "    <tbody>"]
+    anchors = matched_anchors(a_label, b_label)
+    if anchors:
+        best, top, n = anchors
+        out += ["      <tr>",
+                (f"        <td class=\"what\">At equal recall<small>§7.4's comparison, over {n} "
+                 f"anchors: {best['ratio']:,.2f}x at recall {best['recall']:.4f}, falling to "
+                 f"{top['ratio']:,.2f}x at {top['recall']:.4f}</small></td>"),
+                (f'        <td class="num span" colspan="2">recall {best["recall"]:.4f} '
+                 f'to {top["recall"]:.4f}</td>'),
+                "        " + landing_ratio_cell(f"{best['ratio']:,.2f}x"),
+                "      </tr>"]
+    for wid, title, fixed in LANDING_ROWS:
+        r = rows.get(wid)
+        if not r:
+            continue
+        caption = fixed or (f"recall {r.rec_a:.4f} against {r.rec_b:.4f}"
+                            if r.rec_a is not None and r.rec_b is not None else "")
+        if r.ratio == "-":
+            caption = "; ".join(filter(None, [caption, "not compared, the full table says why"]))
+        out += ["      <tr>",
+                f'        <td class="what">{html.escape(title)}<small>{html.escape(caption)}</small></td>',
+                f'        <td class="num">{html.escape(r.sa)}</td><td class="num">{html.escape(r.sb)}</td>',
+                "        " + landing_ratio_cell(r.ratio),
+                "      </tr>"]
+    doc = f"https://github.com/agourlay/strawmann/blob/main/docs/comparison-{name}.md"
+    out += ["    </tbody>",
+            "  </table>",
+            "  </div>",
+            '  <div class="panel-foot">',
+            '    <span class="bar-note">The bar runs from 0x to 5x; the tick marks parity.</span>',
+            "    Every row, with its latency percentiles, recall and the rows the comparison",
+            f'    refuses, is in <a href="{doc}"><code>comparison-{html.escape(name)}.md</code></a>.',
+            "    These ratios are this dimension's and do not carry to another."]
+    for bnr in banners(a_label, b_label):
+        out.append(f'    <p class="warn">{html.escape(bnr)}</p>')
+    out += ["  </div>", "</div>"]
+    return "\n".join(out)
 
 
 def new_comparison_doc(dataset: str) -> str:
@@ -1762,6 +1902,27 @@ def column_title(label: str) -> str:
     return f"{name} {'.'.join(str(v).split('.')[:2])}" if v else name
 
 
+def matched_anchors(a_label: str, b_label: str) -> tuple[dict, dict, int] | None:
+    """The equal-recall frontier's best anchor, its top-of-curve anchor, and
+    how many anchors there were; `None` when the pair cannot license one.
+
+    Shared by `matched_line` and `landing_block`, whose docstrings say why
+    each refusal below is there."""
+    if not licence(a_label, b_label).get("comparative"):
+        return None
+    try:
+        import report_data as rd
+        a, b = rd.load_run(a_label), rd.load_run(b_label)
+        rows = rd.matched_ratios(rd.frontier_points(a, bfb_only=True),
+                                 rd.frontier_points(b, bfb_only=True))
+    except (Exception, SystemExit):
+        return None
+    if len(rows) < 2:
+        return None
+    rows = sorted(rows, key=lambda r: r["recall"])
+    return max(rows, key=lambda r: r["ratio"]), rows[-1], len(rows)
+
+
 def matched_line(a_label: str, b_label: str) -> str | None:
     """The equal-recall comparison, for the block that leads with equal-`ef`.
 
@@ -1787,19 +1948,10 @@ def matched_line(a_label: str, b_label: str) -> str | None:
     # would put a frontier from a T3-failed pair on the front page, which is
     # precisely what the report page shows *under a banner* and the documents
     # do not show at all.
-    if not licence(a_label, b_label).get("comparative"):
+    anchors = matched_anchors(a_label, b_label)
+    if anchors is None:
         return None
-    try:
-        import report_data as rd
-        a, b = rd.load_run(a_label), rd.load_run(b_label)
-        rows = rd.matched_ratios(rd.frontier_points(a, bfb_only=True),
-                                 rd.frontier_points(b, bfb_only=True))
-    except (Exception, SystemExit):
-        return None
-    if len(rows) < 2:
-        return None
-    rows = sorted(rows, key=lambda r: r["recall"])
-    best, top = max(rows, key=lambda r: r["ratio"]), rows[-1]
+    best, top, n = anchors
     # Best and top-of-curve rather than a bare range, because the range's own
     # endpoints hide the shape: on `rel-0921` the minimum *is* the highest-recall
     # anchor, so "1.48x to 2.12x" and "narrowing to 1.48x" said the same thing
@@ -1807,7 +1959,7 @@ def matched_line(a_label: str, b_label: str) -> str | None:
     return (f"at equal recall (§7.4's comparison, not equal ef): "
             f"{best['ratio']:,.2f}x at recall {best['recall']:.4f}, falling to "
             f"{top['ratio']:,.2f}x at {top['recall']:.4f}, over "
-            f"{len(rows)} anchors")
+            f"{n} anchors")
 
 
 def header_block(a_label: str, b_label: str,
@@ -1970,10 +2122,14 @@ def conformance_block(a_label: str, b_label: str) -> list[str]:
 
 def blocks_for(a_label: str, b_label: str,
                a: dict[str, dict], b: dict[str, dict]) -> dict[str, str]:
-    return {
+    out = {
         "compare-table": header_block(a_label, b_label, a, b),
         "compare-full": full_block(a_label, b_label, a, b),
     }
+    dataset = dataset_of(a_label) or dataset_of(b_label)
+    if dataset in LANDING_DATASETS:
+        out[landing_kind(dataset)] = landing_block(a_label, b_label, a, b)
+    return out
 
 
 def splice_readme(blocks: dict[str, str], dataset: str) -> int:

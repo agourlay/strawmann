@@ -2027,6 +2027,86 @@ class MatchedLineTests(unittest.TestCase):
             self.assertIsNone(cmp.matched_line("a", "b"))
 
 
+class LandingBlockTests(unittest.TestCase):
+    """The published landing page's panels, generated from the same rows."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(Path(self.tmp.name))
+        self.m = _reload(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _pair(self, a_rows, b_rows):
+        sw = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.98))]
+        self.fx.label("a", a_rows, good_stamp(), CONF_T3, sw)
+        self.fx.label("b", b_rows, good_stamp(), CONF_T3, sw)
+        cmp = self.m["compare"]
+        return cmp, cmp.load("a"), cmp.load("b")
+
+    def test_the_landing_page_is_a_target_only_for_its_datasets(self):
+        cmp = self.m["compare"]
+        for ds in cmp.LANDING_DATASETS:
+            self.assertEqual(dict(cmp.blocks_targets(ds))[cmp.LANDING_PAGE], f"landing-{ds}")
+        other = dict(cmp.blocks_targets("dbpedia-openai-100K-1536-angular"))
+        self.assertNotIn(cmp.LANDING_PAGE, other)
+
+    def test_the_published_page_has_a_marker_pair_for_every_landing_dataset(self):
+        """Without one, `--write-readme` fails at the end of that dataset's
+        night run, for a page the run was never going to be judged on."""
+        cmp = self.m["compare"]
+        page = (Path(__file__).resolve().parents[2] / cmp.LANDING_PAGE).read_text()
+        for ds in cmp.LANDING_DATASETS:
+            begin, end = cmp.markers(cmp.landing_kind(ds))
+            self.assertEqual(page.count(begin), 1, ds)
+            self.assertEqual(page.count(end), 1, ds)
+            self.assertLess(page.index(begin), page.index(end), ds)
+
+    def test_a_ratio_gets_a_bar_and_a_refusal_keeps_its_words(self):
+        cell = self.m["compare"].landing_ratio_cell
+        self.assertIn('class="ratio win"', cell("1.65x"))
+        self.assertIn("width:33.0%", cell("1.65x"))
+        self.assertIn('class="ratio lose"', cell("0.84x"))
+        self.assertIn("width:100.0%", cell("9.00x"))
+        for refused in ("parity", "-", "offered"):
+            self.assertIn('class="ratio even"', cell(refused))
+            self.assertNotIn("track", cell(refused))
+
+    def test_counts_read_as_captions(self):
+        hc = self.m["compare"].human_count
+        self.assertEqual(hc(1_000_000), "1M")
+        self.assertEqual(hc(100_000), "100K")
+        self.assertEqual(hc(12_345), "12,345")
+        self.assertEqual(hc(None), "")
+
+    def test_the_panel_carries_the_rows_and_their_refusals(self):
+        cmp, a, b = self._pair(
+            [_row("W4", 4000), _row("W9", 150, foreign="rustc(100%)")],
+            [_row("W4", 2000), _row("W9", 100)])
+        block = cmp.landing_block("a", "b", a, b)
+        self.assertIn('<div class="panel" id="sift1m">', block)
+        self.assertIn("<td class=\"num\">4,000</td><td class=\"num\">2,000</td>", block)
+        self.assertIn("<b>2.00x</b>", block)
+        # The contaminated W9 is shown, with no ratio and no bar.
+        self.assertIn("not compared, the full table says why", block)
+        self.assertNotIn("1.50x", block)
+        # A row neither arm measured is left out rather than printed empty.
+        self.assertNotIn("Batched", block)
+        self.assertIn("docs/comparison-sift1m.md", block)
+
+    def test_write_readme_splices_the_panel_and_the_gate_accepts_it(self):
+        cmp, a, b = self._pair([_row("W4", 4000)], [_row("W4", 2000)])
+        blocks = cmp.blocks_for("a", "b", a, b)
+        self.assertIn("landing-sift1m", blocks)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cmp.splice_readme(blocks, "sift1m"), 0)
+            self.assertEqual(cmp.readme_is_current(blocks, True, "a", "b"), 0)
+        page = (cmp.ROOT / cmp.LANDING_PAGE).read_text()
+        self.assertIn("<b>2.00x</b>", page)
+        self.assertNotIn("\nold\n", page)
+
+
 class MatchedRecallGateTests(unittest.TestCase):
     """What a T3 failure does to the matched-recall table.
 
