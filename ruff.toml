@@ -87,4 +87,5 @@ ignore = [
 [lint.isort]
 known-first-party = ["paths", "workloads", "compare", "recall", "regression",
                      "procstat", "provenance", "report", "report_data",
-                     "report_charts", "results", "aggregate", "setup"]
+                     "report_charts", "results", "aggregate", "setup",
+                     "row_schema"]
