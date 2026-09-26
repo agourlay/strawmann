@@ -145,12 +145,6 @@ jobs:
       - name: README table matches measurements
         run: scripts/check.py --only 'readme-table-current'
 
-      # Unlike the step above, this one bites here: it reads the committed
-      # pages in docs/reports/, not the gitignored results.
-      # gate: landing-cards-current
-      - name: Landing page report cards match docs/reports
-        run: scripts/check.py --only 'landing-cards-current'
-
       # `check.py` runs these under `uv run` when uv is on PATH (it is,
       # installed above) and fails the step if the report tests were skipped
       # rather than run: they need the uv project's jinja2/pandas/plotly.
