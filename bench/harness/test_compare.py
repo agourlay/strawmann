@@ -198,13 +198,13 @@ class CompareTests(unittest.TestCase):
 
     def test_licence_banner_when_not_comparative(self):
         sw = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.98))]
-        rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
+        _rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
                                  good_stamp(), good_stamp(), CONF_T2, CONF_T2, sw, sw)
         bl = cmp.blocks_for("a", "b", cmp.load("a"), cmp.load("b"))
         self.assertIn("NOT A LICENSED COMPARATIVE CLAIM", bl["compare-table"])
         self.assertIn("NOT A LICENSED COMPARATIVE CLAIM", bl["compare-full"])
         # No conformance row at all -> UNLICENSED.
-        rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
+        _rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
                                  good_stamp(), good_stamp(), None, None, sw, sw)
         banner = cmp.licence("a", "b")["banner"]
         self.assertIn("UNLICENSED", banner)
@@ -228,7 +228,7 @@ class CompareTests(unittest.TestCase):
         the first version of this banner would have caused exactly that.
         """
         sw = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.98))]
-        rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
+        _rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
                                  good_stamp(), good_stamp(), None, None, sw, sw)
         native = {"dataset": {"name": "sift1m"},
                   "qdrant": {"binary": "/x/target/release/qdrant",
@@ -266,7 +266,7 @@ class CompareTests(unittest.TestCase):
 
     def test_header_block_names_the_recorded_qdrant_version(self):
         sw = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.98))]
-        rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
+        _rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
                                  good_stamp(), good_stamp(), sweeps_a=sw, sweeps_b=sw)
         # No version recorded: the label alone, not a hardcoded `1.19`.
         self.assertEqual(cmp.column_title("b"), "b")
@@ -370,7 +370,7 @@ class CompareTests(unittest.TestCase):
         # Blocks written by --write-readme match, so the check passes even
         # though the results are stale; the warning is printed to stderr.
         sw = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.98))]
-        rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)], None, None,
+        _rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)], None, None,
                                  CONF_T2, CONF_T2, sw, sw)
         a, b = cmp.load("a"), cmp.load("b")
         blocks = cmp.blocks_for("a", "b", a, b)
@@ -385,7 +385,7 @@ class CompareTests(unittest.TestCase):
     def _stale_blocks(self, conf, stamp):
         """Splice the blocks, then hand back ones that no longer match."""
         sw = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.98))]
-        rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
+        _rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
                                  stamp, stamp, conf, conf, sw, sw)
         a, b = cmp.load("a"), cmp.load("b")
         blocks = cmp.blocks_for("a", "b", a, b)
@@ -1296,7 +1296,7 @@ class CompareTests(unittest.TestCase):
                        "detail": "max=0 | ids agree | vs oracle 1.5e-5"}],
             "tier_reached": "T1", "licenses_perf": True, "hash": "abc"}))
         block = cmp.conformance_block("a", "b")
-        row = next(l for l in block if l.startswith("| T1 "))
+        row = next(ln for ln in block if ln.startswith("| T1 "))
         # Split on delimiters the escape did not neutralise: leading empty,
         # three cells, trailing empty.
         self.assertEqual(len(re.split(r"(?<!\\)\|", row)), 5)
@@ -1619,7 +1619,7 @@ class StorageLevelTests(unittest.TestCase):
         a = self._rows(3_900_000_000, 3_900_000_000)     # does not rewrite
         b = self._rows(3_700_000_000, 10_900_000_000)    # rewrites under append
         out = cmp.storage_and_io("a", "b", a, b, markdown=True)
-        line = next(l for l in out if l.startswith("| storage on disk"))
+        line = next(ln for ln in out if ln.startswith("| storage on disk"))
         self.assertIn(self.m["procstat"].human_bytes(3_900_000_000), line)
         self.assertIn(self.m["procstat"].human_bytes(3_700_000_000), line)
         self.assertNotIn(self.m["procstat"].human_bytes(10_900_000_000), line)
@@ -1632,7 +1632,7 @@ class StorageLevelTests(unittest.TestCase):
         cmp = self.m["compare"]
         a = self._rows(1_000, 1_000)
         out = cmp.storage_and_io("a", "b", a, self._rows(1_000, 1_000), markdown=True)
-        line = next(l for l in out if l.startswith("| peak RSS"))
+        line = next(ln for ln in out if ln.startswith("| peak RSS"))
         self.assertIn(self.m["procstat"].human_bytes(110), line)
         self.assertNotIn(self.m["procstat"].human_bytes(900), line)
         self.assertIn("peak RSS are read before W11-steady, W11", out[-1])
@@ -1652,7 +1652,7 @@ class StorageLevelTests(unittest.TestCase):
             _row("W11", 200.0, storage_bytes=7_000, rss_peak_bytes=10,
                  background_pps=3300.0)]}
         out = cmp.storage_and_io("a", "b", only, only, markdown=True)
-        line = next(l for l in out if l.startswith("| storage on disk"))
+        line = next(ln for ln in out if ln.startswith("| storage on disk"))
         self.assertIn(self.m["procstat"].human_bytes(7_000), line)
 
     def test_totals_are_unaffected_and_still_sum_every_row(self):
@@ -1663,7 +1663,7 @@ class StorageLevelTests(unittest.TestCase):
             _row("W11", 200.0, disk_write_ops=7, storage_bytes=2,
                  background_pps=3300.0)]}
         out = cmp.storage_and_io("a", "b", rows, rows, markdown=True)
-        line = next(l for l in out if l.startswith("| disk write ops"))
+        line = next(ln for ln in out if ln.startswith("| disk write ops"))
         self.assertIn("12", line)
 
 

@@ -37,6 +37,7 @@ names.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import statistics
@@ -154,8 +155,8 @@ def _rep_drift(vals: list) -> float | None:
     got = [v for v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)]
     if len(got) < 3 or len(got) != len(vals) or got[0] == 0:
         return None
-    rising = all(b > a for a, b in zip(got, got[1:]))
-    falling = all(b < a for a, b in zip(got, got[1:]))
+    rising = all(b > a for a, b in itertools.pairwise(got))
+    falling = all(b < a for a, b in itertools.pairwise(got))
     if not (rising or falling):
         return None
     move = (got[-1] - got[0]) / abs(got[0])
@@ -184,7 +185,7 @@ def load_rows(label: str) -> list[dict]:
 def pass_spans(reps: list[str], passes: list[list[dict]]) -> list[dict]:
     """`[{label, started, last_row}]`, one per pass, from what each recorded."""
     out = []
-    for rep, rows in zip(reps, passes):
+    for rep, rows in zip(reps, passes, strict=True):
         p = ROOT / "bench/results" / rep / "run.json"
         try:
             started = json.loads(p.read_text()).get("started")
@@ -418,7 +419,7 @@ def main(argv: list[str]) -> int:
         return int(e.code or 0)
     label, reps = args.label, args.reps
     passes = [load_rows(r) for r in reps]
-    missing = [r for r, rows in zip(reps, passes) if not rows]
+    missing = [r for r, rows in zip(reps, passes, strict=True) if not rows]
     if missing:
         print(f"no rows.json for {', '.join(missing)}", file=sys.stderr)
         return 1

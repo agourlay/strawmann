@@ -312,10 +312,10 @@ def check_report() -> int:
         return 0
     r = subprocess.run(
         ["uv", "run", "--project", str(ROOT / "bench"), "python", "-c",
-         "import sys; sys.path.insert(0, 'bench/harness'); import report; "
+         ("import sys; sys.path.insert(0, 'bench/harness'); import report; "
          "from jinja2 import Environment, FileSystemLoader; "
          "e = Environment(loader=FileSystemLoader('bench/harness/templates')); "
-         "e.get_template('report.html.j2'); print('ok')"],
+         "e.get_template('report.html.j2'); print('ok')")],
         cwd=ROOT, capture_output=True, text=True)
     if r.returncode != 0:
         print("report tooling failed to load:", file=sys.stderr)

@@ -316,7 +316,7 @@ def compare(db, workload):
     # `byeng[eng][0]` used to take the oldest row of each, which after a
     # re-measure compared a fresh strawmann against a stale qdrant.
     latest = {}
-    for eng, isa, qps, rec, *_rest in rows:
+    for eng, _isa, qps, rec, *_rest in rows:
         rowid, when, chash, comparative, tier = _rest[5:10]
         if qps is None or rec is None:
             continue

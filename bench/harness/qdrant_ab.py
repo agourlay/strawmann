@@ -198,7 +198,7 @@ def main(argv: list[str]) -> int:
         return out
 
     envs = [as_env(args.env_a), as_env(args.env_b)]
-    arms = list(zip(labels, [args.image_a, args.image_b], envs))
+    arms = list(zip(labels, [args.image_a, args.image_b], envs, strict=True))
     print(f"{len(arms)} image(s) x {args.reps} rep(s) x {len(rows)} row(s)")
     print(f"rows: {' '.join(rows)}")
     print(f"storage: {STORAGE} (wiped between arms)\n")

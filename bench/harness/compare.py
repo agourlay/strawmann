@@ -34,6 +34,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -148,7 +149,7 @@ def mixed_build_reasons(label: str, rows: dict[str, dict] | None = None) -> list
         return []
     parts = []
     for ident, wids in idents.items():
-        named = ", ".join(f"{k}={v}" for k, v in zip(BUILD_KEYS, ident) if v is not None)
+        named = ", ".join(f"{k}={v}" for k, v in zip(BUILD_KEYS, ident, strict=True) if v is not None)
         parts.append(f"{', '.join(wids[:4])}{'...' if len(wids) > 4 else ''}: {named}")
     if commit_label_only(idents):
         # Identical binary, identical ISA/optimize/profile: one build served
@@ -287,10 +288,10 @@ def orphaned_row_reasons(label: str) -> list[str]:
     if not stale:
         return []
     shown = ", ".join(stale[:6]) + ("…" if len(stale) > 6 else "")
-    return [f"{label}: {len(stale)} row(s) were not measured by the run their "
+    return [(f"{label}: {len(stale)} row(s) were not measured by the run their "
             f"run.json describes ({shown}); the arm was re-run and these rows "
             f"are an earlier run's, carrying this run's gate verdict and host. "
-            f"Delete bench/results/{label} and re-run the arm whole."]
+            f"Delete bench/results/{label} and re-run the arm whole.")]
 
 
 def conformance_recovery(a_label: str, b_label: str) -> str:
@@ -703,7 +704,7 @@ class Row:
             return self._refuse(low_note)
         if self.recall_required:
             if self.rec_a is None or self.rec_b is None:
-                which = [l for l, v in ((self.a_label, self.rec_a), (self.b_label, self.rec_b))
+                which = [lbl for lbl, v in ((self.a_label, self.rec_a), (self.b_label, self.rec_b))
                          if v is None]
                 self.notes.append(f"[recall missing: {', '.join(which)}]")
                 return "-"
@@ -1165,7 +1166,7 @@ def read_noise_meta(*labels: str) -> dict:
     the global `bench/results/noise.json`, which is one corpus's and one
     engine's. With no labels it is the global file.
     """
-    return regression.floor_for([l for l in labels if l])
+    return regression.floor_for([lbl for lbl in labels if lbl])
 
 
 def scope_line(a_label: str, b_label: str) -> str:
@@ -1503,7 +1504,7 @@ def storage_and_io(a_label: str, b_label: str,
         lines.append(f"{name:<{width}} {fmt(ta[key]):>16} {fmt(tb[key]):>16}")
     lines.append(f"{'measured via':<{width}} {(ta['source'] or 'n/a'):>16} "
                  f"{(tb['source'] or 'n/a'):>16}")
-    lines += [""] + wrap(note_text(ta, tb))
+    lines += ["", *wrap(note_text(ta, tb))]
     return lines
 
 
@@ -1838,8 +1839,8 @@ def header_block(a_label: str, b_label: str,
                 text = text.replace(lab, eng)
         return text
 
-    lines = [f"  {'':<{width}}  {column_title(a_label):>12} "
-             f"{column_title(b_label):>16} {'ratio':>10}"]
+    lines = [(f"  {'':<{width}}  {column_title(a_label):>12} "
+             f"{column_title(b_label):>16} {'ratio':>10}")]
     notes = []
     for wid, name in HEADER_ROWS:
         r = rows.get(wid)
@@ -1854,7 +1855,7 @@ def header_block(a_label: str, b_label: str,
     if ml:
         lines += ["", "  " + ml]
     if notes:
-        lines += [""] + notes
+        lines += ["", *notes]
     for bnr in banners(a_label, b_label):
         lines += [""] + ["  " + ln for ln in wrap(as_engines(bnr), 74)]
     return "```\n" + "\n".join(lines) + "\n```"
@@ -1876,8 +1877,8 @@ def full_block(a_label: str, b_label: str,
     # The id and its purpose are separate columns, as they are in the HTML
     # report: one cell holding "W10-ef32 recall control, ef=32 (latency only)"
     # is a label, not a table.
-    rows += [f"| id | workload | {a_name} qps | {b_name} qps | ratio "
-             f"| {a_name} p50/p99 | {b_name} p50/p99 | recall@10 | notes |",
+    rows += [(f"| id | workload | {a_name} qps | {b_name} qps | ratio "
+             f"| {a_name} p50/p99 | {b_name} p50/p99 | recall@10 | notes |"),
              "|---|---|--:|--:|--:|--:|--:|--:|---|"]
     for r in detail_rows(a_label, b_label, a, b):
         wid = r["id"]
@@ -1893,10 +1894,10 @@ def full_block(a_label: str, b_label: str,
 
     io = storage_and_io(a_label, b_label, a, b, markdown=True)
     if io:
-        rows += ["", "**Storage and I/O.** Queries per second is half the "
+        rows += ["", ("**Storage and I/O.** Queries per second is half the "
                  "comparison: the two engines hold and write very different "
                  "amounts for the same collection, and only this table shows "
-                 "what that buys and costs.", "", *io]
+                 "what that buys and costs."), "", *io]
     wall = any(r.get("qps_bfb_median") is not None for r in [*a.values(), *b.values()])
     rows += ["", ("qps is wall-clock: queries / bfb's `duration_secs`, not bfb's "
                   "`Median qps` (kept per row as `qps_bfb_median`), which is a median of "
@@ -2097,11 +2098,9 @@ def main(argv: list[str]) -> int:
     a_label, b_label = args.a_label, args.b_label
     # The context the rows were measured under, not the shell's.
     import workloads
-    try:
+    with contextlib.suppress(OSError, json.JSONDecodeError):
         workloads.use_run_context(json.loads(
             (ROOT / "bench/results" / a_label / "run.json").read_text()).get("harness"))
-    except (OSError, json.JSONDecodeError):
-        pass
     lenient = args.check_readme
     a, b = load(a_label, not lenient), load(b_label, not lenient)
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import itertools
 import re
 import subprocess
 import sys
@@ -202,7 +203,7 @@ def display_names(runs: list[Run]) -> dict[str, str]:
     """
     engines = [engine_of(r) for r in runs]
     if len(runs) == 2 and all(engines) and len(set(engines)) == 2:
-        return {r.label: ENGINE_NAMES.get(e, e) for r, e in zip(runs, engines)}
+        return {r.label: ENGINE_NAMES.get(e, e) for r, e in zip(runs, engines, strict=True)}
     return {r.label: r.label for r in runs}
 
 
@@ -228,9 +229,10 @@ def renamed(text: str, names: dict[str, str]) -> str:
     # a path a reader copies (`--strawmann-label sm-dbp1m`), and renaming it
     # breaks the command.
     parts = re.split(f"({re.escape(KEEP_OPEN)}.*?{re.escape(KEEP_CLOSE)}"
-                     r"|<code>.*?</code>|`[^`<>]*`)", text, flags=re.S)
+                     r"|<code>.*?</code>|`[^`<>]*`)", text, flags=re.DOTALL)
     out = []
-    for p in parts:
+    for part in parts:
+        p = part
         if not p.startswith((KEEP_OPEN, "<code>", "`")):
             for rx, name in subs:
                 p = rx.sub(name, p)
@@ -363,7 +365,7 @@ def _sweep_row(fam: str, members: list[str], a: str, b: str | None, df: pd.DataF
     if b:
         cells.append(_qps_range(rows_of(b)))
         got, tips, refused, reasons = [], [], 0, []
-        for w, ef in zip(members, efs):
+        for w, ef in zip(members, efs, strict=True):
             jr = joined_rows.get(w)
             v = ratio_value(jr.ratio) if jr is not None else None
             if v is None:
@@ -614,7 +616,9 @@ WORKLOAD_METRICS: list[tuple[str, object, object, str]] = [
     ("queries sent", lambda r: f"{r['n_queries']:,.0f}" if r.get("n_queries") else "-",
      lambda r: None, "flat"),
     ("cpu", lambda r: f"{_cpu(r):,.1f} s" if _cpu(r) else "-", _cpu, "down"),
-    ("cpu, % of wall", lambda r: _pct_of_wall(r), lambda r: None, "flat"),
+    # A lambda, not the name: the table is built at import and
+    # `_pct_of_wall` is defined below it, so the lookup has to wait.
+    ("cpu, % of wall", lambda r: _pct_of_wall(r), lambda r: None, "flat"),  # noqa: PLW0108
     ("waiting for a core", lambda r: (f"{r['runqueue_wait_s'] * 1000:,.1f} ms"
                                       if r.get("runqueue_wait_s") is not None else "-"),
      lambda r: r.get("runqueue_wait_s"), "down"),
@@ -997,9 +1001,9 @@ def placement_refusal(runs: list[Run]) -> str:
                 "below are shown per engine and not compared: §5.5's residency decides "
                 "whether vectors sit in anonymous memory or in a file mapping, and an "
                 "engine asked to map a file writes bytes for that reason alone."
-                ).format(" and ".join(r.label for r, p in zip(runs, ps) if p is None))
+                ).format(" and ".join(r.label for r, p in zip(runs, ps, strict=True) if p is None))
     if len(set(ps)) > 1:
-        pairs = ", ".join(f"{r.label} {p}" for r, p in zip(runs, ps))
+        pairs = ", ".join(f"{r.label} {p}" for r, p in zip(runs, ps, strict=True))
         return (f"These engines ran in different placements ({pairs}), so the storage "
                 f"and memory rows are not comparable: the disk figures largely report "
                 f"which engine was asked to use a disk. <code>cached</code> is the only "
@@ -1348,7 +1352,7 @@ def noise_provenance(runs: list[Run]) -> dict:
                              "harness stamps; its spread is not one configuration's.")
     else:
         from workloads import stamp_hash
-        off = [l for l, st in stamps.items() if st and stamp_hash(st) != fh]
+        off = [lbl for lbl, st in stamps.items() if st and stamp_hash(st) != fh]
         if off:
             out["stamp_note"] = (f"The floor was measured under a different harness "
                                  f"stamp than {' and '.join(off)}, so its spread may "
@@ -2660,15 +2664,15 @@ def grouped_losses(items: list[dict]) -> list[dict]:
     (`W12-sel1-ef64` joins `W12-sel1`) and the entry carries the ratio range.
     """
     out: dict[str, dict] = {}
-    for l in items:
-        m = SWEEP_ID.match(l["id"])
-        fam = m["fam"] if m else l["id"]
+    for loss in items:
+        m = SWEEP_ID.match(loss["id"])
+        fam = m["fam"] if m else loss["id"]
         g = out.setdefault(fam, {"id": fam, "ids": [], "ratios": [],
-                                 "desc": describe(fam) or re.sub(r",? ef=\d+", "", l["desc"])})
-        g["ids"].append(l["id"])
-        g.setdefault("descs", []).append(l.get("desc") or "")
-        g["ratios"].append(ratio_value(l["ratio"]))
-        g.setdefault("recalls", []).append(l.get("recall", ""))
+                                 "desc": describe(fam) or re.sub(r",? ef=\d+", "", loss["desc"])})
+        g["ids"].append(loss["id"])
+        g.setdefault("descs", []).append(loss.get("desc") or "")
+        g["ratios"].append(ratio_value(loss["ratio"]))
+        g.setdefault("recalls", []).append(loss.get("recall", ""))
     for g in out.values():
         lo, hi = min(g["ratios"]), max(g["ratios"])
         g["ratio"] = f"{lo:.2f}x" if lo == hi else f"{lo:.2f} to {hi:.2f}x"
@@ -2867,7 +2871,7 @@ def interleaving(runs: list[Run]) -> dict:
         return {"blocks": 2 * min(reps), "sequential": False,
                 "first": runs[0].label,
                 "spans": [f"{r.label} folded from {n} alternated passes"
-                          for r, n in zip(runs, reps)]}
+                          for r, n in zip(runs, reps, strict=True)]}
     stamped = [(r["when"], run.label) for run in runs for r in run.rows if r.get("when")]
     if len({lab for _, lab in stamped}) < 2 or len({w for w, _ in stamped}) < 2:
         return {}
@@ -2880,7 +2884,7 @@ def interleaving(runs: list[Run]) -> dict:
     if set.intersection(*per_engine.values()):
         return {}
     stamped.sort()
-    blocks = 1 + sum(1 for (_, a), (_, b) in zip(stamped, stamped[1:]) if a != b)
+    blocks = 1 + sum(1 for (_, a), (_, b) in itertools.pairwise(stamped) if a != b)
     spans = []
     for run in runs:
         w = sorted(r["when"] for r in run.rows if r.get("when"))
@@ -2924,7 +2928,7 @@ def bandwidth_of(runs: list[Run]) -> dict:
     """
     recs = [(r.label, (r.meta.get("host") or {}).get("memory_bandwidth"))
             for r in runs]
-    recs = [(l, b) for l, b in recs if b and b.get("aggregate_gbps")]
+    recs = [(lbl, b) for lbl, b in recs if b and b.get("aggregate_gbps")]
     if not recs:
         return {"text": '<span class="muted">not recorded</span>',
                 "source": "no run.json carries host.memory_bandwidth; "
@@ -2939,14 +2943,14 @@ def bandwidth_of(runs: list[Run]) -> dict:
         return t
 
     recs.sort(key=lambda lb: 0 if "startup" in (lb[1].get("source") or "") else 1)
-    label, best = recs[0]
+    _label, best = recs[0]
     aggs = [b["aggregate_gbps"] for _, b in recs]
     if max(aggs) > 1.1 * min(aggs):
-        text = " / ".join(f"{l}: {fmt(b)}" for l, b in recs)
+        text = " / ".join(f"{lbl}: {fmt(b)}" for lbl, b in recs)
         source = ("the two runs measured different bandwidths, which is a fact "
                   "about the runs, not the machine: " + "; ".join(
-                      f"{l}: {b.get('source', 'unrecorded')} ({b.get('measured_at', '?')})"
-                      for l, b in recs))
+                      f"{lbl}: {b.get('source', 'unrecorded')} ({b.get('measured_at', '?')})"
+                      for lbl, b in recs))
     else:
         text = fmt(best)
         source = f"{best.get('source', 'unrecorded')}, {best.get('measured_at', '?')}"
@@ -2998,8 +3002,8 @@ def _network_path(mode: str | None) -> str:
 def _cpus_in(mask: str) -> set[int]:
     """The CPUs a list like `4-11,14` names."""
     out: set[int] = set()
-    for part in mask.split(","):
-        part = part.strip()
+    for raw in mask.split(","):
+        part = raw.strip()
         if not part:
             continue
         if "-" in part:
@@ -4028,7 +4032,7 @@ def build(runs: list[Run], title: str) -> str:
         # throughput, and the throughput ratio is the first thing on the page:
         # a caveat a reader meets after forming their opinion is a footnote,
         # not a caveat.
-        placement_split=[f"{r.label} {p}" for r, p in zip(runs, placements_of(runs))
+        placement_split=[f"{r.label} {p}" for r, p in zip(runs, placements_of(runs), strict=True)
                          if p] if len(set(placements_of(runs))) > 1 else None,
         css=CSS,
         runs=runs,

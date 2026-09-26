@@ -823,7 +823,7 @@ class WorkloadTests(unittest.TestCase):
         readings = iter([80.0, 40.0, 8.0])
         slept = []
         with mock.patch.object(w, "load_per_core_pct", lambda: next(readings)), \
-                mock.patch.object(w.time, "sleep", lambda s: slept.append(s)), \
+                mock.patch.object(w.time, "sleep", slept.append), \
                 contextlib.redirect_stdout(io.StringIO()):
             w.settle_load_for_retry()
         self.assertEqual(len(slept), 2)
@@ -863,7 +863,7 @@ class WorkloadTests(unittest.TestCase):
             setup.read, setup.time.sleep = real_read, real_sleep
             delattr(setup, "_sampled")
         self.assertEqual(env.failures, 1)
-        self.assertTrue(any("NOT quiescent" in x and "rustc" in x for x in env.lines + [""])
+        self.assertTrue(any("NOT quiescent" in x and "rustc" in x for x in [*env.lines, ""])
                         or env.failures == 1)
         # And which processes are busy is transient, so it must not reach the
         # hash: a run passed at hash 1cdcf393fa18f478 while every row
@@ -1857,7 +1857,7 @@ class FullrunRowInvocationTests(unittest.TestCase):
         """`--lax` proceeds on a failed gate, and the render is told so from
         this verdict: a bare True lost it."""
         f = self.f
-        with mock.patch.object(f, "ports_in_use", lambda: []), \
+        with mock.patch.object(f, "ports_in_use", list), \
                 mock.patch.object(f, "gate", lambda lax: f.Gate(proceed=True, failed=True)):
             v = f.wait_until_admitted(True, 0)
         self.assertTrue(v)
@@ -3355,7 +3355,7 @@ class ArmStorageTests(unittest.TestCase):
         import fullrun
         calls = []
         with mock.patch.object(fullrun, "stop_strawmann", lambda p: calls.append("stop sm")), \
-                mock.patch.object(fullrun, "record_graph_quality", lambda l: calls.append("graphs")), \
+                mock.patch.object(fullrun, "record_graph_quality", lambda _label: calls.append("graphs")), \
                 mock.patch.object(fullrun, "wipe_strawmann_storage", lambda: calls.append("wipe sm")), \
                 mock.patch.object(fullrun, "stop_qdrant", lambda: calls.append("stop qd")), \
                 mock.patch.object(fullrun, "wipe_qdrant_storage", lambda: calls.append("wipe qd") or True), \

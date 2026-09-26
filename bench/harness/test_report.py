@@ -170,7 +170,7 @@ class ReportHostTests(unittest.TestCase):
             sw = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.98, points=pts))]
             w10 = [_row("W10-ef32", 9000, ef=32), _row("W10-ef64", 6000, ef=64)]
             report, runs, df = self._pair(
-                Path(tmp), w10 + [_row("W3", 4000)],
+                Path(tmp), [*w10, _row("W3", 4000)],
                 [_row("W10-ef32", 4500, ef=32, foreign="rustc(100%)"), _row("W10-ef64", 3000, ef=64),
                  _row("W3", 2000)], sw_a=sw, sw_b=sw)
             summ = report.summary(runs, df)
@@ -179,7 +179,7 @@ class ReportHostTests(unittest.TestCase):
             self.assertIn("W10-ef32", summ["matched_refusal"])
             # And the clean version of the same fixture states the range.
             report, runs, df = self._pair(
-                Path(tmp), w10 + [_row("W3", 4000)],
+                Path(tmp), [*w10, _row("W3", 4000)],
                 [_row("W10-ef32", 4500, ef=32), _row("W10-ef64", 3000, ef=64), _row("W3", 2000)],
                 sw_a=sw, sw_b=sw)
             summ = report.summary(runs, df)
@@ -196,7 +196,7 @@ class ReportHostTests(unittest.TestCase):
                      for e, r in ((32, 0.90), (64, 0.95))]
             sw_b = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.98, points=pts_b))]
             report, runs, df = self._pair(
-                Path(tmp), w10 + [_row("W3", 4000)],
+                Path(tmp), [*w10, _row("W3", 4000)],
                 [_row("W10-ef32", 4500, ef=32), _row("W10-ef64", 3000, ef=64), _row("W3", 2000)],
                 sw_a=sw, sw_b=sw_b)
             sm = report.smoke_ordering(runs[0], runs[1])
@@ -205,7 +205,7 @@ class ReportHostTests(unittest.TestCase):
             pts_b[0]["smoke_qps"] = 0.5
             sw_b = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.98, points=pts_b))]
             report, runs, df = self._pair(
-                Path(tmp), w10 + [_row("W3", 4000)],
+                Path(tmp), [*w10, _row("W3", 4000)],
                 [_row("W10-ef32", 4500, ef=32), _row("W10-ef64", 3000, ef=64), _row("W3", 2000)],
                 sw_a=sw, sw_b=sw_b)
             self.assertEqual(report.smoke_ordering(runs[0], runs[1])["verdict"], "mixed")
@@ -270,7 +270,7 @@ class ReportHostTests(unittest.TestCase):
             # is `W12-sel10-ef128: payload index state not read back`, and
             # correctly so.
             colls = [{"collection": "bench12", "payload_indexes": ["a"]}]
-            report, runs, df = self._pair(Path(tmp), rows_a, rows_b,
+            report, runs, _df = self._pair(Path(tmp), rows_a, rows_b,
                                           sw_a=sw, sw_b=sw, colls=colls)
             html = report.matched_recall_table(runs)
             self.assertIn("At matched recall, filtered to 10%", html)
@@ -284,13 +284,13 @@ class ReportHostTests(unittest.TestCase):
             filt_b = [dict(p, n_matching=19796) for p in filt]
             sw_b = [sw[0], ("recall.sift1m.bench12.sel10.json",
                             _sweep("bench12", "sift1m", 0.99, points=filt_b, grade="sel10"))]
-            report, runs, df = self._pair(Path(tmp), rows_a, rows_b,
+            report, runs, _df = self._pair(Path(tmp), rows_a, rows_b,
                                           sw_a=sw, sw_b=sw_b, colls=colls)
             html = report.matched_recall_table(runs)
             self.assertIn("19,936 in a and 19,796 in b", html)
             # One engine's graded sweep missing: no filtered table at all,
             # rather than that engine's unfiltered bench2 recall under it.
-            report, runs, df = self._pair(Path(tmp), rows_a, rows_b,
+            report, runs, _df = self._pair(Path(tmp), rows_a, rows_b,
                                           sw_a=sw, sw_b=sw[:1], colls=colls)
             self.assertNotIn("filtered to 10%", report.matched_recall_table(runs))
 
@@ -332,7 +332,7 @@ class ReportHostTests(unittest.TestCase):
         """A summary that reports only the wins is an advertisement."""
         with tempfile.TemporaryDirectory() as tmp:
             # `a` loses W3 by 2x and wins W13; both clear the 2% minimum.
-            report, runs, df = self._pair(
+            report, runs, _df = self._pair(
                 Path(tmp), [_row("W3", 2000), _row("W13", 4000)],
                 [_row("W3", 4000), _row("W13", 2000)])
             # `_pair` reloads the module onto a fresh root, so ROOT must be read
@@ -346,13 +346,13 @@ class ReportHostTests(unittest.TestCase):
                                          "reps": {"W3": 6, "W13": 6},
                                          "source": "t", "discarded": [],
                                          "arms": ["a", "b"]}))
-            got = {l["id"]: l["ratio"] for l in report.losses(runs)}
+            got = {loss["id"]: loss["ratio"] for loss in report.losses(runs)}
             self.assertEqual(list(got), ["W3"])
             self.assertTrue(got["W3"].startswith("0.5"), got)
             # A row inside the floor is not a loss, it is no measured
             # difference; and a row with no floor at all has not been judged,
             # so it is not one either.
-            report, runs, df = self._pair(
+            report, runs, _df = self._pair(
                 Path(tmp), [_row("W3", 3980)], [_row("W3", 4000)])
             self.assertEqual(report.losses(runs), [])          # no noise.json here
             noise = report.ROOT / "bench/results/noise.json"   # a fresh root per pair
@@ -425,7 +425,7 @@ class ReportHostTests(unittest.TestCase):
                 Path(tmp), [_row("W4", 4000)], [_row("W4", 2000)])
             # Per-request timings live in `<id>.json`, which the fixture does
             # not write; `Run.detail` is where they land once read.
-            for run, vals in zip(runs, (a, b)):
+            for run, vals in zip(runs, (a, b), strict=True):
                 run.detail["W4"] = {"results": {"search": {"full_timings": vals}}}
             c = report.chart_latency_distribution(runs)
             self.assertIsNotNone(c)
@@ -506,7 +506,7 @@ class ReportHostTests(unittest.TestCase):
             conf = {**CONF_T3, "max_delta": 0.0, "p99_delta": 0.0,
                     "epsilon": 4.172e-7, "epsilon_relative": True,
                     "epsilon_source": "floor"}
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)],
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)],
                                           [_row("W3", 2000)], conf_a=conf, conf_b=conf)
             self.assertEqual(report.licence_of(runs)["delta"]["source"], "floor")
             html = report.build(runs, "t")
@@ -514,7 +514,7 @@ class ReportHostTests(unittest.TestCase):
             self.assertNotRegex(html, r"calibrated relative \u03b5")
             self.assertIn("no calibrated cell", html)
             calibrated = {**conf, "epsilon_source": "calibrated"}
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)],
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)],
                                           [_row("W3", 2000)],
                                           conf_a=calibrated, conf_b=calibrated)
             self.assertRegex(report.build(runs, "t"), r"calibrated relative \u03b5")
@@ -523,14 +523,14 @@ class ReportHostTests(unittest.TestCase):
         """The passing verdict was drawn in the caveat amber, so the one piece of
         good news on the page looked like the warnings under it."""
         with tempfile.TemporaryDirectory() as tmp:
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
             # The fixture's env.txt fails §7.1, which is red on its own account.
             self.assertIn('class="banner " id="verdict"', report.build(runs, "t"))
             for r in runs:
                 r.gate_pass = True
             self.assertIn('class="banner ok" id="verdict"', report.build(runs, "t"))
             self.assertIn(".banner.ok{", report.CSS)
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)],
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)],
                                           conf_a=CONF_T2, conf_b=CONF_T2)
             for r in runs:
                 r.gate_pass = True
@@ -577,7 +577,7 @@ class ReportHostTests(unittest.TestCase):
         self.assertEqual([s["last_row"] for s in spans],
                          ["2026-09-03T02:12:58Z", "2026-09-03T02:52:50Z"])
         with tempfile.TemporaryDirectory() as tmp:
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
             runs[0].meta["passes"] = [
                 {"label": "a-rep1", "started": "2026-09-03T02:00:31Z",
                  "last_row": "2026-09-03T02:12:58Z"},
@@ -593,7 +593,7 @@ class ReportHostTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             conf = {**CONF_T3, "max_delta": 1.5e-6, "p99_delta": 2.0e-7,
                     "epsilon": 9.5e-7, "epsilon_relative": False}
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)],
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)],
                                           [_row("W3", 2000)], conf_a=conf, conf_b=conf)
             lic = report.licence_of(runs)
             self.assertEqual(lic["delta"]["max"], 1.5e-6)
@@ -608,19 +608,19 @@ class ReportHostTests(unittest.TestCase):
             self.assertRegex(html, r"absolute \u03b5 of\s+9\.500e-07")
             self.assertNotIn("1.000e+00", html)
             rel = {**conf, "epsilon_relative": True}
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)],
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)],
                                           [_row("W3", 2000)], conf_a=rel, conf_b=rel)
             self.assertEqual(report.licence_of(runs)["delta"]["kind"], "relative")
             # A differ run from before the fields existed says so; it does not
             # show a blank, and it does not show a zero.
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)],
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)],
                                           [_row("W3", 2000)])
             lic = report.licence_of(runs)
             self.assertIsNone(lic["delta"])
             self.assertTrue(lic["delta_missing"])
             self.assertIn("predates its structured fields", report.build(runs, "t"))
             # No conformance row at all is a third state, and not this one.
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)],
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)],
                                           [_row("W3", 2000)], conf_a={}, conf_b={})
             self.assertFalse(report.licence_of(runs)["delta_missing"])
 
@@ -1003,7 +1003,7 @@ class ReportHostTests(unittest.TestCase):
             def at(wid, qps, when):
                 return {**_row(wid, qps), "when": when}
             # A-then-B: every `a` row before every `b` row.
-            report, runs, df = self._pair(
+            report, runs, _df = self._pair(
                 Path(tmp), [at("W3", 4000, "2026-08-18T20:41:00Z"),
                             at("W4", 8000, "2026-08-18T20:55:00Z")],
                 [at("W3", 2000, "2026-08-18T21:00:00Z"),
@@ -1012,7 +1012,7 @@ class ReportHostTests(unittest.TestCase):
             self.assertEqual((iv["blocks"], iv["sequential"], iv["first"]), (2, True, "a"))
             self.assertIn("were not interleaved", report.build(runs, "t"))
             # A/B/A/B: four blocks, and no banner.
-            report, runs, df = self._pair(
+            report, runs, _df = self._pair(
                 Path(tmp), [at("W3", 4000, "2026-08-18T20:00:00Z"),
                             at("W4", 8000, "2026-08-18T20:20:00Z")],
                 [at("W3", 2000, "2026-08-18T20:10:00Z"),
@@ -1023,12 +1023,12 @@ class ReportHostTests(unittest.TestCase):
             # Stamps that cannot answer it are unknown, not sequential, and
             # get no banner: `_row`'s rows all carry the same instant, so the
             # merge order would be the sort's rather than the run's.
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
             self.assertEqual(report.interleaving(runs), {})
             self.assertNotIn("were not interleaved", report.build(runs, "t"))
             # One instant shared across the two engines is the same ambiguity
             # even when the rest of the stamps differ.
-            report, runs, df = self._pair(
+            report, runs, _df = self._pair(
                 Path(tmp), [at("W3", 4000, "2026-08-18T20:00:00Z"),
                             at("W4", 8000, "2026-08-18T20:20:00Z")],
                 [at("W3", 2000, "2026-08-18T20:20:00Z"),
@@ -1043,11 +1043,11 @@ class ReportHostTests(unittest.TestCase):
                 return {**_row("W4-sat90", 9282), "load_mode": "open-loop",
                         "rps_target": 9282, "rps_fraction": 0.9,
                         "saturation_qps": 10313.0, "rps_reference_source": src}
-            report, runs, df = self._pair(Path(tmp), [arm("pinned")], [arm("pinned")])
+            report, runs, _df = self._pair(Path(tmp), [arm("pinned")], [arm("pinned")])
             html = report.build(runs, "t")
             self.assertIn("pinned reference 10,313 qps", html)
             self.assertNotIn("measured 10,313 qps", html)
-            report, runs, df = self._pair(Path(tmp), [arm("own")], [arm("own")])
+            report, runs, _df = self._pair(Path(tmp), [arm("own")], [arm("own")])
             self.assertIn("measured 10,313 qps", report.build(runs, "t"))
 
     def test_open_loop_arms_at_different_rates_are_not_compared(self):
@@ -1063,19 +1063,19 @@ class ReportHostTests(unittest.TestCase):
                         "saturation_qps": rate * 2, "rps_reference_source": src}
             # Each engine at half of its own saturation: different rates, so
             # the percentiles are not side by side comparable.
-            report, runs, df = self._pair(Path(tmp), [arm(11420, 11420, "own")],
+            report, runs, _df = self._pair(Path(tmp), [arm(11420, 11420, "own")],
                                           [arm(7489, 7489, "own")])
             msg = report.open_loop_mismatch(runs)
             self.assertIn("W4-sat50", msg)
             self.assertIn("--rps-reference", report.latency_table(runs))
             # One pinned reference: same rate on both, and no refusal.
-            report, runs, df = self._pair(Path(tmp), [arm(7489, 7489, "pinned")],
+            report, runs, _df = self._pair(Path(tmp), [arm(7489, 7489, "pinned")],
                                           [arm(7489, 7489, "pinned")])
             self.assertEqual(report.open_loop_mismatch(runs), "")
             self.assertNotIn("Not compared", report.latency_table(runs))
             # Same rate reached without pinning is still not a refusal: the
             # test is the offered load, not the bookkeeping.
-            report, runs, df = self._pair(Path(tmp), [arm(9000, 9000, "own")],
+            report, runs, _df = self._pair(Path(tmp), [arm(9000, 9000, "own")],
                                           [arm(9000, 9000, "own")])
             self.assertEqual(report.open_loop_mismatch(runs), "")
 
@@ -1168,7 +1168,7 @@ class ReportHostTests(unittest.TestCase):
         counted every segment, said it was not and that equal x "overstates
         strawmANN in traversal work"."""
         with tempfile.TemporaryDirectory() as tmp:
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
             runs[0].meta["strawmann"] = {"commit": "c"}
             runs[1].meta["qdrant"] = {"version": "1.19.2-dev"}
             runs[0].collections = {"collections": [
@@ -1529,7 +1529,7 @@ class ReportHostTests(unittest.TestCase):
         with the rows (findings 46); the page did not, so it printed a bare
         ratio and "clears the noise floor" under it from the refused floor."""
         with tempfile.TemporaryDirectory() as tmp:
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)],
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)],
                                           [_row("W3", 2000)], sw_a=[], sw_b=[])
             noise = report.ROOT / "bench/results/noise.json"
             noise.parent.mkdir(parents=True, exist_ok=True)
@@ -1551,7 +1551,7 @@ class ReportHostTests(unittest.TestCase):
         the card took the first arm's and said "licensed" under UNLICENSED."""
         with tempfile.TemporaryDirectory() as tmp:
             other = {**CONF_T3, "hash": "other-hash"}
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)],
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)],
                                           [_row("W3", 2000)], conf_a=CONF_T3, conf_b=other)
             lic = report.licence_of(runs)
             self.assertFalse(lic["comparative"])
@@ -1569,7 +1569,7 @@ class ReportHostTests(unittest.TestCase):
         both": a floor is measured over one label's repetitions.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)],
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)],
                                           [_row("W3", 2000)], sw_a=[], sw_b=[])
             noise = report.ROOT / "bench/results/noise.json"
             noise.parent.mkdir(parents=True, exist_ok=True)
@@ -1602,7 +1602,7 @@ class ReportHostTests(unittest.TestCase):
         binary, so every perf report said so.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
             runs[1].meta["qdrant"] = {
                 "image": None, "digest": None, "version": "1.19.1-dev",
                 "network": "native", "binary": "/opt/qdrant/target/release/qdrant",
@@ -1630,7 +1630,7 @@ class ReportHostTests(unittest.TestCase):
         moved to 2874d0f1d. run.json said so (`binary_predates_commit`), and
         the page printed `commit 2874d0f1dbfa` beside "pinned by commit"."""
         with tempfile.TemporaryDirectory() as tmp:
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
             runs[1].meta["qdrant"] = {
                 "image": None, "digest": None, "version": "1.19.2-dev",
                 "network": "native", "binary": "/opt/qdrant/target/release/qdrant",
@@ -1661,7 +1661,7 @@ class ReportHostTests(unittest.TestCase):
                                    side_effect=OSError("no probe")):
                 got = provenance.qdrant_native_build(1)
             self.assertEqual(got["cargo_profile"], "perf")
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
             runs[1].meta["qdrant"] = {
                 "image": None, "digest": None, "version": "1.19.1-dev",
                 "network": "native", "binary": str(exe), "cargo_profile": "perf",
@@ -1747,7 +1747,7 @@ class ReportHostTests(unittest.TestCase):
 
     def test_noise_text_derives_from_noise_json(self):
         with tempfile.TemporaryDirectory() as tmp:
-            report, runs, df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)],
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)],
                                           sw_a=[], sw_b=[])
             self.assertEqual(report.noise_provenance(runs), {})
             noise = report.ROOT / "bench/results/noise.json"
@@ -2707,7 +2707,7 @@ class ReportReadabilityTests(unittest.TestCase):
         with mock.patch.object(report.compare, "joined", lambda *a: joined), \
                 mock.patch.object(report, "load_noise", lambda runs: {}), \
                 mock.patch.object(report, "ratio_verdict", lambda *a: "clears the band"):
-            got = {l["id"]: l["recall"] for l in report.losses(runs)}
+            got = {loss["id"]: loss["recall"] for loss in report.losses(runs)}
         self.assertEqual(got["W12-sel1-ef64"], "sm at recall 1.0000, qd at 0.9963")
         self.assertEqual(got["W9"], "")       # exact search has no recall to state
         self.assertEqual(got["W6"], "")

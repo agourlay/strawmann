@@ -29,6 +29,7 @@ default is one they cannot.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -236,7 +237,7 @@ def strawmann_build(pid: int | None = None) -> dict:
     hash_path = Path(f"/proc/{pid}/exe") if running is not None else binary
     exists = binary.exists() or (running is not None and hash_path.exists())
     digest = file_digest(hash_path) if exists else None
-    out = {
+    return {
         "commit": commit,
         "dirty": status,
         "binary": str(binary) if exists else None,
@@ -248,7 +249,6 @@ def strawmann_build(pid: int | None = None) -> dict:
                          if binary.exists() else None),
         "zig": (_run(["zig", "version"]) or None),
     }
-    return out
 
 
 def probe_path_of(build: dict) -> Path | None:
@@ -368,12 +368,12 @@ def qdrant_build(pid: int | None) -> dict:
         return {**out, **qdrant_native_build(pid)}
     for cid in ids.split():
         info = _run(["docker", "inspect", "-f",
-                     "{{.State.Pid}}|{{.Config.Image}}|{{.Image}}|{{.Name}}|"
-                     "{{json .NetworkSettings.Ports}}|{{.HostConfig.NetworkMode}}", cid])
+                     ("{{.State.Pid}}|{{.Config.Image}}|{{.Image}}|{{.Name}}|"
+                     "{{json .NetworkSettings.Ports}}|{{.HostConfig.NetworkMode}}"), cid])
         if not info or "|" not in info:
             continue
         cpid, image, digest, name, ports, netmode = \
-            (info.split("|") + ["", "", "", "", "", ""])[:6]
+            ([*info.split("|"), "", "", "", "", "", ""])[:6]
         # Against the process's ancestry, not the process: `State.Pid` is the
         # container's PID 1 and the engine visible on the host is its child.
         # See `procstat.ancestors`.
@@ -630,10 +630,8 @@ def _engine_texts(server_log: Path | None, binary: Path | None):
     for `isa build`.
     """
     if server_log is not None and server_log.exists():
-        try:
+        with contextlib.suppress(OSError):
             yield server_log.read_text()
-        except OSError:
-            pass
     if binary is None or not binary.exists():
         return
     if str(binary) in _PROBE_TEXT:  # `memory_bandwidth` already probed this binary
@@ -770,10 +768,8 @@ def memory_bandwidth(server_log: Path | None = None,
         return None
     finally:
         if before is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.sched_setaffinity(0, before)
-            except OSError:
-                pass
     _PROBE_TEXT[str(binary)] = p.stdout + p.stderr
     bw = parse_bandwidth_probe(p.stdout + p.stderr)
     if bw:

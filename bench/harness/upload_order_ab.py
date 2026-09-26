@@ -35,6 +35,7 @@ Not a timing measurement, so no host gate. Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import subprocess
 import sys
@@ -126,10 +127,8 @@ def one_pass(label: str, threads: int, parallel: int, overlap: bool,
         # The graph the sweep scored, in the record beside it: `graph_builds`
         # carries the checksum, so two passes that agree about recall can still
         # be shown to have built different graphs.
-        try:
+        with contextlib.suppress(Exception):
             fullrun.record_graph_quality(label)
-        except Exception:
-            pass
 
     doc = json.loads((fullrun.RESULTS / label /
                       f"recall.{workloads.DATASET}.bench2.json").read_text())

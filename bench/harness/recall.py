@@ -683,8 +683,8 @@ def main(argv: list[str]) -> int:
             return 1
 
     rc = 0
-    for c in args.collections.split(","):
-        c = c.strip()
+    for raw in args.collections.split(","):
+        c = raw.strip()
         if c == FILTERED_COLLECTION:
             # One collection, one sweep per grade: W12's two rows differ only
             # in selectivity, so they search the same `bench12` under different
@@ -701,11 +701,9 @@ def main(argv: list[str]) -> int:
         sets = quant_sweeps_of(c)
         if args.oversampling is not None or args.rescore is not None:
             sets = sets[:1]
-        for (ov, rs), row_efs in sets:
-            if args.oversampling is not None:
-                ov = args.oversampling
-            if args.rescore is not None:
-                rs = args.rescore == "true"
+        for (row_ov, row_rs), row_efs in sets:
+            ov = args.oversampling if args.oversampling is not None else row_ov
+            rs = args.rescore == "true" if args.rescore is not None else row_rs
             efs = [int(x) for x in args.ef.split(",")] if args.ef else row_efs
             rc |= sweep(args.engine, args.label, c, args.queries, ov, rs, efs, args.limit)
 

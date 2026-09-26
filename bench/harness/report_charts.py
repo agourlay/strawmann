@@ -368,8 +368,8 @@ def chart_quantization_recall(runs: list[Run]) -> dict | None:
     dash = ["solid", "dot", "dash"]
     fig = go.Figure()
     drawn = 0
-    for coll, name, hue in ENCODINGS:
-        name = encoding_name(coll, name)
+    for coll, default_name, hue in ENCODINGS:
+        name = encoding_name(coll, default_name)
         for j, run in enumerate(runs):
             ds = (run.meta.get("dataset") or {}).get("name") or "sift1m"
             pts = (recall_mod.load_recall_points(run.label, ds, coll)
@@ -386,7 +386,7 @@ def chart_quantization_recall(runs: list[Run]) -> dict | None:
                 marker=dict(color=hue, size=8,
                             line=dict(color="#fbfbfa", width=1.2)),
                 hovertemplate="ef=%{x}<br>recall@10 %{y:.4f}<extra>"
-                              + f"{name} · {run.label}" + "</extra>")
+                               f"{name} · {run.label}" + "</extra>")
     if not drawn:
         return None
     fig.update_layout(**layout(xaxis_title="ef (search breadth)",
@@ -481,7 +481,7 @@ def chart_runqueue(runs: list[Run], df: pd.DataFrame) -> dict | None:
     if "runqueue_wait_s" not in df.columns:
         return None
     ms = {}
-    for i, run in enumerate(runs):
+    for _i, run in enumerate(runs):
         for _, r in df[df["engine"] == run.label].iterrows():
             v = r.get("runqueue_wait_s")
             if pd.notna(v) and v > 0:

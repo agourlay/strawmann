@@ -60,6 +60,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # `bench/`, for `setup.py`: the gate's own constants and process lists, so the
 # two samplers cannot disagree about what "ours" or "over budget" means.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import contextlib
+
 import perfstat
 
 import paths
@@ -2325,11 +2327,9 @@ def quant_of(w: Workload) -> dict:
     """`--quantization-oversampling` / `--quantization-rescore`, as the row sent them."""
     out: dict = {"quantization_oversampling": None, "quantization_rescore": None}
     if "--quantization-oversampling" in w.args:
-        try:
+        with contextlib.suppress(IndexError, ValueError):
             out["quantization_oversampling"] = float(
                 w.args[w.args.index("--quantization-oversampling") + 1])
-        except (IndexError, ValueError):
-            pass
     if "--quantization-rescore" in w.args:
         try:
             v = w.args[w.args.index("--quantization-rescore") + 1].lower()
@@ -2616,7 +2616,7 @@ def command_for(w: Workload, uri: str, results: Path, common: list[str]) -> list
     # not create anything.
     passthrough = []
     skip_next = False
-    for i, a in enumerate(w.args):
+    for _i, a in enumerate(w.args):
         if skip_next:
             skip_next = False
             continue
@@ -2626,7 +2626,7 @@ def command_for(w: Workload, uri: str, results: Path, common: list[str]) -> list
         if a in ("--search", "--skip-setup"):
             continue
         passthrough.append(a)
-    return base + ["search", "--file", str(cfg), *passthrough]
+    return [*base, "search", "--file", str(cfg), *passthrough]
 
 
 #: §7.1: a warm-up pass before every measured search row, its output
@@ -2664,10 +2664,8 @@ def scale_n(args: list[str], factor: int) -> list[str]:
         return list(args)
     out = list(args)
     i = out.index("-n")
-    try:
+    with contextlib.suppress(IndexError, ValueError):
         out[i + 1] = str(int(out[i + 1]) * factor)
-    except (IndexError, ValueError):
-        pass
     return out
 
 
@@ -3359,10 +3357,8 @@ def main(argv: list[str]) -> int:
     # Python block-buffers stdout when it is not a tty, so a run redirected to a
     # file shows nothing until it exits. A sweep is 50 minutes; watching it is
     # how a stall gets noticed before it wastes the whole run.
-    try:
+    with contextlib.suppress(AttributeError):
         sys.stdout.reconfigure(line_buffering=True)
-    except AttributeError:
-        pass
 
     # argparse, like every other driver here. Was ~95 lines of hand-rolled argv
     # scanning plus a separate flag set and usage string — three copies of one
@@ -3711,11 +3707,11 @@ def main(argv: list[str]) -> int:
         print(f"  -n factors pinned from this arm's first pass: "
               f"{', '.join(f'{k} x{v}' for k, v in sorted(n_pins.items()) if v > 1) or 'all 1x'}")
     out: list[Result] = []
-    for w in rows:
+    for table_row in rows:
         # §4's open-loop arms are a fraction of *measured* saturation, so the
         # rate is only known once W4 has run. Resolved here rather than in
         # `table()`, which cannot see a measurement.
-        w = with_placement(w, memory_vectors)
+        w = with_placement(table_row, memory_vectors)
         rate, sat = None, None
         if w.rps_fraction is not None:
             # The pinned reference wins where one was given: it is what makes

@@ -96,7 +96,7 @@ class Log:
 
     def __call__(self, msg: str) -> None:
         with self.path.open("a") as f:
-            f.write(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S} {msg}\n")
+            f.write(f"{dt.datetime.now().astimezone():%Y-%m-%d %H:%M:%S} {msg}\n")
 
 
 def git(args: list[str], cwd: Path) -> str | None:

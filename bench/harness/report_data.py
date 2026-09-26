@@ -15,6 +15,8 @@ The rule has one home now, in `compare.gate_of_rows`, and this asks it.
 
 from __future__ import annotations
 
+import contextlib
+import itertools
 import json
 import os
 import re
@@ -140,7 +142,7 @@ def glance_of(runs: list[Run]) -> dict | None:
     # One line when the engines agree, which is the ordinary case; both when
     # they do not, because that difference is the reader's to weigh.
     dtype = dtypes[0] if len(set(dtypes)) == 1 else " · ".join(
-        f"{lbl} {v}" for lbl, v in zip(cols, dtypes))
+        f"{lbl} {v}" for lbl, v in zip(cols, dtypes, strict=True))
     # `bench2` is what the headline rows search — W3, W4, W10 and the recall
     # frontier all query it — so its encoding is *the* answer to "which
     # quantization". The others are separate collections measured by their own
@@ -383,10 +385,8 @@ def load_run(label: str) -> Run:
     for r in rows:
         p = d / f"{r['id']}.json"
         if p.exists():
-            try:
+            with contextlib.suppress(json.JSONDecodeError):
                 detail[r["id"]] = json.loads(p.read_text())
-            except json.JSONDecodeError:
-                pass
     def read_json(name: str) -> dict:
         p = d / name
         if not p.exists():
@@ -493,7 +493,7 @@ def _interp_segment(points: list[dict], recall: float) -> Segment | None:
     the slope it could not.
     """
     import math
-    for (a, b) in zip(points, points[1:]):
+    for (a, b) in itertools.pairwise(points):
         if a["recall"] <= recall <= b["recall"]:
             if b["recall"] == a["recall"]:
                 return Segment(qps=a["qps"], slope=0.0)

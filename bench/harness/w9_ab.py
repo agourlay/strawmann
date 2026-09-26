@@ -168,8 +168,8 @@ def _median(rows: list[dict], f) -> float | None:
 
 def table_text(summary: list[dict], bus: str) -> str:
     lines = [f"bus (strawmann --probe): {bus}",
-             f"{'arm':<8} {'reps':>4} {'q/s':>8} {'spread':>7} {'cores':>6} "
-             f"{'Mcyc/q':>8} {'IPC':>5} {'DRAM MB/q':>10} {'implied GB/s':>13}  foreign"]
+             (f"{'arm':<8} {'reps':>4} {'q/s':>8} {'spread':>7} {'cores':>6} "
+             f"{'Mcyc/q':>8} {'IPC':>5} {'DRAM MB/q':>10} {'implied GB/s':>13}  foreign")]
     for s in summary:
         def f(v, fmt):
             return format(v, fmt) if v is not None else "-"

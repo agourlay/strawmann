@@ -123,8 +123,8 @@ def qdrant_segment_env() -> dict[str, str]:
 def cpu_count(spec: str) -> int:
     """How many CPUs a list like `4-11` names."""
     n = 0
-    for part in spec.split(","):
-        part = part.strip()
+    for raw in spec.split(","):
+        part = raw.strip()
         if not part:
             continue
         if "-" in part:
@@ -499,7 +499,7 @@ def wait_until_admitted(lax: bool, wait_min: float,
 def iso(stamp: str) -> dt.datetime:
     """A `when` stamp as a datetime. They are written `...Z`, which
     `fromisoformat` only learned in 3.11 and which reads clearer named."""
-    return dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    return dt.datetime.fromisoformat(stamp)
 
 
 def planned_rows() -> list[str] | None:
@@ -1986,9 +1986,9 @@ def render(labels: list[str], lax: bool = False) -> int:
               "because:", flush=True)
         for r in reasons:
             print(f"!!   - {r}", flush=True)
-        print(f"!! would have run: {' '.join(cmp_argv + ['--write-readme'])}", flush=True)
+        print(f"!! would have run: {' '.join([*cmp_argv, '--write-readme'])}", flush=True)
         print("!! the block it would have written follows, for the record:\n", flush=True)
-        code, out = sh(cmp_argv + ["--readme"], 300, cwd=ROOT)
+        code, out = sh([*cmp_argv, "--readme"], 300, cwd=ROOT)
         print(out.rstrip(), flush=True)
         # Refusing to publish is not itself a failure, and conflating the two
         # cost the exit code its meaning: the single-pass refusal fires on every
@@ -2003,7 +2003,7 @@ def render(labels: list[str], lax: bool = False) -> int:
                   "asked for, not a fault in it: this run has not failed)",
                   flush=True)
     else:
-        code, out = sh(cmp_argv + ["--write-readme"], 300, cwd=ROOT)
+        code, out = sh([*cmp_argv, "--write-readme"], 300, cwd=ROOT)
         print(out.rstrip(), flush=True)
         rc |= code
 

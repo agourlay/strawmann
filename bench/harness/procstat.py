@@ -41,6 +41,7 @@ are the ones a comparison should lead with.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 import subprocess
@@ -286,10 +287,8 @@ def parse_pressure(text: str) -> dict[str, float] | None:
             k, _, v = field.partition("=")
             if k != "total":
                 continue
-            try:
+            with contextlib.suppress(ValueError):
                 out[parts[0]] = int(v) / 1e6
-            except ValueError:
-                pass
     return out or None
 
 
@@ -475,10 +474,8 @@ def parse_proc_stat(text: str) -> dict[str, float] | None:
     # `sched_counters`. A kernel with `task_delayacct=0` reports the field as a
     # permanent zero, which is the shape this module exists to refuse.
     if len(rest) >= 40:
-        try:
+        with contextlib.suppress(ValueError):
             out["blkio_delay_s"] = int(rest[39]) / _CLK_TCK
-        except ValueError:
-            pass
     return out
 
 
@@ -549,10 +546,8 @@ def thread_counters(pid: int) -> dict[str, dict[str, float]]:
         if sd := _read(f"{t}/sched"):
             for row in sd.splitlines():
                 if row.startswith("se.nr_migrations"):
-                    try:
+                    with contextlib.suppress(IndexError, ValueError):
                         got["migrations"] = float(int(row.split(":")[1]))
-                    except (IndexError, ValueError):
-                        pass
                     break
         # The two context-switch counters live in `status`, not `schedstat`.
         # The sampler's whole purpose is to bank the thread-summed counters
@@ -564,10 +559,8 @@ def thread_counters(pid: int) -> dict[str, dict[str, float]]:
                               ("nonvoluntary_ctxt_switches:", "ctx_switches_involuntary")):
                 for row in st.splitlines():
                     if row.startswith(line):
-                        try:
+                        with contextlib.suppress(IndexError, ValueError):
                             got[key] = float(int(row.split()[1]))
-                        except (IndexError, ValueError):
-                            pass
                         break
         if got:
             out[tid] = got
@@ -823,10 +816,8 @@ def rss_split(pid: int) -> dict[str, int | None]:
     for line in text.splitlines():
         head = line.split(":")[0] + ":"
         if head in keys:
-            try:
+            with contextlib.suppress(IndexError, ValueError):
                 out[keys[head]] = int(line.split()[1]) * 1024
-            except (IndexError, ValueError):
-                pass
     return out
 
 

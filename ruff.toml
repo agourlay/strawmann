@@ -40,6 +40,18 @@ select = [
     "C4",     # comprehension rewrites that are also clearer.
     "SIM",    # simplifications that do not change behaviour.
     "RUF",    # ruff's own: mutable class defaults, unused noqa.
+    "ISC",    # implicit string concatenation, above all inside a list, where
+              # a missing comma joins two items into one in silence.
+    "DTZ",    # naive datetimes: a timestamp without a zone is read in whatever
+              # zone the reader is in, and the night runs straddle UTC midnight.
+    "PIE",    # redundant constructs.
+    "RET",    # return-statement clarity.
+    "FURB",   # modern-idiom rewrites that are also clearer.
+    "PLE",    # pylint errors: calls and constructs that fail at run time.
+    "PLW0108", "PLW2901",  # a lambda that only forwards; a loop variable
+              # overwritten inside its own loop.
+    "PGH",    # blanket `noqa` and `type: ignore`.
+    "T10",    # a debugger breakpoint left in.
 ]
 
 # `sys.path.insert` before the local imports is how every entry point here
@@ -60,29 +72,6 @@ ignore = [
     # purpose; every hit is a docstring or a report string, not a homoglyph
     # slipped into an identifier.
     "RUF001", "RUF002", "RUF003",
-
-    # --- Deferred, not dismissed --------------------------------------------
-    #
-    # Each of these has real hits in the tree today, listed with the count at
-    # the time the gate went in. They are off so that the gate is green and can
-    # therefore fail on a *regression*; a linter reporting 73 findings on every
-    # run is one nobody reads, which is the argument zlint.json's own comment
-    # makes about an allowlist. Turning one back on is a commit that fixes its
-    # hits, not a config change on its own.
-    #
-    # In the order worth doing them:
-    "B905",    # 11: `zip()` without `strict=`. The one here with a bug behind
-               # it — this code zips parallel sequences (passes against passes,
-               # engines against columns) and a length mismatch truncates in
-               # silence rather than raising. Wants each site *decided*, not a
-               # blanket `strict=False`, which is why it is not auto-fixed.
-    "E741",    # 10: `l` as a name, mostly `for l, v in ...` over labels.
-    "RUF005",  #  12: `[x] + xs` rather than `[x, *xs]`.
-    "RUF059",  #  9: unpacked and unused, usually a deliberate `a, _b = ...`
-               #  spelled without the underscore.
-    "SIM105",  #  6: `try/except/pass` rather than `contextlib.suppress`.
-    "B007",    #  3: unused loop control variable.
-    "RUF007",  #  2: `zip(x, x[1:])` rather than `itertools.pairwise`.
 ]
 
 [lint.per-file-ignores]

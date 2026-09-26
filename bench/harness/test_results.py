@@ -493,13 +493,13 @@ class NoiseTests(unittest.TestCase):
             self.assertEqual(rc, 0, out)
             self.assertIn("0 regression(s)", out)
             self.assertIn("1 row(s) not attributable", out)
-            b_line = next(l for l in out.splitlines() if l.strip().startswith("B "))
+            b_line = next(ln for ln in out.splitlines() if ln.strip().startswith("B "))
             self.assertIn("not attributable: contaminated", b_line)
             self.assertNotIn("REGRESSION", b_line)
             # An unstamped floor against stamped rows is noted, not refused.
             self.assertIn("carries no harness stamp", out)
-            self.assertIn("inconclusive", next(l for l in out.splitlines()
-                                               if l.strip().startswith("A ")))
+            self.assertIn("inconclusive", next(ln for ln in out.splitlines()
+                                               if ln.strip().startswith("A ")))
 
     def test_an_open_loop_row_re_offered_at_another_rate_is_not_attributable(self):
         """`--rps-reference` sets an open-loop row's offered rate, and its qps is
@@ -700,7 +700,7 @@ class ProvenanceTests(unittest.TestCase):
 
         def fake_bw(server_log=None, binary=None):
             seen["log"] = server_log
-            return None
+            return
 
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(prov, "memory_bandwidth", fake_bw), \
