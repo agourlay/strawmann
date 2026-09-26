@@ -124,7 +124,7 @@ def steps() -> list[Step]:
         # committed report pages, not the gitignored results. A page copied
         # into docs/reports/ or retired from it without regenerating the
         # cards leaves the landing page describing an archive that is gone.
-        Step("landing-cards-current", "the report cards on docs/reports/index.html must "
+        Step("landing-cards-current", "the report cards on docs/index.html must "
                                       "match the pages in docs/reports/",
              [sys.executable, str(ROOT / "bench/harness/landing_cards.py"), "--check"]),
 

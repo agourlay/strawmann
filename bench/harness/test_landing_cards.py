@@ -84,7 +84,7 @@ class MainTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         (self.root / "docs/reports").mkdir(parents=True)
-        self.page = self.root / "docs/reports/index.html"
+        self.page = self.root / "docs/index.html"
         self.page.write_text(f"<main>\n{lc.BEGIN}\nold\n{lc.END}\n</main>\n")
         (self.root / "docs/reports" / SIFT).write_text(PAGE)
         self.patch = mock.patch.multiple(lc, ROOT=self.root, REPORTS=self.root / "docs/reports",

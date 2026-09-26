@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>strawmANN benchmark reports</title>
+<meta name="description" content="strawmANN is a deliberately unfair strawman for approximate nearest neighbour search: a Qdrant-wire-compatible vector engine in Zig, measured against Qdrant 1.19. Headline results and the full run reports.">
+<link rel="icon" type="image/svg+xml" href="assets/strawmann-logo.svg">
+<link rel="canonical" href="https://agourlay.github.io/strawmann/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="strawmANN">
+<meta property="og:title" content="strawmANN benchmark reports">
+<meta property="og:description" content="A deliberately unfair strawman for approximate nearest neighbour search, measured against Qdrant 1.19. Headline results and full run reports.">
+<meta property="og:url" content="https://agourlay.github.io/strawmann/">
+<meta property="og:image" content="https://agourlay.github.io/strawmann/assets/social-card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="strawmANN logo: a plot frame with one straw-coloured bar breaking out through the top edge, next to the name and tagline">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="strawmANN benchmark reports">
+<meta name="twitter:description" content="A deliberately unfair strawman for approximate nearest neighbour search, measured against Qdrant 1.19.">
+<meta name="twitter:image" content="https://agourlay.github.io/strawmann/assets/social-card.png">
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1b1b1b; --muted: #5d5a54; --line: #e6e2d9;
+    --card: #ffffff; --link: #0b5ed7; --straw: #c98f12; --straw-soft: #f6ead0;
+    --bar: #d8d3c8; --win: #8a5f00; --lose: #5d5a54; --shadow: 0 1px 2px rgba(40,30,0,.06), 0 4px 16px rgba(40,30,0,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #121315; --fg: #ececec; --muted: #a3a09a; --line: #2a2c30;
+      --card: #1a1b1e; --link: #86b6ff; --straw: #f0be4a; --straw-soft: #3a3120;
+      --bar: #3a3c41; --win: #f0be4a; --lose: #a3a09a; --shadow: none;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #121315; --fg: #ececec; --muted: #a3a09a; --line: #2a2c30;
+    --card: #1a1b1e; --link: #86b6ff; --straw: #f0be4a; --straw-soft: #3a3120;
+    --bar: #3a3c41; --win: #f0be4a; --lose: #a3a09a; --shadow: none;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg); margin: 0;
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 920px; margin: 0 auto; padding: 40px 16px 64px; }
+  a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.86em; background: rgba(127,127,127,0.14); padding: 1px 5px; border-radius: 4px; white-space: nowrap;
+  }
+
+  /* hero */
+  .hero { display: flex; gap: 28px; align-items: center; margin-bottom: 40px; }
+  .logo, .logo img { flex: none; width: 124px; height: 124px; display: block; }
+  h1 { font-size: 2.6rem; line-height: 1.1; margin: 0; letter-spacing: -0.02em; }
+  h1 em { font-style: normal; color: var(--straw); }
+  .tagline { font-size: 1.12rem; font-weight: 600; margin: 8px 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 14px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px;
+    border: 1px solid var(--line); border-radius: 999px; background: var(--card);
+    color: var(--fg); text-decoration: none; font-size: 0.92rem; font-weight: 600;
+    box-shadow: var(--shadow);
+  }
+  .btn:hover { border-color: var(--straw); }
+  .btn svg { width: 16px; height: 16px; fill: currentColor; }
+  .actions img { height: 20px; display: block; }
+
+  h2 { font-size: 1.25rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .section-note { color: var(--muted); margin: 0 0 16px; font-size: 0.95rem; }
+  section { margin-bottom: 44px; }
+
+  /* results table */
+  .panel {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: var(--shadow); overflow: hidden;
+  }
+  .panel-head {
+    display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 16px;
+    padding: 14px 18px; border-bottom: 1px solid var(--line); font-size: 0.92rem;
+  }
+  .panel-head strong { font-size: 1rem; }
+  .panel-head span { color: var(--muted); }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+  th, td { padding: 10px 18px; text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; white-space: normal; }
+  thead th {
+    font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--line);
+  }
+  tbody tr + tr td { border-top: 1px solid var(--line); }
+  td.num { font-variant-numeric: tabular-nums; }
+  .what { font-weight: 600; }
+  .what small { display: block; font-weight: 400; color: var(--muted); font-size: 0.82rem; }
+  .ratio { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+  .ratio b { font-variant-numeric: tabular-nums; min-width: 3.4em; }
+  .ratio.win b { color: var(--win); }
+  .ratio.lose b { color: var(--lose); font-weight: 600; }
+  /* The track spans 0x to 5x; the tick marks 1x (parity). */
+  .track { position: relative; width: 120px; height: 8px; border-radius: 4px; background: var(--bar); }
+  .track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--straw); }
+  .ratio.lose .track i { background: var(--muted); }
+  .ratio.even b { color: var(--muted); font-weight: 600; }
+  .track::after { content: ""; position: absolute; left: 20%; top: -3px; bottom: -3px; width: 2px; background: var(--fg); opacity: .55; }
+  .panel-foot { padding: 12px 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.86rem; }
+  .panel-foot .warn { margin: 8px 0 0; color: var(--fg); font-weight: 600; }
+  .panel + .panel, .panel + .pending, .pending + .panel { margin-top: 18px; }
+  .pending {
+    padding: 12px 16px; border-radius: 10px; font-size: 0.92rem;
+    background: var(--straw-soft); border: 1px solid var(--line);
+  }
+
+  /* report cards */
+  .cards { display: grid; gap: 14px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 18px; box-shadow: var(--shadow);
+  }
+  .card-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; margin-bottom: 6px; }
+  .card-top a { font-weight: 700; font-size: 1.04rem; }
+  .chip {
+    font-size: 0.74rem; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+  }
+  .chip.now { color: var(--win); border-color: var(--straw); background: var(--straw-soft); }
+  .chip.bad { color: #b42318; border-color: #b42318; }
+  .card p + p { margin-top: 6px; }
+  .card p { margin: 0; color: var(--muted); font-size: 0.93rem; }
+
+  footer { border-top: 1px solid var(--line); padding-top: 18px; color: var(--muted); font-size: 0.88rem; }
+  footer p { margin: 0 0 10px; }
+
+  @media (max-width: 640px) {
+    main { padding-top: 28px; }
+    .hero { flex-direction: column; align-items: flex-start; gap: 16px; }
+    .logo, .logo img { width: 72px; height: 72px; }
+    table { font-size: 0.88rem; }
+    .what small { display: none; }
+    td.span { white-space: normal; }
+    h1 { font-size: 2.1rem; }
+    th, td { padding: 9px 8px; }
+    thead th { white-space: normal; letter-spacing: 0.02em; }
+    th:first-child, td:first-child { padding-left: 12px; }
+    th:last-child, td:last-child { padding-right: 12px; }
+    .ratio b { min-width: 0; }
+    .track, .bar-note { display: none; }
+    .panel-head, .panel-foot { padding-left: 12px; padding-right: 12px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header class="hero">
+    <picture class="logo">
+      <source media="(prefers-color-scheme: dark)" srcset="assets/strawmann-logo-dark.svg">
+      <img src="assets/strawmann-logo.svg" alt="strawmANN logo: a plot frame with two bars inside it and one straw-coloured bar breaking out through the top edge" width="124" height="124">
+    </picture>
+    <div>
+      <h1>strawm<em>ANN</em></h1>
+      <p class="tagline">A deliberately unfair strawman for approximate nearest neighbour search</p>
+      <p class="sub">A Qdrant-wire-compatible vector engine in Zig, built as a performance oracle:
+      no compatibility debt, no distribution, no product. These are its benchmark runs against Qdrant 1.19.</p>
+      <div class="actions">
+        <a class="btn" href="https://github.com/agourlay/strawmann">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          Source on GitHub
+        </a>
+        <a href="https://github.com/agourlay/strawmann/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/agourlay/strawmann?style=social"></a>
+        <a href="https://github.com/agourlay/strawmann/blob/main/docs/findings.md"><img alt="Findings" src="https://img.shields.io/badge/read-findings-E0A82E"></a>
+        <img alt="Conformance: T0 to T4 pass" src="https://img.shields.io/badge/conformance-T0%20%E2%86%92%20T4-2ea44f">
+      </div>
+    </div>
+  </header>
+
+  <section>
+    <h2>Headline results</h2>
+    <p class="section-note">Queries per second, higher is better. A ratio above 1x means strawmANN serves more.</p>
+
+    <!-- BEGIN landing-sift1m (generated by bench/harness/compare.py --write-readme) -->
+<div class="panel" id="sift1m">
+  <div class="panel-head">
+    <strong>sift1m <span>· d=128, euclid, 1M vectors</span></strong>
+    <span>measured 2026-09-25 · 3 passes · gate <code>pass</code> both arms</span>
+  </div>
+  <div class="scroll">
+  <table>
+    <thead>
+      <tr><th scope="col">workload</th><th scope="col">strawmann</th><th scope="col">qdrant 1.19</th><th scope="col">ratio</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="what">At equal recall<small>§7.4's comparison, over 8 anchors: 2.14x at recall 0.9887, falling to 1.78x at 0.9993</small></td>
+        <td class="num span" colspan="2">recall 0.9887 to 0.9993</td>
+        <td><div class="ratio win"><span class="track"><i style="width:42.8%"></i></span><b>2.14x</b></div></td>
+      </tr>
+      <tr>
+        <td class="what">Saturating<small>closed loop, every core busy</small></td>
+        <td class="num">23,166</td><td class="num">14,075</td>
+        <td><div class="ratio win"><span class="track"><i style="width:33.0%"></i></span><b>1.65x</b></div></td>
+      </tr>
+      <tr>
+        <td class="what">Batched<small>16 queries per request</small></td>
+        <td class="num">23,463</td><td class="num">4,845</td>
+        <td><div class="ratio win"><span class="track"><i style="width:96.8%"></i></span><b>4.84x</b></div></td>
+      </tr>
+      <tr>
+        <td class="what">Exact<small>brute force, no index</small></td>
+        <td class="num">184</td><td class="num">122</td>
+        <td><div class="ratio win"><span class="track"><i style="width:30.0%"></i></span><b>1.50x</b></div></td>
+      </tr>
+      <tr>
+        <td class="what">One query at a time<small>single client, latency bound</small></td>
+        <td class="num">1,699</td><td class="num">2,019</td>
+        <td><div class="ratio lose"><span class="track"><i style="width:16.8%"></i></span><b>0.84x</b></div></td>
+      </tr>
+      <tr>
+        <td class="what">Quantized, PQ<small>recall 0.9829 against 0.9781</small></td>
+        <td class="num">3,060</td><td class="num">4,164</td>
+        <td><div class="ratio lose"><span class="track"><i style="width:14.6%"></i></span><b>0.73x</b></div></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="panel-foot">
+    <span class="bar-note">The bar runs from 0x to 5x; the tick marks parity.</span>
+    Every row, with its latency percentiles, recall and the rows the comparison
+    refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-sift1m.md"><code>comparison-sift1m.md</code></a>.
+    These ratios are this dimension's and do not carry to another.
+  </div>
+</div>
+<!-- END landing-sift1m -->
+
+    <!-- BEGIN landing-dbpedia-openai-1m (generated by bench/harness/compare.py --write-readme) -->
+    <div class="pending">
+      <strong>dbpedia-openai-1m (d=1536) is being re-measured.</strong> Its published page ran
+      Qdrant's development profile, whose 4 search threads cap it. The pair with Qdrant in
+      production mode runs on 2026-09-27 and replaces it here.
+    </div>
+<!-- END landing-dbpedia-openai-1m -->
+  </section>
+
+  <section>
+    <h2>Run reports</h2>
+    <p class="section-note">Each page is one full benchmark run, self-contained and needing no network. It
+    states its own licence in the header: the gate verdict per arm, the conformance tier and hash, the
+    environment hash, the pass count, and a banner on every row the comparison refuses. Read that
+    before quoting a number off it.</p>
+
+    <!-- BEGIN landing-reports (generated by bench/harness/landing_cards.py) -->
+<div class="cards">
+  <article class="card">
+    <div class="card-top">
+      <a href="reports/report-sift1m-sm-sift-perf-0926-vs-qd-sift-perf-0926-2026-09-25-2021.html">sift1m, measured 2026-09-25 20:21</a>
+      <span class="chip now">current</span><span class="chip">T4</span><span class="chip">gate pass</span><span class="chip">3 passes</span>
+    </div>
+    <p><code>sm-sift-perf-0926 vs qd-sift-perf-0926</code></p>
+    <p>At equal recall, strawmANN serves 1.78x to 2.14x Qdrant&#x27;s throughput. That range spans the recall levels measured; allowing for the uncertainty in each recall figure widens it to 1.28x to 3.29x.</p>
+  </article>
+  <article class="card">
+    <div class="card-top">
+      <a href="reports/report-dbpedia-openai-1m-sm-dbp1m-perf-0925-vs-qd-dbp1m-perf-0925-2026-09-24-2152.html">dbpedia-openai-1m, measured 2026-09-24 21:52</a>
+      <span class="chip now">current</span><span class="chip">T4</span><span class="chip">gate pass</span><span class="chip">3 passes</span>
+    </div>
+    <p><code>sm-dbp1m-perf-0925 vs qd-dbp1m-perf-0925</code></p>
+    <p>At equal recall, strawmANN serves 1.26x to 1.44x Qdrant&#x27;s throughput. That range spans the recall levels measured; allowing for the uncertainty in each recall figure widens it to 1.03x to 1.55x.</p>
+  </article>
+</div>
+<!-- END landing-reports -->
+  </section>
+
+  <footer>
+    <p>The pages are not a series. Each is one run, and when the harness configuration changes
+    between runs <code>compare.py</code> refuses ratios across them as STALE. Read each page against
+    itself. Superseded pages are retired to the repository's git history.</p>
+    <p>Disclosure: the author works at Qdrant, on the engine being measured. Nothing here is a Qdrant
+    position and nobody at Qdrant has reviewed it.</p>
+    <p><a href="https://github.com/agourlay/strawmann">github.com/agourlay/strawmann</a></p>
+  </footer>
+</main>
+</body>
+</html>

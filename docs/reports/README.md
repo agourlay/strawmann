@@ -9,14 +9,14 @@ A page is self-contained, no network, and states its own licence in the
 header: the §7.1 gate verdict per arm, the conformance tier and hash, the
 environment hash, the pass count, and a banner on every row the comparison
 refuses. Read that before quoting a number off it. At ~5 MB the GitHub blob view
-shows source rather than rendering, so read them at
-<https://agourlay.github.io/strawmann/reports/>, which serves this directory
-over Pages with Jekyll disabled.
+shows source rather than rendering, so read them from
+<https://agourlay.github.io/strawmann/>, the landing page in `docs/index.html`;
+Pages serves `docs/` with Jekyll disabled.
 
 Naming is `report-<dataset>-<a>-vs-<b>-<day>-<hhmm>`, from `report.default_out`:
 a day holds more than one run of one pair.
 
-The report cards on `index.html` are generated from the pages here by
+The report cards on `docs/index.html` are generated from the pages here by
 `bench/harness/landing_cards.py`: after adding or retiring a page, run it. The
 `landing-cards-current` gate step fails until you do. The results panels above
 them are written by `compare.py --write-readme`, as the README's table is.

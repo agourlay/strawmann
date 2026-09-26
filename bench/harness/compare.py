@@ -1650,7 +1650,7 @@ HEADLINE_DATASET = "sift1m"
 #: and a dataset without one would make `--write-readme` fail at the end of a
 #: night's run for a page nobody asked it to appear on. Adding a dataset here
 #: means adding its marker pair to the page in the same commit.
-LANDING_PAGE = "docs/reports/index.html"
+LANDING_PAGE = "docs/index.html"
 LANDING_DATASETS = ("sift1m", "dbpedia-openai-1m")
 
 #: The rows each landing panel shows, in order, with a caption for a reader
