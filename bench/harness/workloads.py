@@ -47,7 +47,6 @@ import json
 import math
 import os
 import re
-import resource
 import subprocess
 import sys
 import threading
@@ -68,6 +67,36 @@ import paths
 import procstat
 import provenance
 import setup
+
+# Split along its leaf groups: the row schema, bfb's output parsers and the
+# host-load sampler moved out and are re-exported here. `run_one` and `main`
+# stay, because `fullrun` runs this file as a script: a module that imported
+# `workloads` would get a second copy, whose dataset and policy globals were
+# read from the environment before `main` parsed its arguments.
+from bfb_output import (  # noqa: F401  re-exported
+    PERCENTILES,
+    WAIT_INDEX_FLOOR_S,
+    background_of,
+    latency_of,
+    percentiles_us,
+    phases_of,
+    wall_qps_of,
+)
+from host_load import (  # noqa: F401  re-exported
+    _OUR_SCRIPT_NAMES,
+    _OUR_SCRIPTS,
+    _OURS,
+    FOREIGN_BUDGET_CORES,
+    FOREIGN_NAME_PCT,
+    CpuSample,
+    _is_ours,
+    _system_busy_s,
+    cpu_sample,
+    foreign_between,
+    foreign_from_ps,
+    foreign_load,
+    load_pct,
+)
 from row_schema import Gate, LoadMode, Result, Status
 
 ROOT = Path(os.environ.get("STRAWMANN_ROOT", Path(__file__).resolve().parents[2]))
@@ -555,11 +584,6 @@ W4_CONNS = int(os.environ.get("W4_CONNS", 2))
 #: is not scanning the corpus (validation 13).
 W9_PARALLEL = int(os.environ.get("W9_PARALLEL", 8))
 
-#: bfb's `wait_index` sleeps 1 s then needs three consecutive Green replies, so
-#: no Time-to-Green below three seconds is real (a 0.064 s build reported
-#: 3.008 s). A constant bias: the difference between engines survives it, the
-#: ratio does not, and it understates the faster one.
-WAIT_INDEX_FLOOR_S = 3.0
 
 #: Pinned per §8.9 alongside the Qdrant version, recorded in every run, and
 #: enforced: `check_bfb_pin` refuses a run whose checkout is not this commit.
@@ -1581,223 +1605,6 @@ def table() -> list[Workload]:
     return rows
 
 
-# --------------------------------------------------------------------------
-# Host state, §7.1 covers configuration, none of which notices a busy machine
-# --------------------------------------------------------------------------
-
-def load_pct() -> int:
-    """1-minute load as a percentage of one core."""
-    with open("/proc/loadavg") as fh:
-        one = float(fh.read().split()[0])
-    return int(one / os.cpu_count() * 100)
-
-
-#: Processes that are *supposed* to be running during a measurement, matched by
-#: prefix because Linux truncates `comm` to 15 characters: the ISA arms appear as
-#: `strawmann-avx5` and `strawmann-base`, so exact matching flagged every ISA
-#: sweep row as contaminated by its own engine.
-_OURS = setup._OURS
-
-#: An interpreter is ours only when it is running one of the harness's own
-#: scripts. `python3` and `uv` used to be exempt by name, so a foreign
-#: `python3 train.py` at 800% CPU was invisible to the very check that exists
-#: to see it. Matched against the full command line (`ps -o args`).
-_OUR_SCRIPTS = ("bench/harness/", "bench/setup.py", "scripts/check.py", "scripts/doctor.py",
-                # The reference-rate calibration `perfstat` runs, which is a
-                # bare `python3 -c` and therefore foreign by the rule above.
-                perfstat.CALIBRATION_TAG)
-
-#: ...and by basename, for a script run from its own directory (`./workloads.py`,
-#: `python3 setup.py check` from `bench/`), where no path prefix is visible.
-_OUR_SCRIPT_NAMES = ("workloads.py", "setup.py", "compare.py", "recall.py", "fullrun.py",
-                     "report.py", "regression.py", "isa_sweep.py", "qdrant_ab.py",
-                     "headline.py", "check.py", "doctor.py")
-
-
-def _is_ours(cmdline: str) -> bool:
-    argv = cmdline.split()
-    if not argv:
-        return False
-    name = os.path.basename(argv[0])
-    if any(name.startswith(p) for p in _OURS) or name in _OUR_SCRIPT_NAMES:
-        return True
-    # The sidecar this harness starts for the row it is measuring. Matched on
-    # `perf stat -x,` — this harness's invocation and nobody else's — rather
-    # than by adding `perf` to `_OURS`, because an operator's own `perf record`
-    # during a row *is* foreign load. Without the exemption the harness condemns
-    # its own measurement and re-runs it, naming a process it started itself.
-    if name.startswith("perf") and " stat " in cmdline and "-x," in cmdline:
-        return True
-    if name.startswith(("python", "uv")):
-        return (any(p in cmdline for p in _OUR_SCRIPTS)
-                or any(os.path.basename(a) in _OUR_SCRIPT_NAMES for a in argv[1:]))
-    return False
-
-
-def foreign_from_ps(out: str, threshold: float = 20.0) -> str:
-    """The busy foreign processes in `ps -eo pcpu=,args=` output."""
-    busy = []
-    for line in out.splitlines():
-        parts = line.split(None, 1)
-        if len(parts) != 2:
-            continue
-        try:
-            pct = float(parts[0])
-        except ValueError:
-            continue
-        cmd = parts[1].strip()
-        if pct > threshold and not _is_ours(cmd):
-            busy.append(f"{os.path.basename(cmd.split()[0])}({pct:.0f}%)")
-    return " ".join(busy[:8])
-
-
-
-def foreign_load(threshold: float = 20.0) -> str:
-    """Busy processes that are neither the benchmark nor an engine, right now.
-
-    A row measured while something else runs is not comparable to one measured
-    idle, and the difference is invisible in the number. A Qwen inference server
-    at 1008% CPU went unnoticed through an entire table before this existed.
-
-    `ps`'s `pcpu` is a *lifetime* average, so this is a moment's view: the
-    rows use `cpu_sample` / `foreign_between`, which difference `/proc` across
-    the row and see only what ran during it.
-    """
-    try:
-        out = subprocess.run(["ps", "-eo", "pcpu=,args="], capture_output=True,
-                             text=True, timeout=10).stdout
-    except Exception:
-        return ""
-    return foreign_from_ps(out, threshold)
-
-
-@dataclass
-class CpuSample:
-    """Every process's CPU seconds so far, and the machine's, at one instant."""
-    t: float
-    #: pid -> (user+system seconds, command line). Kernel threads carry their
-    #: `comm` in place of a command line.
-    procs: dict[int, tuple[float, str]]
-    #: Non-idle seconds summed over all cores from `/proc/stat`, or None.
-    busy_s: float | None
-    #: pids with no command line: kernel threads, whose CPU is the kernel's
-    #: (writeback, softirq on the engine's behalf) and not a foreign process's.
-    kernel: frozenset[int] = frozenset()
-    #: CPU seconds of this harness's *reaped* children so far
-    #: (`getrusage(RUSAGE_CHILDREN)`). bfb starts and exits inside every row,
-    #: so at `after` its pid is gone and its time is on the system-wide line
-    #: only; without this it was reported as `exited-processes(124%)` on the
-    #: very first gated row after the per-pid rewrite, and contamination
-    #: refuses the ratio.
-    children_s: float = 0.0
-
-
-def _system_busy_s() -> float | None:
-    text = procstat._read("/proc/stat")
-    if not text:
-        return None
-    fields = text.split("\n", 1)[0].split()
-    if len(fields) < 5 or fields[0] != "cpu":
-        return None
-    try:
-        vals = [int(x) for x in fields[1:]]
-    except ValueError:
-        return None
-    # user nice system idle iowait irq softirq steal ...: idle and iowait are
-    # the two that are not work.
-    idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
-    return (sum(vals) - idle) / procstat._CLK_TCK
-
-
-def cpu_sample() -> CpuSample:
-    procs: dict[int, tuple[float, str]] = {}
-    kernel = set()
-    for name in os.listdir("/proc"):
-        if not name.isdigit():
-            continue
-        pid = int(name)
-        st = procstat._read(f"/proc/{pid}/stat")
-        parsed = procstat.parse_proc_stat(st) if st else None
-        if not parsed:
-            continue
-        cmd = provenance.cmdline(pid)
-        if not cmd:
-            kernel.add(pid)
-            cmd = st[st.find("(") + 1:st.rfind(")")]
-        procs[pid] = (parsed["cpu_user_s"] + parsed["cpu_system_s"], cmd)
-    ru = resource.getrusage(resource.RUSAGE_CHILDREN)
-    return CpuSample(time.monotonic(), procs, _system_busy_s(), frozenset(kernel),
-                     ru.ru_utime + ru.ru_stime)
-
-
-#: Total foreign CPU, in cores, a row may run alongside. `bench/setup.py`'s
-#: budget, imported rather than repeated: a process the gate is willing to
-#: start a run alongside must not be one that condemns every row it touches.
-#: (The comment said "imported" over a second copy of the literal for a
-#: month; now it is.)
-FOREIGN_BUDGET_CORES = setup.FOREIGN_BUDGET_CORES
-
-#: Percent of one core above which a foreign process is worth naming in the
-#: row's note. Naming, not condemning — the budget above is the verdict.
-FOREIGN_NAME_PCT = 5.0
-
-
-def foreign_between(before: CpuSample, after: CpuSample,
-                    budget_cores: float | None = None,
-                    threshold: float = FOREIGN_NAME_PCT) -> str:
-    """The foreign processes that ran *during* the interval, as `ps` spells them.
-
-    Percent of one core over the interval, from the difference of each
-    process's `/proc/<pid>/stat` CPU time; a process that appears only in
-    `after` started inside the interval and all of its time counts. Two `ps`
-    samples around a row saw a lifetime average instead: a long-idle process
-    with a busy history was flagged on every row and a compiler that started
-    and finished inside one was never seen. The second case is what the
-    system-wide line is for: non-idle time nobody visible accounts for is
-    reported as `exited-processes(N%)`.
-    """
-    wall = after.t - before.t
-    if wall <= 0:
-        return ""
-    if budget_cores is None:
-        budget_cores = FOREIGN_BUDGET_CORES
-    busy: list[tuple[float, str]] = []
-    accounted = seen_foreign = 0.0
-    for pid, (cpu1, cmd) in after.procs.items():
-        prev = before.procs.get(pid)
-        # A pid whose command line changed was reused; its earlier time was
-        # someone else's.
-        cpu0 = prev[0] if prev is not None and prev[1] == cmd else 0.0
-        d = max(0.0, cpu1 - cpu0)
-        if pid in after.kernel or _is_ours(cmd):
-            accounted += d
-            continue
-        seen_foreign += d
-        pct = 100 * d / wall
-        if pct > threshold:
-            busy.append((pct, f"{os.path.basename(cmd.split()[0])}({pct:.0f}%)"))
-    busy.sort(key=lambda x: -x[0])
-    out = [s for _, s in busy[:8]]
-    exited = 0.0
-    if before.busy_s is not None and after.busy_s is not None:
-        # Children this harness has reaped since `before` (bfb, taskset,
-        # docker exec) are ours: their pids are gone but their time is not.
-        accounted += max(0.0, after.children_s - before.children_s)
-        exited = max(0.0, after.busy_s - before.busy_s - accounted - seen_foreign)
-        pct = 100 * exited / wall
-        if pct > threshold:
-            out.append(f"exited-processes({pct:.0f}%)")
-    # The verdict is the *total*, in cores, against the calibrated budget —
-    # not each process against a share of one core. Load that arrives as ten
-    # small processes costs what one large one costs, and the per-process test
-    # saw neither: it condemned a row for 0.2 of a core, which
-    # `docs/decisions.md` measures as inside run-to-run noise, and passed 1.5
-    # cores spread thinly, which it measures as costing real throughput.
-    cores = (seen_foreign + exited) / wall
-    if cores <= budget_cores:
-        return ""
-    return f"{cores:.2f} cores" + (f": {' '.join(out)}" if out else "")
-
 
 # --------------------------------------------------------------------------
 # Running
@@ -1854,34 +1661,6 @@ def build_identity(run_meta: dict) -> dict:
 #: much as the engine. It is flagged, and `--min-duration` scales `-n` up.
 MIN_ROW_S = 2.0
 
-
-#: The percentiles §8.9's row shape requires, plus the two tails §7.4 argues
-#: about. bfb's own JSON reports min/avg/p50/p95/max and no p99, but it also
-#: writes every request time, so the tail is recoverable rather than lost.
-PERCENTILES = (50, 95, 99, 99.9)
-
-
-def percentiles_us(times: list[float]) -> dict[str, float]:
-    """Percentiles in microseconds, from bfb's raw per-request times.
-
-    Nearest-rank on the sorted sample, not interpolated: with 50,000 requests
-    the difference is below the noise this measures, and a rank is a request
-    that actually happened. The rank is `ceil(p/100 * n)`, the textbook
-    nearest-rank; `round()` (banker's, to even) put p50 of five samples at the
-    second value rather than the third, and p50 of 3,125 (W5's batches) at
-    rank 1,562 rather than 1,563: the wrong element wherever `p/100 * n`
-    ends in .5.
-    """
-    if not times:
-        return {}
-    xs = sorted(times)
-    out = {}
-    for p in PERCENTILES:
-        k = max(0, min(len(xs) - 1, math.ceil(p / 100 * len(xs)) - 1))
-        out[f"p{p:g}".replace(".", "")] = xs[k] * 1e6
-    out["max"] = xs[-1] * 1e6
-    out["mean"] = sum(xs) / len(xs) * 1e6
-    return out
 
 
 def exact_of(w: Workload) -> bool:
@@ -2142,124 +1921,6 @@ def static_notes(w: Workload) -> list[str]:
         out.append(f"queries: dataset, {w.query_strategy}")
     if w.background:
         out.append("concurrent append of synthetic vectors; recall not measured")
-    return out
-
-
-def phases_of(results: Path, wid: str) -> dict:
-    """bfb's own upload and index-wait times, in seconds, unrounded.
-
-    The harness's `seconds` is `int(wall_clock)` around the whole invocation:
-    one-second resolution on a row whose headline *is* a duration, and it
-    includes process startup, collection creation and teardown. bfb reports the
-    two phases separately and as floats, so W1's ingest and W2's Time-to-Green
-    can be the number they claim to be.
-
-    It also exposes the bias. `wait_index` sleeps one second *before* its first
-    poll and requires three consecutive Green observations, so its floor is
-    three seconds no matter how fast the build is — a 50k build measured here
-    reported 3.008 s against an upload of 0.064 s. `time_to_green_floored`
-    marks a row sitting on that floor, where the number is an upper bound on
-    the build and a measurement of the polling loop.
-    """
-    p = results / f"{wid}.json"
-    if not p.exists():
-        return {}
-    try:
-        d = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
-    res = d.get("results", {})
-    out: dict = {}
-    if isinstance(res.get("upload"), dict):
-        v = res["upload"].get("duration_secs")
-        if isinstance(v, (int, float)):
-            out["upload_s"] = round(float(v), 4)
-    if isinstance(res.get("index"), dict):
-        v = res["index"].get("wait_secs")
-        if isinstance(v, (int, float)):
-            out["index_wait_s"] = round(float(v), 3)
-            out["time_to_green_floored"] = float(v) < WAIT_INDEX_FLOOR_S + 0.5
-    return out
-
-
-def wall_qps_of(results: Path, wid: str, batch: int = 1) -> dict:
-    """`n_queries / duration_secs` from bfb's JSON, the figure the tables print.
-
-    bfb's `Median qps` (`stats.rs`) is the median of a rate series sampled per
-    request from a moving window, and on a short row that median sits below
-    the mean by construction, more so the shorter the row: it read 27,201 on a
-    W4 whose 50,000 queries took 1.61 s (31,056). The wall figure has no such
-    dependence, and it is what a reader means by queries per second. The
-    request count comes from `full_timings` rather than `-n`, so an
-    interrupted row reports what it did rather than what it was asked.
-    """
-    p = results / f"{wid}.json"
-    if not p.exists():
-        return {}
-    try:
-        d = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
-    res = d.get("results", {})
-    phase = res.get("search") or res.get("scroll") or {}
-    dur = phase.get("duration_secs")
-    reqs = phase.get("full_timings")
-    if not isinstance(dur, (int, float)) or dur <= 0 or not isinstance(reqs, list) or not reqs:
-        return {}
-    n = len(reqs) * max(1, batch)
-    return {"qps_wall": round(n / float(dur), 3), "duration_s": round(float(dur), 3),
-            "n_queries": n}
-
-
-def background_of(results: Path, wid: str) -> dict:
-    """The upload phase of a row's concurrent bfb, from its own JSON."""
-    p = results / f"{wid}-write.json"
-    if not p.exists():
-        return {}
-    try:
-        d = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
-    up = (d.get("results") or {}).get("upload") or {}
-    out = {}
-    if isinstance(up.get("points_per_sec"), (int, float)):
-        out["background_pps"] = round(float(up["points_per_sec"]), 1)
-    if isinstance(up.get("duration_secs"), (int, float)):
-        out["background_s"] = round(float(up["duration_secs"]), 3)
-    return out
-
-
-def latency_of(results: Path, wid: str) -> dict:
-    """Client-side and server-side latency for one row.
-
-    Both, because their difference is the transport and the queue: §7.4's rule
-    that a closed-loop p99 is not a latency result is exactly about the gap
-    between them. bfb calls them `full_timings` (round trip) and
-    `server_timings` (what the server reported).
-
-    Read from `search` *or* `scroll`, because bfb records the same two series
-    under whichever phase ran. Reading only `search` cost W13 its percentiles
-    entirely: it published a five-figure qps with no latency next to it and no
-    stated reason, which reads as a measurement failure rather than as a lookup
-    in the wrong key.
-    """
-    p = results / f"{wid}.json"
-    if not p.exists():
-        return {}
-    try:
-        d = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
-    res = d.get("results", {})
-    search = res.get("search") or res.get("scroll") or {}
-    out = {}
-    for key, prefix in (("full_timings", "client"), ("server_timings", "server")):
-        v = search.get(key)
-        if isinstance(v, list) and v:
-            for name, val in percentiles_us(v).items():
-                out[f"{prefix}_{name}_us"] = round(val, 3)
-    if out:
-        out["latency_samples"] = len(search.get("full_timings") or [])
     return out
 
 
