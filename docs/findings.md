@@ -15,19 +15,16 @@ The d=1536 comparison is licensed since 2026-09-24, and the current page is
 the account of the licence is in `decisions.md`). What that page publishes
 wrongly, or still refuses and could not:
 
-**1. strawmANN's SQ8 bounds now follow Qdrant's rule; the rows have not been
-measured under it.** T4 on both d=1536 pages read `sq8/strawmann |Δscore|
+**1. strawmANN's SQ8 bounds follow Qdrant's rule; dbpedia is not measured
+under it yet.** T4 on both d=1536 pages read `sq8/strawmann |Δscore|
 p50=4.866e-1` against Qdrant's `1.943e-3`: `scalar.train` clipped 0.5% of the
-pooled *values*, and dbpedia's component 194 sits at -0.64 in every vector, so
-it and two others were clipped out of every vector. Since 2026-09-25
-`scalar.train` ports Qdrant's `find_quantile_interval`, a cut counted in
-vectors (`decisions.md`, 2026-09-25). Simulated, that takes `|Δ|` to 0.0010
-and the stage-1 top-10 overlap from 0.810 to 0.947 on dbpedia and 0.972 to
-0.985 on sift1m. The next pair on each corpus is the measurement: T4's
-`|Δscore|`, the SQ8 recall sweep (which should not move, rescore being on),
-and W6 and its `ef` sweep, whose throughput may move either way because the
-walk navigates on the codes. Until then the published W6 rows are the old
-encoder's.
+pooled *values*, and dbpedia's component 194 sits at -0.64 in every vector.
+Since 2026-09-25 it ports Qdrant's `find_quantile_interval`, a cut counted in
+vectors (`decisions.md`). sift1m's 0926 pair measured it where no dimension
+dominates: T4's stage-1 overlap went from 0.974 to 0.986 (simulated 0.972 to
+0.985), p99 `|Δscore|` from 5.75 to 0.78, W6 unchanged within build variance,
+recall untouched. dbpedia, where the old rule did its damage (simulated
+`|Δ|` 0.49 to 0.001, overlap 0.810 to 0.947), is the 0927 pair.
 
 **3. W11's write rate is fixed, and its search is sized to fit.** The 25 s
 and 60 s spans were sized for d=128, where a 50,000-query search ends inside
@@ -56,69 +53,47 @@ candidates (`decisions.md`). A night pair run with `OVERSAMPLING_POLICY=pool`
 is the measurement: equal recall per row on all three encodings if the pool
 was the whole gap, and any gap left is the encoders'.
 
-**12. Every published native-Qdrant pair ran Qdrant's development profile.**
-`fullrun.start_qdrant_binary` never set `RUN_MODE`, Qdrant's `settings.rs`
-defaults it to `development`, and started from its checkout it merged
-`config/development.yaml`: `max_search_threads: 4`, audit logging of every
-request to `./storage/audit` (5.6M lines during the 0925 night), `log_level:
-DEBUG`, and `feature_flags: all`. Qdrant's Docker image sets `production`,
-which is what a user runs. Found by the 2026-09-25 review; fixed the same day
-(3cd5588). It affects the sift1m 0923 and dbpedia-openai-1m 0924 and 0925
-pages, and every ratio on them leans toward strawmANN by an amount not yet
-measured: most on the rows that run many requests at once (W4, W5, W9, the
-open-loop arms), where four search threads cap Qdrant outright, and some on
-every row, which paid an audit write and debug logging per request (a lead
-for item 6's 0.63 ms of server p50). The next production-mode pair of each
-corpus is the measurement, and until then those pages' Qdrant figures
-describe a development build's configuration, not Qdrant's.
+**12. Every native-Qdrant pair before 2026-09-26 ran Qdrant's development
+profile; sift1m is re-measured, dbpedia is not.** `fullrun.start_qdrant_binary`
+never set `RUN_MODE`, Qdrant's `settings.rs` defaults it to `development`, and
+started from its checkout it merged `config/development.yaml`:
+`max_search_threads: 4`, audit logging of every request, `log_level: DEBUG`,
+`feature_flags: all`. Fixed 2026-09-25 (3cd5588). sift1m's 0926 pair, the
+first in production mode, measured what it cost: Qdrant's W4 went from 5.50 to
+7.79 busy cores and the saturating ratio from 2.24x to 1.65x, W10-ef512 from
+2.14x to 1.69x, W3 from 0.90x to 0.84x; W9 went the other way (item 10). The
+Qdrant binary changed between those pairs too, so no single row attributes to
+the profile alone. On dbpedia a production-mode W4 probe read Qdrant at
+about 3,230 q/s on 7.91 cores against the published 2,580 on 4.46, which puts
+that page's 1.38x nearer 1.1x; the 0927 pair replaces both dbpedia pages.
 
 ### P2. What the licensed numbers are made of, and what the run costs
 
-**5. The saturating win at d=1536 is two halves, one of them narrowed.** W4
-reads 1.38x, and the decomposition puts it at 0.85x less work per query times
-1.61x cores busy. strawmANN's cycles per query rise from 1.66M at W3 to 4.01M
-at W4 while its DRAM per query holds at 4.4 MB and its IPC halves from 0.71 to
-0.29; aggregate traffic is 16 GB/s against a 73 GB/s bus, so the seven workers
-are waiting on their own misses, not on the bus. The next-candidate prefetch
+**5. strawmANN's IPC halves at saturation at d=1536.** W4 read 1.38x on the
+development-profile page, as 0.85x less work per query times 1.61x cores
+busy. The cores half was Qdrant's 4 search threads (item 12): in production
+mode it fills 7.91 of 8 on the same row (probe, 2026-09-26), `max_search_threads:
+8` changes nothing, and the 0927 pair will read the ratio again. What is left
+is strawmANN's half: its cycles per query rise from 1.66M at W3 to 4.01M at W4
+while its DRAM per query holds at 4.4 MB and its IPC halves from 0.71 to 0.29;
+aggregate traffic is 16 GB/s against a 73 GB/s bus, so the seven workers are
+waiting on their own misses, not on the bus. The next-candidate prefetch
 (715343f) was measured on sift1m, where W4's IPC is 1.08, and not at d=1536,
-where the latency it exists to hide is the whole cost. That half is open.
+where the latency it exists to hide is the whole cost.
 
-Qdrant, on the same row and the same client parallelism of 64, fills 4.47 of
-its 8 pinned cores. This file said on 2026-09-25 that its threads block; that
-was wrong. Read in its source (878843e6e), `max_search_threads: 0` would build
-a 32-thread `search-io` pool, but the harness never set `RUN_MODE`, which
-Qdrant defaults to `development`, and run from its checkout it layered
-`config/development.yaml`'s `max_search_threads: 4` over that (item 12). Four
-search threads and the gRPC runtime are the 4.46 cores, and W9's 4.01 is the
-same cap. The half of the 1.38x that is "Qdrant leaves cores idle" is
-therefore the harness's, not Qdrant's, until a production-mode pair says what
-Qdrant does with eight.
-
-**6. Qdrant's single-query cost doubles at d=1536: its fp32 kernel is 256-bit,
-which explains the instructions and not all the cycles.** W3 flips between the
-tiers: 0.90x on sift1m, 1.73x here. Qdrant spends 3.13M cycles and 2.13M
-instructions per query against strawmANN's 1.66M and 1.17M, at the same
-recall. Qdrant has no AVX-512 path for dense fp32 (read at 878843e6e: the
-only AVX-512 in `lib/` is in quantization), and the measured binary's
-`dot_similarity_avx` (sha256 `dbeb0f73dea2d371`) uses `ymm` registers only,
-while strawmANN's hot kernel is `Dot(16,8)` on `zmm`. Nothing else in Qdrant's
-path is O(dim) per node: vectors are read in place from the mmap, cosine is a
-dot on pre-normalised vectors, and each node is scored once. At 256 against
-512 bits a 1536-dim dot is about 630 instructions against 255, and over the
-~2,500 nodes a query scores that is the 0.96M gap; at d=128 the same arithmetic
-is ~70k, inside the 5% measured there. The cycles are another matter.
-strawmANN's own ISA matrix (`docs/isa-matrix.md`, measured before pinning, so
-approximate) shows its AVX2 build at 1.79x the instructions of AVX-512 at
-d=1536 but only 1.02x the cycles L1-hot and 1.25x DRAM-cold, which bounds the
-width at about 0.6M of the 1.47M-cycle gap. Two leads on the remainder:
-Qdrant's vector file carries a 4-byte header, so its vectors are 4-byte
-aligned and a share of its loads split cache lines; and its server-side p50
-is 0.63 ms longer (1.47 against 0.84 ms), about the whole remainder, and
-that server ran with audit logging and DEBUG logs on (item 12). W3 on
-strawmANN's AVX2 build at d=1536 is the measurement: near Qdrant's cycles and
-the ratio is the width, near its own and the rest is elsewhere. Either way the
-1.73x is correct as measured, and part of what it measures is that strawmANN
-uses the host's AVX-512 and Qdrant as shipped does not.
+**6. Qdrant's single-query cost doubles at d=1536; kernel width is a quarter
+of it.** W3 read 1.73x at d=1536 (0.84x on sift1m in production mode). Qdrant
+has no AVX-512 path for dense fp32 (878843e6e), and its measured binary's
+`dot_similarity_avx` uses `ymm` only, where strawmANN's `Dot(16,8)` uses
+`zmm`. Measured on 2026-09-26, pinned, on dbpedia's W3: strawmANN built for
+256-bit vectors (`avx2`, `avx512-256`) spends 2.05M cycles and 1.72M
+instructions per query, and at 512 bits (`avx512-full`) 1.67M and 1.17M,
+885 against 1,061 q/s. So width is 0.38M of the 1.47M-cycle gap to Qdrant's
+3.13M, and at 256 bits strawmANN still spends 1.5x fewer cycles. That 3.13M
+was measured in Qdrant's development profile, whose audit and debug logging
+cost it about 7% of W3's cycles on sift1m; the 0927 pair gives the production
+figure. Past that, the leads are Qdrant's 4-byte-aligned vectors splitting
+cache lines and its longer server-side p50.
 
 **7. At 1% selectivity strawmANN offers only the exact answer.** On 0925,
 with trusted postings (202841c) and the ACORN-1 walk (15bddf7), `W12-sel10`
@@ -149,19 +124,26 @@ insertion on exactly this ground. Live insertion exists behind `-Dlive-insert`
 `W11-steady` at d=1536 with it on, once item 3 makes the row measure a
 concurrent write.
 
-**10. Exact search loses at d=1536, on memory, not compute.** `W9` is 1.31x on
-sift1m and 0.77x on dbpedia-openai-1m. strawmANN's IPC falls from 2.06 to
-0.26 on 7 cores and 9.8 q/s x the 6.08 GB arena is about 60 GB/s against a
-65 GB/s bus: each query streams the whole arena from DRAM, where on sift1m's
-0.5 GB the concurrent scans shared lines (118 GB/s implied against 73). Qdrant
-implies ~78 GB/s from 4 cores. The 2026-09-22 decision against a cross-request
-gather rested on that sharing, which is gone at 6 GB, and it tested only a
-gather onto one worker. `bench/harness/w9_ab.py` measures three arms (7
-workers, 4 workers, and 8 queries per request as the ceiling of a gather split
-across workers) plus a profile; a 100K smoke run read 101 / 136 / 470 q/s and
-90% of cycles in the dot kernel. The 1M run is scheduled; it says whether
-fewer streams or one shared pass is the lever, and whether 09-22 reopens for
-d=1536.
+**10. Exact search at d=1536 is lost to scan contention, and a shared pass
+wins it back.** `W9` read 0.77x on dbpedia (1.50x on sift1m). Measured on
+2026-09-26 (`w9_ab.py`, pinned, three reps each, no foreign load):
+
+| arm | q/s | cores | IPC | implied GB/s |
+|---|--:|--:|--:|--:|
+| 7 workers, one query a request (W9 as published) | 9.74 | 7.00 | 0.26 | 59 |
+| 4 workers | 13.04 | 4.00 | 0.60 | 79 |
+| 7 workers, 8 queries a request | 51.06 | 6.94 | 1.33 | 311 |
+
+Seven concurrent 6 GB scans get less from the bus than four: 1.34x from
+dropping three workers, about Qdrant's published 12.8, which it reached on the
+development profile's 4 threads. Production Qdrant runs 7.83 scan threads on
+sift1m's W9 and each costs 2.3x the cycles, the same contention on its side.
+And one pass shared by 8 queries is 5.2x: the 2026-09-22 decision against a
+cross-request gather rested on sift1m, where concurrent scans shared lines
+through the cache, and tested a gather onto one worker. At 6 GB there is no
+sharing, and a gather split across the workers is the lever, which reopens
+that decision for d=1536. Capping concurrent exact scans below the worker
+count is the smaller one.
 
 **11. strawmANN's index build ran at the search workers' priority during
 `W11`.** On 0925 strawmANN's `W11` served 102 q/s against Qdrant's 216, with
