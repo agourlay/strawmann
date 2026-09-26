@@ -240,9 +240,16 @@ def main(argv: list[str], root: Path = ROOT) -> int:
         log(f"EXIT={EXIT_NO_QDRANT} (no Qdrant binary at {binary}; set QDRANT_BINARY)")
         return EXIT_NO_QDRANT
     log(qdrant_provenance(binary))
-    log(f"rps reference: `auto`, from {' / '.join(pair)}" if pair else
-        f"rps reference: no previous {family(args.dataset)} pair, so each engine uses "
-        f"its own saturation (the report refuses the cross-engine latency read)")
+    # An explicit reference, when the previous pair's is not this pair's
+    # regime: 0925's W4 was Qdrant's development profile, 4 search threads,
+    # and "90% of saturation" off it is ~72% of a production Qdrant.
+    rps_override = os.environ.get("RPS_REFERENCE")
+    if rps_override:
+        log(f"rps reference: {rps_override} q/s, from $RPS_REFERENCE")
+    else:
+        log(f"rps reference: `auto`, from {' / '.join(pair)}" if pair else
+            f"rps reference: no previous {family(args.dataset)} pair, so each engine uses "
+            f"its own saturation (the report refuses the cross-engine latency read)")
 
     # Sessions of the CLI are ambient load the gate sees (findings 44). Named,
     # not killed: they are the user's.
@@ -264,7 +271,8 @@ def main(argv: list[str], root: Path = ROOT) -> int:
            "--oversampling-policy", oversampling,
            "--perf", "--qdrant-binary", str(binary),
            "--wait-for-gate", f"{WAIT_FOR_GATE_MIN:g}",
-           "--strawmann-label", sm, "--qdrant-label", qd]
+           "--strawmann-label", sm, "--qdrant-label", qd,
+           *(["--rps-reference", rps_override] if rps_override else [])]
     # The one line an analysis otherwise has to reconstruct from this file.
     log("command: " + shlex.join(cmd))
     out = night / "fullrun.out"

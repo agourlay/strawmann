@@ -2939,6 +2939,13 @@ class NightrunTests(unittest.TestCase):
         night = results / "night-20260925"
         self.assertIn("--oversampling-policy matched", (night / "fullrun.out").read_text())
         self.assertIn("oversampling matched", (night / "night.log").read_text())
+        # An explicit reference is forwarded, and logged as one.
+        with mock.patch.dict(os.environ, {**env, "RPS_REFERENCE": "3230"}), \
+                mock.patch.object(fullrun, "previous_pair", lambda labels: None):
+            self.assertEqual(self.n.main(["2026-09-26", "sift1m"], root=self.root), 0)
+        night = results / "night-20260926"
+        self.assertIn("--rps-reference 3230", (night / "fullrun.out").read_text())
+        self.assertIn("rps reference: 3230 q/s, from $RPS_REFERENCE", (night / "night.log").read_text())
 
 
 class OversamplingPolicyTests(unittest.TestCase):
