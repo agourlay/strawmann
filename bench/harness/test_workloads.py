@@ -3339,3 +3339,20 @@ class DriverRobustnessTests(unittest.TestCase):
                 contextlib.redirect_stdout(out):
             ab.warn_other_engines()
         self.assertIn("2 engine processes alive", out.getvalue())
+
+
+class ArmStorageTests(unittest.TestCase):
+    """An arm frees its engine's storage when it ends."""
+
+    def test_each_arm_frees_its_storage_after_its_engine_stops(self):
+        import fullrun
+        calls = []
+        with mock.patch.object(fullrun, "stop_strawmann", lambda p: calls.append("stop sm")), \
+                mock.patch.object(fullrun, "record_graph_quality", lambda l: calls.append("graphs")), \
+                mock.patch.object(fullrun, "wipe_strawmann_storage", lambda: calls.append("wipe sm")), \
+                mock.patch.object(fullrun, "stop_qdrant", lambda: calls.append("stop qd")), \
+                mock.patch.object(fullrun, "wipe_qdrant_storage", lambda: calls.append("wipe qd") or True), \
+                mock.patch.object(fullrun, "PLACEMENT", fullrun.workloads.Placement.cached):
+            fullrun.finish_strawmann_arm(None, "sm-x")
+            fullrun.finish_qdrant_arm()
+        self.assertEqual(calls, ["stop sm", "graphs", "wipe sm", "stop qd", "wipe qd"])

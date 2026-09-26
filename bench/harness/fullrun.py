@@ -803,6 +803,27 @@ def record_graph_quality(label: str) -> None:
           f"{worst['unreachable']:,} of {worst['nodes']:,} unreachable{seed}", flush=True)
 
 
+def finish_strawmann_arm(p: subprocess.Popen | None, label: str) -> None:
+    """Stop the engine, read its graph builds off the finished log, and free
+    its arenas now rather than at the next strawmANN arm's start.
+
+    Nothing reads them once the arm is over, and kept they shared the disk with
+    the Qdrant arm that follows: on dbpedia-openai-1m 45.7 GB of arenas beside
+    Qdrant's 65.5 GiB W11-steady peak is about 110 GB, on a host with 86 GB free.
+    """
+    stop_strawmann(p)
+    # After the engine exits, so the log is complete.
+    record_graph_quality(label)
+    if workloads.Placement.pinned != PLACEMENT:
+        wipe_strawmann_storage()
+
+
+def finish_qdrant_arm() -> None:
+    """Stop Qdrant and free its storage, for the same reason as strawmANN's."""
+    stop_qdrant()
+    wipe_qdrant_storage()
+
+
 def stop_strawmann(p: subprocess.Popen | None) -> None:
     if p is None:
         return
@@ -2468,9 +2489,7 @@ def main(argv: list[str]) -> int:
                               args.client_cpus, args.storage,
                               placement=PLACEMENT)
             finally:
-                stop_strawmann(p)
-                # After the engine exits, so the log is complete.
-                record_graph_quality(sm_label)
+                finish_strawmann_arm(p, sm_label)
 
         # --- Qdrant, this pass ---
         if "qdrant" not in args.skip:
@@ -2483,7 +2502,7 @@ def main(argv: list[str]) -> int:
                               args.client_cpus, str(QDRANT_STORAGE),
                               placement=PLACEMENT)
             finally:
-                stop_qdrant()
+                finish_qdrant_arm()
 
     if args.reps > 1:
         say(f"folding {args.reps} passes per engine (§7.4: median and spread)")
