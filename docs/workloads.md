@@ -395,12 +395,11 @@ walks ACORN-1 style, hopping through rejected neighbours without scoring them
 selectivity, which is the reason for two grades rather than one. At `-k 100`
 over 200k points a keyword covers about 2,000 matches: `W12-sel1` scores that
 set directly on both engines' cheaper side, so strawmANN's throughput and
-recall are flat across every `ef` (2,575 q/s on sift1m's `perf-0923`, 1,873 on
+recall are flat across every `ef` (5,325 q/s on sift1m's `perf-0926`, 1,873 on
 dbpedia-openai-1m's `perf-0925`, recall 1.0000) because a scan cannot be
 steered by `ef`. `W12-sel10`, at ten keywords and about 20,000 matches, walks
 the graph under the filter, so its cost and recall move with `ef`: 811 q/s at
-`ef` 128 on dbpedia-openai-1m `perf-0925`, and 300 on sift1m `perf-0923`,
-which was measured before the ACORN walk.
+`ef` 128 on dbpedia-openai-1m `perf-0925` and 1,269 on sift1m `perf-0926`.
 
 An earlier draft of this paragraph said "both score the matching set directly"
 at `-k 1000`, which was true of the single 0.1% grade the row then had and is

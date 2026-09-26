@@ -76,14 +76,13 @@
       and 64 paged the collection back in during two passes and are refused as drift.</div>
     </li>
     <li>
-      <div class="name"><a href="report-sift1m-sm-sift-perf-0923-vs-qd-sift-perf-0923-2026-09-23-0230.html">sift1m, 2026-09-23</a></div>
+      <div class="name"><a href="report-sift1m-sm-sift-perf-0926-vs-qd-sift-perf-0926-2026-09-25-2021.html">sift1m, 2026-09-26</a></div>
       <div class="what">The current sift1m comparison, and the source of the tables in
-      <code>README.md</code> and <code>comparison-sift1m.md</code>. T4, gate <code>pass</code>
-      both arms, 3 passes, equal-work, <code>--perf</code>, against the same Qdrant binary as
-      the retired 09-21 pair. One row was re-measured after a contamination and came back clean, so no
-      folded row carries foreign load, and the drift that left three rows unbanded on 09-21
-      did not recur. It records the oversampling policy and 09-21 does not, so no ratio
-      crosses them.</div>
+      <code>README.md</code> and <code>comparison-sift1m.md</code>. T4 with T3 passing, gate
+      <code>pass</code> both arms, 3 passes, equal-work, <code>pool</code> oversampling (rescore
+      pools matched to ef), <code>--perf</code>. The first pair with Qdrant in production mode:
+      the earlier pages ran its development profile, whose 4 search threads capped it, so the
+      saturating ratio reads 1.65x where 09-23 read 2.24x. No contaminated row in any pass.</div>
     </li>
   </ul>
 
