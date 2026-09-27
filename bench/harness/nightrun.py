@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
+import json
 import os
 import shlex
 import shutil
@@ -114,7 +115,8 @@ def qdrant_provenance(binary: Path) -> str:
     records.
     """
     import provenance
-    commit = git(["rev-parse", "--short", "HEAD"], binary.parent) or "?"
+    commit = (git(["rev-parse", "--short", "HEAD"], binary.parent)
+              or "unknown (binary outside a git tree)")
     predates = (" (BINARY PREDATES THIS COMMIT; sha256 is the identity that holds)"
                 if provenance.qdrant_binary_predates_head(binary) else "")
     digest = (provenance.file_digest(binary) or "?")[:16]
@@ -168,12 +170,41 @@ def analyse(root: Path, night: Path, dataset: str, sm: str, qd: str, prev: str |
                        ("@DIR@", str(night.relative_to(root))), ("@PREV@", prev or "")):
         prompt = prompt.replace(key, value)
     out, err = night / "analysis.md", night / "analysis.err"
-    with out.open("w") as fo, err.open("w") as fe:
-        rc = subprocess.run([claude, "-p", prompt, "--output-format", "text",
-                             "--allowedTools", ANALYSIS_TOOLS],
+    stream = night / "analysis.jsonl"
+    with stream.open("w") as fo, err.open("w") as fe:
+        rc = subprocess.run([claude, "-p", prompt, "--output-format", "stream-json",
+                             "--verbose", "--allowedTools", ANALYSIS_TOOLS],
                             cwd=root, stdout=fo, stderr=fe, env=child_env()).returncode
-    lines = out.read_text(errors="replace").count("\n") if out.exists() else "?"
-    log(f"analysis exited {rc} ({lines} lines in {out})")
+    out.write_text(analysis_text(stream.read_text(errors="replace")))
+    lines = out.read_text(errors="replace").count("\n")
+    log(f"analysis exited {rc} ({lines} lines in {out}; every message in {stream.name})")
+
+
+def analysis_text(stream: str) -> str:
+    """The write-up in a `claude -p --output-format stream-json` transcript.
+
+    The longest text the session produced, not its last. `--output-format
+    text` keeps only the final message, and 0927's final message was a
+    one-line reply to a background task's late notification, sent after the
+    42,000-character analysis it had just written; the analysis was
+    recovered from the session's transcript by hand. The analysis is one
+    document by the prompt's own instruction, so the longest message is it.
+    """
+    texts = []
+    for line in stream.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "result" and isinstance(event.get("result"), str):
+            texts.append(event["result"])
+        elif event.get("type") == "assistant":
+            for block in (event.get("message") or {}).get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    texts.append(block.get("text") or "")
+    return max(texts, key=len, default="")
 
 
 def main(argv: list[str], root: Path = ROOT) -> int:

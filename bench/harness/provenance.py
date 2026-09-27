@@ -349,6 +349,48 @@ def qdrant_binary_predates_head(binary: Path) -> bool | None:
     return None
 
 
+#: Qdrant's start-up banner: `Version: 1.19.2-dev, build: 878843e6`.
+_BANNER = re.compile(r"Version: \S+, build: ([0-9a-f]{7,40})\b")
+
+
+def server_banner_build(text: str) -> str | None:
+    """The build hash a Qdrant server's banner names, or `None`."""
+    m = _BANNER.search(text or "")
+    return m.group(1) if m else None
+
+
+def _proc_stdout_head(pid: int, limit: int = 65536) -> str:
+    """The first bytes of what the process writes to stdout, when that is a
+    file: the harness points a native Qdrant's stdout at its server log."""
+    try:
+        with open(f"/proc/{pid}/fd/1", "rb") as fh:
+            return fh.read(limit).decode(errors="replace")
+    except OSError:
+        return ""
+
+
+def _native_launch(pid: int) -> dict:
+    """How the serving process was launched: its `RUN_MODE` and its working
+    directory, which picks the `config/*.yaml` it merged.
+
+    Read from the process rather than from the harness's intent. Every native
+    pair to 2026-09-25 ran Qdrant's development profile because `RUN_MODE` was
+    unset, and nothing recorded it; Qdrant's `settings.rs` defaults the unset
+    value to `development`, so that is what an absent variable records.
+    """
+    out: dict = {}
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        environ = None
+    if environ is not None:
+        env = dict(kv.decode(errors="replace").split("=", 1) for kv in environ if b"=" in kv)
+        out["run_mode"] = env.get("RUN_MODE") or "development (RUN_MODE unset)"
+    with contextlib.suppress(OSError):
+        out["cwd"] = os.readlink(f"/proc/{pid}/cwd")
+    return out
+
+
 def qdrant_build(pid: int | None) -> dict:
     """The container that is actually serving, by digest.
 
@@ -457,6 +499,14 @@ def qdrant_native_build(pid: int | None) -> dict:
         if repo.parent == repo:
             break
         repo = repo.parent
+    out.update(_native_launch(pid))
+    # A copy outside any checkout (0927 ran one from ~/.cache) has no commit to
+    # read, but the server prints its build in its first log lines, and its
+    # stdout is that log.
+    if not out.get("commit"):
+        banner = server_banner_build(_proc_stdout_head(pid))
+        if banner:
+            out.update(commit=banner, commit_source="server banner")
     for port in (6333,):
         try:
             import urllib.request
@@ -733,6 +783,14 @@ def parse_bandwidth_probe(text: str) -> dict | None:
     return out
 
 
+def _recorded_bandwidth(meta_path: Path) -> dict | None:
+    """The bandwidth an earlier invocation of this label recorded, if any."""
+    try:
+        return (json.loads(meta_path.read_text()).get("host") or {}).get("memory_bandwidth")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def memory_bandwidth(server_log: Path | None = None,
                      binary: Path | None = None) -> dict | None:
     """The machine's memory bandwidth, as the engine measured it.
@@ -773,7 +831,8 @@ def memory_bandwidth(server_log: Path | None = None,
     _PROBE_TEXT[str(binary)] = p.stdout + p.stderr
     bw = parse_bandwidth_probe(p.stdout + p.stderr)
     if bw:
-        bw.update(source="strawmann --probe at run start", measured_at=now_iso(),
+        bw.update(source="strawmann --probe at the label's first invocation",
+                  measured_at=now_iso(),
                   cpuset=cpuset)
         if aff_err:
             bw["affinity_error"] = aff_err
@@ -835,8 +894,14 @@ def collect(label: str, uri: str, engine_pid: int | None,
     # Qdrant arm has no such log and is probed instead. Same machine, same
     # number, said differently. The probe is the serving image where there is
     # one, so `isa_build` reads this run's output rather than probing again.
-    out["host"]["memory_bandwidth"] = memory_bandwidth(server_log=results / "server.log",
-                                                       binary=probe)
+    # Once per label. `run_meta` runs on every invocation of an arm, and each
+    # probed again and overwrote the last: 0927's record, labelled "at run
+    # start", was the probe of pass 1's W11 invocation, on a host by then
+    # running the arm. The first invocation's is the one taken before any
+    # row, so a later one keeps it.
+    out["host"]["memory_bandwidth"] = (
+        _recorded_bandwidth(results / "run.json")
+        or memory_bandwidth(server_log=results / "server.log", binary=probe))
     out["engine_cmdline"] = cmdline(engine_pid)
     out["engine_affinity"] = affinity(engine_pid)
     # What the harness *asked* for, beside what the kernel reports. The two

@@ -2195,7 +2195,7 @@ def bandwidth_of(runs: list[Run]) -> dict:
 
     Recorded per run in `run.json` (`host.memory_bandwidth`) by
     `provenance.memory_bandwidth`: the strawmann server's own startup banner
-    when `fullrun.py` kept its log, else `strawmann --probe` at run start, else
+    when `fullrun.py` kept its log, else `strawmann --probe` at the label's first invocation, else
     backfilled after the fact. It is a host property, so on one machine the
     report says it once; it prefers the startup measurement, and if the two
     runs' figures disagree by more than 10% it shows both, because that gap
@@ -2422,6 +2422,17 @@ def provenance_table(runs: list[Run]) -> str:
                 if q.get("binary_predates_commit"):
                     commit = f"commit unknown (the binary predates checkout {code})"
                     pill = ('<span class="pill warn">binary predates its checkout: '
+                            'sha256 is the identity (§8.9)</span>')
+                # A copy outside any checkout has no commit to pin by. 0927 ran
+                # one and printed "commit unknown" beside "pinned by commit".
+                # The server's own banner may still name the build it was.
+                elif not q.get("commit"):
+                    commit = "commit unknown (no checkout around the binary)"
+                    pill = ('<span class="pill warn">native binary outside a checkout: '
+                            'sha256 is the identity (§8.9)</span>')
+                elif q.get("commit_source") == "server banner":
+                    commit = f"build {code} (from the server's banner, not a checkout)"
+                    pill = ('<span class="pill warn">native binary outside a checkout: '
                             'sha256 is the identity (§8.9)</span>')
                 bits = [f"version {_fmt(q.get('version'))}",
                         f"binary <code>{_tilde(q.get('binary'))}</code>"

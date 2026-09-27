@@ -2892,6 +2892,31 @@ class NightrunTests(unittest.TestCase):
         os.utime(binary)   # now: built after the commit
         self.assertNotIn("PREDATES", self.n.qdrant_provenance(binary))
 
+    def test_the_analysis_is_the_longest_message_not_the_last(self):
+        """0927's last message was a one-line reply to a late notification,
+        and `--output-format text` kept only that."""
+        import json as js
+        report = "# Night run\n\n" + "a finding\n" * 200
+        stream = "\n".join(js.dumps(e) for e in [
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Reading the logs."},
+                {"type": "tool_use", "name": "Read", "input": {}}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": report}]}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "That notification adds nothing."}]}},
+            {"type": "result", "result": "That notification adds nothing."}])
+        self.assertEqual(self.n.analysis_text(stream + "\nnot json\n"), report)
+        self.assertEqual(self.n.analysis_text(""), "")
+
+    def test_the_provenance_line_says_why_a_copy_has_no_commit(self):
+        """0927's binary was a copy under ~/.cache, and the line read `commit=?`."""
+        (self.root / "cache").mkdir()
+        binary = self.root / "cache/qdrant"
+        binary.write_bytes(b"\x7fELF")
+        self.assertIn("commit=unknown (binary outside a git tree)",
+                      self.n.qdrant_provenance(binary))
+
     def test_a_whole_night_end_to_end_with_a_stub_fullrun(self):
         """Every step once, in order, from a temp tree: provenance, the one
         `fullrun.py` call and its flags, the report copy, the closing line."""
@@ -3363,3 +3388,46 @@ class ArmStorageTests(unittest.TestCase):
             fullrun.finish_strawmann_arm(None, "sm-x")
             fullrun.finish_qdrant_arm()
         self.assertEqual(calls, ["stop sm", "graphs", "wipe sm", "stop qd", "wipe qd"])
+
+
+class NativeQdrantLaunchTests(unittest.TestCase):
+    """What a native Qdrant was launched as, read from the serving process.
+
+    0927 ran a binary copied outside any checkout: night.log read `commit=?`,
+    run.json had no commit, and nothing recorded `RUN_MODE`, the variable whose
+    absence cost every native pair to 2026-09-25 Qdrant's production profile.
+    """
+
+    def test_the_banner_names_the_build(self):
+        import provenance
+        log = "2026-09-26T22:02:27Z INFO qdrant: Version: 1.19.2-dev, build: 878843e6\n"
+        self.assertEqual(provenance.server_banner_build(log), "878843e6")
+        self.assertIsNone(provenance.server_banner_build("no banner here"))
+        self.assertIsNone(provenance.server_banner_build(""))
+
+    def test_run_mode_cwd_and_stdout_are_read_from_the_process(self):
+        import subprocess
+        import tempfile
+
+        import provenance
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "server.log"
+            with log.open("wb") as fh:
+                fh.write(b"Version: 1.19.2-dev, build: 878843e6\n")
+                fh.flush()
+                env = {k: v for k, v in os.environ.items() if k != "RUN_MODE"}
+                procs = [subprocess.Popen(["sleep", "30"], cwd=tmp, stdout=fh,
+                                          env={**env, **extra})
+                         for extra in ({"RUN_MODE": "production"}, {})]
+            try:
+                prod, unset = (provenance._native_launch(p.pid) for p in procs)
+                self.assertEqual(prod["run_mode"], "production")
+                self.assertEqual(prod["cwd"], str(Path(tmp).resolve()))
+                # Qdrant's own default for an unset variable, said as such.
+                self.assertEqual(unset["run_mode"], "development (RUN_MODE unset)")
+                self.assertEqual(provenance.server_banner_build(
+                    provenance._proc_stdout_head(procs[0].pid)), "878843e6")
+            finally:
+                for p in procs:
+                    p.kill()
+                    p.wait()

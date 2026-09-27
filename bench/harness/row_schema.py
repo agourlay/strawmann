@@ -214,6 +214,10 @@ class BackgroundWriteFields:
     #: against the rebuild the append provoked, not a concurrent write, and is
     #: not the row §4 describes; `compare` refuses it.
     write_overlap_pct: float | None = None
+    #: W11: how much of the *append* the search was there for, the share the
+    #: note's "(P% of the append was covered)" prints. A number so the fold
+    #: medians it; the note text is pass 1's.
+    append_covered_pct: float | None = None
 
 
 @dataclass(kw_only=True)

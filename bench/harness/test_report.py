@@ -1642,6 +1642,25 @@ class ReportHostTests(unittest.TestCase):
             self.assertNotIn("pinned by commit", html)
             self.assertNotIn("commit <code>2874d0f1dbfa</code>", html)
 
+    def test_a_binary_outside_a_checkout_is_not_pinned_by_commit(self):
+        """0927 ran a copy under ~/.cache with no .git around it, and the page
+        printed "commit unknown" beside "pinned by commit"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
+            runs[1].meta["qdrant"] = {
+                "image": None, "digest": None, "version": "1.19.2-dev",
+                "network": "native", "binary": "/cache/qdrant-dbeb0f73/qdrant",
+                "binary_sha256": "dbeb0f73dea2d371"}
+            html = report.build(runs, "t")
+            self.assertIn("no checkout around the binary", html)
+            self.assertIn("sha256 is the identity", html)
+            self.assertNotIn("pinned by commit", html)
+            # The banner's build, when recorded, is named as the banner's.
+            runs[1].meta["qdrant"].update(commit="878843e6", commit_source="server banner")
+            html = report.build(runs, "t")
+            self.assertIn("build <code>878843e6</code> (from the server's banner", html)
+            self.assertNotIn("pinned by commit", html)
+
     def test_a_native_qdrant_shows_its_cargo_profile(self):
         """`target/perf/qdrant` is release without LTO; the page showed only
         the path, and the Qdrant arm lost 4-13% against a fat-LTO

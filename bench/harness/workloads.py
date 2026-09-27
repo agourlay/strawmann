@@ -2510,6 +2510,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
     bgd = background_of(results, w.id) if w.background else {}
     overlap = None
     overlap_pct = None
+    covered_pct = None
     if bg is not None and bg_t0 is not None and bg_t1 is not None:
         overlap = round(max(0.0, min(t1, bg_t1) - max(t0, bg_t0)), 3)
         bg_wall = bg_t1 - bg_t0
@@ -2533,9 +2534,9 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
                 # the remainder as quiet inverts the row's meaning.
                 notes.append(f"append finished {t1 - bg_t1:.1f} s before the search did")
             elif t1 < bg_t1:
+                covered_pct = round(100 * overlap / max(bg_wall, 1e-9), 1)
                 notes.append(f"search finished {bg_t1 - t1:.1f} s before the append did "
-                             f"({100 * overlap / max(bg_wall, 1e-9):.0f}% of the append "
-                             f"was covered)")
+                             f"({covered_pct:.0f}% of the append was covered)")
             if bgd.get("background_pps") is not None:
                 notes.append(f"append {bgd['background_pps']:,.0f} points/s")
 
@@ -2564,6 +2565,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
         n_requested=n_of(w),
         harness_hash=stamp_hash(stamp) if stamp is not None else None,
         ratio_policy=w.ratio_policy, write_overlap_pct=overlap_pct,
+        append_covered_pct=covered_pct,
         needs_payload_index=w.needs_payload_index,
         payload_index_suppressed=payload_index_suppressed(w),
         warmup_s=warmup_s,

@@ -1812,6 +1812,18 @@ class FoldedOverlapTests(unittest.TestCase):
         self.assertIn("write overlap 81%", compare.with_folded_overlap(row["notes"], row))
         self.assertEqual(compare.with_folded_overlap("x", {"write_overlap_pct": None}), "x")
 
+    def test_the_rate_and_the_coverage_are_the_folded_ones_too(self):
+        """0927's Qdrant W11 printed pass 1's 2,440 points/s beside a folded 2,758."""
+        compare = importlib.import_module("compare")
+        note = ("search finished 3.1 s before the append did (95% of the append was "
+                "covered); append 2,440 points/s")
+        row = {"background_pps": 2758.2, "append_covered_pct": 88.4}
+        out = compare.with_folded_overlap(note, row)
+        self.assertIn("append 2,758 points/s", out)
+        self.assertIn("(88% of the append was covered)", out)
+        # A row from before the coverage field keeps its text, not a blank.
+        self.assertIn("(95% of the append", compare.with_folded_overlap(note, {}))
+
 
 class RescoreCauseTests(unittest.TestCase):
     """What a quantized row's unequal recall is blamed on."""

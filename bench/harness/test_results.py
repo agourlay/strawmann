@@ -639,7 +639,7 @@ class BandwidthTests(unittest.TestCase):
             self.assertEqual(bw["cpuset"], f"0-{ncpu - 1}")
             self.assertNotIn("affinity_error", bw)
             self.assertEqual(bw["threads"], 24)
-            self.assertEqual(bw["source"], "strawmann --probe at run start")
+            self.assertEqual(bw["source"], "strawmann --probe at the label's first invocation")
             # A cpuset-limited container refuses the widening: the record
             # holds the affinity actually in effect and says why.
             aff["fail"] = True
@@ -648,6 +648,26 @@ class BandwidthTests(unittest.TestCase):
             self.assertIn("Invalid argument", bw["affinity_error"])
         # And the spelling of a real affinity, without touching it.
         self.assertRegex(prov.probe_cpuset(), r"^\d+(-\d+)?(,\d+(-\d+)?)*$")
+
+    def test_a_later_invocation_keeps_the_labels_first_probe(self):
+        """0927's record, labelled "at run start", was pass 1's W11 invocation:
+        every invocation probed again and overwrote the one before."""
+        prov = _reload(Path(tempfile.gettempdir()))["provenance"]
+        first = {"aggregate_gbps": 70.9, "measured_at": "2026-09-26T21:00:13Z",
+                 "source": "strawmann --probe at the label's first invocation"}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(prov, "memory_bandwidth",
+                                  side_effect=AssertionError("probed again")), \
+                mock.patch.object(prov, "qdrant_build", return_value={}):
+            (Path(d) / "run.json").write_text(json.dumps({"host": {"memory_bandwidth": first}}))
+            out = prov.collect("qd-x", "http://localhost:1", None, "qdrant", results=Path(d))
+        self.assertEqual(out["host"]["memory_bandwidth"], first)
+        # With no earlier record, the probe is what fills it.
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(prov, "memory_bandwidth", return_value={"aggregate_gbps": 1.0}), \
+                mock.patch.object(prov, "qdrant_build", return_value={}):
+            out = prov.collect("qd-x", "http://localhost:1", None, "qdrant", results=Path(d))
+        self.assertEqual(out["host"]["memory_bandwidth"], {"aggregate_gbps": 1.0})
 
     def test_isa_build_from_banner_then_probe(self):
         prov = _reload(Path(tempfile.gettempdir()))["provenance"]

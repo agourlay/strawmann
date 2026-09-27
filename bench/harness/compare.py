@@ -1539,16 +1539,22 @@ _COVERAGE_ANY = re.compile(r";?\s*search finished [\d.]+ s before the append did
 
 
 def with_folded_overlap(note: str, row: dict) -> str:
-    """The note's `write overlap N%` as the row's own `write_overlap_pct`.
+    """The note's W11 figures as the row's own folded numbers.
 
-    A folded row keeps pass 1's note text and medians the number, so 0925's
+    A folded row keeps pass 1's note text and medians the numbers, so 0925's
     strawmANN W11 printed "write overlap 82%" (pass 1) beside "the last 19%"
-    (100 minus the median, 81.0): 101% of one row.
+    (100 minus the median, 81.0): 101% of one row. 0927's Qdrant W11 printed
+    pass 1's "append 2,440 points/s" beside a folded `background_pps` of
+    2,758, so the rate and the append's coverage are rewritten as well.
     """
-    pct = row.get("write_overlap_pct")
-    if pct is None:
-        return note
-    return re.sub(r"write overlap \d+(?:\.\d+)?%", f"write overlap {pct:.0f}%", note)
+    if (pct := row.get("write_overlap_pct")) is not None:
+        note = re.sub(r"write overlap \d+(?:\.\d+)?%", f"write overlap {pct:.0f}%", note)
+    if (pps := row.get("background_pps")) is not None:
+        note = re.sub(r"append [\d,]+ points/s", f"append {pps:,.0f} points/s", note)
+    if (cov := row.get("append_covered_pct")) is not None:
+        note = re.sub(r"\(\d+% of the append was covered\)",
+                      f"({cov:.0f}% of the append was covered)", note)
+    return note
 
 
 def trim_row_note(note: str) -> str:
