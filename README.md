@@ -251,7 +251,8 @@ What the table does not say:
 
 - **Qdrant runs in production mode since the 2026-09-26 pair.** Pages before
   it ran Qdrant's development profile (4 search threads, audit and debug
-  logging), which is why the saturating ratio fell from 2.24x to 1.65x.
+  logging), which is why the saturating ratio fell from 2.24x to 1.65x on
+  sift1m, and on dbpedia-openai-1m (the 2026-09-27 pair) from 1.38x to parity.
 - **Only search rows carry a noise floor.** Ingest and index-build rows carry
   no verdict. A floor from three passes is itself noisy.
 - **W11 measures the rebuild window, not search during write.** The append
