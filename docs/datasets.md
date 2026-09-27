@@ -53,11 +53,24 @@ Two things about them are easy to get wrong, so `datasets.py info` prints both:
   condition. It is not §4.3's unfiltered k=100 and cannot be substituted for
   it.
 
-What they are wired into today is bfb, through `bfb-config`: bfb's `tar`
-reader takes the extracted directory and reads all three files, so these
-datasets can drive load and filtered search now. They are **not** wired into
-the relevance path. That is `fbin` plus our own fp64 ground truth (§4.3), and
-nothing converts `.npy` yet. Recall on them needs that converter first.
+bfb's `tar` reader takes the extracted directory and reads all three files,
+through `bfb-config`. The relevance path reads `fbin` plus our own fp64 ground
+truth (§4.3), so a bundle becomes runnable in two steps: `convert-npy` writes
+`base.fbin` and `queries.fbin` (widening `laion-small-clip`'s float16 to f32),
+and `oracle` writes the unfiltered k=100 truth to
+`gt/<name>.cosine.k100.gt.json`. `dbpedia-openai-100K-1536-angular` and, since
+2026-09-27, `laion-small-clip` have been through both and are in
+`bench/harness/paths.py`'s `_CORPUS`; `h-and-m-2048-angular-filters` has not.
+
+```sh
+cd conformance
+D=$STRAWMANN_DATA/laion-small-clip
+cargo run --release -- convert-npy --in-dir $D/laion-small-clip \
+    --out-base $D/base.fbin --out-queries $D/queries.fbin
+cargo run --release -- oracle --base $D/base.fbin --queries $D/queries.fbin \
+    --metric cosine --k 100 --dataset laion-small-clip \
+    --out $D/gt/laion-small-clip.cosine.k100.gt.json
+```
 
 ## Choosing the dataset directory
 

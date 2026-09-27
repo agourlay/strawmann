@@ -471,12 +471,20 @@ class DataDirTests(unittest.TestCase):
         # `stale_reasons` has to keep apart — the metric cannot do it here.
         self.assertEqual(self.paths.metric("dbpedia-openai-100K-1536-angular"),
                          self.paths.metric("dbpedia-openai-1m"))
+        # Converted and given the oracle's ground truth, a bundle entry runs;
+        # float16 on disk, its fbin is the converter's f32.
+        base, queries, gt = self.paths.dataset("laion-small-clip")
+        root = Path("/mnt/shared/datasets/laion-small-clip")
+        self.assertEqual((base, queries), (root / "base.fbin", root / "queries.fbin"))
+        self.assertEqual(gt.name, "laion-small-clip.cosine.k100.gt.json")
+        self.assertEqual(self.paths.dim("laion-small-clip"), 512)
         # Fetched and extracted, but its shipped neighbours are computed under
-        # each query's filter, so it has no unfiltered ground truth to score
-        # against. It must not be offerable as a choice while that is true.
-        self.assertNotIn("laion-small-clip", self.paths.runnable())
+        # each query's filter, and the oracle has not been run over it, so it
+        # has no unfiltered ground truth to score against. It must not be
+        # offerable as a choice while that is true.
+        self.assertNotIn("h-and-m-2048-angular-filters", self.paths.runnable())
         with self.assertRaises(SystemExit):
-            self.paths.dataset("laion-small-clip")
+            self.paths.dataset("h-and-m-2048-angular-filters")
 
     def test_rows_are_built_against_the_overridden_root(self):
         w = self.m["workloads"]

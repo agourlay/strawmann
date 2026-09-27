@@ -169,14 +169,16 @@ def add_data_argument(ap: argparse.ArgumentParser) -> None:
 #:
 #: A dataset is in here when its corpus exists in a form a row can open, which
 #: for the `tar` entries in `datasets.json` means `convert-npy` has been run
-#: over the extracted bundle. The two that remain absent
-#: (`laion-small-clip`, `h-and-m-2048-angular-filters`) are convertible the same
-#: way, but their `tests.jsonl` ships neighbours computed *under each query's
-#: filter*, so they have no unfiltered ground truth to be scored against yet.
+#: over the extracted bundle. Their `tests.jsonl` ships neighbours computed
+#: *under each query's filter*, which is not §4.3's unfiltered ground truth, so
+#: a bundle entry is in here once the fp64 `oracle` has also been run over the
+#: converted files. `laion-small-clip` has been, since 2026-09-27;
+#: `h-and-m-2048-angular-filters` is convertible the same way and has not.
 _CORPUS = {
     "sift1m": ("sift1m.fbin", "sift1m_query.fbin"),
     "dbpedia-openai-1m": ("base.fbin", "queries.fbin"),
     "dbpedia-openai-100K-1536-angular": ("base.fbin", "queries.fbin"),
+    "laion-small-clip": ("base.fbin", "queries.fbin"),
 }
 
 #: `datasets.json`, for the dimension and the metric. Read from the descriptor

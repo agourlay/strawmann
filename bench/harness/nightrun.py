@@ -63,7 +63,8 @@ ANALYSIS_TOOLS = ",".join([
 #: A dataset's label family. Anything else is `<dataset>-perf`.
 FAMILIES = {"sift1m": "sift-perf",
             "dbpedia-openai-100K-1536-angular": "dbp100k-perf",
-            "dbpedia-openai-1m": "dbp1m-perf"}
+            "dbpedia-openai-1m": "dbp1m-perf",
+            "laion-small-clip": "laion-perf"}
 
 
 def child_env() -> dict[str, str]:
