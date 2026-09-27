@@ -1817,7 +1817,8 @@ class FullrunRowInvocationTests(unittest.TestCase):
     def _admit(self, asks, wait_min=30, lax=False):
         """`wait_until_admitted` over canned answers, on a fake clock.
 
-        Each ask is "ports" (a port is held), False (the gate refuses) or True.
+        Each ask is "ports" (a port is held), False (the gate refuses on
+        foreign load), "config" (it refuses on something else) or True.
         """
         f, asks, slept, now = self.f, list(asks), [], [0.0]
         state = {}
@@ -1827,7 +1828,8 @@ class FullrunRowInvocationTests(unittest.TestCase):
             return ["6334 qdrant"] if state["ask"] == "ports" else []
 
         def gate(_lax):
-            return f.Gate(proceed=state["ask"] is True, failed=state["ask"] is not True)
+            return f.Gate(proceed=state["ask"] is True, failed=state["ask"] is not True,
+                          transient=state["ask"] is False)
 
         def sleep(s):
             slept.append(s)
@@ -1862,6 +1864,24 @@ class FullrunRowInvocationTests(unittest.TestCase):
             v = f.wait_until_admitted(True, 0)
         self.assertTrue(v)
         self.assertTrue(v.failed)
+
+    def test_a_configuration_failure_is_not_waited_on(self):
+        """2026-09-27: 24 asks over 120 minutes on `governor=powersave` and
+        `boost=enabled` after a reboot, which no wait can change."""
+        ok, sleeps, err = self._admit(["config", True], wait_min=120)
+        self.assertEqual((ok, sleeps), (False, 0))
+        self.assertIn("waiting cannot fix", err)
+        # Load first and a configuration failure after: waited once, then stops.
+        self.assertEqual(self._admit([False, "config", True], wait_min=120)[:2], (False, 1))
+
+    def test_only_a_quiescence_failure_is_transient(self):
+        t = self.f.workloads.transient_gate_failure
+        load = "  FAIL NOT quiescent: rustc(90%)\n  ok governor=performance\n"
+        conf = "  FAIL governor=powersave, expected performance\n"
+        self.assertTrue(t(load))
+        self.assertFalse(t(conf))
+        self.assertFalse(t(load + conf))
+        self.assertFalse(t("no verdict at all"))
 
     def test_waiting_gives_up_at_the_deadline(self):
         # 30 min at 5 min per ask: asks at 0, 5, ... 30, and the one at the

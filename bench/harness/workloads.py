@@ -2080,6 +2080,18 @@ def env_hash_of_gate(out: str) -> str | None:
     return m.group(1) if m else None
 
 
+def transient_gate_failure(out: str) -> bool:
+    """Whether a failed `bench/setup.py check` failed on quiescence alone.
+
+    The one failure waiting can fix: foreign load goes away, a governor or a
+    boost setting does not. Shared by this module's per-row retry and
+    `fullrun.wait_until_admitted`, which disagreed until 2026-09-27, when
+    the second waited two hours on `governor=powersave` after a reboot.
+    """
+    fails = [ln for ln in out.splitlines() if "FAIL" in ln]
+    return bool(fails) and all("NOT quiescent" in ln for ln in fails)
+
+
 def run_gate_with_retry() -> subprocess.CompletedProcess:
     """`bench/setup.py check`, taken again while its only failure is a transient.
 
@@ -2101,8 +2113,7 @@ def run_gate_with_retry() -> subprocess.CompletedProcess:
             return gate
         out = gate.stdout + gate.stderr
         fails = [ln for ln in out.splitlines() if "FAIL" in ln]
-        transient = fails and all("NOT quiescent" in ln for ln in fails)
-        if not transient or attempt == GATE_RETRIES:
+        if not transient_gate_failure(out) or attempt == GATE_RETRIES:
             return gate
         who = next((ln.split("NOT quiescent:", 1)[1].strip()
                     for ln in fails if "NOT quiescent:" in ln), "foreign load")

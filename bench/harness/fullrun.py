@@ -145,6 +145,9 @@ def cpu_count(spec: str) -> int:
 class Gate(NamedTuple):
     proceed: bool
     failed: bool
+    #: A refusal on foreign load alone, which asking again can clear. Anything
+    #: else (a governor, boost, a missing tool) cannot change while a run waits.
+    transient: bool = False
 
     def __bool__(self) -> bool:
         return self.proceed
@@ -183,7 +186,8 @@ def gate(lax: bool) -> Gate:
           "add isolcpus/nohz_full to the kernel cmdline and reboot for the rest,\n"
           "or pass --lax to take development-grade numbers deliberately.",
           file=sys.stderr)
-    return Gate(proceed=False, failed=True)
+    return Gate(proceed=False, failed=True,
+                transient=workloads.transient_gate_failure(out))
 
 
 # -------------------------------------------------------------------------
@@ -486,6 +490,14 @@ def wait_until_admitted(lax: bool, wait_min: float,
                   f"process. Free them and re-run.", file=sys.stderr)
         elif verdict := gate(lax):
             return verdict
+        elif wait_min and not verdict.transient:
+            # Not load, so not something the next five minutes change. On
+            # 2026-09-27 this waited out all 120 minutes on a governor and a
+            # boost setting a reboot had reset, and measured nothing.
+            print("!! --wait-for-gate: the gate failed on something other than "
+                  "foreign load, which waiting cannot fix; not asking again",
+                  file=sys.stderr)
+            return Gate(proceed=False, failed=True)
         if clock() + GATE_RETRY_S > deadline:
             if wait_min:
                 print(f"!! --wait-for-gate {wait_min:g}: gave up after {ask} ask(s)",
