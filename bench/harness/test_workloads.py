@@ -2838,7 +2838,7 @@ class NightrunTests(unittest.TestCase):
         """A failed launch's analysis was still running when its directory was
         removed and a second launch recreated it, so a stray "analysis exited 0"
         from the dead run landed in the middle of the live one's log."""
-        night = self.root / "bench/results/night-20260923"
+        night = self.root / "bench/results/night-20260923-sift1m"
         night.mkdir(parents=True)
         (night / "night.log").write_text("2026-09-23 03:51:37 night run starting\n")
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -2847,11 +2847,27 @@ class NightrunTests(unittest.TestCase):
         self.assertIn("exists", err.getvalue())
         self.assertEqual((night / "night.log").read_text().count("\n"), 1)
 
+    def test_two_datasets_on_one_night_get_a_directory_each(self):
+        """2026-09-27's laion-small-clip run found that morning's dbpedia
+        night in `night-20260927` and refused to start."""
+        taken = self.n.night_dir(self.root, "2026-09-27", "dbpedia-openai-1m")
+        taken.mkdir(parents=True)
+        (taken / "night.log").write_text("2026-09-26 23:00:13 night run starting\n")
+        other = self.n.night_dir(self.root, "2026-09-27", "laion-small-clip")
+        self.assertNotEqual(taken, other)
+        self.assertEqual(other.name, "night-20260927-laion-small-clip")
+        with mock.patch.dict(os.environ, {"QDRANT_BINARY": str(self.root / "absent")}):
+            rc = self.n.main(["2026-09-27", "laion-small-clip"], root=self.root)
+        # Past the one-run-per-directory check, to the next refusal.
+        self.assertEqual(rc, self.n.EXIT_NO_QDRANT)
+        self.assertTrue((other / "night.log").exists())
+        self.assertEqual((taken / "night.log").read_text().count("\n"), 1)
+
     def test_no_qdrant_binary_stops_before_anything_runs(self):
         with mock.patch.dict(os.environ, {"QDRANT_BINARY": str(self.root / "absent")}):
             rc = self.n.main(["2026-09-23", "sift1m"], root=self.root)
         self.assertEqual(rc, self.n.EXIT_NO_QDRANT)
-        self.assertIn("EXIT=97", (self.root / "bench/results/night-20260923/night.log")
+        self.assertIn("EXIT=97", (self.root / "bench/results/night-20260923-sift1m/night.log")
                       .read_text())
 
     def test_the_run_keeps_a_copy_of_its_report(self):
@@ -2860,7 +2876,7 @@ class NightrunTests(unittest.TestCase):
         results = self.root / "bench/results"
         page = results / "report-sift1m-sm-a-vs-qd-a-2026-09-23-0230.html"
         page.write_text("the run's render")
-        night = results / "night-20260923"
+        night = results / "night-20260923-sift1m"
         night.mkdir()
         got = self.n.keep_report(self.root, night, "sift1m", "sm-a", "qd-a",
                                  self.n.Log(night / "night.log"))
@@ -2870,7 +2886,7 @@ class NightrunTests(unittest.TestCase):
         self.assertEqual((night / "report.path").read_text().strip(), str(page))
 
     def test_no_report_is_recorded_as_none(self):
-        night = self.root / "bench/results/night-20260923"
+        night = self.root / "bench/results/night-20260923-sift1m"
         night.mkdir()
         self.assertIsNone(self.n.keep_report(self.root, night, "sift1m", "sm-a", "qd-a",
                                              self.n.Log(night / "night.log")))
@@ -2938,7 +2954,7 @@ class NightrunTests(unittest.TestCase):
                 mock.patch.object(fullrun, "previous_pair", lambda labels: None):
             rc = self.n.main(["2026-09-24", "sift1m"], root=self.root)
         self.assertEqual(rc, 0)
-        night = results / "night-20260924"
+        night = results / "night-20260924-sift1m"
         log = (night / "night.log").read_text()
         for line in ("labels sm-sift-perf-0924 / qd-sift-perf-0924", "qdrant binary",
                      "no previous sift-perf pair", "fullrun.py exited 0",
@@ -2961,14 +2977,14 @@ class NightrunTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {**env, "OVERSAMPLING_POLICY": "matched"}), \
                 mock.patch.object(fullrun, "previous_pair", lambda labels: None):
             self.assertEqual(self.n.main(["2026-09-25", "sift1m"], root=self.root), 0)
-        night = results / "night-20260925"
+        night = results / "night-20260925-sift1m"
         self.assertIn("--oversampling-policy matched", (night / "fullrun.out").read_text())
         self.assertIn("oversampling matched", (night / "night.log").read_text())
         # An explicit reference is forwarded, and logged as one.
         with mock.patch.dict(os.environ, {**env, "RPS_REFERENCE": "3230"}), \
                 mock.patch.object(fullrun, "previous_pair", lambda labels: None):
             self.assertEqual(self.n.main(["2026-09-26", "sift1m"], root=self.root), 0)
-        night = results / "night-20260926"
+        night = results / "night-20260926-sift1m"
         self.assertIn("--rps-reference 3230", (night / "fullrun.out").read_text())
         self.assertIn("rps reference: 3230 q/s, from $RPS_REFERENCE", (night / "night.log").read_text())
 

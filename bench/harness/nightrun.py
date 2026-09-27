@@ -125,6 +125,17 @@ def qdrant_provenance(binary: Path) -> str:
     return f"qdrant binary {binary} sha256={digest} commit={commit}{predates}"
 
 
+def night_dir(root: Path, date: str, dataset: str) -> Path:
+    """A run's own directory, by date *and* dataset.
+
+    By date alone until 2026-09-27, when a laion-small-clip run on the day of
+    that morning's dbpedia-openai-1m night found `night-20260927` taken and
+    refused, correctly, to share its log. Directories from before keep the
+    date-only name.
+    """
+    return root / "bench/results" / f"night-{date.replace('-', '')}-{dataset}"
+
+
 def newest_report(results: Path, dataset: str, sm: str, qd: str) -> Path | None:
     pages = sorted(results.glob(f"report-{dataset}-{sm}-vs-{qd}-*.html"),
                    key=lambda p: p.stat().st_mtime)
@@ -248,13 +259,13 @@ def main(argv: list[str], root: Path = ROOT) -> int:
     # One run per night directory. On 2026-09-23 a failed 03:51 launch had its
     # analysis still running when the directory was removed and a second
     # launch recreated it, so a stray "analysis exited 0" from the dead run
-    # landed in the middle of the live one's log. The directory comes from the
-    # date alone, so a second run of one night needs the first moved aside.
-    night = root / "bench/results" / f"night-{args.date.replace('-', '')}"
+    # landed in the middle of the live one's log. A second run of one dataset
+    # on one night needs the first moved aside.
+    night = night_dir(root, args.date, args.dataset)
     if (night / "night.log").exists():
-        print(f"nightrun: {night / 'night.log'} exists; another run of {args.date} has "
-              f"used this directory.\n  move it aside, or pass a different date, rather "
-              f"than sharing a log.", file=sys.stderr)
+        print(f"nightrun: {night / 'night.log'} exists; another {args.dataset} run of "
+              f"{args.date} has used this directory.\n  move it aside, or pass a "
+              f"different date, rather than sharing a log.", file=sys.stderr)
         return EXIT_LOG_EXISTS
     night.mkdir(parents=True, exist_ok=True)
     log = Log(night / "night.log")
