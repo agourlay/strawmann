@@ -59,8 +59,10 @@ truth (§4.3), so a bundle becomes runnable in two steps: `convert-npy` writes
 `base.fbin` and `queries.fbin` (widening `laion-small-clip`'s float16 to f32),
 and `oracle` writes the unfiltered k=100 truth to
 `gt/<name>.cosine.k100.gt.json`. `dbpedia-openai-100K-1536-angular` and, since
-2026-09-27, `laion-small-clip` have been through both and are in
-`bench/harness/paths.py`'s `_CORPUS`; `h-and-m-2048-angular-filters` has not.
+2026-09-27, `laion-small-clip` and `h-and-m-2048-angular-filters` have been
+through both and are in `bench/harness/paths.py`'s `_CORPUS`. h-and-m's bundle
+extracts to `h-and-m-2048-angular/hnm`, so its `--in-dir` is that directory and
+its `--out-*` files go under `h-and-m-2048-angular-filters/`.
 
 ```sh
 cd conformance

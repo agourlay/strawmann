@@ -64,7 +64,8 @@ ANALYSIS_TOOLS = ",".join([
 FAMILIES = {"sift1m": "sift-perf",
             "dbpedia-openai-100K-1536-angular": "dbp100k-perf",
             "dbpedia-openai-1m": "dbp1m-perf",
-            "laion-small-clip": "laion-perf"}
+            "laion-small-clip": "laion-perf",
+            "h-and-m-2048-angular-filters": "hnm-perf"}
 
 
 def child_env() -> dict[str, str]:

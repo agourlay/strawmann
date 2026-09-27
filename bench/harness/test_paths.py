@@ -478,13 +478,14 @@ class DataDirTests(unittest.TestCase):
         self.assertEqual((base, queries), (root / "base.fbin", root / "queries.fbin"))
         self.assertEqual(gt.name, "laion-small-clip.cosine.k100.gt.json")
         self.assertEqual(self.paths.dim("laion-small-clip"), 512)
-        # Fetched and extracted, but its shipped neighbours are computed under
-        # each query's filter, and the oracle has not been run over it, so it
-        # has no unfiltered ground truth to score against. It must not be
-        # offerable as a choice while that is true.
-        self.assertNotIn("h-and-m-2048-angular-filters", self.paths.runnable())
+        self.assertEqual(self.paths.dim("h-and-m-2048-angular-filters"), 2048)
+        self.assertEqual(self.paths.dataset("h-and-m-2048-angular-filters")[0],
+                         Path("/mnt/shared/datasets/h-and-m-2048-angular-filters/base.fbin"))
+        # Declared in the descriptor but never fetched or converted: not a
+        # choice, and asking for it says so rather than naming a missing file.
+        self.assertNotIn("gist1m", self.paths.runnable())
         with self.assertRaises(SystemExit):
-            self.paths.dataset("h-and-m-2048-angular-filters")
+            self.paths.dataset("gist1m")
 
     def test_rows_are_built_against_the_overridden_root(self):
         w = self.m["workloads"]

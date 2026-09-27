@@ -172,13 +172,16 @@ def add_data_argument(ap: argparse.ArgumentParser) -> None:
 #: over the extracted bundle. Their `tests.jsonl` ships neighbours computed
 #: *under each query's filter*, which is not §4.3's unfiltered ground truth, so
 #: a bundle entry is in here once the fp64 `oracle` has also been run over the
-#: converted files. `laion-small-clip` has been, since 2026-09-27;
-#: `h-and-m-2048-angular-filters` is convertible the same way and has not.
+#: converted files. `laion-small-clip` and `h-and-m-2048-angular-filters`
+#: have been, since 2026-09-27. h-and-m's bundle extracts to
+#: `h-and-m-2048-angular/hnm` (the descriptor's `extract.dir`), and its fbin
+#: sits under the dataset's own name like every other entry's.
 _CORPUS = {
     "sift1m": ("sift1m.fbin", "sift1m_query.fbin"),
     "dbpedia-openai-1m": ("base.fbin", "queries.fbin"),
     "dbpedia-openai-100K-1536-angular": ("base.fbin", "queries.fbin"),
     "laion-small-clip": ("base.fbin", "queries.fbin"),
+    "h-and-m-2048-angular-filters": ("base.fbin", "queries.fbin"),
 }
 
 #: `datasets.json`, for the dimension and the metric. Read from the descriptor
