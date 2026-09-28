@@ -127,3 +127,23 @@ published within the row (`rebuild start points=1089100 pending=99100` and no
 `published`, in every pass), so every query scanned the whole pending tail
 (item 8). Nice 10 bought the search workers their CPUs back and spent them on
 the exhaustive tail.
+
+### P3. What the datasets offer that no row measures yet
+
+**55. h-and-m and laion ship real filtered queries, and W12 uses synthetic
+ones.** `h-and-m-2048-angular-filters` carries a 24-field product payload per
+vector (`payloads.jsonl`: product type and group, colour, department, section,
+garment group, a free-text description), the value sets its conditions draw
+from (`filters.json`), and 10,000 queries that each hold a condition such as
+`{"and": [{"product_group_name": {"match": {"value": "Shoes"}}}]}` with their
+25 nearest neighbours *under that condition* (`tests.jsonl`). `laion-small-clip`
+ships the same shape with a float range condition on every query, and k=10.
+The harness uploads the vectors alone, from the fbin, and W12 filters bfb's
+synthetic keywords over `bench12`, so neither engine is measured on a
+realistic filter, a multi-field payload or a range condition, and the shipped
+filtered truth goes unread. What it needs: the payload uploaded with the
+collection, a W12-style row driven by each query's own condition, and recall
+scored against the shipped `closest_ids` with the ε-tie rule (checked once
+against our own filtered oracle, as `ground-truth.md` §6 did for the
+unconditional sets). This is also the workload vector-db-benchmark runs on
+these two datasets.
