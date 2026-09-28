@@ -1690,3 +1690,41 @@ configurations. Pooling the passes of both rows would have given the same
 band here (about +-22%) and needed the per-pass directories; judging only
 the base row would have kept a 1.12x on a configuration seen to vary by more.
 
+## Exact duplicates prune each other, as in Qdrant, decided 2026-09-28
+
+laion-small-clip's first pair stopped strawmANN's recall@10 at 0.9875 at `ef`
+512 against Qdrant's 0.9978, and its three builds spread 0.0055 where Qdrant's
+spread 0.00004. The corpus holds 57 byte-identical copies of one vector. The
+neighbour heuristic dropped a candidate only when an already-selected
+neighbour was *strictly* closer to it than the base; a duplicate is exactly as
+close to its copies as to the base, so none was ever dropped, and the
+`keepPrunedConnections` top-up added any that were. A group larger than `m`
+(16 above level 0, 32 at it) fills its members' lists with itself: a sink the
+descent enters and cannot leave.
+
+Measured with `graph-diff`, in process, 5,000 queries, recall@10 at `ef` 512,
+8 threads:
+
+| build | seeds 1 to 4 |
+|---|---|
+| as it was | 0.99722, 0.99096, 0.98912, 0.97114 |
+| `ef_construct` 400 | 0.99376, 0.99086, 0.99038, 0.97212 |
+| `m` 32 | 0.99948, 0.99946, 0.99946, 0.99946 |
+| duplicates removed from the corpus | 0.99884, 0.99888, 0.99882, 0.99886 |
+| the tie rule below | 0.99882, 0.99870, 0.99886, 0.99884 |
+
+Searching level 0 from each query's true nearest neighbour recovered 65.5% of
+the worst seed's misses, so most of the loss was the descent into the sink,
+not level 0. Through the real server and upload (`bench2`, one pass each), the
+same probes read 0.9923 to 0.9986 alone and 0.9250 beside `bench12`'s build
+before, and 0.9989 in all three after, with every build's `unreachable` at 0
+where it had been 18 to 494.
+
+The rule is Qdrant's `is_redundant` (#10239): strict, except between
+candidates exactly as close to the base as each other, where `>=` drops a
+duplicate of a selected neighbour; the top-up skips those. Ordinary candidates
+tie with measure zero, so nothing else moves: sift1m reads 0.99956 and 0.99957
+at `ef` 512 against 0.99955 before, and the build time is unchanged. It also
+accounts for part of findings 34's pass-to-pass draw, since which node ids the
+duplicates arrive at changes with every concurrent upload.
+

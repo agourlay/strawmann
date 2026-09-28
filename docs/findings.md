@@ -36,19 +36,16 @@ points/s on every pass (2,440, 2,758 and 3,300; the row drifted +53%). The
 next dbpedia pair sizes both from 0927. Item 8 is what the row shows once it
 measures what it claims to.
 
-**54. strawmANN's recall stops at 0.9875 on laion-small-clip.** The first
-laion pair (`sm/qd-laion-perf-0927`, 100k x 512 cosine CLIP, T4 with T3
-passing) reads 1.59x at matched recall 0.9530 and 0.38x at 0.9875, the top
-of strawmANN's curve: at `ef` 512 it reaches 0.9875 where Qdrant reaches
-0.9978, so W10-ef512 is refused for unequal recall and above 0.988 only
-Qdrant is measured. At matched `ef` strawmANN is faster (W10-ef64 1.44x,
-ef128 1.29x, ef256 1.13x); the loss is the graph, not the search. The report
-reads it two ways: strawmANN's recall@10 at `ef` 512 spreads 0.00554 across
-the three builds against Qdrant's 0.00004, 138x, and 0 to 156 of the 100,000
-nodes are unreachable from the entry point. On sift1m and dbpedia neither
-shows. What is unmeasured is which part of the build leaves CLIP's clusters
-unconnected (the pruning heuristic, `M`, or the parallel insert order) and
-whether a larger `ef_construct` alone closes it.
+**54. The laion-small-clip page was measured with a duplicate-vector sink;
+fixed, not yet re-measured.** The first laion pair (`sm/qd-laion-perf-0927`)
+reads 1.59x at matched recall 0.9530 and 0.38x at 0.9875, where strawmANN's
+curve stopped (Qdrant 0.9978 at `ef` 512). The cause was 57 byte-identical
+vectors that the neighbour heuristic never pruned against each other, which
+filled their lists and became a sink; Qdrant fixed the same in #10239, and
+strawmANN takes its rule since 2026-09-28 (`decisions.md`). Through the server,
+`bench2` then reads 0.9989 at `ef` 512 in three builds out of three, with no
+unreachable node, where the same probes spread 0.925 to 0.9986 before. What
+is open is the page: the next laion pair re-measures it.
 
 ### P2. What the licensed numbers are made of, and what the run costs
 

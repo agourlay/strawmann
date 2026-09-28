@@ -712,6 +712,19 @@ pub fn selectNeighboursHeuristic(
 /// unreachable — 3.5%, growing with n.
 pub const keep_pruned_default = true;
 
+/// Qdrant's `is_redundant` (#10239): strict, except between candidates exactly
+/// as close to the base as each other, which a group of byte-identical vectors
+/// always is. Strict there, the group never prunes itself, fills every slot and
+/// becomes a sink with no edge leaving it.
+fn redundant(to_selected: f32, candidate_score: f32, selected_score: f32) bool {
+    if (candidate_score == selected_score) return to_selected >= candidate_score;
+    return to_selected > candidate_score;
+}
+
+/// The widest selection `selectNeighbours` makes: `m0 = 2 * m`, and the API
+/// caps `m` at 512 (`api/collections.zig`).
+const max_selection = 1024;
+
 pub fn selectNeighbours(
     candidates: []const Candidate,
     m: usize,
@@ -720,22 +733,27 @@ pub fn selectNeighbours(
     out: []u32,
     keep_pruned: bool,
 ) usize {
+    std.debug.assert(m <= max_selection);
+    // Each selected neighbour's score against the base, beside `out`, for the
+    // tie test in `redundant`.
+    var scores: [max_selection]f32 = undefined;
     var n: usize = 0;
     for (candidates) |c| {
         if (n >= m) break;
         var keep = true;
-        for (out[0..n]) |selected| {
+        for (out[0..n], scores[0..n]) |selected, selected_score| {
             // Distance from the candidate to an already-selected neighbour.
             const to_selected = score_between(ctx, c.id, selected);
             // If the candidate is closer to a selected neighbour than to the
             // query node, the selected neighbour already covers that direction.
-            if (to_selected > c.score) {
+            if (redundant(to_selected, c.score, selected_score)) {
                 keep = false;
                 break;
             }
         }
         if (keep) {
             out[n] = c.id;
+            scores[n] = c.score;
             n += 1;
         }
     }
@@ -747,14 +765,21 @@ pub fn selectNeighbours(
         for (candidates) |c| {
             if (n >= m) break;
             var already = false;
-            for (out[0..n]) |sel| {
+            for (out[0..n], scores[0..n]) |sel, sel_score| {
                 if (sel == c.id) {
+                    already = true;
+                    break;
+                }
+                // Not a duplicate of a selected neighbour either: topping up
+                // with the exact ties the pass above dropped rebuilds the sink.
+                if (c.score == sel_score and score_between(ctx, c.id, sel) >= c.score) {
                     already = true;
                     break;
                 }
             }
             if (!already) {
                 out[n] = c.id;
+                scores[n] = c.score;
                 n += 1;
             }
         }
@@ -767,6 +792,38 @@ pub fn selectNeighbours(
 // -------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "a group of exact duplicates does not fill every slot with itself" {
+    // laion-small-clip holds 57 byte-identical vectors, more than `m0`. Under a
+    // strict comparison they never prune each other (each is exactly as close
+    // to the base as to the others), so a node in the group linked only into
+    // it, and the top-up added the rest back: a sink the descent could enter
+    // and not leave. Recall@10 at ef 512 spread 0.9711 to 0.9972 over four
+    // level seeds; with this rule, 0.9987 to 0.9989. Qdrant #10239 is the same
+    // fix.
+    const Ctx = struct {
+        // 0, 1, 2: duplicates of the base (and of each other). 3, 4: elsewhere.
+        fn between(_: *const anyopaque, a: u32, b: u32) f32 {
+            if (a < 3 and b < 3) return 1.0;
+            const other = if (a < 3) b else a;
+            if (a >= 3 and b >= 3) return 0.1;
+            return if (other == 3) 0.8 else 0.7;
+        }
+    };
+    const dummy: u8 = 0;
+    const cands = [_]Candidate{
+        .{ .id = 0, .score = 1.0 },
+        .{ .id = 1, .score = 1.0 },
+        .{ .id = 2, .score = 1.0 },
+        .{ .id = 3, .score = 0.8 },
+        .{ .id = 4, .score = 0.7 },
+    };
+    var out: [4]u32 = undefined;
+    // One duplicate, then the two directions out of the group; the top-up does
+    // not bring the other duplicates back into the spare slot.
+    const n = selectNeighbours(&cands, 4, Ctx.between, @ptrCast(&dummy), &out, true);
+    try testing.expectEqualSlices(u32, &.{ 0, 3, 4 }, out[0..n]);
+}
 
 test "keepPrunedConnections fills the spare slots the heuristic left empty" {
     // Algorithm 4's `keepPrunedConnections`. The pruned candidate is not
