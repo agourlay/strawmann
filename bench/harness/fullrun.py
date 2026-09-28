@@ -621,6 +621,18 @@ def estimated_minutes(dataset: str, reps: int) -> tuple[float, str] | None:
     return reps * per_pass / 60, basis
 
 
+def held_port(entry: str) -> int | None:
+    """The port a `ports_in_use` entry names: its leading number.
+
+    Not a substring test over the entry. The rest of it is `ss`'s process
+    detail, and on 2026-09-27 `"6334" in "6344 users:((\"strawmann\",pid=156334,...))"`
+    read the conformance strawmANN's pid as Qdrant's gRPC port, so the differ
+    refused to start Qdrant and a full run of rows went unlicensed.
+    """
+    head = entry.split(" ", 1)[0]
+    return int(head) if head.isdigit() else None
+
+
 def ports_in_use() -> list[str]:
     """Which of the run's ports something already holds, and what holds them.
 
@@ -981,7 +993,7 @@ def start_qdrant_binary(server_cpus: str, grpc: int, rest: int,
     # start of a process that never started. Found by doing it: a second dry
     # run "succeeded" against the first one's server.
     stop_scope(QDRANT_SCOPE)
-    stale = [p for p in ports_in_use() if str(rest) in p or str(grpc) in p]
+    stale = [p for p in ports_in_use() if held_port(p) in (rest, grpc)]
     if stale:
         print(f"something still holds qdrant's ports: {'; '.join(stale)}",
               file=sys.stderr)

@@ -1865,6 +1865,17 @@ class FullrunRowInvocationTests(unittest.TestCase):
         self.assertTrue(v)
         self.assertTrue(v.failed)
 
+    def test_a_pid_is_not_a_port(self):
+        """The conformance strawmANN on 6344 had pid 156334, which a substring
+        test read as Qdrant's 6334, and the differ refused to start Qdrant."""
+        held = self.f.held_port
+        self.assertEqual(held('6344 users:(("strawmann",pid=156334,fd=3))'), 6344)
+        self.assertEqual(held('6334 users:(("qdrant",pid=4242,fd=9))'), 6334)
+        self.assertEqual(held("6333"), 6333)
+        self.assertIsNone(held("garbage"))
+        busy = ['6344 users:(("strawmann",pid=156334,fd=3))']
+        self.assertEqual([p for p in busy if held(p) in (6333, 6334)], [])
+
     def test_a_configuration_failure_is_not_waited_on(self):
         """2026-09-27: 24 asks over 120 minutes on `governor=powersave` and
         `boost=enabled` after a reboot, which no wait can change."""
