@@ -1781,3 +1781,22 @@ pure miss latency. Prefetching the fp32 rescore candidates the same way was
 tried and bought nothing (5,481 against 5,602), and is not kept. What remains
 of the gap is findings 56.
 
+## T3 stays two-sided at one width, decided 2026-09-28
+
+The laion 0928 analysis (its P12) and the second h-and-m smoke raised the same
+case: T3 requires the two engines' recall@10 intervals to overlap at the
+differ's single `ef`, and fails when strawmANN is the *more* accurate one. The
+h-and-m smoke read strawmANN 0.9988 [0.9979, 0.9993] against Qdrant 0.9967
+[0.9954, 0.9977], 0.0002 apart, where the first smoke's Qdrant draw (0.9970,
+upper bound 0.9979) touched and passed. Three changes were on the table:
+testing at matched recall with each engine's `ef` taken from the sweep,
+making the test one-sided, or neither.
+
+Neither. T3 says the two engines answer the same question equally well at the
+point the differ measures, and a gap in either direction is a gap: a
+throughput ratio between engines at unequal recall is the claim §7.4 forbids,
+whichever engine is ahead on recall. A pair whose T3 fails on Qdrant's build
+draw is unlicensed and re-measured, as any other failed tier is. The cost is
+known: on h-and-m, where the two intervals sit within about 0.0002 of each
+other, a night's licence depends on that draw.
+
