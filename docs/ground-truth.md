@@ -196,8 +196,28 @@ recomputed GT carries fp64 scores for exactly that reason.
 | **sift1m** | yes, verified | yes, 2 m 24 s | yes, 0 interior disagreements |
 | **dbpedia-openai-1m** | yes, 26 of 26 shards verified | yes, cosine k=100 | n/a, §4.2 marks GT as recompute-only, so there is nothing to diff against |
 | **dbpedia-openai-100K-1536-angular** | yes, verified | yes, 1 m 44 s, cosine k=100 | yes, against the shipped k=10: see §6.1 |
-| **laion-small-clip** | yes, verified | no | its shipped neighbours are filtered (§6) |
-| **h-and-m-2048-angular-filters** | yes, verified | no | as above |
+| **laion-small-clip** | yes, verified | yes, 24 s, cosine k=100 (Qdrant-order length since 2026-09-28) | its shipped neighbours are filtered (§6) |
+| **h-and-m-2048-angular-filters** | yes, verified | yes, 3 m 7 s, cosine k=100 (Qdrant-order length since 2026-09-28) | as above |
+
+### 4.1 The cosine length is summed in Qdrant's order, since 2026-09-28
+
+The oracle reproduces Qdrant's cosine preprocessing in f32, short-circuit
+included (§8.3, trap 3), and until 2026-09-28 it summed the squared length
+left to right, which is Qdrant's scalar fallback. On an AVX+FMA host Qdrant
+takes `cosine_preprocess_avx` from d=32, and strawmANN's `norm.zig` has
+reproduced that order bit for bit all along. At d=2048 the strict sum
+scales a stored vector by up to ~2e-6: the oracle scored an h-and-m vector
+against itself at 1.000001928 and swapped query 1433's neighbours 32432 and
+34449, 1.7e-7 apart, at rank 10. Both engines returned the exact-cosine
+order, and T1 failed on the oracle's error. Summed in Qdrant's order the
+self-score is 1.000000059 and the pair is back in order; one query of
+10,000 changes its top ten.
+
+Every cosine ground truth computed before this is stale and indistinguishable
+from a new one by its checksums, which describe the input files. They are
+recomputed for dbpedia-openai-1m, dbpedia-openai-100K-1536-angular,
+laion-small-clip and h-and-m-2048-angular-filters. Euclid has no
+preprocessing and sift1m is untouched.
 
 ## 5. The headline tier's conversion path
 

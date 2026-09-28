@@ -1728,3 +1728,26 @@ at `ef` 512 against 0.99955 before, and the build time is unchanged. It also
 accounts for part of findings 34's pass-to-pass draw, since which node ids the
 duplicates arrive at changes with every concurrent upload.
 
+## The oracle sums a cosine length in Qdrant's order, decided 2026-09-28
+
+The h-and-m smoke failed T1 on one query: the oracle's rank-10 neighbour of
+query 1433 was returned by neither engine, which agreed with each other to
+3e-7. The oracle was wrong. It reproduced Qdrant's cosine preprocessing in
+f32, as §8.3 asks, but summed `Σx²` left to right, Qdrant's scalar fallback;
+Qdrant 1.19 on every host here takes `cosine_preprocess_avx` (32 lanes, fused
+steps, `four_way_hsum`), and strawmANN's `norm.zig` reproduces that. At
+d=2048 the strict sum carried a relative error near 2e-6 into every stored
+vector, the same against both engines (each read a maximum deviation from
+the oracle of 2.565e-6), so the oracle scored a vector against itself at
+1.000001928 and reversed a pair 1.7e-7 apart. Reproduced exactly in numpy:
+the scalar order gives the oracle's 0.847924370 and 0.847924203 to nine
+digits, an accurate length gives the engines' order.
+
+The oracle now makes `norm.pathFor`'s choice (AVX order from d=32, SSE from
+16, scalar below) with each path transcribed in order. Not a wider ε: the
+engines were right and the reference was not, and widening the tolerance
+against the oracle would have excused the next real disagreement at this
+width too. The self-score becomes 1.000000059 and one h-and-m query of
+10,000 changes its top ten. Cosine ground truth computed before this is
+recomputed; its checksums, which describe the inputs, cannot tell it apart.
+

@@ -98,16 +98,102 @@ impl Metric {
 /// put a different population of vectors on each side of the boundary, and the
 /// oracle would then disagree with both engines about which vectors were
 /// normalised at all.
+///
+/// And in **Qdrant's order**, which is not the scalar loop. On every host in
+/// the comparison (AVX+FMA, §7.1) and at every dimension ≥ 32, Qdrant 1.19
+/// takes `cosine_preprocess_avx`, as strawmANN's `src/dist/norm.zig` does bit
+/// for bit. Until 2026-09-28 this function used the scalar order. At d=2048 a
+/// strict left-to-right f32 sum scales every stored vector by up to ~2e-6, so
+/// the oracle scored a vector against itself at 1.0000019 and swapped two
+/// h-and-m neighbours 1.7e-7 apart at rank 10, where both engines agreed with
+/// each other and with an exact cosine: T1 failed on the oracle's error.
 pub fn cosine_preprocess(v: &[f32]) -> Vec<f32> {
-    let mut length: f32 = 0.0;
-    for &x in v {
-        length += x * x;
-    }
+    let length = squared_length(v);
     if length < f32::EPSILON || (length - 1.0).abs() <= 1.0e-6 {
         return v.to_vec();
     }
     let length = length.sqrt();
     v.iter().map(|x| x / length).collect()
+}
+
+/// `Σ xᵢ²` in the order Qdrant 1.19's `CosineMetric::preprocess` computes it on
+/// an AVX+FMA x86-64 host: `cosine_preprocess_avx` from d=32
+/// (`MIN_DIM_SIZE_AVX`), `cosine_preprocess_sse` from d=16 (`MIN_DIM_SIZE_SIMD`),
+/// the scalar loop below that. The same choice as `norm.pathFor`.
+pub fn squared_length(v: &[f32]) -> f32 {
+    if v.len() >= 32 {
+        squared_length_avx(v)
+    } else if v.len() >= 16 {
+        squared_length_sse(v)
+    } else {
+        squared_length_scalar(v)
+    }
+}
+
+/// `simple.rs::cosine_preprocess`: one f32 accumulator, left to right.
+pub fn squared_length_scalar(v: &[f32]) -> f32 {
+    let mut length: f32 = 0.0;
+    for &x in v {
+        length += x * x;
+    }
+    length
+}
+
+/// `simple_avx.rs::cosine_preprocess_avx`: four 8-lane `vfmadd231ps`
+/// accumulators over blocks of 32, reduced by `four_way_hsum` (`(a+b)+(c+d)`
+/// lane-wise, then `hsum256_ps_avx`: `((x0+x4)+(x1+x5))+((x2+x6)+(x3+x7))`),
+/// then the `dim % 32` tail added left to right. `f32::mul_add` rounds once,
+/// as the hardware fused step does.
+pub fn squared_length_avx(v: &[f32]) -> f32 {
+    let n = v.len();
+    let m = n - n % 32;
+    let mut acc = [[0f32; 8]; 4];
+    let mut i = 0;
+    while i < m {
+        for (k, lanes) in acc.iter_mut().enumerate() {
+            for (l, a) in lanes.iter_mut().enumerate() {
+                let x = v[i + k * 8 + l];
+                *a = x.mul_add(x, *a);
+            }
+        }
+        i += 32;
+    }
+    let mut total = [0f32; 8];
+    for l in 0..8 {
+        total[l] = (acc[0][l] + acc[1][l]) + (acc[2][l] + acc[3][l]);
+    }
+    let lr: [f32; 4] = std::array::from_fn(|l| total[l + 4] + total[l]);
+    let mut length = (lr[0] + lr[1]) + (lr[2] + lr[3]);
+    for &x in &v[m..] {
+        length += x * x;
+    }
+    length
+}
+
+/// `simple_sse.rs::cosine_preprocess_sse`: four 4-lane `mulps` + `addps`
+/// accumulators over blocks of 16 (two roundings a step, no FMA), each reduced
+/// by `hsum128_ps_sse` (`(x0+x1)+(x2+x3)`) and the four partials added left to
+/// right, then the `dim % 16` tail.
+pub fn squared_length_sse(v: &[f32]) -> f32 {
+    let n = v.len();
+    let m = n - n % 16;
+    let mut acc = [[0f32; 4]; 4];
+    let mut i = 0;
+    while i < m {
+        for (k, lanes) in acc.iter_mut().enumerate() {
+            for (l, a) in lanes.iter_mut().enumerate() {
+                let x = v[i + k * 4 + l];
+                *a += x * x;
+            }
+        }
+        i += 16;
+    }
+    let h = |x: [f32; 4]| (x[0] + x[1]) + (x[2] + x[3]);
+    let mut length = h(acc[0]) + h(acc[1]) + h(acc[2]) + h(acc[3]);
+    for &x in &v[m..] {
+        length += x * x;
+    }
+    length
 }
 
 /// Apply a metric's ingest preprocessing.
@@ -953,6 +1039,23 @@ mod tests {
         // A zero vector must not divide by zero.
         let v = vec![0.0f32; 8];
         assert_eq!(cosine_preprocess(&v), v);
+    }
+
+    #[test]
+    fn the_length_is_summed_in_qdrants_avx_order_not_left_to_right() {
+        // `norm.zig`'s vector: 1e4 then ones. ulp(1e8) is 8, so a strict f32
+        // sum stays at 1e8, while the 31 AVX lanes that never see the 1e8 term
+        // keep their 32 ones each: 1e8 + 31 * 32, exactly representable.
+        let mut v = vec![1.0f32; 1024];
+        v[0] = 1.0e4;
+        assert_eq!(squared_length_scalar(&v), 1.0e8);
+        assert_eq!(squared_length_avx(&v), 100_000_992.0);
+        assert_eq!(squared_length(&v), squared_length_avx(&v));
+        let out = cosine_preprocess(&v);
+        assert_eq!(out[1], 1.0 / 100_000_992.0f32.sqrt());
+        // Below d=32 Qdrant takes the SSE order, below d=16 the scalar one.
+        assert_eq!(squared_length(&v[..20]), squared_length_sse(&v[..20]));
+        assert_eq!(squared_length(&v[..8]), squared_length_scalar(&v[..8]));
     }
 
     #[test]
