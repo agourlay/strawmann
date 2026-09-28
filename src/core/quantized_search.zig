@@ -309,6 +309,15 @@ pub fn searchQuantized(
     collection.scanPendingTailFiltered(coll, query, covered, req.filter, out);
 }
 
+test "the quantized scorer gives the traversal a prefetch" {
+    // Without one, `hnsw.Scorer.of` leaves `prefetch` null and every quantized
+    // traversal takes each neighbour's codes as a demand miss: sift1m W6 read
+    // 3.2x the demand DRAM fills and PQ's W8 ran at 60% of its speed with it.
+    var q: quantized.Query = .{ .store = undefined, .kernel = .dot };
+    const scorer = hnsw.Scorer.of(&q);
+    try std.testing.expect(scorer.prefetch != null);
+}
+
 test "§6.7 two-stage search: quantized traversal plus rescore matches fp32 closely" {
     const dim = 64;
     const n = 1500;

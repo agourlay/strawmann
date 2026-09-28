@@ -1751,3 +1751,33 @@ width too. The self-score becomes 1.000000059 and one h-and-m query of
 10,000 changes its top ten. Cosine ground truth computed before this is
 recomputed; its checksums, which describe the inputs, cannot tell it apart.
 
+## The quantized traversal prefetches its codes, decided 2026-09-28
+
+Every quantized row trailed Qdrant on sift1m (W6 0.90x, W8 0.73x) and PQ
+trailed everywhere, and the counters named the cause: at W6 strawmANN read
+539 KB of demand DRAM fills per query against Qdrant's 117 KB, at IPC 0.80
+against 1.70; on dbpedia 3.3 MB against 749 KB. SQ8 still won there (1.31x)
+on fewer cycles per query, not on memory.
+
+`hnsw.Index.searchLayer` asks the scorer for a prefetch of every neighbour
+before it scores any (`Scorer.prefetch`), and the fp32 `collection.Probe`
+provides one. `quantized.Query` never did, so a quantized traversal issued no
+prefetch: each neighbour's codes, and for SQ8 its `stats` entry in a separate
+array, were demand misses taken one at a time. A `perf record` of W6 on
+`ls_dmnd_fills_from_sys.dram_io_all` put 38% of the fills in the SQ8 kernel
+and 31% in `Query.score` itself, which is the `stats[node]` load.
+
+`Query.prefetch` asks for the first line of the node's codes, and for SQ8 its
+stats entry. Through the server on sift1m, three runs against three (W6) and
+two against two (W8), `--lax`, the same probe both ways:
+
+| row | before | after | demand fills |
+|---|---|---|---|
+| W6 (SQ8) | 5,044 / 4,726 / 5,084 | 5,602 / 5,562 / 5,362 (+11%) | 3.2 to 3.6x fewer |
+| W8 (PQ) | 3,381 / 3,402 | 5,558 / 5,311 (+60%) | 5x fewer |
+
+PQ gains most because its codes are 16 bytes a vector, so every neighbour was
+pure miss latency. Prefetching the fp32 rescore candidates the same way was
+tried and bought nothing (5,481 against 5,602), and is not kept. What remains
+of the gap is findings 56.
+

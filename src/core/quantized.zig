@@ -389,6 +389,30 @@ pub const Query = struct {
             .product => |p| self.table.?.score(p.row(node)),
         };
     }
+
+    /// The first line of `node`'s codes, and for SQ8 its `stats` entry, so
+    /// the traversal can ask for them before it scores (`hnsw.Scorer.prefetch`),
+    /// as `collection.Probe.prefetch` does for fp32 rows.
+    ///
+    /// Absent until 2026-09-28, so every quantized traversal issued no
+    /// prefetch at all: each neighbour's codes and, separately, its stats were
+    /// demand misses taken one at a time. sift1m's W6 read 539 KB of DRAM per
+    /// query against Qdrant's 117 KB at IPC 0.80 against 1.70, and a profile
+    /// put 38% of the demand fills in the SQ8 kernel and 31% in this struct's
+    /// `score`, which is the `stats[node]` load.
+    pub fn prefetch(ctx: *const anyopaque, node: u32) void {
+        const self: *const Query = @ptrCast(@alignCast(ctx));
+        const hint: std.builtin.PrefetchOptions = .{ .rw = .read, .locality = 3, .cache = .data };
+        switch (self.store.*) {
+            .none => {},
+            .scalar => |s| {
+                @prefetch(s.row(node).ptr, hint);
+                @prefetch(&s.stats[node], hint);
+            },
+            .binary => |b| @prefetch(b.codes.rowConst(node).ptr, hint),
+            .product => |p| @prefetch(p.row(node).ptr, hint),
+        }
+    }
 };
 
 /// Scratch a worker needs to run a quantized query.
