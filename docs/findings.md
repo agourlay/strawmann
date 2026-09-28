@@ -36,17 +36,6 @@ points/s on every pass (2,440, 2,758 and 3,300; the row drifted +53%). The
 next dbpedia pair sizes both from 0927. Item 8 is what the row shows once it
 measures what it claims to.
 
-**54. The laion-small-clip page was measured with a duplicate-vector sink;
-fixed, not yet re-measured.** The first laion pair (`sm/qd-laion-perf-0927`)
-reads 1.59x at matched recall 0.9530 and 0.38x at 0.9875, where strawmANN's
-curve stopped (Qdrant 0.9978 at `ef` 512). The cause was 57 byte-identical
-vectors that the neighbour heuristic never pruned against each other, which
-filled their lists and became a sink; Qdrant fixed the same in #10239, and
-strawmANN takes its rule since 2026-09-28 (`decisions.md`). Through the server,
-`bench2` then reads 0.9989 at `ef` 512 in three builds out of three, with no
-unreachable node, where the same probes spread 0.925 to 0.9986 before. What
-is open is the page: the next laion pair re-measures it.
-
 ### P2. What the licensed numbers are made of, and what the run costs
 
 **5. strawmANN's IPC halves at saturation at d=1536.** W4 read 1.38x on the
