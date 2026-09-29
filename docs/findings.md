@@ -38,19 +38,6 @@ measures what it claims to.
 
 ### P2. What the licensed numbers are made of, and what the run costs
 
-**6. Qdrant's single-query cost doubles at d=1536; kernel width is a quarter
-of it.** W3 reads 1.75x at d=1536 on the 0927 pair (0.84x on sift1m). Qdrant
-has no AVX-512 path for dense fp32 (878843e6e), and its measured binary's
-`dot_similarity_avx` uses `ymm` only, where strawmANN's `Dot(16,8)` uses
-`zmm`. Measured on 2026-09-26, pinned, on dbpedia's W3: strawmANN built for
-256-bit vectors (`avx2`, `avx512-256`) spends 2.05M cycles and 1.72M
-instructions per query, and at 512 bits (`avx512-full`) 1.67M and 1.17M,
-885 against 1,061 q/s. So width is 0.38M of the 1.44M-cycle gap to Qdrant's
-3.10M, and at 256 bits strawmANN still spends 1.5x fewer cycles. That 3.10M is
-the 0927 pair's, in production mode; the development profile's 3.13M cost it
-1% here, against about 7% of W3's cycles on sift1m. Past that, the leads are Qdrant's 4-byte-aligned vectors splitting
-cache lines and its longer server-side p50.
-
 **7. At 1% selectivity strawmANN offers only the exact answer.** On 0925,
 with trusted postings (202841c) and the ACORN-1 walk (15bddf7), `W12-sel10`
 reads 811 q/s and leads at matched recall up to 0.988 (1.44x to 1.78x; not
@@ -101,8 +88,9 @@ And one pass shared by 8 queries is 5.2x: the 2026-09-22 decision against a
 cross-request gather rested on sift1m, where concurrent scans shared lines
 through the cache, and tested a gather onto one worker. At 6 GB there is no
 sharing, and a gather split across the workers is the lever, which reopens
-that decision for d=1536. Capping concurrent exact scans below the worker
-count is the smaller one.
+that decision for d=1536. The smaller lever landed in 99d2776: scans of 4 GB
+and more wait for one of four slots, 10.98 q/s against ~10 (`decisions.md`,
+2026-09-29). The shared pass is what is left.
 
 **11. strawmANN's index build ran at the search workers' priority during
 `W11`.** On 0925 strawmANN's `W11` served 102 q/s against Qdrant's 216, with

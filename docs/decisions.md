@@ -1937,3 +1937,16 @@ two regimes; nothing between 0.86 and 6.1 GB has been measured. Batched exact
 requests keep their shared pass (`bruteForceRangeMulti`), which is the larger
 lever findings 10 names and is unaffected.
 
+## Qdrant's single-query cost at d=1536 is explained; findings 6 closed, 2026-09-29
+
+W3 reads 1.75x at d=1536 on the 0927 pair (0.84x on sift1m). Qdrant has no
+AVX-512 path for dense fp32 (878843e6e): its `dot_similarity_avx` uses `ymm`
+only, where strawmANN's `Dot(16,8)` uses `zmm`. Measured on 2026-09-26, pinned,
+on dbpedia's W3: strawmANN built for 256-bit vectors (`avx2`, `avx512-256`)
+spends 2.05M cycles and 1.72M instructions per query, and at 512 bits
+(`avx512-full`) 1.67M and 1.17M, 885 against 1,061 q/s. Width is therefore
+0.38M of the 1.44M-cycle gap to Qdrant's 3.10M (production mode; the
+development profile's 3.13M cost it 1%), and at equal width strawmANN still
+spends 1.5x fewer cycles. The remainder is on Qdrant's side (its 4-byte-aligned
+vectors splitting cache lines, its longer server-side p50), which is not
+strawmANN work, so the item is closed as explained rather than as fixed.
