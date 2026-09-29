@@ -385,6 +385,59 @@ class ReportHostTests(unittest.TestCase):
             # W3 is comparable and must not be marked.
             self.assertNotIn("W3  search, fp32, single query  \u2014 not compared", c["html"])
 
+    def test_parity_is_a_verdict_not_a_refusal(self):
+        """laion 0927 read "2 of 5 points not compared" on a sweep whose two
+        points the full table printed as parity, and hatched them as refused."""
+        from types import SimpleNamespace as NS
+        from unittest import mock
+
+        import pandas as pd
+        report = self.report
+        members = [f"W10-ef{e}" for e in (32, 64, 128)]
+        jr = {"W10-ef32": NS(ratio="parity", refusal="", notes=[]),
+              "W10-ef64": NS(ratio="1.20x", refusal="", notes=[]),
+              "W10-ef128": NS(ratio="-", refusal="recall unequal", notes=["recall unequal"])}
+        df = pd.DataFrame([{"id": w, "engine": e, "qps": 1000.0}
+                           for w in members for e in ("a", "b")])
+        with mock.patch.object(report, "short_notes", lambda j: (["recall unequal"], False)):
+            html, _ = report._sweep_row("W10", members, "a", "b", df, jr, {}, None)
+        self.assertIn("1 of 3 points not compared", html)
+        self.assertIn("1 of 3 points at parity", html)
+        self.assertIn("ef=32 parity", html)
+        # All at parity: the cell says so rather than a bare dash.
+        allp = {w: NS(ratio="parity", refusal="", notes=[]) for w in members}
+        html, _ = report._sweep_row("W10", members, "a", "b", df, allp, {}, None)
+        self.assertIn(">parity</td>", html)
+        self.assertNotIn("not compared", html)
+        # And the charts do not hatch a parity row.
+        charts = importlib.import_module("report_charts")
+        runs = [NS(label="a", by_id=dict), NS(label="b", by_id=dict)]
+        rows = [NS(id="W4", ratio="parity", refusal="", notes=[]),
+                NS(id="W11", ratio="-", refusal="search-during-write", notes=[])]
+        with mock.patch.object(charts.compare, "joined", lambda *a, **k: rows):
+            self.assertEqual(set(charts.refused_ids(runs)), {"W11"})
+
+    def test_a_folded_matched_count_reads_as_its_range(self):
+        """The folded page quoted pass 1's 19,941 matched points for three
+        builds whose counts were 19,941 to 20,193."""
+        charts = importlib.import_module("report_charts")
+        self.assertEqual(charts.matched_count({"n_matching": 19941,
+                                               "n_matching_range": [19941, 20193], "reps": 3}),
+                         "19,941 to 20,193 across 3 builds")
+        self.assertEqual(charts.matched_count({"n_matching": 19941}), "19,941")
+        self.assertIsNone(charts.matched_count({}))
+
+    def test_unreachable_nodes_are_counted_against_their_own_graph(self):
+        """sift1m 0929 read "0 of 1,100,472", the W11 graph's size, for builds
+        of 1,000,000."""
+        from types import SimpleNamespace as NS
+        run = NS(label="sm", meta={"graph_builds": [
+            {"nodes": 1_000_000, "unreachable": 0, "in_degree_zero": 0},
+            {"nodes": 1_000_000, "unreachable": 2, "in_degree_zero": 3},
+            {"nodes": 1_100_472, "unreachable": 0, "in_degree_zero": 0}]})
+        note = self.report._graph_quality_note([run])
+        self.assertIn("sm 0 to 2 of 1,000,000, in-degree zero 3 and 0 of 1,100,472", note)
+
     def test_every_series_trace_carries_the_theme_tag(self):
         """`THEME_JS` re-colours by this tag, so a trace whose colour means the
         engine must carry one — and one whose colour means something else must
@@ -1068,11 +1121,14 @@ class ReportHostTests(unittest.TestCase):
             msg = report.open_loop_mismatch(runs)
             self.assertIn("W4-sat50", msg)
             self.assertIn("--rps-reference", report.latency_table(runs))
+            # Nor does the summary rank them: its tile marked one `better`.
+            self.assertNotIn("p99 latency at", report.build(runs, "t"))
             # One pinned reference: same rate on both, and no refusal.
             report, runs, _df = self._pair(Path(tmp), [arm(7489, 7489, "pinned")],
                                           [arm(7489, 7489, "pinned")])
             self.assertEqual(report.open_loop_mismatch(runs), "")
             self.assertNotIn("Not compared", report.latency_table(runs))
+            self.assertIn("p99 latency at 50% load", report.build(runs, "t"))
             # Same rate reached without pinning is still not a refusal: the
             # test is the offered load, not the bookkeeping.
             report, runs, _df = self._pair(Path(tmp), [arm(9000, 9000, "own")],

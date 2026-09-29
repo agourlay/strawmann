@@ -526,19 +526,29 @@ def ingest_run(db, label: str, root: Path) -> int:
             print(f"  run the differ with --json bench/results/{label}/conformance.json to "
                   "produce the green row these need", file=sys.stderr)
         without = [(rid, coll) for rid, coll, why in refused if "without recall" in why]
-        if without:
+        # Split by the row's own `recall_joinable`: a row that mutates its
+        # collection can never have a sweep, and naming it among the rows whose
+        # sweep is "not on disk" sent readers of three nights looking for a
+        # file that exists (bench2's sweep is on disk; W11 wrote over bench2).
+        joinable = {r["id"]: r.get("recall_joinable", True) for r in rows}
+        by_design = [(rid, coll) for rid, coll in without if not joinable.get(rid, True)]
+        missing = [(rid, coll) for rid, coll in without if joinable.get(rid, True)]
+        if by_design:
+            print("  refused by design: "
+                  + ", ".join(f"{rid} on {coll or '?'}" for rid, coll in by_design)
+                  + " mutates the collection it searches, so no sweep can speak "
+                  "for it.", file=sys.stderr)
+        if missing:
             # The hint used to send the operator to sweep a collection that
             # W11 had just mutated, or W12's that nothing swept. `bench12` is
-            # swept per grade since 2026-09-08, so W12 is no longer in the
-            # by-design half of this sentence.
+            # swept per grade since 2026-09-08.
             print("  a refused search row needs a recall sweep of the collection it "
                   f"searched (bench/harness/recall.py {label}, "
                   "recall.<dataset>.<collection>.json); none is on disk for "
-                  + ", ".join(f"{rid} on {coll or '?'}" for rid, coll in without)
-                  + ". A row that mutates its collection (W11) cannot have one "
-                  "and stays refused by design; a filtered row needs the sweep "
-                  "of its own grade (recall.<dataset>.bench12.<grade>.json), "
-                  "which `--filtered-base-n` is required for.", file=sys.stderr)
+                  + ", ".join(f"{rid} on {coll or '?'}" for rid, coll in missing)
+                  + ". A filtered row needs the sweep of its own grade "
+                  "(recall.<dataset>.bench12.<grade>.json), which "
+                  "`--filtered-base-n` is required for.", file=sys.stderr)
     return 0 if accepted or not rows else 1
 
 

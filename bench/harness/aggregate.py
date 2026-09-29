@@ -46,6 +46,7 @@ from pathlib import Path
 
 import perfstat
 
+import bfb_output
 import procstat
 from regression import MIXED_STAMP, stamp_hash_of
 from workloads import Gate
@@ -251,6 +252,13 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
                              f"passes, so no median is published for it")
                 continue
             merged[key] = _median(vals)
+        # A flag *about* a folded number is re-derived from it, by the rule
+        # that set it: h-and-m 0929's Qdrant W0-upload kept pass 1's `floored`
+        # (3.01 s) beside a folded 4.01 s, and the report daggered a time that
+        # was not at bfb's polling floor.
+        if "time_to_green_floored" in merged:
+            wait = merged.get("index_wait_s")
+            merged["time_to_green_floored"] = bfb_output.time_to_green_floored(wait)
         for key in sorted(numeric & CONFIG_NUMERIC):
             seen = {v for v in (r.get(key) for r in got) if v is not None}
             if len(seen) > 1:
@@ -380,6 +388,13 @@ def fold_recall(dest: Path, reps: list[str], notes: list[str]) -> None:
                 vals = [g.get(key) for g in group]
                 if any(isinstance(v, (int, float)) for v in vals):
                     pt[key] = _median(vals)
+            # The matched-point count differs per build (bfb draws the keyword
+            # payloads unseeded), so a folded sweep carries the range, not pass
+            # 1's count quoted as if it were the three.
+            counts = sorted({g["n_matching"] for g in group
+                             if isinstance(g.get("n_matching"), int)})
+            if len(counts) > 1:
+                pt["n_matching_range"] = [counts[0], counts[-1]]
             los = [g.get("recall_at_10_ci95_low") for g in group]
             his = [g.get("recall_at_10_ci95_high") for g in group]
             los = [v for v in los if isinstance(v, (int, float))]

@@ -1990,7 +1990,10 @@ the row licenses no claim (`ConformanceRow::build_identity_known`)."
     }
 
     println!();
-    println!("conformance tier reached: {:?}", row.tier_reached());
+    println!(
+        "conformance tier reached: {}",
+        differ::Tier::reached_label(row.tier_reached())
+    );
     println!("conformance hash: {:016x}", row.hash());
     if row.licenses_performance_claim() {
         println!("§8: LICENSES single-engine performance rows (kernels, cost model, ISA");

@@ -536,15 +536,30 @@ def required_capacity() -> int:
     """
     return max(upload_n() + w11_n() + w11_steady_n(), w12_n())
 
-def strawmann_start_requirements(comm: str, wanted: set[str]) -> list[str]:
+def _cmdline_int(cmdline: str | None, flag: str) -> int | None:
+    """The integer after `flag` in an engine's command line, or None."""
+    words = (cmdline or "").split()
+    for i, w in enumerate(words[:-1]):
+        if w == flag and words[i + 1].isdigit():
+            return int(words[i + 1])
+    return None
+
+
+def strawmann_start_requirements(comm: str, wanted: set[str],
+                                 cmdline: str | None = None) -> list[str]:
     """What strawmANN must have been started with for the rows about to run.
 
     Printed on every invocation until 0925, including Qdrant's nine and the
     ones that ran neither W4 nor W11, and with a sum that left W11-steady out
-    of a total that included it.
+    of a total that included it. Given the engine's command line it checks
+    rather than advises: laion 0928 printed "must be started with --capacity
+    125000" six times beside an engine started with exactly that.
     """
     if not comm.startswith("strawmann"):
         return []
+    conns = _cmdline_int(cmdline, "--connections")
+    io_threads = _cmdline_int(cmdline, "--io-threads") or 1
+    capacity = _cmdline_int(cmdline, "--capacity")
     runs = lambda pred: not wanted or any(pred(r) for r in wanted)
     out = []
     # The socket demand, stated before the run rather than discovered as a
@@ -553,9 +568,16 @@ def strawmann_start_requirements(comm: str, wanted: set[str]) -> list[str]:
     # preface, and the client cannot tell that from an engine fault.
     if runs(lambda r: r == "W4" or r.startswith("W4-")):
         want_sockets = 16 * W4_CONNS
-        out.append(f"  -> W4 will open ~{want_sockets} sockets (-t 16 -c {W4_CONNS}). "
-                   f"strawmann must be started with io_threads x connections >= "
-                   f"{want_sockets}, e.g. --connections {want_sockets}")
+        if conns is not None:
+            have = io_threads * conns
+            out.append(f"  ok  io_threads x connections = {have} covers W4's ~{want_sockets} sockets"
+                       if have >= want_sockets else
+                       f"  !! io_threads x connections = {have}, under W4's ~{want_sockets} "
+                       f"sockets: restart strawmann with --connections {want_sockets}")
+        else:
+            out.append(f"  -> W4 will open ~{want_sockets} sockets (-t 16 -c {W4_CONNS}). "
+                       f"strawmann must be started with io_threads x connections >= "
+                       f"{want_sockets}, e.g. --connections {want_sockets}")
     # Name the collection that actually binds, not one of the two. The
     # message used to explain the requirement with W11's arithmetic
     # regardless, so at a smoke scale it printed a correct number beside a
@@ -566,9 +588,15 @@ def strawmann_start_requirements(comm: str, wanted: set[str]) -> list[str]:
                f"W2's {upload_n():,} in bench2"
                if upload_n() + w11_n() + w11_steady_n() >= w12_n()
                else f"W12 loads {w12_n():,} into bench12")
-        out.append(f"  -> {why}, so the largest single collection reaches {need:,}. "
-                   f"strawmann must be started with --capacity {need} or that row "
-                   f"fails with RESOURCE_EXHAUSTED")
+        if capacity is not None:
+            out.append(f"  ok  --capacity {capacity} covers {need:,} ({why})"
+                       if capacity >= need else
+                       f"  !! --capacity {capacity}, under the {need:,} needed ({why}): "
+                       f"that row fails with RESOURCE_EXHAUSTED")
+        else:
+            out.append(f"  -> {why}, so the largest single collection reaches {need:,}. "
+                       f"strawmann must be started with --capacity {need} or that row "
+                       f"fails with RESOURCE_EXHAUSTED")
     return out
 
 
@@ -2929,7 +2957,8 @@ def main(argv: list[str]) -> int:
             else:
                 print("  -> storage directory unknown, reported as such rather "
                       "than as zero. Pass --storage <path> or set STORAGE_DIR")
-        for line in strawmann_start_requirements(probe.comm, wanted):
+        for line in strawmann_start_requirements(probe.comm, wanted,
+                                                 provenance.cmdline(probe.pid)):
             print(line)
 
     if perf_set:

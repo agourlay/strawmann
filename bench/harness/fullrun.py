@@ -557,7 +557,10 @@ def estimated_minutes(dataset: str, reps: int) -> tuple[float, str] | None:
             continue
 
         def secs(r):
-            return r.get("wall_s") or r.get("seconds") or 0
+            # A mixed row lasts as long as its writer, not its search: laion
+            # 0928's W11 searched for 10.9 s beside a 66.7 s append, and the
+            # estimate, priced on the search, ended 11 minutes early.
+            return max(r.get("wall_s") or r.get("seconds") or 0, r.get("background_s") or 0)
 
         row_s = sum(secs(r) for r in rows)
         stamped = sorted((r for r in rows if r.get("when")), key=lambda r: r["when"])
@@ -825,6 +828,21 @@ def record_graph_quality(label: str) -> None:
         f", {len(seeds)} DIFFERENT SEEDS" if seeds else ", seed not recorded")
     print(f"  graph: {len(builds)} build(s) published, worst "
           f"{worst['unreachable']:,} of {worst['nodes']:,} unreachable{seed}", flush=True)
+
+
+def finish_conformance(p: subprocess.Popen | None) -> None:
+    """Stop both engines after the differ and free their storage, as each
+    arm's finish does.
+
+    The differ's arenas were left behind: sift1m 0929 ended with its
+    conformance collections still on disk, for the next run's arm-start wipe
+    to find.
+    """
+    stop_strawmann(p)
+    if workloads.Placement.pinned != PLACEMENT:
+        wipe_strawmann_storage()
+    stop_qdrant()
+    wipe_qdrant_storage()
 
 
 def finish_strawmann_arm(p: subprocess.Popen | None, label: str) -> None:
@@ -2379,6 +2397,12 @@ def main(argv: list[str]) -> int:
         print(f"open-loop arms pinned to {RPS_REFERENCE:,.0f} qps for both engines "
               f"(§4's fractions of one reference, so the two arms are the same "
               f"offered load and not merely the same fraction of capacity)")
+    elif asked:
+        # Asked for by name: said once here, as the `auto` fallback says it,
+        # rather than left for the report to discover.
+        print("open-loop arms at each engine's own saturation (--rps-reference none): "
+              "the report will refuse to read their latency percentiles across the "
+              "two columns")
 
     for f in paths.dataset(DATASET):
         if not f.exists():
@@ -2559,8 +2583,7 @@ def main(argv: list[str]) -> int:
                                       labels, args.client_cpus,
                                       build_identity(version))
         finally:
-            stop_strawmann(p)
-            stop_qdrant()
+            finish_conformance(p)
 
     # The invariant, checked against what the engines said rather than what
     # they were asked. A run that drifted off one residency has not produced a

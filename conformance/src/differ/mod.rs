@@ -100,6 +100,12 @@ impl Tier {
             Tier::T4QuantFidelity => "T4 quantization fidelity",
         }
     }
+
+    /// A reached tier as the report and `conformance.json` spell it, `none`
+    /// when nothing was reached. The console printed `Some(T4QuantFidelity)`.
+    pub fn reached_label(reached: Option<Tier>) -> &'static str {
+        reached.map_or("none", Tier::as_str)
+    }
 }
 
 /// §8.1's claims, stated before any tier runs.
@@ -1344,6 +1350,14 @@ pub fn accept_performance_row(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reached_tier_prints_as_its_label_not_its_debug_form() {
+        assert_eq!(
+            Tier::reached_label(Some(Tier::T4QuantFidelity)),
+            "T4 quantization fidelity"
+        );
+        assert_eq!(Tier::reached_label(None), "none");
+    }
 
     #[test]
     fn identity_needs_all_three_builds() {

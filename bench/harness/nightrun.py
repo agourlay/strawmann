@@ -118,7 +118,7 @@ def qdrant_provenance(binary: Path) -> str:
     """
     import provenance
     commit = (git(["rev-parse", "--short", "HEAD"], binary.parent)
-              or "unknown (binary outside a git tree)")
+              or "not in a git tree; fullrun reads it from the server banner into run.json")
     predates = (" (BINARY PREDATES THIS COMMIT; sha256 is the identity that holds)"
                 if provenance.qdrant_binary_predates_head(binary) else "")
     digest = (provenance.file_digest(binary) or "?")[:16]
@@ -134,6 +134,19 @@ def night_dir(root: Path, date: str, dataset: str) -> Path:
     date-only name.
     """
     return root / "bench/results" / f"night-{date.replace('-', '')}-{dataset}"
+
+
+def qdrant_build_recorded(meta_path: Path) -> str | None:
+    """The Qdrant build the run recorded, for the line the pre-run one could not
+    finish: before the server runs, a binary outside a git tree has no commit to
+    read, and `run.json` then carries the one its banner named."""
+    try:
+        q = json.loads(meta_path.read_text()).get("qdrant") or {}
+    except (OSError, ValueError):
+        return None
+    if not q.get("commit"):
+        return None
+    return f"qdrant build {q['commit']} ({q.get('commit_source') or 'checkout'}, run.json)"
 
 
 def newest_report(results: Path, dataset: str, sm: str, qd: str) -> Path | None:
@@ -288,7 +301,10 @@ def main(argv: list[str], root: Path = ROOT) -> int:
     # regime: 0925's W4 was Qdrant's development profile, 4 search threads,
     # and "90% of saturation" off it is ~72% of a production Qdrant.
     rps_override = os.environ.get("RPS_REFERENCE")
-    if rps_override:
+    if rps_override == "none":
+        log("rps reference: none, from $RPS_REFERENCE: each engine is offered a fraction "
+            "of its own saturation, and the report refuses the cross-engine latency read")
+    elif rps_override:
         log(f"rps reference: {rps_override} q/s, from $RPS_REFERENCE")
     else:
         log(f"rps reference: `auto`, from {' / '.join(pair)}" if pair else
@@ -326,6 +342,8 @@ def main(argv: list[str], root: Path = ROOT) -> int:
                             env=child_env()).returncode
     log(f"fullrun.py exited {rc} (output in {out})")
     log(f"measurement finished, rc={rc}, {int((time.monotonic() - start) // 60)} min")
+    if (built := qdrant_build_recorded(root / "bench/results" / qd / "run.json")):
+        log(built)
 
     keep_report(root, night, args.dataset, sm, qd, log)
     analyse(root, night, args.dataset, sm, qd, pair[0] if pair else None, log)

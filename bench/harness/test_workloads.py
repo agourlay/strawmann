@@ -564,6 +564,16 @@ class WorkloadTests(unittest.TestCase):
         only_w11 = w.strawmann_start_requirements("strawmann", {"W11-steady"})
         self.assertEqual(len(only_w11), 1)
         self.assertIn("--capacity", only_w11[0])
+        # Given the engine's command line it checks instead of advising.
+        need = w.required_capacity()
+        met = w.strawmann_start_requirements(
+            "strawmann", {"W4", "W11"},
+            f"strawmann --port 6334 --capacity {need} --connections 64 --io-threads 1")
+        self.assertTrue(all(line.startswith("  ok  ") for line in met), met)
+        short = w.strawmann_start_requirements(
+            "strawmann", {"W4", "W11"},
+            f"strawmann --capacity {need - 1} --connections 4 --io-threads 1")
+        self.assertTrue(all(line.startswith("  !! ") for line in short), short)
 
     def test_the_throttle_never_ends_the_append_before_its_span(self):
         """0925 resolved W11 at 431 s and ran it at 396 s: `-T` was rounded
@@ -2376,6 +2386,14 @@ class RunEstimateTests(unittest.TestCase):
         self.assertAlmostEqual(f.estimated_minutes("sift1m", 3)[0],
                                (3 * 2 * 870) / 60, places=2)
 
+    def test_a_mixed_row_is_priced_at_its_writer_not_its_search(self):
+        """laion 0928's W11 searched 10.9 s beside a 66.7 s append."""
+        rows = self._rows(4, 60, 30)
+        rows[-1].update(wall_s=10, background_s=60)
+        self._label("a", "sift1m", rows)
+        # Three gaps of 90 s, then the last row at its writer's 60 s, not 10.
+        self.assertAlmostEqual(self.f.estimated_minutes("sift1m", 1)[0], 2 * 330 / 60, places=2)
+
     def test_another_corpus_is_not_borrowed(self):
         """A dbpedia estimate from a sift run would be off by 4x.
 
@@ -2961,8 +2979,17 @@ class NightrunTests(unittest.TestCase):
         (self.root / "cache").mkdir()
         binary = self.root / "cache/qdrant"
         binary.write_bytes(b"\x7fELF")
-        self.assertIn("commit=unknown (binary outside a git tree)",
+        self.assertIn("commit=not in a git tree; fullrun reads it from the server banner",
                       self.n.qdrant_provenance(binary))
+        # And after the run, the build the banner named, from run.json.
+        meta = self.root / "run.json"
+        meta.write_text(json.dumps({"qdrant": {"commit": "878843e6",
+                                                "commit_source": "server banner"}}))
+        self.assertEqual(self.n.qdrant_build_recorded(meta),
+                         "qdrant build 878843e6 (server banner, run.json)")
+        meta.write_text(json.dumps({"qdrant": {}}))
+        self.assertIsNone(self.n.qdrant_build_recorded(meta))
+        self.assertIsNone(self.n.qdrant_build_recorded(self.root / "absent.json"))
 
     def test_a_whole_night_end_to_end_with_a_stub_fullrun(self):
         """Every step once, in order, from a temp tree: provenance, the one
@@ -3018,6 +3045,13 @@ class NightrunTests(unittest.TestCase):
         night = results / "night-20260926-sift1m"
         self.assertIn("--rps-reference 3230", (night / "fullrun.out").read_text())
         self.assertIn("rps reference: 3230 q/s, from $RPS_REFERENCE", (night / "night.log").read_text())
+        # `none` is said as what it means, not as a rate.
+        with mock.patch.dict(os.environ, {**env, "RPS_REFERENCE": "none"}), \
+                mock.patch.object(fullrun, "previous_pair", lambda labels: None):
+            self.assertEqual(self.n.main(["2026-09-27", "sift1m"], root=self.root), 0)
+        log = (self.n.night_dir(self.root, "2026-09-27", "sift1m") / "night.log").read_text()
+        self.assertIn("rps reference: none, from $RPS_REFERENCE: each engine", log)
+        self.assertNotIn("none q/s", log)
 
 
 class OversamplingPolicyTests(unittest.TestCase):
@@ -3435,6 +3469,18 @@ class ArmStorageTests(unittest.TestCase):
             fullrun.finish_strawmann_arm(None, "sm-x")
             fullrun.finish_qdrant_arm()
         self.assertEqual(calls, ["stop sm", "graphs", "wipe sm", "stop qd", "wipe qd"])
+
+    def test_the_differ_frees_both_engines_storage_too(self):
+        """sift1m 0929 left its conformance arenas on disk after the differ."""
+        import fullrun
+        calls = []
+        with mock.patch.object(fullrun, "stop_strawmann", lambda p: calls.append("stop sm")), \
+                mock.patch.object(fullrun, "wipe_strawmann_storage", lambda: calls.append("wipe sm")), \
+                mock.patch.object(fullrun, "stop_qdrant", lambda: calls.append("stop qd")), \
+                mock.patch.object(fullrun, "wipe_qdrant_storage", lambda: calls.append("wipe qd") or True), \
+                mock.patch.object(fullrun, "PLACEMENT", fullrun.workloads.Placement.cached):
+            fullrun.finish_conformance(None)
+        self.assertEqual(calls, ["stop sm", "wipe sm", "stop qd", "wipe qd"])
 
 
 class NativeQdrantLaunchTests(unittest.TestCase):

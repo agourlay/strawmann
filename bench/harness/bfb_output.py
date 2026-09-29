@@ -16,6 +16,13 @@ from pathlib import Path
 WAIT_INDEX_FLOOR_S = 3.0
 
 
+def time_to_green_floored(wait_s: float | None) -> bool:
+    """Whether a time-to-green sits at bfb's polling floor, so it bounds the
+    build rather than measures it. The one statement of the rule: the fold
+    re-derives the flag from a folded time with it."""
+    return isinstance(wait_s, (int, float)) and wait_s < WAIT_INDEX_FLOOR_S + 0.5
+
+
 #: The percentiles §8.9's row shape requires, plus the two tails §7.4 argues
 #: about. bfb's own JSON reports min/avg/p50/p95/max and no p99, but it also
 #: writes every request time, so the tail is recoverable rather than lost.
@@ -80,7 +87,7 @@ def phases_of(results: Path, wid: str) -> dict:
         v = res["index"].get("wait_secs")
         if isinstance(v, (int, float)):
             out["index_wait_s"] = round(float(v), 3)
-            out["time_to_green_floored"] = float(v) < WAIT_INDEX_FLOOR_S + 0.5
+            out["time_to_green_floored"] = time_to_green_floored(float(v))
     return out
 
 

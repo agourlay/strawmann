@@ -128,6 +128,16 @@ def row_label(wid: str, extra: str = "") -> str:
     return head + desc + extra
 
 
+def matched_count(pt: dict) -> str | None:
+    """A sweep point's matched-point count, as the range across its builds when
+    a folded point carries one (`aggregate.fold_recall`)."""
+    rng = pt.get("n_matching_range")
+    if rng and rng[0] != rng[1]:
+        return f"{rng[0]:,} to {rng[1]:,} across {pt.get('reps') or 'its'} builds"
+    n = pt.get("n_matching")
+    return f"{n:,}" if isinstance(n, int) else None
+
+
 def refused_ids(runs: list[Run]) -> dict[str, str]:
     """The rows `compare.py` declines to compare, and why, keyed by row id.
 
@@ -142,7 +152,9 @@ def refused_ids(runs: list[Run]) -> dict[str, str]:
     out = {}
     for jr in compare.joined(runs[0].label, runs[1].label,
                              runs[0].by_id(), runs[1].by_id()):
-        if ratio_value(jr.ratio) is None:
+        # Parity is a comparison with a verdict, not a refusal: hatching it
+        # drew rows the table compares as rows it declines to.
+        if ratio_value(jr.ratio) is None and jr.ratio != "parity":
             reason = jr.refusal or "; ".join(n.strip("[]") for n in jr.notes) or "not comparable"
             out[jr.id] = reason
     return out
@@ -1070,18 +1082,19 @@ def filtered_matched_recall_table(runs: list[Run]) -> str:
     # Each engine's own count: bfb draws the keyword payloads unseeded at
     # every upload, so the two matching sets differ, and one number was one
     # engine's first pass.
-    def n_of(run: Run, p: list):
-        return ((p[0] or {}).get("n_matching")
-                or (recall_mod.load_recall_json(run.label,
-                    (run.meta.get("dataset") or {}).get("name") or "sift1m",
-                    "bench12", grade=grade).get("points") or [{}])[0].get("n_matching"))
+    def n_of(run: Run, p: list) -> str | None:
+        pt = (p[0] or {}) if (p[0] or {}).get("n_matching") else (
+            (recall_mod.load_recall_json(run.label,
+             (run.meta.get("dataset") or {}).get("name") or "sift1m",
+             "bench12", grade=grade).get("points") or [{}])[0])
+        return matched_count(pt)
     na, nb = n_of(a, pts[0]), n_of(b, pts[1])
     if na and nb and na != nb:
-        matched = (f" over the points the condition matched, {na:,} in {a.label} "
-                   f"and {nb:,} in {b.label} (bfb draws the keyword payloads "
+        matched = (f" over the points the condition matched, {na} in {a.label} "
+                   f"and {nb} in {b.label} (bfb draws the keyword payloads "
                    f"unseeded at each upload)")
     else:
-        matched = f" over the {na or nb:,} points the condition matched" if na or nb else ""
+        matched = f" over the {na or nb} points the condition matched" if na or nb else ""
     return ('<h3 style="margin-top:28px">At matched recall, filtered to 10%</h3>'
             '<p class="note">The same reading under a keyword filter'
             + html.escape(matched) +

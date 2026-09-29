@@ -420,6 +420,44 @@ class NoiseTests(unittest.TestCase):
             # And the median is still published either way.
             self.assertEqual(rows["W3"]["qps"], 3001.0)
 
+    def test_the_floored_flag_follows_the_folded_time(self):
+        """h-and-m 0929's Qdrant W0-upload kept pass 1's `floored` (3.01 s)
+        beside a folded 4.01 s, and the report daggered it."""
+        import importlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _reload(root)
+            agg = importlib.reload(importlib.import_module("aggregate"))
+            for i, (wait, floored) in enumerate(((3.01, True), (4.01, False), (4.02, False)),
+                                                start=1):
+                self._rep(root, f"lbl-rep{i}", [_row("W0-upload", 100.0, index_wait_s=wait,
+                                                     time_to_green_floored=floored)])
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(agg.main(["aggregate.py", "lbl",
+                                           "lbl-rep1", "lbl-rep2", "lbl-rep3"]), 0)
+            row = json.loads((root / "bench/results/lbl/rows.json").read_text())[0]
+            self.assertEqual(row["index_wait_s"], 4.01)
+            self.assertFalse(row["time_to_green_floored"])
+
+    def test_a_folded_sweep_carries_the_matched_count_range(self):
+        import importlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _reload(root)
+            agg = importlib.reload(importlib.import_module("aggregate"))
+            reps = []
+            for i, n in enumerate((19941, 20193, 20050), start=1):
+                d = root / f"bench/results/lbl-rep{i}"
+                d.mkdir(parents=True)
+                (d / "recall.sift1m.bench12.sel10.json").write_text(json.dumps(
+                    {"points": [{"ef": 128, "recall_at_10": 0.99, "n_matching": n}]}))
+                reps.append(f"lbl-rep{i}")
+            dest = root / "bench/results/lbl"
+            dest.mkdir(parents=True)
+            agg.fold_recall(dest, reps, [])
+            pt = json.loads((dest / "recall.sift1m.bench12.sel10.json").read_text())["points"][0]
+            self.assertEqual(pt["n_matching_range"], [19941, 20193])
+
     def test_a_folded_floor_says_mixed_when_the_passes_disagree(self):
         import importlib
         with tempfile.TemporaryDirectory() as tmp:
@@ -857,8 +895,8 @@ class ResultsSinkTests(unittest.TestCase):
                 "strawmann": {"commit": "abcdef123456", "dirty": True}}
         d = self._label("arm", meta, self.CONF)
         (d / "rows.json").write_text(json.dumps([
-            _row("W11-steady", 3000.0, collection="bench2"),
-            _row("W11", 1200.0, collection="bench2"),
+            _row("W11-steady", 3000.0, collection="bench2", recall_joinable=False),
+            _row("W11", 1200.0, collection="bench2", recall_joinable=False),
             _row("W12", 26.0, collection="bench12")]))
         db = res.connect(":memory:")
         err = io.StringIO()
@@ -869,7 +907,11 @@ class ResultsSinkTests(unittest.TestCase):
             self.assertIn(f"refused {wid}: {wid}: QPS given without recall@10", out)
         self.assertIn("W11 on bench2", out)
         self.assertIn("W12 on bench12", out)
-        self.assertIn("refused by design", out)
+        self.assertIn("refused by design: W11-steady on bench2, W11 on bench2", out)
+        # A mutating row is not among the ones whose sweep is "not on disk":
+        # three nights named bench2's, which was there all along.
+        self.assertIn("none is on disk for W12 on bench12.", out)
+        self.assertNotIn("none is on disk for W11", out)
 
     def test_ingest_binds_the_row_to_the_conformance_build(self):
         import contextlib

@@ -387,10 +387,17 @@ def _sweep_row(fam: str, members: list[str], a: str, b: str | None, df: pd.DataF
     rescore, notes = False, []
     if b:
         cells.append(_qps_range(rows_of(b)))
-        got, tips, refused, reasons = [], [], 0, []
+        got, tips, refused, parity, reasons = [], [], 0, 0, []
         for w, ef in zip(members, efs, strict=True):
             jr = joined_rows.get(w)
             v = ratio_value(jr.ratio) if jr is not None else None
+            # Parity is a verdict (measured, and inside the noise band), not a
+            # refusal: laion 0927 read "2 of 5 points not compared" beside two
+            # sweep rows the full table printed as parity.
+            if v is None and jr is not None and jr.ratio == "parity":
+                parity += 1
+                tips.append(f"ef={ef} parity")
+                continue
             if v is None:
                 refused += 1
                 tips.append(f"ef={ef} not compared")
@@ -411,8 +418,14 @@ def _sweep_row(fam: str, members: list[str], a: str, b: str | None, df: pd.DataF
             klass = ("up" if lo >= 1 else "down" if hi < 1 else "muted") if clear else "muted"
             cells.append(f'<td class="num {klass}" title="{html.escape("; ".join(tips))}">'
                          f'{text}</td>')
+        elif parity:
+            cells.append(f'<td class="num muted" title="{html.escape("; ".join(tips))}">'
+                         'parity</td>')
         else:
             cells.append('<td class="num muted">-</td>')
+        if parity and got:
+            notes.append(f'<span class="muted">{parity} of {len(members)} points at '
+                         f'parity</span>')
         if refused:
             notes.append(f'<span class="caveat">{refused} of {len(members)} points not '
                          f'compared</span>')
@@ -1626,14 +1639,25 @@ def _graph_quality_note(have: list[Run]) -> str:
     out = []
     for r in have:
         builds = (r.meta or {}).get("graph_builds") or []
-        vals = [b.get("unreachable") for b in builds
-                if isinstance(b.get("unreachable"), int)]
-        nodes = [b.get("nodes") for b in builds if isinstance(b.get("nodes"), int)]
-        if not vals or not nodes:
+        # Per graph size. The count read "0 of 1,100,472" on sift1m, the W11
+        # graph's size, as the denominator of builds of 1,000,000: each build
+        # is counted against its own nodes, and the sizes are named apart.
+        by_size: dict[int, list[dict]] = {}
+        for b in builds:
+            if isinstance(b.get("unreachable"), int) and isinstance(b.get("nodes"), int):
+                by_size.setdefault(b["nodes"], []).append(b)
+        if not by_size:
             continue
-        span = (f"{min(vals):,}" if min(vals) == max(vals)
-                else f"{min(vals):,}–{max(vals):,}")
-        out.append(f"{r.label} {span} of {max(nodes):,}")
+        parts = []
+        for size, group in sorted(by_size.items()):
+            vals = [b["unreachable"] for b in group]
+            span = (f"{min(vals):,}" if min(vals) == max(vals)
+                    else f"{min(vals):,} to {max(vals):,}")
+            zero = [b["in_degree_zero"] for b in group
+                    if isinstance(b.get("in_degree_zero"), int)]
+            extra = (f", in-degree zero {max(zero):,}" if zero and max(zero) else "")
+            parts.append(f"{span} of {size:,}{extra}")
+        out.append(f"{r.label} " + " and ".join(parts))
     if not out:
         return ""
     return (f" Over the same builds the engine reported unreachable nodes: "
@@ -2002,11 +2026,13 @@ def kpis(runs: list[Run], df: pd.DataFrame, summ: dict) -> list[dict]:
         if top is not None:
             ps = [((run.by_id().get(top["id"]) or {}).get("latency") or {}).get("client_p99_us")
                   for run in runs]
-            if all(p is not None for p in ps):
-                whose = "each engine's own" if open_loop_mismatch(runs) else "measured"
+            # Two different offered loads: the Latency section refuses to read
+            # these side by side, and a tile marking one `better` above the fold
+            # read them anyway (laion 0927, h-and-m 0929).
+            if all(p is not None for p in ps) and not open_loop_mismatch(runs):
                 out.append(_kpi(f'p99 latency at {top["rps_fraction"]:.0%} load',
                                 [_us(p) for p in ps],
-                                f'{top["id"]}, open loop, {whose} saturation', ps))
+                                f'{top["id"]}, open loop, one offered rate', ps))
     totals = []
     for run in runs:
         by = run.by_id()
