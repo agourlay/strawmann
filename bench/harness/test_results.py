@@ -458,6 +458,28 @@ class NoiseTests(unittest.TestCase):
             pt = json.loads((dest / "recall.sift1m.bench12.sel10.json").read_text())["points"][0]
             self.assertEqual(pt["n_matching_range"], [19941, 20193])
 
+    def test_a_drift_that_moved_with_major_faults_names_paging(self):
+        """dbpedia 0929's W11-steady drifted +24% beside major faults 182,555,
+        90,262 and 0, and the note named no cause."""
+        import importlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _reload(root)
+            agg = importlib.reload(importlib.import_module("aggregate"))
+            for i, (q, mf) in enumerate(((782.0, 182555), (956.0, 90262), (967.0, 0)), start=1):
+                self._rep(root, f"lbl-rep{i}", [_row("W11-steady", q, major_faults=mf),
+                                               _row("W3", 1000.0 * i, major_faults=0)])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                self.assertEqual(agg.main(["aggregate.py", "lbl",
+                                           "lbl-rep1", "lbl-rep2", "lbl-rep3"]), 0)
+            text = out.getvalue()
+            self.assertIn("major faults 182,555 to 0 across them: the engine was paging", text)
+            # A drift with no faults beside it names none.
+            self.assertNotIn("W3: qps moved +200% monotonically across the 3 passes; that "
+                             "spread is a trend, not noise, and a band built from it would "
+                             "call a real change parity (major", text)
+
     def test_a_folded_floor_says_mixed_when_the_passes_disagree(self):
         import importlib
         with tempfile.TemporaryDirectory() as tmp:

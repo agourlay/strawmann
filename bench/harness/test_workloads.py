@@ -3470,6 +3470,25 @@ class ArmStorageTests(unittest.TestCase):
             fullrun.finish_qdrant_arm()
         self.assertEqual(calls, ["stop sm", "graphs", "wipe sm", "stop qd", "wipe qd"])
 
+    def test_a_recall_sweep_that_paged_says_so(self):
+        """dbpedia 0929's k=100 sweep ran at 33.7 q/s with 182,555 major faults."""
+        import fullrun
+        self.assertEqual(fullrun.paging_warning("x", 10, 10, 5.0), "")
+        self.assertEqual(fullrun.paging_warning("x", None, 10, 5.0), "")
+        warn = fullrun.paging_warning("--collections bench2 --limit 100", 100, 182_655, 297.4)
+        self.assertIn("took 297 s with 182,555 major faults", warn)
+        self.assertTrue(warn.startswith("  !! recall sweep (--collections bench2 --limit 100)"))
+        # And `run_recall` asks around each sweep.
+        faults = iter([0, 0, 5, 90_005])
+        out = io.StringIO()
+        with mock.patch.object(fullrun, "engine_major_faults", lambda: next(faults)), \
+                mock.patch.object(fullrun.subprocess, "run",
+                                  lambda *a, **k: mock.Mock(returncode=0)), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(fullrun.run_recall("http://x", "lbl", "0-3"), 0)
+        self.assertEqual(out.getvalue().count("!! recall sweep"), 1)
+        self.assertIn("90,000 major faults", out.getvalue())
+
     def test_the_differ_frees_both_engines_storage_too(self):
         """sift1m 0929 left its conformance arenas on disk after the differ."""
         import fullrun

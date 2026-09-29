@@ -63,6 +63,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import paths
+import procstat
 import provenance
 import setup
 import workloads
@@ -1324,8 +1325,36 @@ def run_recall(uri: str, label: str, client_cpus: str) -> int:
         argv = ["taskset", "-c", client_cpus,
                 str(ROOT / "bench/harness/recall.py"), label, "--engine", uri, *extra]
         print(f"  {' '.join(argv)}", flush=True)
+        before, t0 = engine_major_faults(), time.monotonic()
         rc |= subprocess.run(argv, cwd=ROOT).returncode
+        if (warn := paging_warning(" ".join(extra) or "every collection", before,
+                                   engine_major_faults(), time.monotonic() - t0)):
+            print(warn, flush=True)
     return rc
+
+
+def engine_major_faults() -> int | None:
+    """The running engine's major-fault count, or None when it cannot be read."""
+    procs = procstat.engine_processes()
+    if len(procs) != 1:
+        return None
+    got = (procstat.sched_counters(procs[0][0]) or {}).get("major_faults")
+    return int(got) if isinstance(got, (int, float)) else None
+
+
+def paging_warning(what: str, before: int | None, after: int | None, secs: float) -> str:
+    """A recall sweep that paged the engine's arenas back in, said at the sweep.
+
+    dbpedia 0929's first k=100 sweep ran at 33.7 q/s beside 182,555 major
+    faults, and nothing said so there: the only trace was a drift note on a
+    later row, naming no cause. A sweep's recall is unaffected by paging, but
+    its time and the rows after it are, and they are read against it.
+    """
+    if before is None or after is None or after <= before:
+        return ""
+    return (f"  !! recall sweep ({what}) took {secs:.0f} s with {after - before:,} major "
+            f"faults: the engine was paging its arenas back in, and the rows after it "
+            f"may be measured on a collection that was not resident")
 
 
 def qdrant_target() -> str:

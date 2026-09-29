@@ -126,6 +126,22 @@ def _median(vals: list) -> float | None:
 DRIFT_MIN = float(os.environ.get("DRIFT_MIN", 0.10))
 
 
+def _paging_note(got: list[dict]) -> str:
+    """The cause, when a drifting row's major faults moved with it.
+
+    dbpedia 0929's W11-steady drifted +24% with major faults 182,555, then
+    90,262, then 0 beside it, and the drift line named no cause: the engine
+    was paging its arenas back in on the first passes, which is residency,
+    not the engine getting faster.
+    """
+    mf = [r.get("major_faults") for r in got]
+    if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in mf):
+        return ""
+    if _rep_drift(mf) is None:
+        return ""
+    return f" (major faults {mf[0]:,.0f} to {mf[-1]:,.0f} across them: the engine was paging)"
+
+
 def _rep_drift(vals: list) -> float | None:
     """Relative first-to-last change, when the passes moved one way only.
 
@@ -318,7 +334,8 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
             merged["rep_drift"] = drift
             notes.append(f"{wid}: qps moved {drift:+.0%} monotonically across the "
                          f"{n} passes; that spread is a trend, not noise, and a "
-                         f"band built from it would call a real change parity")
+                         f"band built from it would call a real change parity"
+                         + _paging_note(got))
         out.append(merged)
     return out, rsd, notes
 
