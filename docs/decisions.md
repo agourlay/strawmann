@@ -1916,3 +1916,24 @@ per miss, not a stall strawmANN could remove. W4's ratio is at equal `ef`,
 which §7.4 already says is not equal work; the equal-recall headline is the
 comparison that holds.
 
+## Exact scans of a collection past 4 GB run four at a time, decided 2026-09-29
+
+findings 10 measured W9 on dbpedia-openai-1m faster with four workers than
+seven (13.04 against 9.74 q/s): seven concurrent 6 GB scans get less from the
+bus than four. A process-wide cap on concurrent exact scans, swept through the
+server (W9, one run per cell):
+
+| dataset | bytes per scan | no cap (7) | cap 4 | cap 2 |
+|---|--:|--:|--:|--:|
+| sift1m | 0.5 GB | 191 | 141 | 102 |
+| dbpedia-100K | 0.6 GB | 145 | 131 | 91 |
+| h-and-m | 0.86 GB | 97 | 86 | 64 |
+| dbpedia-1m | 6.1 GB | ~10 | 10.98 | |
+
+At under a gigabyte the cap only costs (those scans still share lines through
+the cache); at 6.1 GB four at a time is ~10% faster at a sixth of the demand
+fills. So the cap applies from `exact_scan_large_bytes` (4 GB), between the
+two regimes; nothing between 0.86 and 6.1 GB has been measured. Batched exact
+requests keep their shared pass (`bruteForceRangeMulti`), which is the larger
+lever findings 10 names and is unaffected.
+

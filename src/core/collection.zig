@@ -2575,7 +2575,59 @@ pub fn searchFiltered(
             }
         },
     }
-    bruteForceRangeFiltered(coll, query, 0, @intCast(coll.id_space.count()), extra, out);
+    const total: u32 = @intCast(coll.id_space.count());
+    const capped = exactScanCapped(@as(usize, total) * coll.space.stride);
+    if (capped) acquireScanSlot();
+    defer if (capped) releaseScanSlot();
+    bruteForceRangeFiltered(coll, query, 0, total, extra, out);
+}
+
+/// How many exact scans of a very large collection may run at once,
+/// process-wide.
+///
+/// Concurrent scans of a collection far larger than the cache contend for
+/// the memory bus, and past some size fewer of them finish sooner: W9 on
+/// dbpedia-openai-1m (6.1 GB of fp32 per scan) read 10.98 q/s with four at
+/// a time against ~10 with all seven workers scanning, at a sixth of the
+/// demand fills (2026-09-29). Below it the cap only costs: at 0.5 to 0.9 GB
+/// (sift1m, dbpedia-100K, h-and-m) four at a time read 10 to 26% under seven,
+/// because those scans still share lines through the cache. So only scans
+/// past `exact_scan_large_bytes` wait for a slot; the threshold sits between
+/// the two measured regimes, and nothing between them has been measured.
+pub const exact_scan_cap: u32 = 4;
+/// The scan size from which `exact_scan_cap` applies.
+pub const exact_scan_large_bytes: usize = 4 << 30;
+var exact_scans_in_flight = std.atomic.Value(u32).init(0);
+
+/// Whether an exact scan of `bytes` of vectors waits for one of
+/// `exact_scan_cap` slots.
+pub fn exactScanCapped(bytes: usize) bool {
+    return bytes >= exact_scan_large_bytes;
+}
+
+fn acquireScanSlot() void {
+    while (true) {
+        const cur = exact_scans_in_flight.load(.acquire);
+        if (cur < exact_scan_cap and
+            exact_scans_in_flight.cmpxchgWeak(cur, cur + 1, .acq_rel, .acquire) == null) return;
+        // A scan of this size takes hundreds of milliseconds, so a 50 µs
+        // sleep costs nothing and a spin would take a core from the scans.
+        var ts = std.os.linux.timespec{ .sec = 0, .nsec = 50 * std.time.ns_per_us };
+        _ = std.os.linux.nanosleep(&ts, null);
+    }
+}
+
+fn releaseScanSlot() void {
+    _ = exact_scans_in_flight.fetchSub(1, .release);
+}
+
+test "only an exact scan past the cache-sized regime waits for a slot" {
+    // dbpedia-openai-1m's 6.1 GB scans are capped; sift1m's 0.5 GB and
+    // h-and-m's 0.86 GB are not, where a cap measured slower.
+    try testing.expect(exactScanCapped(990_000 * 1536 * 4));
+    try testing.expect(!exactScanCapped(1_000_000 * 128 * 4));
+    try testing.expect(!exactScanCapped(105_100 * 2048 * 4));
+    try testing.expect(!exactScanCapped(0));
 }
 
 pub fn notDeleted(ctx: *const anyopaque, node: u32) bool {
