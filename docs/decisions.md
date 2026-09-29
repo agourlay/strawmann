@@ -1781,6 +1781,18 @@ pure miss latency. Prefetching the fp32 rescore candidates the same way was
 tried and bought nothing (5,481 against 5,602), and is not kept. What remains
 of the gap is findings 56.
 
+How much of the row, swept on dbpedia-100K (d=1536) on 2026-09-29, one run
+per width then three at the ends: PQ (W8, `product-x16`, 384-byte codes)
+climbed with the width, 1,509 q/s at one line, 1,578 at two, 1,660 at four,
+and 1,718 (three runs: 1,724 / 1,710 / 1,720, against one line's
+1,509 / 1,522 / 1,593) at the whole row, +11.5%. SQ8 (W6, 1,536-byte codes)
+stayed flat from one line to the whole row (3,583, 3,700, 3,635, 3,564)
+although the whole row cut its demand fills 3.3x: past the first line the
+hardware prefetcher streams an SQ8 row, and the kernel is the bound. So PQ and
+binary codes (`dim/4` and `dim/8` bytes) are prefetched whole, and SQ8 keeps
+its first line and stats entry. On sift1m every PQ row is one line (32
+bytes), which is why the one-line prefetch already gave it +60%.
+
 ## T3 stays two-sided at one width, decided 2026-09-28
 
 The laion 0928 analysis (its P12) and the second h-and-m smoke raised the same

@@ -390,9 +390,9 @@ pub const Query = struct {
         };
     }
 
-    /// The first line of `node`'s codes, and for SQ8 its `stats` entry, so
-    /// the traversal can ask for them before it scores (`hnsw.Scorer.prefetch`),
-    /// as `collection.Probe.prefetch` does for fp32 rows.
+    /// A neighbour's codes, and for SQ8 its `stats` entry, so the traversal
+    /// can ask for them before it scores (`hnsw.Scorer.prefetch`), as
+    /// `collection.Probe.prefetch` does for fp32 rows.
     ///
     /// Absent until 2026-09-28, so every quantized traversal issued no
     /// prefetch at all: each neighbour's codes and, separately, its stats were
@@ -400,17 +400,32 @@ pub const Query = struct {
     /// query against Qdrant's 117 KB at IPC 0.80 against 1.70, and a profile
     /// put 38% of the demand fills in the SQ8 kernel and 31% in this struct's
     /// `score`, which is the `stats[node]` load.
+    ///
+    /// How much of the row, swept on dbpedia-100K (d=1536, 2026-09-29): PQ
+    /// climbed with the width, 1,509 q/s at one line to 1,724 at its whole
+    /// 384-byte row, while SQ8 stayed flat from one line to its whole
+    /// 1,536 bytes (3,583 to 3,564), because past the first line the hardware
+    /// prefetcher streams the row and SQ8 is bound by its kernel. So PQ and
+    /// binary codes, a few lines at most (`dim/4` and `dim/8` bytes), are
+    /// asked for whole, and SQ8 for its first line.
     pub fn prefetch(ctx: *const anyopaque, node: u32) void {
         const self: *const Query = @ptrCast(@alignCast(ctx));
         const hint: std.builtin.PrefetchOptions = .{ .rw = .read, .locality = 3, .cache = .data };
+        const pf = dist.common.prefetchRow;
         switch (self.store.*) {
             .none => {},
             .scalar => |s| {
                 @prefetch(s.row(node).ptr, hint);
                 @prefetch(&s.stats[node], hint);
             },
-            .binary => |b| @prefetch(b.codes.rowConst(node).ptr, hint),
-            .product => |p| @prefetch(p.row(node).ptr, hint),
+            .binary => |b| {
+                const row = b.codes.rowConst(node);
+                pf(@ptrCast(row.ptr), row.len * @sizeOf(u64));
+            },
+            .product => |p| {
+                const row = p.row(node);
+                pf(row.ptr, row.len);
+            },
         }
     }
 };
