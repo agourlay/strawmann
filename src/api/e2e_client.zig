@@ -144,6 +144,28 @@ pub const Client = struct {
         return c;
     }
 
+    /// A DATA flag bit RFC 9113 leaves unused, set on a frame kept in `buf`
+    /// for a later read once its connection window has been handed back, so
+    /// the read that consumes it hands back only the stream's.
+    const conn_released: u8 = 0x40;
+
+    /// Hand back connection window alone, for DATA received and kept.
+    fn releaseConnection(self: *Client, n: u32) !void {
+        try self.releaseCapacity(0, n);
+    }
+
+    /// Hand back stream window alone, for kept DATA whose connection window
+    /// already went back.
+    fn releaseStream(self: *Client, sid: u31, n: u32) !void {
+        if (n == 0) return;
+        var wb: [16]u8 = undefined;
+        var wo = h2.OutBuf.init(&wb);
+        var wu: [4]u8 = undefined;
+        std.mem.writeInt(u32, &wu, n, .big);
+        try wo.frame(.window_update, 0, sid, &wu);
+        self.writeAll(wo.written()) catch |e| if (!self.peer_may_be_gone) return e;
+    }
+
     /// Hand back the window a DATA frame consumed, on both the connection and
     /// the stream, as h2 does when the body is read.
     pub fn releaseCapacity(self: *Client, sid: u31, n: u32) !void {
@@ -281,7 +303,8 @@ pub const Client = struct {
             pos += total;
             if (fh.stream_id != 0 and self.wasReset(fh.stream_id)) {
                 self.late_cancelled += 1;
-                if (fh.frame_type == .data) {
+                // Unless it was kept earlier and its window already went back.
+                if (fh.frame_type == .data and fh.flags & conn_released == 0) {
                     self.conn_window -= fh.length;
                     try self.releaseCapacity(0, fh.length);
                 }
@@ -375,18 +398,32 @@ pub const Client = struct {
                         // A response that beat our RST_STREAM to the server:
                         // legal, dropped, and accounted for.
                         self.late_cancelled += 1;
-                        if (fh.frame_type == .data) {
+                        if (fh.frame_type == .data and fh.flags & conn_released == 0) {
                             self.conn_window -= fh.length;
                             try self.releaseCapacity(0, fh.length);
                         }
                         continue;
+                    }
+                    // Another stream's DATA, kept for a later read: its
+                    // connection window goes back now, because it has been
+                    // received, and only its stream window waits for the read.
+                    // Held back, two responses read one after the other
+                    // through a 64 KiB connection window deadlocked about one
+                    // run in seven: the server spent the window on the second
+                    // stream, the client kept those frames while it read the
+                    // first, and the first's remaining DATA could never be sent.
+                    if (fh.frame_type == .data and fh.flags & conn_released == 0) {
+                        self.conn_window -= fh.length;
+                        if (self.conn_window < 0) return error.FlowControlError;
+                        try self.releaseConnection(fh.length);
+                        self.buf[frame_start + 4] |= conn_released;
                     }
                     std.mem.copyForwards(u8, self.buf[keep..][0..total], self.buf[frame_start..pos]);
                     keep += total;
                     continue;
                 }
                 if (fh.frame_type == .rst_stream and fh.stream_id == sid) return error.StreamReset;
-                if (fh.frame_type == .data) {
+                if (fh.frame_type == .data and fh.flags & conn_released == 0) {
                     self.conn_window -= fh.length;
                     if (self.conn_window < 0) return error.FlowControlError;
                 }
@@ -427,7 +464,10 @@ pub const Client = struct {
                         if (body_len + payload.len > out.len) return error.ResponseTooLarge;
                         @memcpy(out[body_len..][0..payload.len], payload);
                         body_len += payload.len;
-                        try self.releaseCapacity(sid, fh.length);
+                        if (fh.flags & conn_released != 0)
+                            try self.releaseStream(sid, fh.length)
+                        else
+                            try self.releaseCapacity(sid, fh.length);
                     },
                     else => {},
                 }
