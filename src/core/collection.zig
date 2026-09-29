@@ -677,6 +677,12 @@ pub const Collection = struct {
     normalized_count: usize = 0,
     short_circuited_count: usize = 0,
 
+    /// A mapped arena's file, `<dir>/<name>.vectors.bin`: the one definition,
+    /// for `init` that creates it and `Engine.drop` that removes it.
+    pub fn arenaPath(buf: []u8, dir: []const u8, name: []const u8) ?[]const u8 {
+        return std.fmt.bufPrint(buf, "{s}/{s}.vectors.bin", .{ dir, name }) catch null;
+    }
+
     pub fn init(alloc: std.mem.Allocator, name: []const u8, config: Config) !Collection {
         if (config.datatype != .float32 and config.dim > max_converted_dim) {
             return Error.DimensionTooLargeForDatatype;
@@ -687,8 +693,7 @@ pub const Collection = struct {
         var space = if (config.placement.isMapped()) blk: {
             const dir = config.dir orelse return Error.PlacementNeedsDirectory;
             var pbuf: [512]u8 = undefined;
-            const path = std.fmt.bufPrint(&pbuf, "{s}/{s}.vectors.bin", .{ dir, name }) catch
-                return Error.PlacementNeedsDirectory;
+            const path = arenaPath(&pbuf, dir, name) orelse return Error.PlacementNeedsDirectory;
             break :blk VectorSpace.initMapped(
                 config.dim,
                 config.datatype,

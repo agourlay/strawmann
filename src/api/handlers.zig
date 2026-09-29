@@ -287,8 +287,19 @@ pub const Engine = struct {
                 _ = std.os.linux.nanosleep(&ts, null);
             }
         }
+        // A mapped arena's file goes with the collection. `deinit` unmapped it
+        // and left it on disk, so dbpedia 0927 reported 45.7 GB of storage at
+        // W13 with bench1's, bench6's, bench7's, bench8's and bench12's dead
+        // arenas in it, where Qdrant's figure fell as it dropped the same ones.
+        // The path is taken before `deinit` frees the name it is built from.
+        var pbuf: [512]u8 = undefined;
+        const arena = if (c.config.placement.isMapped() and c.config.dir != null)
+            core.Collection.arenaPath(&pbuf, c.config.dir.?, c.name)
+        else
+            null;
         c.deinit();
         self.alloc.destroy(c);
+        if (arena) |path| core.storage.removeFile(path);
         return true;
     }
 };
@@ -1970,6 +1981,26 @@ test "engine create, find and drop" {
     try testing.expect(e.drop("bench"));
     try testing.expect(!e.drop("bench"));
     try testing.expectEqual(@as(?*core.Collection, null), e.find("bench"));
+}
+
+test "dropping a mapped collection removes its arena file" {
+    // dbpedia 0927: dropped collections kept their arenas on disk until the
+    // harness wiped the directory at the arm's end.
+    const linux = std.os.linux;
+    const dir = ".zig-cache/tmp";
+    _ = linux.mkdir(dir, 0o755); // EEXIST is fine
+    var e = Engine.init(testing.allocator);
+    defer e.deinit();
+    _ = try e.create("dropme", .{ .dim = 4, .metric = .dot, .capacity = 16, .placement = .cached, .dir = dir });
+    var pbuf: [512]u8 = undefined;
+    const path = core.Collection.arenaPath(&pbuf, dir, "dropme").?;
+    var z: [513]u8 = undefined;
+    @memcpy(z[0..path.len], path);
+    z[path.len] = 0;
+    const zpath: [*:0]const u8 = @ptrCast(&z);
+    try testing.expectEqual(@as(usize, 0), linux.access(zpath, linux.F_OK));
+    try testing.expect(e.drop("dropme"));
+    try testing.expect(linux.access(zpath, linux.F_OK) != 0);
 }
 
 test "creating an existing collection returns the existing one" {

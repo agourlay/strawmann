@@ -1812,3 +1812,18 @@ draw is unlicensed and re-measured, as any other failed tier is. The cost is
 known: on h-and-m, where the two intervals sit within about 0.0002 of each
 other, a night's licence depends on that draw.
 
+## A dropped collection's arena goes with it; the main thread stays unpinned, decided 2026-09-29
+
+`Engine.drop` unmapped a mapped collection's arena in `deinit` and left
+`<dir>/<name>.vectors.bin` on disk, so dbpedia 0927 reported 45.7 GB of
+storage at W13 with bench1/6/7/8/12's dead arenas in it, where Qdrant's
+figure fell as it dropped the same collections. The drop now removes the
+file after unmapping it (`Collection.arenaPath`, the one definition of the
+name), and a test holds it.
+
+The sift1m 0929 analysis (5.14) asked whether `--pin` leaving the main thread
+unpinned costs anything. Measured with a per-thread `/proc/<pid>/task/*/stat`
+delta over W4 on sift1m: the main thread took 0.00 s of CPU, against 2.30 s
+for each of the seven pinned workers and 1.14 s for the I/O thread. It starts
+the server and waits; leaving it free is correct.
+
