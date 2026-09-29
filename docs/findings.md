@@ -42,7 +42,9 @@ measures what it claims to.
 development-profile page, as 0.85x less work per query times 1.61x cores
 busy. The cores half was Qdrant's 4 search threads: on the 0927 pair, in
 production mode, Qdrant fills 7.79 cores against strawmANN's 7.02, and W4 reads
-parity (3,549 against 3,487 q/s). What is left is strawmANN's half: its cycles
+parity (3,549 against 3,487 q/s), and at d=2048 on h-and-m's first pair (0929) it
+reads 0.82x (4,656 against 5,683), the first saturating loss. What is left is
+strawmANN's half: its cycles
 per query rise from 1.66M at W3 to 3.95M at W4 (Qdrant's 4.43M, at IPC 0.43)
 while its DRAM per query holds at 4.4 MB and its IPC falls from 0.70 to 0.29;
 aggregate traffic is 16 GB/s against a 73 GB/s bus, so the seven workers are

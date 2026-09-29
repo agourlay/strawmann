@@ -1657,7 +1657,8 @@ HEADLINE_DATASET = "sift1m"
 #: night's run for a page nobody asked it to appear on. Adding a dataset here
 #: means adding its marker pair to the page in the same commit.
 LANDING_PAGE = "docs/index.html"
-LANDING_DATASETS = ("sift1m", "dbpedia-openai-1m", "laion-small-clip")
+LANDING_DATASETS = ("sift1m", "dbpedia-openai-1m", "laion-small-clip",
+                    "h-and-m-2048-angular-filters")
 
 #: The rows each landing panel shows, in order, with a caption for a reader
 #: who has not read §4, or `None` for the row's recall pair. The equal-recall
