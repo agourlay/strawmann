@@ -1889,3 +1889,30 @@ Through the server, the same probe both ways: sift1m W12-sel10 at ef 256,
 (now the walk). At ef 128 sift1m sits on the crossover and ties (1,261 against
 1,275).
 
+## The saturating loss at d=2048 is equal ef, not the engine; findings 5 closed, 2026-09-29
+
+h-and-m 0929 read W4 at 0.82x (4,656 against 5,683 q/s), the first saturating
+loss, with strawmANN's cycles per query rising from 1.33M at W3 to 3.00M at W4
+(IPC 0.69 to 0.30) where Qdrant's rose 1.39x. Three things were measured.
+
+- **TLB:** not it. strawmANN takes fewer dTLB walks per query than Qdrant on
+  every dataset and row (h-and-m W4 2,283 against 3,483).
+- **Cores:** not it. The harness runs strawmANN with 7 workers and a pinned
+  I/O thread where Qdrant searches on all 8 cores, but `--workers 8` (the I/O
+  thread sharing a worker's core, which the engine supports) read
+  4,461 / 4,588 q/s against 7 workers' 4,605 / 4,417. More compute does not
+  raise a saturated row.
+- **Prefetch depth:** not it, and deeper is worse. The fp32 prefetch at one
+  line, 256 bytes, 1 KB and the whole 8 KB row read W4 4,570 / 4,561 /
+  4,393 / 3,270 q/s: past the first line it floods the memory system.
+
+The saturated rows are bound by random-access memory latency, and at equal
+`ef` strawmANN does more work: its ef 128 reaches recall 0.9986 against
+Qdrant's 0.9970 by reading 2.83 MB per query against 2.15. At matched recall,
+under the same saturation, strawmANN at ef 64 (0.9972) runs 7,476 q/s on
+1.65 MB and 1.79M cycles per query against Qdrant's ef 128 (0.9970) at
+4,791 q/s on 2.15 MB and 2.44M cycles: 1.56x. The low IPC is few instructions
+per miss, not a stall strawmANN could remove. W4's ratio is at equal `ef`,
+which §7.4 already says is not equal work; the equal-recall headline is the
+comparison that holds.
+
