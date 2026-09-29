@@ -1848,3 +1848,20 @@ sift1m W6 346 against 331 µs (0.94x as published), W3 482 against 415
 (0.88x). That is engine time at d=128, not occupancy, and the `x cores busy`
 term in the rows' decomposition notes is not a lever for strawmANN.
 
+## SQ8 training selects its bounds instead of sorting, decided 2026-09-29
+
+h-and-m 0929 took 85.2 s to build its SQ8 collection against 23.1 s for fp32
+(Qdrant: 19.1 s). A `perf record` of the upload put 64.5% of samples in the
+fp32 graph build and 22.1% in `sort.block`: `scalar.train` copied its sample
+and fully sorted it, single-threaded, to read two order statistics.
+`train_sample` is 65,536 vectors, so h-and-m's 105,100 were all sampled:
+215 million floats, about 55 s of wall clock, where the comment beside the
+constant promised "a fraction of a second" (true at d=128, not at 2048).
+
+`train` now finds `sorted[lo]` and `sorted[hi]` with a bounded heap in the
+scratch it already had, one pass, no allocation. The bounds are bit for bit
+the sort's (a test compares them across sizes, quantiles and duplicated
+values), so nothing measured moves but the build time: h-and-m's SQ8 build is
+24.0 s (84.6 s before, same probe), 3 s over its fp32 build. The sample size
+stays at 65,536 rather than Qdrant's 5,000, which would move the bounds.
+

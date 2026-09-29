@@ -113,9 +113,7 @@ pub const default_quantile: f32 = 0.99;
 /// selection; the caller owns it so training allocates nothing.
 pub fn train(sample: []const f32, quantile: f32, dim: usize, scratch: []f32) Params {
     std.debug.assert(scratch.len >= sample.len);
-    @memcpy(scratch[0..sample.len], sample);
-    const s = scratch[0..sample.len];
-    std.mem.sort(f32, s, {}, std.sort.asc(f32));
+    const s = sample;
 
     // Qdrant's arithmetic to the digit, since the bounds are what the two
     // engines are compared on: the cut in f32, truncated, so 5,000 vectors at
@@ -136,13 +134,65 @@ pub fn train(sample: []const f32, quantile: f32, dim: usize, scratch: []f32) Par
         }
     }
 
-    const lo = s[lo_idx];
-    const hi = s[hi_idx];
+    // The two order statistics, not a sort. `sorted[lo_idx]` is the
+    // `lo_idx + 1`-th smallest value and `sorted[hi_idx]` the `len - hi_idx`-th
+    // largest, and both ranks are small (the cut is a count of *vectors*), so
+    // a bounded heap finds each in one pass. The full sort this replaces was
+    // single-threaded over the whole sample: on h-and-m (105,100 x 2048, a
+    // sample of every vector) 215 million floats, about 55 s of an 85 s
+    // SQ8 build where fp32's took 21 s. Same bounds, bit for bit.
+    const lo = kthExtreme(.smallest, s, lo_idx + 1, scratch);
+    const hi = kthExtreme(.largest, s, s.len - hi_idx, scratch);
     // A degenerate range (every sampled value identical) would give alpha = 0
     // and a division by zero in `quantizeOne`. Mapping everything to code 0 is
     // the correct behaviour there and costs nothing.
     const alpha = if (hi > lo) (hi - lo) / 255.0 else 1.0;
     return .{ .lo = lo, .alpha = alpha, .dim = dim };
+}
+
+const Extreme = enum { smallest, largest };
+
+/// The `k`-th smallest (or largest) value of `s`, counting from 1, with
+/// duplicates counted: `sorted[k - 1]` for `.smallest`. A heap of the `k` best
+/// seen so far in `heap[0..k]`, whose root is the worst of them; a value
+/// beats the root or is dropped, so a sample in random order touches the heap
+/// rarely and the pass is close to linear.
+fn kthExtreme(comptime which: Extreme, s: []const f32, k: usize, heap: []f32) f32 {
+    std.debug.assert(k >= 1 and k <= s.len and heap.len >= k);
+    // `worse(a, b)`: a would be dropped before b. The root holds the worst.
+    const worse = struct {
+        fn f(a: f32, b: f32) bool {
+            return if (which == .smallest) a > b else a < b;
+        }
+    }.f;
+    const h = heap[0..k];
+    @memcpy(h, s[0..k]);
+    // Heapify with the worst at the root.
+    var i: usize = k / 2;
+    while (i > 0) {
+        i -= 1;
+        siftDown(h, i, worse);
+    }
+    for (s[k..]) |v| {
+        if (worse(h[0], v)) {
+            h[0] = v;
+            siftDown(h, 0, worse);
+        }
+    }
+    return h[0];
+}
+
+fn siftDown(h: []f32, start: usize, comptime worse: fn (f32, f32) bool) void {
+    var i = start;
+    while (true) {
+        const l = 2 * i + 1;
+        if (l >= h.len) return;
+        var w = l;
+        if (l + 1 < h.len and worse(h[l + 1], h[l])) w = l + 1;
+        if (!worse(h[w], h[i])) return;
+        std.mem.swap(f32, &h[i], &h[w]);
+        i = w;
+    }
 }
 
 /// Encode one vector into `dst`.
@@ -358,6 +408,50 @@ test "training clips outliers rather than letting them stretch the range" {
     try testing.expect(p.lo + p.alpha * 255.0 < 10.0);
     // And the step must be fine enough to resolve a standard normal.
     try testing.expect(p.maxComponentError() < 0.05);
+}
+
+test "training finds the same bounds a full sort would" {
+    // `train` used to sort the whole sample; it now selects the two order
+    // statistics. Checked against the sort, bit for bit, over sizes that do
+    // and do not take Qdrant's interval, quantiles, and heavy duplication.
+    var prng = std.Random.DefaultPrng.init(0x5e1ec7);
+    const rnd = prng.random();
+    const Case = struct { vectors: usize, dim: usize, q: f32, dups: bool };
+    const cases = [_]Case{
+        .{ .vectors = 200, .dim = 8, .q = 0.99, .dups = false },
+        .{ .vectors = 5000, .dim = 4, .q = 0.99, .dups = false },
+        .{ .vectors = 5000, .dim = 4, .q = 0.9, .dups = true },
+        .{ .vectors = 100, .dim = 8, .q = 0.99, .dups = false }, // under 127: min/max
+        .{ .vectors = 300, .dim = 3, .q = 1.0, .dups = true }, // q >= 1: min/max
+    };
+    for (cases) |c| {
+        const n = c.vectors * c.dim;
+        const values = try testing.allocator.alloc(f32, n);
+        defer testing.allocator.free(values);
+        for (values) |*v| v.* = if (c.dups) @floatFromInt(rnd.intRangeAtMost(i32, -20, 20)) else rnd.floatNorm(f32);
+        const scratch = try testing.allocator.alloc(f32, n);
+        defer testing.allocator.free(scratch);
+        const got = train(values, c.q, c.dim, scratch);
+
+        // The reference: the full sort, and the same index arithmetic.
+        const sorted = try testing.allocator.dupe(f32, values);
+        defer testing.allocator.free(sorted);
+        std.mem.sort(f32, sorted, {}, std.sort.asc(f32));
+        var lo_idx: usize = 0;
+        var hi_idx: usize = n - 1;
+        if (c.vectors >= 127 and c.q < 1.0 and n >= 4) {
+            const cut_f = @as(f32, @floatFromInt(c.vectors)) * (1.0 - c.q) / 2.0;
+            var cut: usize = @intFromFloat(@max(0.0, cut_f));
+            cut = @max(@min((n - 1) / 2, cut), 1);
+            if (n - 2 * cut - 1 >= 2) {
+                lo_idx = cut + 1;
+                hi_idx = n - 1 - cut;
+            }
+        }
+        try testing.expectEqual(sorted[lo_idx], got.lo);
+        const want_alpha = if (sorted[hi_idx] > sorted[lo_idx]) (sorted[hi_idx] - sorted[lo_idx]) / 255.0 else 1.0;
+        try testing.expectEqual(want_alpha, got.alpha);
+    }
 }
 
 test "training cuts what Qdrant's find_quantile_interval cuts" {
