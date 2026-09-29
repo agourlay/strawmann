@@ -1865,3 +1865,27 @@ values), so nothing measured moves but the build time: h-and-m's SQ8 build is
 24.0 s (84.6 s before, same probe), 3 s over its fp32 build. The sample size
 stays at 65,536 rather than Qdrant's 5,000, which would move the bounds.
 
+## The filtered scan-or-walk crossover follows the dimension, decided 2026-09-29
+
+`filteredPlan` chose the scan when the matching set was smaller than the
+two-hop walk's ~1.5·ef·m0 scored rows, row for row, a constant measured once
+at d=1536. The two costs do not scale alike. From the four 0929 pairs'
+W12-sel10 sweeps (scan: q/s times matched rows; walk: two-hop q/s at ef 128
+times 1.5·ef·m0), per row:
+
+| dataset | d | scan | walk | scan / walk |
+|---|--:|--:|--:|--:|
+| sift1m | 128 | 37 ns | 128 ns | 0.29 |
+| laion | 512 | 80 ns | 129 ns | 0.62 |
+| dbpedia-1m | 1536 | 172 ns | 202 ns | 0.85 |
+| h-and-m | 2048 | 229 ns | 142 ns | 1.61 |
+
+A scanned row streams every value, so it grows with `dim`; a walked row is a
+random fetch. The rule now compares `selected x (240 + dim)` against
+`walk x 1500`, which makes the choice the measurements make on all four at
+every ef they ran, and leaves dbpedia's and laion's decisions where they were.
+Through the server, the same probe both ways: sift1m W12-sel10 at ef 256,
+746 to 1,289 q/s (now the scan, recall 1.0000); h-and-m at ef 256, 387 to 672
+(now the walk). At ef 128 sift1m sits on the crossover and ties (1,261 against
+1,275).
+

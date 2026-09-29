@@ -1296,7 +1296,7 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
         pred = prepared.filter;
         if (prepared.selected) |n| {
             const m0 = coll.config.hnsw_m * 2;
-            const plan: FilteredPlan = if (exact) .scan else filteredPlan(n, prepared.bound, ef, m0);
+            const plan: FilteredPlan = if (exact) .scan else filteredPlan(n, prepared.bound, ef, m0, coll.config.dim);
             switch (plan) {
                 .scan => {
                     core.collection.searchSelected(coll, raw, ctx.workspace.filter_bits, @intCast(prepared.bound), &top);
@@ -1856,14 +1856,25 @@ const FilteredPlan = enum { scan, two_hop, walk };
 /// at ef 512 is ~21,600), so the scan wins while the matching set is smaller
 /// than that. Below the floor the choice is the one it always was, between
 /// the scan and the plain walk.
-fn filteredPlan(selected: usize, bound: usize, ef: usize, m0: usize) FilteredPlan {
+fn filteredPlan(selected: usize, bound: usize, ef: usize, m0: usize, dim: usize) FilteredPlan {
     const reach = std.math.mul(usize, selected, @max(m0, 1)) catch std.math.maxInt(usize);
     if (reach >= bound) {
         const walk = blk: {
             const a = std.math.mul(usize, @max(ef, 1), @max(m0, 1)) catch break :blk std.math.maxInt(usize);
             break :blk (std.math.mul(usize, a, 3) catch std.math.maxInt(usize)) / 2;
         };
-        return if (selected < walk) .scan else .two_hop;
+        // Weighted by what a row costs each way, not row for row. A scanned
+        // row streams all `dim` values, about 24 ns + 0.1 ns per dimension;
+        // a walked row is a random fetch, about 150 ns at any width. From
+        // the four 0929 pairs' W12-sel10 sweeps (scan: q/s x matched rows;
+        // walk: two-hop q/s at ef 128 x 1.5 ef m0 rows): 37 against 128 ns at
+        // d=128, 80 against 129 at 512, 172 against 202 at 1536, 229 against
+        // 142 at 2048. Row for row, sift1m walked at ef 128 and 256 where its
+        // scan was faster (1,353 q/s against 1,272 and 774), and h-and-m
+        // scanned at ef 256 at 408 q/s where the walk would run ~570.
+        const scan_cost = std.math.mul(usize, selected, 240 +| dim) catch std.math.maxInt(usize);
+        const walk_cost = std.math.mul(usize, walk, 1500) catch std.math.maxInt(usize);
+        return if (scan_cost < walk_cost) .scan else .two_hop;
     }
     return if (plainFilteredSearch(selected, bound, ef, m0)) .scan else .walk;
 }
@@ -1934,25 +1945,41 @@ test "a selective filter scores its matching set; a permissive one traverses" {
 
 test "an indexed filter scans below 1/m0, walks two-hop above it, and scans again at a wide ef" {
     // W12's two grades on bench12 (n = 200,000, m0 = 32).
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(2_000, 200_000, 128, 32));
-    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(20_000, 200_000, 128, 32));
-    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(20_000, 200_000, 256, 32));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(2_000, 200_000, 128, 32, 1536));
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(20_000, 200_000, 128, 32, 1536));
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(20_000, 200_000, 256, 32, 1536));
     // At ef 512 the walk's ~24,600 rows cost more than scoring the 20,000.
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(20_000, 200_000, 512, 32));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(20_000, 200_000, 512, 32, 1536));
     // A permissive filter walks two-hop too; it used to walk scoring everything.
-    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(100_000, 200_000, 128, 32));
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(100_000, 200_000, 128, 32, 1536));
     // The floor is `selected · m0 >= n`: either side of 6,250.
-    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(6_250, 200_000, 32, 32));
-    try testing.expect(filteredPlan(6_249, 200_000, 32, 32) != .two_hop);
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(6_250, 200_000, 32, 32, 1536));
+    try testing.expect(filteredPlan(6_249, 200_000, 32, 32, 1536) != .two_hop);
     // Below the floor, the old rule: a large sparse set on a huge collection
     // at a narrow ef still walks rather than scanning millions.
-    try testing.expectEqual(FilteredPlan.walk, filteredPlan(100_000, 10_000_000, 16, 32));
+    try testing.expectEqual(FilteredPlan.walk, filteredPlan(100_000, 10_000_000, 16, 32, 1536));
     // A small collection scores every filter directly.
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(590, 600, 600, 32));
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(120, 600, 16, 32));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(590, 600, 600, 32, 1536));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(120, 600, 16, 32, 1536));
     // Degenerate inputs answer rather than overflow or divide by zero.
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(0, 0, 0, 0));
-    _ = filteredPlan(std.math.maxInt(usize), std.math.maxInt(usize), std.math.maxInt(usize), std.math.maxInt(usize));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(0, 0, 0, 0, 1536));
+    _ = filteredPlan(std.math.maxInt(usize), std.math.maxInt(usize), std.math.maxInt(usize), std.math.maxInt(usize), std.math.maxInt(usize));
+}
+
+test "the scan-or-walk crossover follows the dimension" {
+    // The four 0929 pairs' W12-sel10, m0 = 32. sift1m (d=128, 20,035 matched
+    // of 200,000): its scan beat the walk from ef 128 up.
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(20_035, 200_000, 64, 32, 128));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(20_035, 200_000, 128, 32, 128));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(20_035, 200_000, 256, 32, 128));
+    // h-and-m (d=2048, 10,608 of 105,100): the walk wins at ef 256, the scan at 512.
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(10_608, 105_100, 256, 32, 2048));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(10_608, 105_100, 512, 32, 2048));
+    // dbpedia (d=1536, 19,895 of 200,000): unchanged, the scan only at ef 512.
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(19_895, 200_000, 256, 32, 1536));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(19_895, 200_000, 512, 32, 1536));
+    // h-and-m's 1% filter still scans, below the two-hop floor.
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(1_044, 105_100, 32, 32, 2048));
 }
 
 test "hnsw_ef defaults to the collection's ef_construct, then max(ef, top), then the clamp" {
