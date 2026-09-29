@@ -52,17 +52,6 @@ waiting on their own misses, not on the bus. The next-candidate prefetch
 (715343f) was measured on sift1m, where W4's IPC is 1.08, and not at d=1536,
 where the latency it exists to hide is the whole cost.
 
-**56. strawmANN keeps fewer cores busy with two requests in flight.** On the
-quantized rows (two in flight) it runs 1.65 to 1.91 busy cores where Qdrant
-runs 1.97 to 2.01, on every dataset and all three quantizers, and on W3's one
-it runs 0.86 to 0.92 against 0.98 to 1.02. Before the quantized prefetch
-(`decisions.md`, 2026-09-28) memory stalls were the larger term; after it,
-this is what is left, worth about 0.85x on any row where the client keeps the
-engine short of work. The candidates are per-request: the single I/O thread,
-the handoff to a worker, and response encoding. Measured nowhere yet: a W6 at
-four and eight in flight would show whether the gap closes as the queue
-deepens, which separates a fixed per-request cost from a scheduling one.
-
 **6. Qdrant's single-query cost doubles at d=1536; kernel width is a quarter
 of it.** W3 reads 1.75x at d=1536 on the 0927 pair (0.84x on sift1m). Qdrant
 has no AVX-512 path for dense fp32 (878843e6e), and its measured binary's

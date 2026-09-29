@@ -1827,3 +1827,24 @@ delta over W4 on sift1m: the main thread took 0.00 s of CPU, against 2.30 s
 for each of the seven pinned workers and 1.14 s for the I/O thread. It starts
 the server and waits; leaving it free is correct.
 
+## Busy cores are not a per-request cost; findings 56 closed, 2026-09-29
+
+findings 56 read strawmANN's 1.65 to 1.91 busy cores against Qdrant's 1.97 to
+2.01, at two requests in flight, as a per-request cost in strawmANN's serving
+path. Each row's own latencies say otherwise. The client p50 less the server
+p50 is everything outside the engine (the network, the I/O thread's handoff,
+encoding, the client), and on the 0929 pairs it is the same on both engines:
+
+| row | strawmANN, outside the engine | Qdrant, outside the engine |
+|---|--:|--:|
+| sift1m W3 / W6 / W8 | 106 / 93 / 101 µs | 97 / 96 / 100 µs |
+| dbpedia W3 / W6 / W8 | 100 / 95 / 97 µs | 128 / 114 / 128 µs |
+
+What differs is Qdrant's busy-core count itself. W13 (scroll) spends 11 µs of
+server time per request on strawmANN at 1.42 cores, and 28 µs on Qdrant at
+4.28 cores: its runtime polls, and the cores it reports busy are not all doing
+the query. The low-concurrency rows are decided by server time per query:
+sift1m W6 346 against 331 µs (0.94x as published), W3 482 against 415
+(0.88x). That is engine time at d=128, not occupancy, and the `x cores busy`
+term in the rows' decomposition notes is not a lever for strawmANN.
+
