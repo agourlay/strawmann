@@ -352,6 +352,16 @@ pub const Scorer = struct {
 pub const Index = struct {
     graph: *Graph,
     scorer: Scorer,
+    /// Nodes at or past this id are neither scored nor traversed.
+    ///
+    /// A reader's snapshot of `graph.count`, for a graph a drainer extends in
+    /// place (`build.drainLive`): the nodes it is linking are reachable from
+    /// published ones before the count covers them, and until it does they
+    /// are the reader's pending tail, scanned there. Traversing them as well
+    /// returned a point twice; traversing a half-linked one costs recall.
+    /// One compare beside a cache-missing score, where a `Filter` would be
+    /// an indirect call and would still route through them.
+    bound: u32 = std.math.maxInt(u32),
 
     /// Per-worker scratch. §6.3: "No allocation on the query path."
     pub const Scratch = struct {
@@ -403,6 +413,7 @@ pub const Index = struct {
             const ns = self.graph.neighbours(best.id, level);
             for (ns) |n| {
                 if (n == empty_neighbour) break;
+                if (n >= self.bound) continue;
                 const s = self.scorer.call(self.scorer.ctx, n);
                 const c = Candidate{ .id = n, .score = s };
                 if (c.better(best)) {
@@ -493,6 +504,7 @@ pub const Index = struct {
             }
             for (ns) |n| {
                 if (n == empty_neighbour) break;
+                if (n >= self.bound) continue;
                 if (!scratch.vis.testAndSet(n)) continue;
                 const s = self.scorer.call(self.scorer.ctx, n);
                 const c = Candidate{ .id = n, .score = s };
@@ -549,6 +561,7 @@ pub const Index = struct {
         var scored: usize = 0;
         for (ns) |n| {
             if (n == empty_neighbour) break;
+            if (n >= self.bound) continue;
             if (filter.admits(n)) {
                 if (!scratch.vis.testAndSet(n)) continue;
                 scored += 1;
@@ -560,6 +573,7 @@ pub const Index = struct {
             for (self.graph.neighbours(n, level)) |n2| {
                 if (n2 == empty_neighbour) break;
                 if (scored >= budget) break;
+                if (n2 >= self.bound) continue;
                 // Tested before the visited stamp: a rejected two-hop node is
                 // not taken here, and stamping it would stop a later hop
                 // through it.

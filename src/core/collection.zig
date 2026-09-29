@@ -620,6 +620,23 @@ pub const Collection = struct {
     /// store" indivisible, whatever the state machine does meanwhile.
     build_thread_lock: lock.Mutex = .{},
 
+    /// Held by whatever mutates or copies the published graph: a rebuild for
+    /// its whole length (it copies the graph to extend it) and the tail
+    /// drainer for each chunk it links. The two never write one graph at
+    /// once, and a drainer waiting on a rebuild follows the graph it
+    /// publishes. Taken before `write_lock` wherever both are.
+    index_writer: lock.Mutex = .{},
+    /// The background tail drainer (`drainTail`), joined like `build_thread`.
+    drain_thread: ?std.Thread = null,
+    /// Set by the spawner that wins it (`Engine.ensureTailDraining`) and
+    /// cleared as the drainer returns.
+    drain_running: std.atomic.Value(bool) = .init(false),
+    /// The end of the chunk the drainer is linking, set under `write_lock`
+    /// before it reads a row. An in-place overwrite below it lands on a node
+    /// the graph will hold at its old vector's position, so `noteOverwrite`
+    /// counts it as the graph's, not as the tail's.
+    drain_to: std.atomic.Value(usize) = .init(0),
+
     /// Offsets sorted by external id, built lazily for `Scroll` and dropped on
     /// any mutation.
     ///
@@ -747,6 +764,10 @@ pub const Collection = struct {
         if (self.build_thread) |t| {
             t.join();
             self.build_thread = null;
+        }
+        if (self.drain_thread) |t| {
+            t.join();
+            self.drain_thread = null;
         }
         // Before the graph it points at, though it owns none of it: the
         // builder holds six of its own allocations and nothing else frees them.
@@ -1008,7 +1029,7 @@ fn noteOverwrite(self: *Collection, offset: u32, vec: []const f32) void {
     // publish are ordered against this write; see `overwrite_log`.
     if (self.overwrite_log_active) self.overwrite_log.set(offset);
 
-    if (offset >= self.graph_count.load(.acquire)) return;
+    if (offset >= @max(self.graph_count.load(.acquire), self.drain_to.load(.acquire))) return;
     _ = self.overwritten_since_build.fetchAdd(1, .monotonic);
 
     const guard = SearchGuard.begin(self);
@@ -1827,6 +1848,10 @@ pub const BuildMode = enum {
 /// that triggers it can return Yellow immediately, which is what bfb's poll
 /// loop expects to see.
 pub fn buildIndex(coll: *Collection, mode: BuildMode, threads: usize) !void {
+    // The drainer links into the published graph, which this copies to extend
+    // and then replaces; neither may run while the other writes it.
+    coll.index_writer.lock();
+    defer coll.index_writer.unlock();
     const n = coll.id_space.count();
     if (n == 0) {
         // Nothing to build over, but the same publish rule as below: under
@@ -2455,6 +2480,73 @@ pub fn admission(coll: *const Collection, extra: ?hnsw.Index.Filter, storage_: *
     return null;
 }
 
+/// How many appended points the drainer links before it publishes them.
+///
+/// A reader sees none of a chunk until all of it is linked, so this is the
+/// drain's visibility latency: 1,024 points at d=1536 is about a quarter of a
+/// second on eight threads, against a W11-steady append of 26 s.
+pub const drain_chunk: usize = 1024;
+
+/// Link the pending tail into the published graph in the background, a chunk
+/// at a time, until nothing is pending or a rebuild is due.
+///
+/// Every query scans the tail exhaustively, so a point that waits there costs
+/// every query until a rebuild: at d=1536 W11-steady's 49,500 appended points
+/// were 304 MB a query and search fell from 3,570 to 244 qps (findings 8), and
+/// the rebuild never published inside the row (findings 11). Linking a point
+/// costs about one query, once. Past `rebuild_ratio` a rebuild takes over, as
+/// before, and that keeps bulk ingest into a built graph on the parallel
+/// build. Quantized collections are left to the rebuild: §6.7 traverses on
+/// codes, and a linked point would have none (`liveInsert`).
+pub fn drainTail(coll: *Collection, threads: usize) void {
+    defer coll.drain_running.store(false, .release);
+    const t0 = monotonicNs();
+    const from = coll.graph_count.load(.acquire);
+    var chunks: usize = 0;
+    while (drainChunk(coll, threads)) chunks += 1;
+    // One line per drain, as a rebuild has two: whether the drainer kept up
+    // with the writer is the whole question a mixed row asks of it, and
+    // `pending` at exit is the answer (0 when it caught up, or the tail it
+    // left to a rebuild).
+    const to = coll.graph_count.load(.acquire);
+    if (log_rebuilds and chunks > 0) std.debug.print(
+        "index: drain linked={d} chunks={d} ms={d} pending={d} rebuild_due={}\n",
+        .{ to - from, chunks, (monotonicNs() -| t0) / std.time.ns_per_ms, coll.id_space.count() -| to, needsRebuild(coll) },
+    );
+}
+
+/// One chunk of `drainTail`; false when there is nothing to do or it must stop.
+fn drainChunk(coll: *Collection, threads: usize) bool {
+    coll.index_writer.lock();
+    defer coll.index_writer.unlock();
+    if (coll.drop_requested.load(.acquire)) return false;
+    if (coll.index_state.load(.acquire) != .ready) return false;
+    if (coll.quant.load(.acquire) != null) return false;
+    if (needsRebuild(coll)) return false;
+    // Stable while `index_writer` is held: only a rebuild replaces it.
+    const g = publishedGraph(coll) orelse return false;
+    const from = @atomicLoad(usize, &g.count, .acquire);
+    const total = coll.id_space.count();
+    if (from == 0 or from >= total) return false;
+    const to = @min(total, from + drain_chunk);
+
+    coll.write_lock.lock();
+    coll.drain_to.store(to, .release);
+    coll.write_lock.unlock();
+
+    build_hnsw.drainLive(coll.alloc, g, scorerFor(coll), from, to, threads) catch return false;
+
+    // Published as `insertLive` publishes one node: the graph's count last,
+    // with release, so a reader that loads it finds every node below it
+    // linked, and one that loaded the old count scans the chunk in its tail.
+    @atomicStore(usize, &g.count, to, .release);
+    coll.write_lock.lock();
+    coll.graph_count.store(to, .release);
+    coll.indexed_count = to;
+    coll.write_lock.unlock();
+    return true;
+}
+
 /// Extend the published graph by the point just appended, or leave it to the
 /// tail scan.
 ///
@@ -2553,7 +2645,7 @@ pub fn searchFiltered(
             if (scratch) |sc| {
                 var buf: [Probe.max_buffer]u8 align(Probe.buffer_align) = undefined;
                 const probe = Probe.init(coll, query, &buf);
-                const idx = hnsw.Index{ .graph = g, .scorer = .of(&probe) };
+                const idx = hnsw.Index{ .graph = g, .scorer = .of(&probe), .bound = covered };
                 // Tombstones are dropped as results are admitted to `out`, not
                 // after it has been truncated to `k`, see `Index.Filter`.
                 idx.searchFiltered(ef, sc, out, traversal_filter);
@@ -4203,6 +4295,24 @@ test "a graph covering more than the reader's snapshot returns a point twice" {
         const e = try seen2.getOrPut(cand.id);
         try testing.expect(!e.found_existing);
     }
+
+    // The form the search path uses: `Index.bound`, which neither scores nor
+    // routes through a node past the snapshot.
+    var bounded_store: [32]Candidate = undefined;
+    var bounded_out = heap.TopK.init(&bounded_store, 32);
+    {
+        var buf: [Probe.max_buffer]u8 align(Probe.buffer_align) = undefined;
+        const probe = Probe.init(&c, &q, &buf);
+        const idx = hnsw.Index{ .graph = c.graph.?, .scorer = .of(&probe), .bound = covered };
+        idx.searchFiltered(64, &scratch, &bounded_out, null);
+        scanPendingTail(&c, &q, covered, &bounded_out);
+    }
+    var seen3 = std.AutoHashMap(u32, void).init(testing.allocator);
+    defer seen3.deinit();
+    for (bounded_out.finish()) |cand| {
+        const e = try seen3.getOrPut(cand.id);
+        try testing.expect(!e.found_existing);
+    }
 }
 
 test "live insertion keeps every appended point findable exactly once" {
@@ -4316,4 +4426,141 @@ test "live insertion leaves the collection searchable after a rebuild" {
     var out = heap.TopK.init(&store, 10);
     search(&c, &q, 256, .approximate, &scratch, &out);
     try testing.expect(out.finish().len == 10);
+}
+
+test "the drainer links the tail while searches run, and every point stays findable once" {
+    // findings 8: every query scans the pending tail, and at d=1536 that is
+    // 304 MB a query. `drainTail` links the tail into the graph readers are
+    // walking. The two failures it must not have are the two regions
+    // disagreeing: a point in neither (invisible) or in both (returned
+    // twice). Searchers run throughout, over two chunks.
+    if (build_options.live_insert) return error.SkipZigTest;
+    const dim = 8;
+    const built = 12_000;
+    const appended = drain_chunk + 100; // two chunks, under `rebuild_ratio`
+    const total = built + appended;
+    // Euclid, so a stored vector's nearest neighbour is itself.
+    var c = try makeCollection(dim, .euclid, total);
+    defer c.deinit();
+    var prng = std.Random.DefaultPrng.init(0xD4A1);
+    const rnd = prng.random();
+    const stored = try testing.allocator.alloc(f32, total * dim);
+    defer testing.allocator.free(stored);
+    for (stored) |*x| x.* = rnd.floatNorm(f32);
+    for (0..built) |i| _ = try c.upsert(.{ .num = i }, stored[i * dim ..][0..dim]);
+    try buildIndex(&c, .parallel, 4);
+    for (built..total) |i| _ = try c.upsert(.{ .num = i }, stored[i * dim ..][0..dim]);
+    invalidateIndex(&c);
+    try testing.expectEqual(IndexState.ready, c.index_state.load(.acquire));
+    const g = c.graph.?;
+    const entry = g.entry_point;
+    const max_level = g.max_level;
+
+    const H = struct {
+        fn searcher(coll: *Collection, vecs: []const f32, dupes: *std.atomic.Value(u32), missing: *std.atomic.Value(u32), stop: *std.atomic.Value(bool)) void {
+            var sc = hnsw.Index.Scratch.init(testing.allocator, total, 128) catch {
+                _ = missing.fetchAdd(1, .monotonic);
+                return;
+            };
+            defer sc.deinit(testing.allocator);
+            var i: usize = 0;
+            while (!stop.load(.acquire)) : (i += 1) {
+                // Mostly the tail, where the regions move.
+                const id = if (i % 4 == 0) (i * 7919) % built else built + (i * 31) % appended;
+                var buf: [16]Candidate = undefined;
+                var out = heap.TopK.init(&buf, 16);
+                search(coll, vecs[id * dim ..][0..dim], 128, .approximate, &sc, &out);
+                const got = out.finish();
+                for (got, 0..) |a, j| {
+                    for (got[j + 1 ..]) |b| if (a.id == b.id) {
+                        _ = dupes.fetchAdd(1, .monotonic);
+                    };
+                }
+                if (got.len == 0 or got[0].id != coll.id_space.lookup(.{ .num = id }).?)
+                    _ = missing.fetchAdd(1, .monotonic);
+            }
+        }
+    };
+    var dupes = std.atomic.Value(u32).init(0);
+    var missing = std.atomic.Value(u32).init(0);
+    var stop = std.atomic.Value(bool).init(false);
+    const t1 = try std.Thread.spawn(.{}, H.searcher, .{ &c, stored, &dupes, &missing, &stop });
+    const t2 = try std.Thread.spawn(.{}, H.searcher, .{ &c, stored, &dupes, &missing, &stop });
+    c.drain_running.store(true, .release);
+    drainTail(&c, 4);
+    stop.store(true, .release);
+    t1.join();
+    t2.join();
+
+    try testing.expectEqual(@as(u32, 0), dupes.load(.acquire));
+    try testing.expectEqual(@as(u32, 0), missing.load(.acquire));
+    // Linked in place, and published: the same graph, covering everything,
+    // with no tail left, and the entry point where readers left it.
+    try testing.expect(c.graph.? == g);
+    try testing.expectEqual(@as(usize, total), g.count);
+    try testing.expectEqual(@as(usize, total), c.graph_count.load(.acquire));
+    try testing.expectEqual(@as(usize, total), c.indexed_count);
+    try testing.expectEqual(entry, g.entry_point);
+    try testing.expectEqual(max_level, g.max_level);
+    try testing.expect(!c.drain_running.load(.acquire));
+    try testing.expectEqual(Status.green, c.status());
+
+    // And the drained points are reached through the graph, not the tail:
+    // with nothing pending, the tail scan adds nothing.
+    var sc = try hnsw.Index.Scratch.init(testing.allocator, total, 128);
+    defer sc.deinit(testing.allocator);
+    var hits: usize = 0;
+    for (built..total) |i| {
+        var buf: [1]Candidate = undefined;
+        var out = heap.TopK.init(&buf, 1);
+        search(&c, stored[i * dim ..][0..dim], 64, .approximate, &sc, &out);
+        if (out.finish()[0].id == c.id_space.lookup(.{ .num = i }).?) hits += 1;
+    }
+    try testing.expectEqual(@as(usize, appended), hits);
+}
+
+test "the drainer leaves a tail past the rebuild ratio to the rebuild" {
+    // Bulk ingest into a built graph stays on the parallel build: past
+    // `rebuild_ratio` the drainer returns without linking anything.
+    if (build_options.live_insert) return error.SkipZigTest;
+    const dim = 8;
+    var c = try makeCollection(dim, .euclid, 1000);
+    defer c.deinit();
+    var prng = std.Random.DefaultPrng.init(0xD4A2);
+    const rnd = prng.random();
+    for (0..600) |i| {
+        var v: [dim]f32 = undefined;
+        for (&v) |*x| x.* = rnd.floatNorm(f32);
+        _ = try c.upsert(.{ .num = i }, &v);
+        if (i == 499) try buildIndex(&c, .serial, 1);
+    }
+    try testing.expect(needsRebuild(&c));
+    c.drain_running.store(true, .release);
+    drainTail(&c, 2);
+    try testing.expectEqual(@as(usize, 500), c.graph.?.count);
+    try testing.expect(!c.drain_running.load(.acquire));
+}
+
+test "an overwrite of a row being drained counts against the graph" {
+    // The drainer reads a chunk's rows as it links them. A row overwritten
+    // in place under it sits in the graph at its old vector's position, which
+    // only a rebuild moves, so it must count as the graph's
+    // (`overwritten_since_build`) and not vanish as a tail row would.
+    if (build_options.live_insert) return error.SkipZigTest;
+    const dim = 4;
+    var c = try makeCollection(dim, .euclid, 64);
+    defer c.deinit();
+    var v = [_]f32{ 1, 2, 3, 4 };
+    for (0..20) |i| {
+        v[0] = @floatFromInt(i);
+        _ = try c.upsert(.{ .num = i }, &v);
+        if (i == 17) try buildIndex(&c, .serial, 1);
+    }
+    // Row 19 is tail: overwriting it is the tail's business.
+    _ = try c.upsert(.{ .num = 19 }, &v);
+    try testing.expectEqual(@as(usize, 0), c.overwritten_since_build.load(.acquire));
+    // With a chunk covering it in flight, it is the graph's.
+    c.drain_to.store(20, .release);
+    _ = try c.upsert(.{ .num = 19 }, &v);
+    try testing.expectEqual(@as(usize, 1), c.overwritten_since_build.load(.acquire));
 }

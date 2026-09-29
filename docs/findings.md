@@ -55,16 +55,21 @@ is an occupancy choice, not a cheaper scan, and is the user's call. Software
 prefetch in `searchSelected` was measured on 2026-09-24 and lost (0.75x to
 0.80x).
 
-**8. The exhaustive pending tail costs 15x at d=1536.** `W11-steady` is refused
-(item 3), but its counters are readable: during a 5% append strawmANN's search
-fell from 3,570 to 244 qps at 57.6M cycles and 59 MB of DRAM per query, which
-is every query scanning 49,500 pending vectors, 304 MB at this width, before it
-returns. On sift1m the same row ran at 78% of W4 because that tail is 25 MB.
-The cost is tail size times dimension, and findings 31 asked for incremental
-insertion on exactly this ground. Live insertion exists behind `-Dlive-insert`
-(1f03ba2) and was characterised on sift1m only (7cc278d). The measurement is
-`W11-steady` at d=1536 with it on, once item 3 makes the row measure a
-concurrent write.
+**8. The exhaustive pending tail costs 15x at d=1536.** During a 5% append
+strawmANN's search fell from 3,570 to 244 qps on 0927, every query scanning
+49,500 pending vectors (304 MB at this width), and below `rebuild_ratio` the
+tail never left: nothing indexes it until a rebuild the ratio does not call.
+Since 2026-09-29 a background drainer links the tail into the live graph
+(`collection.drainTail`, `decisions.md`). Measured on dbpedia-1m in-process
+(random queries, W11-steady's 49,500 points at 1,900 points/s): it links
+about 1,020 points/s against the search, so during the append it is behind
+and search reads within 8 to 17% of `--no-drain` (412 and 445 against 381
+q/s); 22 s after the append the tail is gone and search runs 900 to 1,800
+q/s, where `--no-drain` stays at 134 for as long as the tail stands. What is
+open: the published row (W11-steady on the next dbpedia pair, with item 3's
+window), and the in-append half, which is the drainer's CPU against the
+search's: at 2 ms of core per insertion at d=1536, keeping up with 1,900
+points/s is about four of the eight cores.
 
 **10. Exact search at d=1536 is lost to scan contention, and a shared pass
 wins it back.** `W9` read 0.77x on the development-profile dbpedia page and
@@ -100,7 +105,9 @@ against Qdrant's 99, at 313M cycles per query. The deprioritised build never
 published within the row (`rebuild start points=1089100 pending=99100` and no
 `published`, in every pass), so every query scanned the whole pending tail
 (item 8). Nice 10 bought the search workers their CPUs back and spent them on
-the exhaustive tail.
+the exhaustive tail. The drainer (item 8) does not reach this row: W11's fifth of the
+corpus arrives at 3,300 points/s, faster than it links, so the tail crosses
+`rebuild_ratio` and the rebuild takes over as before.
 
 ### P3. What the datasets offer that no row measures yet
 

@@ -43,6 +43,7 @@ const Flag = enum {
     cpus,
     build_threads,
     build_mode,
+    no_drain,
 
     /// The text each flag is spelled with.
     ///
@@ -70,6 +71,7 @@ const Flag = enum {
             .cpus => "--cpus",
             .build_threads => "--build-threads",
             .build_mode => "--build-mode",
+            .no_drain => "--no-drain",
         };
     }
 
@@ -204,6 +206,7 @@ const Options = struct {
     /// neither measures what every run so far measured.
     build_threads: usize = engineDefault(.build_threads),
     build_mode: core.collection.BuildMode = engineDefault(.build_mode),
+    drain_tail: bool = engineDefault(.drain_tail),
     pin: bool = false,
     /// §5.5. Declared, never ambient, §7.1's rule, so a result row can state
     /// which arm produced it.
@@ -232,6 +235,9 @@ fn usage(w: *Io.Writer) !void {
         \\                       (default {d}, at least 1)
         \\  --build-mode         serial|parallel graph build (§8.7; default {s}.
         \\                       serial is deterministic and slow)
+        \\  --no-drain           leave appends to a built graph in the pending tail
+        \\                       until a rebuild, instead of linking them in the
+        \\                       background (the A/B arm for the drainer)
         \\  --pin                pin threads to cores   (§6.3, §7.1)
         \\  --cpus <list>        which cpus --pin may use, e.g. 4-11 or 0,2,4-6
         \\                       (default 0..; name them on a heterogeneous part)
@@ -333,6 +339,7 @@ pub fn main(init: std.process.Init) !void {
             },
             .pin => opts.pin = true,
             .no_huge_pages => opts.huge_pages = false,
+            .no_drain => opts.drain_tail = false,
             .no_bandwidth_probe => opts.bandwidth_probe = false,
             .probe => opts.probe_only = true,
             .host => opts.host = next(args, &i) orelse return error.MissingValue,
@@ -393,6 +400,7 @@ pub fn main(init: std.process.Init) !void {
     engine.default_placement = opts.default_placement;
     engine.build_threads = opts.build_threads;
     engine.build_mode = opts.build_mode;
+    engine.drain_tail = opts.drain_tail;
     if (opts.default_placement.isMapped() and opts.data_dir == null) {
         try w.print("error: --default-placement {s} needs --data-dir <path>\n", .{opts.default_placement.name()});
         try w.flush();
@@ -587,6 +595,11 @@ pub fn main(init: std.process.Init) !void {
     switch (engine.build_mode) {
         .parallel => try w.print("  index                  : HNSW, bulk parallel build on {d} threads (brute force until built and for exact)\n", .{engine.build_threads}),
         .serial => try w.print("  index                  : HNSW, bulk serial build, deterministic, one thread (brute force until built and for exact)\n", .{}),
+    }
+    if (engine.drain_tail) {
+        try w.print("  appends                : linked into the built graph in the background on {d} threads, until {d}% pending asks for a rebuild\n", .{ engine.build_threads, @as(u32, @intFromFloat(core.collection.rebuild_ratio * 100)) });
+    } else {
+        try w.print("  appends                : pending tail until a rebuild (--no-drain)\n", .{});
     }
 
     // §7.2: the hardware baseline belongs next to the result, not in a separate

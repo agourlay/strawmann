@@ -1976,3 +1976,50 @@ Taken over the alternatives: a `--duration` flag in bfb would stop the
 search at the writer's end but changes the client both engines are measured
 with; throttling the search to the append's span would measure the throttle.
 
+## Appends to a built graph are linked in the background, decided 2026-09-29
+
+findings 8 and 11: a point appended to a built collection waited in the
+pending tail, scanned by every query, until a rebuild; below `rebuild_ratio`
+(10%) no rebuild came, so W11-steady's 49,500 points at d=1536 stayed a 304 MB
+scan per query for as long as the collection lived. `-Dlive-insert` linked
+each point inside its upsert, under the write lock, on one thread: about 500
+points/s at d=1536 against W11-steady's 1,900, with every writer waiting.
+
+A drainer thread per collection now links the tail into the published graph,
+a chunk of `drain_chunk` (1,024) points at a time on `build_threads`
+(`build.drainLive`), publishing each chunk's count once all of it is linked.
+It starts from the search and info paths (`Engine.ensureTailDraining`, two
+atomic loads on the steady state) and stops when nothing is pending, when a
+rebuild is due, or when the collection is dropped. What keeps it sound
+against readers and the rebuild:
+
+- **Readers bound their traversal** by the count they loaded (`Index.bound`),
+  so a node linked but not yet published is neither scored nor routed
+  through, and belongs to their tail scan. One compare per neighbour.
+- **The entry point never moves** during a drain, since readers load its two
+  fields separately; the next rebuild promotes a node drawn above it.
+- **`index_writer` excludes a drain chunk and a rebuild**, which copies the
+  graph to extend it. It is taken before `write_lock` everywhere.
+- **An overwrite below the chunk in flight** (`drain_to`) counts against the
+  graph, as an overwrite of a covered row does.
+- **Quantized collections are left to the rebuild**, as live insertion was:
+  a linked point would have no code.
+
+It runs at normal priority, unlike a build: its work is one insertion per
+appended point, bounded by the write rate, while a point left in the tail
+costs every query until a rebuild. `--no-drain` is the arm without it.
+
+Measured in-process on dbpedia-1m, random queries, W11-steady's append
+(search qps per 10 s span):
+
+| arm | during the 26 s append | after it |
+|---|---|---|
+| `--no-drain` | 586, 287, 194 | 134, and stays |
+| drain | 601, 330, 210 | 232, 725, 1,831, 1,266, 1,525, 905, 969, 1,406 |
+
+The drainer linked 49,500 points in 48.6 s (1,020 points/s) against the
+search, so during the append it is behind and costs nearly what it saves
+(+8 to 17% over the window); it is the collection after the append that it
+changes, 7 to 13x. W11 appends 20% at 3,300 points/s, which the drainer does
+not keep up with, so that row still crosses the ratio and rebuilds.
+

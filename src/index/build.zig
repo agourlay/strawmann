@@ -805,6 +805,107 @@ pub fn extendParallel(
     };
 }
 
+/// Link `[from, to)` into a graph that is being searched, on `threads`
+/// threads, and leave `graph.count` at `from` for the caller to publish.
+///
+/// `insertLive` is this for one node under the collection's write lock, on
+/// the upsert's thread: at d=1536 one thread links about 500 points a second
+/// against W11-steady's 1,900, and every upsert waits for it. This is the
+/// background drainer's form (`collection.drainTail`), and differs from
+/// `extendParallel` in the three ways a live graph needs:
+///
+///   * the count is not moved. A reader bounds its traversal by the count it
+///     loaded (`Index.bound`) and scans the rest as its pending tail, so a
+///     node linked here is invisible to it until the caller publishes `to`,
+///     and in exactly one of the two regions after;
+///   * the entry point is not moved. A reader loads `entry_point` and
+///     `max_level` as two plain fields, and a promotion between the loads
+///     would start its descent at a level the entry does not have. The
+///     builders' own entry word is private to this call. A node drawn above
+///     `max_level` keeps its lists and the next rebuild promotes it; at a
+///     tail of 10% of the graph, which a rebuild takes over (`rebuild_ratio`),
+///     that is a draw of order 1/n per node;
+///   * nothing is repaired afterwards. `repairUnreachable` walks the whole
+///     graph for a bulk build's evictions; a drain adds a few thousand nodes
+///     to a million, and the rebuild that follows repairs them.
+///
+/// Readers never take the node locks. What they can observe mid-link is what
+/// `insertLive` documents: a row being rewritten holds only valid ids, and
+/// any of them past the reader's bound is skipped.
+pub fn drainLive(
+    alloc: std.mem.Allocator,
+    graph: *Graph,
+    scorer: Scorer,
+    from: usize,
+    to: usize,
+    threads: usize,
+) !void {
+    std.debug.assert(from == graph.count and from > 0 and from <= to);
+    if (from == to) return;
+    if (graph.entry_point == empty_neighbour) return error.NoEntryPoint;
+    try layoutUpperLevels(graph, from, to);
+
+    var locks = try NodeLocks.init(alloc, to);
+    defer locks.deinit(alloc);
+
+    const Shared = struct {
+        graph: *Graph,
+        scorer: Scorer,
+        locks: *NodeLocks,
+        next: std.atomic.Value(usize),
+        to: usize,
+        entry: std.atomic.Value(u64),
+        alloc: std.mem.Allocator,
+        err: std.atomic.Value(bool),
+    };
+    var shared = Shared{
+        .graph = graph,
+        .scorer = scorer,
+        .locks = &locks,
+        .next = .init(from),
+        .to = to,
+        .entry = .init((EntrySnapshot{
+            .entry_point = graph.entry_point,
+            .max_level = graph.max_level,
+        }).pack()),
+        .alloc = alloc,
+        .err = .init(false),
+    };
+
+    const Worker = struct {
+        fn run(sh: *Shared) void {
+            var b = Builder.init(sh.alloc, sh.graph, sh.scorer) catch {
+                sh.err.store(true, .release);
+                return;
+            };
+            defer b.deinit(sh.alloc);
+            b.locks = sh.locks;
+            b.entry = &sh.entry;
+            while (true) {
+                if (sh.graph.cancelled()) break;
+                const i = sh.next.fetchAdd(1, .monotonic);
+                if (i >= sh.to) break;
+                b.insertOne(@intCast(i));
+            }
+        }
+    };
+
+    const n_threads = @max(1, @min(threads, to - from));
+    const handles = try alloc.alloc(std.Thread, n_threads);
+    defer alloc.free(handles);
+    var spawned: usize = 0;
+    for (handles) |*h| {
+        h.* = std.Thread.spawn(.{}, Worker.run, .{&shared}) catch break;
+        spawned += 1;
+    }
+    for (handles[0..spawned]) |h| h.join();
+    if (spawned == 0) return error.SpawnFailed;
+    // A worker that could not allocate leaves its share to the others; only
+    // when none ran is a node left unlinked, and `next` is what says so.
+    if (shared.err.load(.acquire) and shared.next.load(.acquire) < to) return error.OutOfMemory;
+    if (graph.cancelled()) return error.Cancelled;
+}
+
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------

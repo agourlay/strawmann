@@ -86,6 +86,10 @@ pub const Engine = struct {
     /// conformance runs against the parallel build"), and the flag is what
     /// makes the second half of that sentence stop being true.
     build_mode: core.collection.BuildMode = .parallel,
+    /// Link appends to a built graph in the background (`drainTail`) rather
+    /// than leave them in the pending tail every query scans until a rebuild.
+    /// `--no-drain` is the arm without it.
+    drain_tail: bool = true,
     /// Largest vector dimension any worker's scratch can hold.
     ///
     /// §6.3 forbids allocating on the query path, so `Workspace.query` is sized
@@ -196,7 +200,11 @@ pub const Engine = struct {
         // Cheap early out for the steady state (`.ready` or `.building`), so
         // a poll per second or a query per microsecond does not contend on
         // the lock below.
-        if (coll.index_state.load(.acquire) != .absent) return;
+        switch (coll.index_state.load(.acquire)) {
+            .ready => return self.ensureTailDraining(coll),
+            .building => return,
+            .absent => {},
+        }
 
         // The lock covers the compare-exchange *and* the handle bookkeeping,
         // so two winners of successive exchanges cannot interleave their
@@ -241,6 +249,43 @@ pub const Engine = struct {
             return;
         };
         coll.build_thread = t;
+    }
+
+    /// Start the tail drainer if a built graph has appends past it and none
+    /// is running. Two atomic loads on the steady state, since every search
+    /// comes through here; the spawn itself takes `build_thread_lock`, as a
+    /// build does, so the join-then-store cannot interleave.
+    fn ensureTailDraining(self: *Engine, coll: *core.Collection) void {
+        if (!self.drain_tail or build_options.live_insert) return;
+        if (coll.graph_count.load(.acquire) >= coll.count()) return;
+        if (coll.drain_running.load(.acquire)) return;
+        if (coll.quant.load(.acquire) != null) return;
+
+        coll.build_thread_lock.lock();
+        defer coll.build_thread_lock.unlock();
+        if (coll.drain_running.cmpxchgStrong(false, true, .acq_rel, .monotonic) != null) return;
+
+        const Task = struct {
+            fn run(c: *core.Collection, threads: usize, cpus: ?[]const usize) void {
+                // The whole server's cpus, as a build's, and *not* lowered:
+                // a drain's work is bounded by the write rate, one insertion
+                // per point, while a point left in the tail costs every query
+                // that runs until a rebuild. Lowered, a rebuild under search
+                // load never published inside W11 (findings 11).
+                if (cpus) |set| net.server.pinToCpus(set);
+                core.collection.drainTail(c, threads);
+            }
+        };
+        // `drain_running` false means the previous drainer has returned, or
+        // is returning, from `drainTail`: the join is immediate.
+        if (coll.drain_thread) |prev| {
+            prev.join();
+            coll.drain_thread = null;
+        }
+        coll.drain_thread = std.Thread.spawn(.{}, Task.run, .{ coll, self.build_threads, self.build_cpus }) catch {
+            coll.drain_running.store(false, .release);
+            return;
+        };
     }
 
     pub fn drop(self: *Engine, name: []const u8) bool {
@@ -2127,6 +2172,46 @@ test "a drop stops a build still running on the collection" {
     // Stopped at its next node, not finished: a quarter of a full build is
     // a generous bound for a check made once per inserted point.
     try testing.expect(drop_ns * 4 < full_ns);
+}
+
+test "a poll on a built collection with a tail starts the drainer, and --no-drain does not" {
+    if (build_options.live_insert) return error.SkipZigTest;
+    const dim = 8;
+    var prng = std.Random.DefaultPrng.init(0xD4A3);
+    const rnd = prng.random();
+    var v: [dim]f32 = undefined;
+    for ([_]bool{ true, false }) |drain| {
+        var e = Engine.init(testing.allocator);
+        defer e.deinit();
+        e.build_threads = 2;
+        e.drain_tail = drain;
+        const c = try e.create("c", .{ .dim = dim, .metric = .dot, .capacity = 1200 });
+        for (0..1000) |i| {
+            for (&v) |*x| x.* = rnd.float(f32);
+            _ = try c.upsert(.{ .num = i }, &v);
+        }
+        try core.collection.buildIndex(c, .parallel, 2);
+        for (1000..1050) |i| {
+            for (&v) |*x| x.* = rnd.float(f32);
+            _ = try c.upsert(.{ .num = i }, &v);
+        }
+        core.collection.invalidateIndex(c);
+        e.ensureIndexBuilding(c);
+        if (drain) {
+            // The drainer runs on its own thread: wait for its publish.
+            var spins: usize = 0;
+            while (c.graph_count.load(.acquire) < 1050) : (spins += 1) {
+                if (spins > 10_000) return error.DrainerNeverPublished;
+                const ts: std.os.linux.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
+                _ = std.os.linux.nanosleep(&ts, null);
+            }
+        } else {
+            try testing.expect(c.drain_thread == null);
+            try testing.expectEqual(@as(usize, 1000), c.graph_count.load(.acquire));
+        }
+        // Either way the collection stays on the graph it has.
+        try testing.expectEqual(core.collection.IndexState.ready, c.index_state.load(.acquire));
+    }
 }
 
 test "concurrent creates of one name: exactly one creates, and the loser touches nothing" {
