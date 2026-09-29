@@ -351,6 +351,13 @@ pub const CALIBRATED: &[(Metric, usize, f64, bool)] = &[
     // is true of the general case and false of this corpus, so no arrangement
     // of accumulators — 4 or 8, SSE2 through AVX-512 — can disagree here.
     (Metric::Euclid, 128, 4.172e-7, true),
+    // docs/tolerance.md: cosine d=512 (laion-small-clip), 4 × max(qdrant 2.384e-7,
+    // strawmann 2.384e-7), 2026-09-29 over 8 forced-ISA arms and two Qdrant arms
+    // (the native build and the v1.19.0 image), n=10,000 scores.
+    (Metric::Cosine, 512, 9.537e-7, false),
+    // docs/tolerance.md: cosine d=2048 (h-and-m-2048-angular-filters), same arms,
+    // same spreads, same ε.
+    (Metric::Cosine, 2048, 9.537e-7, false),
 ];
 
 /// Where a default ε came from, so the run can print it.
@@ -483,14 +490,14 @@ impl Table {
         s.push_str("the one into the other, and each run says which of the two it used.\n");
         s.push_str("\n### euclid at d=128: measured, and measured at zero\n\n");
         s.push_str("The euclid/128 cell is SIFT1M, the corpus the published comparison runs\n");
-        s.push_str("on, and its ε *equals* the floor — so the row looks like a floor and is\n");
+        s.push_str("on, and its ε *equals* the floor, so the row looks like a floor and is\n");
         s.push_str("not one. Across eight forced-ISA arms (SSE2 through AVX-512, VNNI and\n");
         s.push_str("VPOPCNTDQ) and two Qdrant arms, over 30,000 scores, both cross-arm spreads\n");
         s.push_str("came back **exactly** zero, so `calibrate`'s floor clause set the value.\n\n");
         s.push_str("That zero is arithmetic rather than luck, and it is worth knowing before\n");
         s.push_str("anyone re-runs the calibration expecting a number. SIFT descriptors are\n");
         s.push_str("uint8, so a squared euclid over d=128 is an integer of at most\n");
-        s.push_str("128·255² = 8,323,200 — the observed maximum is 126,546 — and every partial\n");
+        s.push_str("128·255² = 8,323,200 (the observed maximum is 126,546) and every partial\n");
         s.push_str("sum is exactly representable in fp32 below 2²⁴ = 16,777,216. A sum of\n");
         s.push_str("exact integers is the same in any order, so no arrangement of accumulators\n");
         s.push_str("can disagree, and the final square root is a correctly-rounded operation on\n");
@@ -507,7 +514,7 @@ impl Table {
         s.push_str("about the general case: on a corpus whose distances are exact integers it\n");
         s.push_str("does not hold, which is what the euclid/128 row above measures. What *is*\n");
         s.push_str("achievable is value equality within a tolerance derived from how much each\n");
-        s.push_str("engine already disagrees with itself — which is what this table records.\n");
+        s.push_str("engine already disagrees with itself, which is what this table records.\n");
         s
     }
 }

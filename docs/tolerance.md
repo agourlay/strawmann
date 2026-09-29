@@ -8,6 +8,8 @@ kernels, and strawmann's across the §7.5 forced-ISA matrix.
 |---|--:|--:|---|--:|---|---|
 | cosine | 1536 | 9.537e-7 | absolute | 4 | n=3000 max=0.000e0 p99.9=0.000e0 p99=0.000e0 p50=0.000e0 mean=0.000e0 (rel max=0.000e0 p99=0.000e0) | n=3000 max=2.384e-7 p99.9=2.384e-7 p99=1.788e-7 p50=5.960e-8 mean=5.708e-8 (rel max=2.987e-7 p99=2.158e-7) |
 | euclid | 128 | 4.172e-7 | relative | 4 | n=30000 max=0.000e0 p99.9=0.000e0 p99=0.000e0 p50=0.000e0 mean=0.000e0 (rel max=0.000e0 p99=0.000e0) | n=30000 max=0.000e0 p99.9=0.000e0 p99=0.000e0 p50=0.000e0 mean=0.000e0 (rel max=0.000e0 p99=0.000e0) |
+| cosine | 512 | 9.537e-7 | absolute | 4 | n=10000 max=2.384e-7 p99.9=1.788e-7 p99=1.192e-7 p50=0.000e0 mean=2.650e-8 (rel max=2.763e-7 p99=1.886e-7) | n=10000 max=2.384e-7 p99.9=1.788e-7 p99=1.192e-7 p50=0.000e0 mean=3.699e-8 (rel max=2.975e-7 p99=1.831e-7) |
+| cosine | 2048 | 9.537e-7 | absolute | 4 | n=10000 max=2.384e-7 p99.9=1.788e-7 p99=1.192e-7 p50=0.000e0 mean=2.390e-8 (rel max=2.384e-7 p99=1.597e-7) | n=10000 max=2.384e-7 p99.9=1.192e-7 p99=1.192e-7 p50=0.000e0 mean=3.324e-8 (rel max=2.384e-7 p99=1.579e-7) |
 
 These cells are mirrored in `conformance/src/differ/tolerance.rs` (`CALIBRATED`),
 which is what `differ` and `relevance` default to when `--epsilon` is not
