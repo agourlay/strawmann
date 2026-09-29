@@ -683,7 +683,16 @@ class Row:
         # "Most" only when it is: at 82% overlap the rebuild had 18% of the row.
         rest = [f"{100 - pct:.0f}%" for _, pct in low]
         tail = "measured the rebuild the append provoked rather than a concurrent write"
-        if len(low) == 2:
+        windowed = [lbl for lbl, r in ((self.a_label, ra), (self.b_label, rb))
+                    if r.get("write_window_s") is not None]
+        if low and all(lbl in windowed for lbl, _ in low):
+            # Measured over the write window, a low overlap is a search that
+            # ended before its append did: what it measured is the append's
+            # start, with the pending tail short of where the append takes it.
+            who = "either append" if len(low) == 2 else f"{low[0][0]}'s append"
+            low_note = (f"the search saw under {floor} of {who}, so its qps is the "
+                        f"append's start and not all of it")
+        elif len(low) == 2:
             low_note = (f"the writer covered under {floor} of either search, so "
                         + ("most of both rows " if all(pct < 50 for _, pct in low) else
                            f"the last {rest[0]} and {rest[1]} of the two rows ")

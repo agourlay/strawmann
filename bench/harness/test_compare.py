@@ -1010,6 +1010,16 @@ class CompareTests(unittest.TestCase):
         self.assertIn("[search-during-write; no recall join]", rows["W11"].note_text)
         self.assertNotIn("write overlap", rows["W11"].note_text)
 
+    def test_a_windowed_w11_says_the_search_ended_before_its_append(self):
+        """Measured over the write window, a low overlap is a search that
+        ended inside its append, not a writer gone for most of the search."""
+        w11 = dict(recall_joinable=False, ratio_policy="search-during-write; no recall join")
+        rows, _ = self._joined([_row("W11", 4000, write_overlap_pct=60.0, write_window_s=36.0, **w11)],
+                               [_row("W11", 2000, write_overlap_pct=100.0, write_window_s=60.0, **w11)],
+                               good_stamp(), good_stamp())
+        self.assertIn("the search saw under 90% of a's append", rows["W11"].note_text)
+        self.assertNotIn("rebuild the append provoked", rows["W11"].note_text)
+
     def test_w11_note_says_most_only_when_it_was_most(self):
         """0925's strawmANN W11 ran at 82% overlap and the note said "most of
         that row measured the rebuild": 18% of it did."""

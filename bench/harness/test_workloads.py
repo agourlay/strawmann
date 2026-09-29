@@ -685,15 +685,49 @@ class WorkloadTests(unittest.TestCase):
         self.assertEqual(r4.n_requested, 4 * w.QUERIES)
         self.assertEqual(r4.harness_hash, w.stamp_hash(stamp))
         self.assertIn(f"-n {4 * w.QUERIES} (4x the table's {w.QUERIES})", r4.notes)
-        # W11: the append finishes at a fifth of the search, and the row says so.
+        # W11: the append finishes at a fifth of the search, and the row is
+        # measured over the append alone: the qps is the searches stamped
+        # while it ran, and the whole search's stays beside it.
         r11 = w.run_one(t["W11"], "http://localhost:1", results, [], None, 1, stamp)
         self.assertEqual(r11.status, w.Status.ok, r11.detail)
         self.assertEqual(r11.ratio_policy, "search-during-write; no recall join")
+        self.assertIsNotNone(r11.write_window_s)
+        self.assertLess(r11.write_window_s, 0.5)
+        self.assertIsNotNone(r11.qps_search)
+        self.assertIn("qps over the", r11.notes)
+        self.assertIn("append finished", r11.notes)
         self.assertIsNotNone(r11.write_overlap_pct)
-        self.assertLess(r11.write_overlap_pct, 90)
-        self.assertIn("write overlap", r11.notes)
+        # A row with no writer is not windowed.
+        self.assertIsNone(r.write_window_s)
         # ...and no stamp given, no hash invented.
         self.assertIsNone(w.run_one(t["W3"], "http://localhost:1", results, []).harness_hash)
+
+    def test_the_write_window_counts_only_searches_inside_the_append(self):
+        w = self.w
+        # 10 q/s for 20 s from t=100 s, the writer from 104 to 110: six
+        # seconds, 60 searches, 10 q/s, whatever the search did either side.
+        stamps = [1000 * (100 + 0.1 * (i + 1)) for i in range(200)]
+        qps, span = w.write_window_qps(stamps, 1, 104.0, 110.0)
+        self.assertAlmostEqual(span, 6.0)
+        self.assertAlmostEqual(qps, 10.0, places=1)
+        # Batched requests count their queries.
+        self.assertAlmostEqual(w.write_window_qps(stamps, 8, 104.0, 110.0)[0], 80.0, places=0)
+        # A search that ended first: clipped to its own last completion.
+        qps, span = w.write_window_qps(stamps, 1, 104.0, 150.0)
+        self.assertAlmostEqual(span, 16.0)
+        # One that started after the writer: clipped to its first.
+        self.assertAlmostEqual(w.write_window_qps(stamps, 1, 50.0, 110.0)[1], 9.9)
+        # No search inside the append is no measurement, not zero.
+        self.assertIsNone(w.write_window_qps(stamps, 1, 130.0, 140.0))
+        self.assertIsNone(w.write_window_qps([], 1, 104.0, 110.0))
+
+    def test_search_completions_reads_bfbs_timestamps_and_skips_the_rest(self):
+        p = Path(self.tmp.name) / "s.jsonl"
+        p.write_text('{"timestamp": 1.5, "request_latency": 0.1}\n'
+                     'not json\n{"delay": 3.0}\n{"timestamp": 2.5}\n')
+        self.assertEqual(self.w.search_completions(p), [1.5, 2.5])
+        self.assertEqual(self.w.search_completions(p.with_name("missing")), [])
+        self.assertEqual(self.w.search_completions(None), [])
 
     def test_w11_writer_failure_and_reaper_exception_are_on_the_row(self):
         # A writer that exits non-zero fails the row and still times its exit;
@@ -1639,7 +1673,7 @@ class FullrunRowInvocationTests(unittest.TestCase):
                 {"id": wid, "qps": q, "n_queries": n, "write_overlap_pct": c}
                 for wid, (q, n, c) in got.items()]))
 
-    def test_the_mixed_rows_search_ends_inside_a_fixed_rate_append(self):
+    def test_the_mixed_rows_search_outlasts_a_fixed_rate_append(self):
         """0a3de76 stretched the append to the previous search, and the search
         was as long as the write rate let it be: 2,000 points/s on 0924, 200 on
         0925, about 1,100 next. The rate is now fixed and the search is sized
@@ -1664,15 +1698,14 @@ class FullrunRowInvocationTests(unittest.TestCase):
                              {"W11-steady": 100, "W11": 400})
             got = f.resolve_w11_queries(["sm-dbp1m-perf-0926", "qd-dbp1m-perf-0926"])
             append = {k: n / want[k] for k, n in (("W11-steady", 49_500), ("W11", 198_000))}
-            # Read off 0924, the conservative of the two estimates per engine:
-            # the rate times the append, or the queries the writer covered.
-            steady = min(244.0 * append["W11-steady"], 50_000 * 0.121)
+            # Read off 0924: the faster engine's rate times the append, past
+            # it by the margin, so both engines' searches cover the write.
             self.assertEqual(got, {
-                "W11_STEADY_QUERIES": math.floor(steady / f.W11_SPAN_MARGIN),
-                "W11_QUERIES": math.floor(145.0 * append["W11"] / f.W11_SPAN_MARGIN)})
-            # And the slower engine's search then ends inside the append.
-            self.assertLess(got["W11_STEADY_QUERIES"] / 244.0, append["W11-steady"])
-            self.assertLess(got["W11_QUERIES"] / 145.0, append["W11"])
+                "W11_STEADY_QUERIES": math.ceil(427.0 * append["W11-steady"] * f.W11_SPAN_MARGIN),
+                "W11_QUERIES": math.ceil(166.0 * append["W11"] * f.W11_SPAN_MARGIN)})
+            for wid, env in f.W11_QUERIES_ENV.items():
+                for q in {"W11-steady": (244.0, 427.0), "W11": (166.0, 145.0)}[wid]:
+                    self.assertGreater(got[env] / q, append[wid])
 
     def test_the_walk_reaches_an_older_pair_at_this_rate(self):
         """`previous_pair` returned the newest pair other than its argument,
@@ -1713,51 +1746,37 @@ class FullrunRowInvocationTests(unittest.TestCase):
                 p.write_text(json.dumps(rows))
             self.assertEqual(f.resolve_w11_queries(["sm-dbp1m-perf-0926", "qd-dbp1m-perf-0926"]), {})
 
-    def test_the_step_is_damped_toward_what_the_pair_ran(self):
-        """Halfway in log from the pair's own -n to what its rate implies."""
-        f, w = self.f, self.f.workloads
-        rates = {"W11-steady": 1_900, "W11": 3_300}
-        with mock.patch.object(w, "upload_n", lambda: 990_000), \
-                mock.patch.object(w, "w11_n", lambda: 198_000):
-            self._w11_pair("0926", None, {
-                "sm": {"W11-steady": (240.0, 4_840, 100.0), "W11": (150.0, 6_965, 100.0)},
-                "qd": {"W11-steady": (420.0, 4_840, 100.0), "W11": (140.0, 6_965, 100.0)}},
-                rates=rates, sized=True)
-            got = f.resolve_w11_queries(["sm-dbp1m-perf-0927", "qd-dbp1m-perf-0927"])
-            raw = math.floor(140.0 * 60.0 / f.W11_SPAN_MARGIN)
-            self.assertEqual(got["W11_QUERIES"], math.floor(math.sqrt(raw * 6_965)))
-
-    def test_a_search_that_outran_its_writer_shrinks_the_next_one(self):
-        """A qps averaged over a search that outlived its writer includes the
-        faster quiet tail, so sizing from it alone would overrun again, every
-        night. The covered share shrinks it by the margin until it fits."""
+    def test_neither_the_pairs_length_nor_its_coverage_moves_the_next_one(self):
+        """Sized to end inside the append, the search was damped toward what
+        the pair ran and shrunk by what its writer covered, and still missed
+        (findings 3). Measured over the write window, a pair's rate is its
+        rate under the write whatever it ran, so neither enters."""
         f, w = self.f, self.f.workloads
         rates = {"W11-steady": 1_900, "W11": 3_300}
         with mock.patch.object(w, "upload_n", lambda: 990_000), \
                 mock.patch.object(w, "w11_n", lambda: 198_000):
             self._w11_pair("0926", None, {
                 "sm": {"W11-steady": (240.0, 4_840, 80.0), "W11": (150.0, 6_965, 100.0)},
-                "qd": {"W11-steady": (420.0, 4_840, 100.0), "W11": (140.0, 6_965, 100.0)}},
-                rates=rates)
+                "qd": {"W11-steady": (420.0, 4_840, 100.0), "W11": (140.0, 6_965, 43.0)}},
+                rates=rates, sized=True)
             got = f.resolve_w11_queries(["sm-dbp1m-perf-0927", "qd-dbp1m-perf-0927"])
-            self.assertEqual(got["W11_STEADY_QUERIES"], math.floor(4_840 * 0.80 / f.W11_SPAN_MARGIN))
-            # Covered fully: the rate is the rate under the write, and exact.
-            self.assertEqual(got["W11_QUERIES"], math.floor(140.0 * 60.0 / f.W11_SPAN_MARGIN))
+            self.assertEqual(got["W11_STEADY_QUERIES"],
+                             math.ceil(420.0 * 49_500 / 1_900 * f.W11_SPAN_MARGIN))
+            self.assertEqual(got["W11_QUERIES"], math.ceil(150.0 * 60.0 * f.W11_SPAN_MARGIN))
 
-    def test_the_search_is_never_longer_than_queries_nor_shorter_than_a_row(self):
+    def test_the_search_is_never_longer_than_queries(self):
         f, w = self.f, self.f.workloads
         rates = {"W11-steady": 1_900, "W11": 3_300}
         with mock.patch.object(w, "upload_n", lambda: 990_000), \
                 mock.patch.object(w, "w11_n", lambda: 198_000):
-            # sift1m-fast: QUERIES already fits inside the append.
             self._w11_pair("0926", None, {
                 "sm": {"W11-steady": (9_000.0, 50_000, 100.0), "W11": (3.0, 50_000, 100.0)},
-                "qd": {"W11-steady": (8_000.0, 50_000, 100.0), "W11": (900.0, 50_000, 100.0)}},
+                "qd": {"W11-steady": (8_000.0, 50_000, 100.0), "W11": (100.0, 50_000, 100.0)}},
                 rates=rates)
             got = f.resolve_w11_queries(["sm-dbp1m-perf-0927", "qd-dbp1m-perf-0927"])
             self.assertEqual(got["W11_STEADY_QUERIES"], w.QUERIES)
-            # An absurdly slow engine does not cut the faster one below MIN_ROW_S.
-            self.assertEqual(got["W11_QUERIES"], math.ceil(900.0 * w.MIN_ROW_S))
+            # An absurdly slow engine does not size the search: the faster does.
+            self.assertEqual(got["W11_QUERIES"], math.ceil(100.0 * 60.0 * f.W11_SPAN_MARGIN))
         # Nothing to read, or nothing at this rate: QUERIES stands.
         self.assertEqual(f.resolve_w11_queries(["strawmann", "qdrant"]), {})
 

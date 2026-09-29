@@ -292,10 +292,10 @@ def resolve_rps_reference(arg: str | None, labels: list[str]) -> float | None:
 #: Each mixed row's search length, as the variable `workloads` reads.
 W11_QUERIES_ENV = {"W11-steady": "W11_STEADY_QUERIES", "W11": "W11_QUERIES"}
 
-#: How far inside the append the slower engine's search should end. The row
-#: waits for the appender either way; a search that outlives it puts the
-#: "writer covered under 90%" refusal straight back, so the margin is on the
-#: search.
+#: How far past the append the faster engine's search should run. The row is
+#: measured over the write window (`workloads.write_window_qps`), so a search
+#: that outlives its append costs time and nothing else, and one that ends
+#: early is the refusal; the margin is on the long side.
 W11_SPAN_MARGIN = 1.25
 
 #: The spans every run used before 0a3de76 recorded one.
@@ -326,17 +326,24 @@ def w11_append_rates_of(label: str) -> dict[str, int] | None:
 
 
 def resolve_w11_queries(labels: list[str]) -> dict[str, int]:
-    """`{env var: queries}` so each mixed row's search ends inside its append.
+    """`{env var: queries}` so each mixed row's search outlasts its append.
 
     The write rate is fixed (`workloads.W11_STEADY_SPAN_S`); what varies by
-    corpus is how long `QUERIES` takes to search. At d=1536 it took 117 to 345
-    s against a 25 s and 60 s append, the writer covered 12 to 23% of it, and
-    both rows were refused (findings 3). So the search is shortened to what
-    the slower engine searched inside the append on that row (its rate times
-    the append, or the covered share of its queries where the writer finished
-    first), over `W11_SPAN_MARGIN`, and never lengthened past `QUERIES` or cut
-    below `MIN_ROW_S` on the faster engine. A search that still overruns
-    shrinks the next one by the margin again, so it converges on coverage.
+    corpus is how long `QUERIES` takes to search: 117 to 345 s at d=1536
+    against a 25 s and 60 s append. The row is measured over the append's
+    span (`workloads.write_window_qps`), so the search only has to cover it:
+    the faster engine's rate on that row times the append, times
+    `W11_SPAN_MARGIN`, never past `QUERIES`. The append lasts its span
+    whatever the corpus, so the search is never short of `MIN_ROW_S`. The
+    slower engine then runs longer than it needs to, and nothing it does past
+    the append is counted.
+
+    Until 2026-09-29 the search was sized to *end* inside the append, from a
+    qps its own length had set, and it never held (findings 3: 10 to 12% of
+    W11-steady's append covered on 0927, 51% and 84% of W11's on 0929). A
+    row measured before the window was measured over its whole search, which
+    a quiet tail makes faster, so its rate sizes a longer search: the safe
+    side.
 
     The rate comes from the newest pair of this family measured at *this*
     write rate (these labels' own rows first): a search is faster against a
@@ -357,7 +364,7 @@ def resolve_w11_queries(labels: list[str]) -> dict[str, int]:
         for wid, env in W11_QUERIES_ENV.items():
             if env in out:
                 continue
-            qps, fits, sent = [], [], []
+            qps = []
             for label in pair:
                 if (w11_append_rates_of(label) or {}).get(wid) != want[wid]:
                     break
@@ -372,47 +379,15 @@ def resolve_w11_queries(labels: list[str]) -> dict[str, int]:
                 # the row was measured under that stamp.
                 if not stamped_by_run_json(label, r):
                     break
-                q, n, cover = r.get("qps"), r.get("n_queries"), r.get("write_overlap_pct")
+                q = r.get("qps")
                 if not (isinstance(q, (int, float)) and q > 0):
                     break
                 qps.append(q)
-                # Only a search that was itself sized is a step to damp from:
-                # 0924 ran `QUERIES` and says nothing about where the last
-                # estimate landed.
-                if n and label_sized_w11(label):
-                    sent.append(n)
-                # A search that outlived its writer ran its tail against a
-                # quiet collection, faster, so its qps overstates the search
-                # under the write and would size the next one too long again.
-                # The queries that did fit are at most the covered share of it.
-                fit = q * append_s[wid]
-                if isinstance(cover, (int, float)) and cover < 100 and n:
-                    fit = min(fit, n * cover / 100)
-                fits.append(fit)
             if len(qps) == len(pair):
-                n = math.floor(min(fits) / W11_SPAN_MARGIN)
-                # Halfway, in log, from what that pair ran to what its rate
-                # says. The rate is not uniform over the append: strawmANN's
-                # queries slow as the unindexed tail grows, so 0924's average
-                # sized a search that would end in the append's first 8%, and
-                # the undamped step from each night's short search to the
-                # next's long one oscillated (4,840, 29,178, 6,918, 29,178).
-                # The geometric mean converges on any monotone response.
-                if sent:
-                    n = math.floor(math.sqrt(n * min(sent)))
-                n = max(n, math.ceil(max(qps) * workloads.MIN_ROW_S))
+                n = math.ceil(max(qps) * append_s[wid] * W11_SPAN_MARGIN)
                 out[env] = min(workloads.QUERIES, n)
         pair = previous_pair(pair)
     return out
-
-
-def label_sized_w11(label: str) -> bool:
-    """Whether the label's stamp records a sized mixed-row search."""
-    try:
-        h = json.loads((ROOT / "bench/results" / label / "run.json").read_text()).get("harness")
-    except (OSError, json.JSONDecodeError):
-        return False
-    return bool((h or {}).get("w11_queries"))
 
 
 def stamped_by_run_json(label: str, row: dict) -> bool:
@@ -2420,8 +2395,8 @@ def main(argv: list[str]) -> int:
     for env, n in resolve_w11_queries(labels).items():
         os.environ[env] = str(n)
         setattr(workloads, env, n)
-        print(f"{env}={n:,}: the slower engine's previous search at this write rate, "
-              f"ending {W11_SPAN_MARGIN - 1:.0%} inside the append")
+        print(f"{env}={n:,}: the faster engine's previous search at this write rate, "
+              f"running {W11_SPAN_MARGIN - 1:.0%} past the append")
     if RPS_REFERENCE:
         print(f"open-loop arms pinned to {RPS_REFERENCE:,.0f} qps for both engines "
               f"(§4's fractions of one reference, so the two arms are the same "

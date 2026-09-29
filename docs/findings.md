@@ -18,23 +18,21 @@ not:
 
 **3. W11's write rate is fixed, and its search is sized to fit.** The 25 s
 and 60 s spans were sized for d=128, where a 50,000-query search ends inside
-them. At d=1536 it did not: the writer covered 12 to 23% of the search on every
-pass of both engines, so both mixed rows measured the rebuild the append
-provoked, and both were refused. 0a3de76 stretched the span to the previous
-search instead, which set the write rate from a search the rate had set:
-2,000 and 3,300 points/s on 0924, 200 and 500 on 0925 (W11-steady +803% on
-strawmANN with no engine change), about 1,100 and 300 next. Since 2026-09-25
-the spans are the constants again, so the rate is fixed (1,900 and 3,300
-points/s at 1M) and hashed into the stamp, and `fullrun.resolve_w11_queries`
-shortens the search instead: 4,840 and 6,965 queries for the 0927 pair, read
-off 0924, the newest pair at that rate (`decisions.md`, 2026-09-25). It did not
-hold. 0924 was measured on development-mode Qdrant, so `W11-steady`'s 4,840
-queries ran at 1,944 and 1,580 q/s and covered only 10 to 12% of the append,
-mostly a quiet collection. On `W11` strawmANN's search outlived its writer by
-78 s (`write overlap 43%`), and Qdrant's writer missed the stamped 3,300
-points/s on every pass (2,440, 2,758 and 3,300; the row drifted +53%). The
-next dbpedia pair sizes both from 0927. Item 8 is what the row shows once it
-measures what it claims to.
+them; at d=1536 the writer covered 12 to 23% of the search and both mixed rows
+measured the rebuild the append provoked. Since 2026-09-25 the rate is fixed
+(1,900 and 3,300 points/s at 1M) and hashed into the stamp, and the search was
+sized to end inside the append from the previous pair's qps. That never held:
+0927 covered 10 to 12% of W11-steady's append, and on 0929 W11's search saw
+51% (strawmANN) and 84% (Qdrant) of it, with `W11-steady` drifting +24%
+monotonically over three passes. The qps it sized from was set by the search's
+own length, since the tail past the writer ran against a different collection.
+Since 2026-09-29 the row is measured over the append alone: bfb stamps every
+search, `workloads.write_window_qps` counts those that completed while the
+writer ran, and `resolve_w11_queries` sizes the search to *outlast* the append
+on the faster engine (`decisions.md`). What is open is the next dbpedia pair
+confirming it: both rows' `write overlap` (now the share of the append the qps
+saw) at 90% or more, and `W11-steady` flat across passes. Item 8 is what the
+row shows once it measures what it claims to.
 
 ### P2. What the licensed numbers are made of, and what the run costs
 

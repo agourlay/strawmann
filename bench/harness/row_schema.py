@@ -218,6 +218,11 @@ class BackgroundWriteFields:
     #: note's "(P% of the append was covered)" prints. A number so the fold
     #: medians it; the note text is pass 1's.
     append_covered_pct: float | None = None
+    #: W11: the row's `qps` is the searches completed while the append ran
+    #: (`workloads.write_window_qps`), over this many seconds; `qps_search` is
+    #: the whole search's, which a search that outlives its writer inflates.
+    write_window_s: float | None = None
+    qps_search: float | None = None
 
 
 @dataclass(kw_only=True)

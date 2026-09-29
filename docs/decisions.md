@@ -1950,3 +1950,29 @@ development profile's 3.13M cost it 1%), and at equal width strawmANN still
 spends 1.5x fewer cycles. The remainder is on Qdrant's side (its 4-byte-aligned
 vectors splitting cache lines, its longer server-side p50), which is not
 strawmANN work, so the item is closed as explained rather than as fixed.
+
+## A mixed row is measured over its append, decided 2026-09-29
+
+findings 3: a mixed row's search was sized to end inside its fixed-rate
+append, from the previous pair's qps, and damped toward what that pair ran.
+It never converged, because the qps it read was set by the search's own
+length: whatever ran past the writer ran against a rebuilding or quiet
+collection, at another speed. 0929's dbpedia W11 saw 51% of strawmANN's append
+and 84% of Qdrant's.
+
+The row is now measured over the write window instead. The reader passes
+`--jsonl-searches --absolute-time true`, so bfb stamps each request in epoch
+milliseconds as it completes; `write_window_qps` counts the requests inside
+the writer's span, clipped to the searches' first and last, and that is the
+row's `qps` (`qps_search` keeps the whole search's, `write_window_s` the span).
+`write_overlap_pct` becomes the share of the append the qps saw, so the 90%
+floor now refuses a search that ended inside its append. A search that
+outlives its append costs time and nothing else, so `resolve_w11_queries`
+sizes it to outlast the append on the faster engine by `W11_SPAN_MARGIN`, in
+one step with no damping. At 0929's rates that is about 7,950 queries for W11
+(Qdrant's 106 q/s over 60 s), so strawmANN's search runs about 100 s.
+
+Taken over the alternatives: a `--duration` flag in bfb would stop the
+search at the writer's end but changes the client both engines are measured
+with; throttling the search to the append's span would measure the throttle.
+

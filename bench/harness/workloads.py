@@ -350,16 +350,18 @@ W11_BATCH = 100
 #: write rate they make at a given corpus size (1,900 and 3,300 points/s at
 #: 1M): the rate is what the row measures. A corpus whose searches run longer
 #: gets a shorter search (`W11_STEADY_QUERIES`, `W11_QUERIES`), not a longer
-#: append. Reading the span back off the previous search, as 0a3de76 did, set
-#: the rate from a search the rate itself had set: 2,000 points/s on 0924,
-#: 200 on 0925, and about 1,100 next (decisions, 2026-09-25).
+#: append, and the row is measured over the append alone. Reading the span
+#: back off the previous search, as 0a3de76 did, set the rate from a search
+#: the rate itself had set: 2,000 points/s on 0924, 200 on 0925, and about
+#: 1,100 next (decisions, 2026-09-25).
 W11_STEADY_SPAN_S = float(os.environ.get("W11_STEADY_SPAN_S", 25.0))
 W11_SPAN_S = float(os.environ.get("W11_SPAN_S", 60.0))
 
 
 #: Each mixed row's search, in queries. `QUERIES` unless `fullrun` sizes it
-#: to end inside the append from the previous pair's search rate at this
-#: write rate (`fullrun.resolve_w11_queries`).
+#: to outlast the append from the previous pair's search rate at this write
+#: rate (`fullrun.resolve_w11_queries`); the row counts only the searches
+#: inside the append (`write_window_qps`).
 W11_STEADY_QUERIES = int(os.environ.get("W11_STEADY_QUERIES", QUERIES))
 W11_QUERIES = int(os.environ.get("W11_QUERIES", QUERIES))
 
@@ -1641,8 +1643,53 @@ def table() -> list[Workload]:
 
 
 #: The share of a concurrent row's search phase the write must cover for the
-#: row to count as "search during write" (W11).
+#: row to count as "search during write" (W11). Since the row is measured
+#: over the write window, the share of the *append* its qps saw.
 W11_MIN_OVERLAP = 0.9
+
+
+def search_completions(path: Path | None) -> list[float]:
+    """The `timestamp` of every record in bfb's `--jsonl-searches` file."""
+    out: list[float] = []
+    try:
+        lines = path.read_text().splitlines() if path is not None else []
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            ts = json.loads(line).get("timestamp")
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        if isinstance(ts, (int, float)):
+            out.append(float(ts))
+    return out
+
+
+def write_window_qps(completions_ms: list[float], batch: int,
+                     w0: float, w1: float) -> tuple[float, float] | None:
+    """`(qps, window_s)` over the searches that completed while the writer ran.
+
+    `completions_ms` are bfb's `--jsonl-searches --absolute-time` stamps
+    (epoch milliseconds, one per request, taken as it completes); `w0` and
+    `w1` bound the writer in epoch seconds. The window is the writer's span
+    clipped to the searches' own, so neither a search that outlived the
+    append nor one that started after it is counted as searching during it.
+
+    This is what lets a mixed row's search be as long as it likes: findings 3
+    sized it to *end* inside a fixed-rate append, from the previous pair's
+    rate, and the rate moved with the search (0927 covered 10 to 12% of
+    W11-steady's append, 0929 51% and 84% of W11's). A search that outlives
+    the append now costs time and nothing else. None when fewer than two
+    requests completed inside it.
+    """
+    stamps = sorted(t / 1000.0 for t in completions_ms)
+    if len(stamps) < 2:
+        return None
+    a, b = max(w0, stamps[0]), min(w1, stamps[-1])
+    inside = sum(1 for t in stamps if a < t <= b)
+    if b <= a or inside < 2:
+        return None
+    return batch * inside / (b - a), b - a
 
 
 #: The `Result` fields that together name the build a row was measured on.
@@ -2404,6 +2451,12 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
         tw = time.monotonic()
         subprocess.run(wcmd, capture_output=True, text=True)
         warmup_s = round(time.monotonic() - tw, 3)
+    # A mixed row is measured over its writer's span (`write_window_qps`), so
+    # the reader stamps each search as it completes.
+    search_jsonl = results / f"{w.id}-search.jsonl" if w.background else None
+    if search_jsonl is not None:
+        search_jsonl.unlink(missing_ok=True)
+        cmd = [*cmd, "--jsonl-searches", str(search_jsonl), "--absolute-time", "true"]
 
     l0, cpu0 = load_pct(), cpu_sample()
     when = provenance.now_iso()
@@ -2439,11 +2492,12 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
     # overwrites the other's.
     bg = None
     bg_t0 = bg_t1 = None
+    bg_e0 = None
     bg_done: dict = {}
     if w.background:
         bg_cmd = [str(BFB), *common, "--uri", uri,
                   "--json", str(results / f"{w.id}-write.json"), *w.background]
-        bg_t0 = time.monotonic()
+        bg_t0, bg_e0 = time.monotonic(), time.time()
         bg = subprocess.Popen(bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               text=True)
 
@@ -2458,7 +2512,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
             except Exception as e:
                 bg_done["error"] = f"{type(e).__name__}: {e}"
             finally:
-                bg_done["t1"] = time.monotonic()
+                bg_done["t1"], bg_done["e1"] = time.monotonic(), time.time()
 
         reaper = threading.Thread(target=_reap, daemon=True)
         reaper.start()
@@ -2550,6 +2604,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
     overlap = None
     overlap_pct = None
     covered_pct = None
+    qps_search = window_s = None
     if bg is not None and bg_t0 is not None and bg_t1 is not None:
         overlap = round(max(0.0, min(t1, bg_t1) - max(t0, bg_t0)), 3)
         bg_wall = bg_t1 - bg_t0
@@ -2557,6 +2612,19 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
         # its process wall: the ramp and connect are not searching.
         search_s = wallq.get("duration_s") or wall
         overlap_pct = round(min(100.0, 100 * overlap / max(search_s, 1e-9)), 1)
+        window = (write_window_qps(search_completions(search_jsonl), batch_size_of(w),
+                                   bg_e0, bg_done["e1"])
+                  if status == Status.ok and search_jsonl is not None
+                  and bg_e0 is not None and bg_done.get("e1") is not None else None)
+        if window is not None:
+            # The row's qps is the searches that ran while the writer did, and
+            # its overlap is how much of the append that saw; the whole
+            # search's figure stays beside it.
+            qps_search, qps = qps, round(window[0], 1)
+            window_s = round(window[1], 3)
+            overlap_pct = round(min(100.0, 100 * window_s / max(bg_wall, 1e-9)), 1)
+            notes.append(f"qps over the {window_s:.1f} s the append ran"
+                         + (f" ({qps_search:,.0f} over the whole search)" if qps_search else ""))
         if status == Status.ok and overlap_pct < 100 * W11_MIN_OVERLAP:
             # The reader's qps spans its whole duration whether or not the
             # writer was still there; below the floor the row is not measuring
@@ -2604,7 +2672,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
         n_requested=n_of(w),
         harness_hash=stamp_hash(stamp) if stamp is not None else None,
         ratio_policy=w.ratio_policy, write_overlap_pct=overlap_pct,
-        append_covered_pct=covered_pct,
+        append_covered_pct=covered_pct, qps_search=qps_search, write_window_s=window_s,
         needs_payload_index=w.needs_payload_index,
         payload_index_suppressed=payload_index_suppressed(w),
         warmup_s=warmup_s,
