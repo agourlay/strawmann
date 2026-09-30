@@ -821,6 +821,33 @@ def rss_split(pid: int) -> dict[str, int | None]:
     return out
 
 
+#: `huge_pages`' fields: resident memory mapped by 2 MiB pages, anonymous and
+#: file-backed.
+HUGE_FIELDS = ("anon_huge_bytes", "file_pmd_bytes")
+
+
+def huge_pages(pid: int | None) -> dict[str, int | None]:
+    """`AnonHugePages` and `FilePmdMapped` from `/proc/<pid>/smaps_rollup`.
+
+    The walk `rss_split` avoids, so it is read once per row, *after* the row's
+    closing snapshot, when nothing is being measured. findings 62: strawmANN's
+    third pass reads 6 to 7% slower on every W10 point on dbpedia, two nights
+    running, with W3 and W4 on the same collection flat, and whether that
+    pass's arenas are mapped by smaller pages is one reading away.
+    """
+    out: dict[str, int | None] = dict.fromkeys(HUGE_FIELDS)
+    text = _read(f"/proc/{pid}/smaps_rollup") if pid else None
+    if text is None:
+        return out
+    keys = {"AnonHugePages:": "anon_huge_bytes", "FilePmdMapped:": "file_pmd_bytes"}
+    for line in text.splitlines():
+        head = line.split(":")[0] + ":"
+        if head in keys:
+            with contextlib.suppress(IndexError, ValueError):
+                out[keys[head]] = int(line.split()[1]) * 1024
+    return out
+
+
 def dir_bytes(path: str | os.PathLike) -> int | None:
     """Bytes on disk under `path`, following no symlinks out of it.
 

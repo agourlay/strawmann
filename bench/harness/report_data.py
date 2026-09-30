@@ -877,3 +877,16 @@ ENCODINGS = [("bench2", "fp32 (no quantization)", "#C97A00"),
              ("bench7", "binary, 4x oversampling", "#2F6FD0"),
              ("bench8", "PQ (product)", "#2EA44F"),
              ("bench6", "SQ8 scalar", "#A970FF")]
+
+
+def row_bracket_s(r) -> float | None:
+    """The seconds a row's engine counters span: the search's wall, or its
+    writer's on a mixed row whose append outlived the search. The CPU is
+    bracketed around both, so dividing it by the search alone printed 1,503%
+    on eight cpus (dbpedia 0930, W11)."""
+    wall = r.get("wall_s") or r.get("duration_s")
+    bg = r.get("background_s")
+    if isinstance(bg, (int, float)) and bg == bg and (not wall or bg > wall):
+        return bg
+    return wall
+

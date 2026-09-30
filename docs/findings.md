@@ -40,19 +40,6 @@ bound bites. It closes when a pair shows both rows' `write overlap` at 90% or
 more on every corpus and `W11-steady` flat across passes. Item 8 is what the
 row shows once it measures what it claims to.
 
-**57. strawmANN's graph searches got about 2% slower with 1fb2e43.** On sift1m
-0930 every graph row executes about 1.9% more instructions per query (W4
-681.0k to 695.3k, the same on W3, W5 and W10) and reads 1.6 to 2.8% slower,
-while Qdrant's count did not move. Instruction counts do not depend on the
-host, so this is the engine. The suspect is `Index.bound`, the drainer's
-traversal bound, now compared on every neighbour of every search; 14b8df2
-also changed the search path's handler. On dbpedia the fp32 rows moved -0.3
-to -0.9%, inside the bands. What it needs: a pinned A/B of W3 and W4 at
-`e149208` and `1fb2e43` with perf. If the bound is the cost, skip the
-compare when no drain is in flight (bound equal to the graph count), with a
-test that a bounded traversal at `bound == count` returns what an unbounded
-one does.
-
 **58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**
 W10-ef128 +10.4%, W10-ef256 +11.5%, W12-sel1 +10.2%, W11 +10%, with cycles
 per query down 10% at the same recall, a byte-identical binary (sha256
@@ -101,13 +88,13 @@ much of that is the drainer, since W11 changed definition with it and there
 is no `--no-drain` arm. At d=128 and d=512 the drainer kept up with the writer
 while a search ran (`drain linked=58000 ... pending=0` on sift1m).
 
-What is open. First, the drainer starts only from a search or an info call,
-so once W11's search ended the rest of its tail waited for the read-back's
-rebuild (`rebuild start points=1250000 pending=179100` on sift1m, 18,300 on
-laion): it needs a start from `upsert` on a `.ready` collection, which is an
-operator choice because W11 then never crosses `rebuild_ratio` at the laion and
-sift1m rates, and the row stops being the rebuild row
-`workloads.W11_STEADY_RATIO` describes. Second, the in-append half at d=1536:
+The drainer started only from a search or an info call, so once W11's search
+ended the rest of its tail waited for the read-back's rebuild (`rebuild start
+points=1250000 pending=179100` on sift1m); since 2026-09-30 an upsert to a
+`.ready` collection starts it too. At the sift1m and laion rates W11 then
+never crosses `rebuild_ratio`, so it measures the incremental path there and
+the rebuild only where the writer outruns the drainer
+(`workloads.W11_STEADY_RATIO`). What is open is the in-append half at d=1536:
 at 2 ms of core per insertion, keeping up with 1,900 points/s is about four of
 the eight cores.
 
@@ -133,7 +120,12 @@ through the cache, and tested a gather onto one worker. At 6 GB there is no
 sharing, and a gather split across the workers is the lever, which reopens
 that decision for d=1536. The smaller lever landed in 99d2776: scans of 4 GB
 and more wait for one of four slots, 10.98 q/s against ~10 (`decisions.md`,
-2026-09-29). The shared pass is what is left.
+2026-09-29). The shared pass is what is left. Below the cap
+the same contention is a draw: sift1m's W9 read 202 q/s on 0929 and 186 on
+0930, and in-process two runs of one build read 190 and 182 at 423k and 590k
+demand fills per query, as far apart as any two commits (e149208 to 1fb2e43,
+177 to 189). Instructions are identical; what moves is how much the seven
+0.5 GB scans share lines, which is scheduling and not code.
 
 **11. strawmANN's index build ran at the search workers' priority during
 `W11`.** On 0925 strawmANN's `W11` served 102 q/s against Qdrant's 216, with
@@ -149,40 +141,23 @@ the exhaustive tail. The drainer (item 8) does not reach this row: W11's fifth o
 corpus arrives at 3,300 points/s, faster than it links, so the tail crosses
 `rebuild_ratio` and the rebuild takes over as before.
 
-**59. sift1m's exact search (W9) fell 7.9% with no commit claiming it.** 202
-to 186 q/s on 0930, with demand DRAM per query 23.7 to 35.1 MB (+48%), IPC 2.19
-to 2.01, instructions unchanged and dTLB walks down; Qdrant flat at 124. The
-0.5 GB scan is below the 4 GB cap (99d2776), so the cap cannot be it, but
-99d2776, 65def65 and 1fb2e43 all change `collection.zig`. Concurrent scans at
-this size shared lines through the cache (`decisions.md`, the cap sweep), and
-something now stops them sharing. What it needs: `w9_ab.py` pinned, three reps
-each, at `e149208`, `65def65`, `99d2776` and `1fb2e43`.
-
 **60. Exact search past 4 GB admits waiting scans in no order, and W9's tail
 doubled.** dbpedia 0930 W9 reads 13.06 q/s (1.33x, from parity) with the cap,
 and p99 1,505 ms, p99.9 2,481 ms, max 3,292 ms against p50 576 ms (0929 p99
 1,109 ms). `acquireScanSlot` is a compare-exchange plus a 50 us sleep, so a
-waiter can lose every race. What it needs: a ticket gate (admission in arrival
-order, at most `exact_scan_cap` in flight), a test that admission order is
-ticket order, and a W9 run on dbpedia-1m to read qps and p99 against 13.06
-and 1,505 ms.
+waiter can lose every race. Since 2026-09-30 the slots are a ticket gate
+(`collection.ScanGate`): admission in arrival order, at most `exact_scan_cap`
+in flight, waiters asleep on a futex, and a test that holds both. What is
+open is the dbpedia W9 row read against 13.06 q/s and 1,505 ms.
 
 **62. strawmANN's third pass is 6 to 7% slower on every W10 point on
 dbpedia, two nights running.** W10-ef32 10,625 / 10,752 / 9,934 on 0930 and
 10,525 / 10,546 / 9,888 on 0929, while W3 and W4 on the same `bench2` are
-flat. Unexplained. What it needs: a residency probe (W10-ef128 again at the end
-of each strawmANN arm, a row-set change) or `smaps_rollup` per row
-(`AnonHugePages`, `FilePmdMapped`), fields only.
-
-**63. strawmANN's graphs disagree with each other 36x as much as Qdrant's at a
-fixed seed on sift1m.** 0930's rep3 build drew recall@10 0.9934 at `ef` 512
-against 0.9955 and 0.9952, seed `0x57ea3111`, no unreachable node, and the
-report prints the 36x. On laion and dbpedia the spreads are equal (0.00012
-against 0.00034, 0.00035 against 0.00033). It is what moved sift1m's matched
-range from 1.29x to 1.81x at its low end between two nights with no code
-change. What it needs: N same-seed builds in-process to price the spread, then
-an operator choice between publishing it and a deterministic parallel build
-at an unmeasured build-time cost.
+flat. Unexplained. Since 2026-09-30 every row records its engine's
+`AnonHugePages` and `FilePmdMapped` after the row (`anon_huge_bytes`,
+`file_pmd_bytes`, read outside the bracket since the walk takes
+`mmap_lock`). What is open is reading them on the next dbpedia pair: whether
+pass 3's arenas are mapped by smaller pages.
 
 **64. At d=512 strawmANN's SQ8 reads 2.9x Qdrant's memory per query.** laion
 0930 W6: 742.8 against 256.3 KiB of demand DRAM per query, IPC 0.99 against
@@ -190,35 +165,6 @@ at an unmeasured build-time cost.
 prefetch (f7c9ecb) that took sift1m's W6 up 11% did not move laion's. What it
 needs: an in-process SQ8 sweep on laion of the whole-row prefetch 2ed2a97
 measured only at d=1536, and of the SQ8 stats load.
-
-**65. strawmANN's storage figure is the arena at `--capacity`, not the data.**
-dbpedia 0930: a 200,000-point `W12-upload` moved storage from 28.4 to 35.5 GiB,
-and the report sets strawmANN's 35.5 GiB beside Qdrant's 26.5. The comparison
-is of allocations, not of what either engine stores. What it needs: per-
-collection sizing that grows, or the report saying `allocated at --capacity`
-beside the figure; an operator choice.
-
-**66. The harness says several things that are not true of the row.** None
-costs a published ratio; each is a unit test.
-- `REJECTED, and this is the gate working` prints for by-design W11 refusals,
-  which `refused by design` already names (`results.py`); ingest lines do not
-  name their label.
-- W11 shows `requests/s` although it is not batched (8,033 qps "3,805 req/s",
-  and 504,237 requests/s on dbpedia's page), and its "% of wall" divides by the
-  search's wall, not the writer's (1,503% on eight cpus).
-- The note "qps over the 2.7 s the append ran" describes a 25 s append.
-- A calibrated ε is described as the §8.4 floor with `max(qdrant 0, strawmann
-  0)` (`tolerance.rs` `describe`), since `CALIBRATED` carries no spreads.
-- 14b8df2 said laion's filtered choices were unchanged; at `ef` 128 laion now
-  scans (1,335 against 1,263 q/s, recall 1.0000), and the crossover test has no
-  d=512 case.
-- The run estimate prices arms from the 0923 and 0924 pairs (9.4 h estimated
-  against 7 h 19 min on dbpedia, 46 min over on sift1m).
-- The report's "Reproducing this" section names sift1m's files on every
-  dataset's page.
-- The recall sweeps' paging `!!` fires at any count, 6 times on dbpedia 0930
-  (PSI stalls on the W7, W8 and W12 uploads, and 298,000 major faults on W11 in
-  two passes); it does not say what memory was free, nor which rows follow.
 
 ### P3. What the datasets offer that no row measures yet
 

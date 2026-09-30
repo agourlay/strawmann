@@ -786,12 +786,12 @@ bench/harness/workloads.py run http://localhost:6334 strawmann --sink --report
 # the other half of every number: recall, and the licence to compare at all
 cd conformance
 cargo run --release -- relevance --engine http://localhost:6334 --label strawmann \
-  --base $DATA/sift1m.fbin --queries $DATA/sift1m_query.fbin \
-  --ground-truth $DATA/gt/sift1m.euclid.k100.gt.json --metric euclid \
+  --base {{ repro.base }} --queries {{ repro.queries }} \
+  --ground-truth {{ repro.gt }} --metric {{ repro.metric }} \
   --ef 32 64 128 256 512 --json ../bench/results/strawmann/recall.json
 cargo run --release -- differ --strawmann http://localhost:6334 --qdrant http://localhost:6434 \
-  --base $DATA/sift1m.fbin --queries $DATA/sift1m_query.fbin \
-  --ground-truth $DATA/gt/sift1m.euclid.k100.gt.json \
+  --base {{ repro.base }} --queries {{ repro.queries }} \
+  --ground-truth {{ repro.gt }} \
   --json ../bench/results/strawmann/conformance.json
 
 uv run --project bench bench/harness/report.py strawmann qdrant</code></pre>

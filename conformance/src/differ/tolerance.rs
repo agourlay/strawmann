@@ -214,7 +214,9 @@ impl Epsilon {
     pub fn describe(&self) -> String {
         let (q, s) = self.spreads();
         let derived = self.multiple * q.max(s);
-        let how = if derived >= self.value {
+        // Within the three figures ε is stored to: a calibrated cell carries
+        // 9.537e-7 for a derived 9.5367e-7, and was described as the floor.
+        let how = if derived >= self.value * (1.0 - 1e-3) {
             format!(
                 "= {}x max(qdrant {q:.3e}, strawmann {s:.3e})",
                 self.multiple
@@ -243,7 +245,7 @@ impl Epsilon {
     /// through hand-editing.
     pub fn rust_literal(&self) -> String {
         format!(
-            "    // docs/tolerance.md: {} d={}, {}.\n    (Metric::{:?}, {}, {:.3e}, {}),",
+            "    // docs/tolerance.md: {} d={}, {}.\n    (Metric::{:?}, {}, {:.3e}, {}, {:e}, {:e}),",
             self.metric.as_str(),
             self.dim,
             self.describe()
@@ -253,7 +255,9 @@ impl Epsilon {
             self.metric,
             self.dim,
             self.value,
-            self.relative
+            self.relative,
+            self.spreads().0,
+            self.spreads().1
         )
     }
 
@@ -334,9 +338,22 @@ pub fn calibrate(
 /// noise, which flatters recall.
 ///
 /// A new `calibrate` run must add its cell here as well as to the document.
-pub const CALIBRATED: &[(Metric, usize, f64, bool)] = &[
+///
+/// Each cell is `(metric, dim, ε, relative, qdrant spread, strawmann spread)`,
+/// the two maxima in the cell's own kind (relative for a relative cell). They
+/// ride along so a default ε describes the derivation it came from: without
+/// them `describe` saw two zero spreads and printed the §8.4 floor beside a
+/// value marked calibrated (findings 66).
+pub const CALIBRATED: &[(Metric, usize, f64, bool, f64, f64)] = &[
     // docs/tolerance.md: cosine d=1536, 4 × max(qdrant 0, strawmann 2.384e-7).
-    (Metric::Cosine, 1536, 9.537e-7, false),
+    (
+        Metric::Cosine,
+        1536,
+        9.537e-7,
+        false,
+        0.0,
+        2.384185791015625e-7,
+    ),
     // docs/tolerance.md: euclid d=128, measured 2026-09-08 over 8 forced-ISA
     // arms and two Qdrant arms, n=30,000 scores. Both spreads came back
     // *exactly* zero, so `calibrate`'s floor clause applies and the value is
@@ -350,14 +367,28 @@ pub const CALIBRATED: &[(Metric, usize, f64, bool)] = &[
     // any order. §8.1's "different summation order gives different last bits"
     // is true of the general case and false of this corpus, so no arrangement
     // of accumulators — 4 or 8, SSE2 through AVX-512 — can disagree here.
-    (Metric::Euclid, 128, 4.172e-7, true),
+    (Metric::Euclid, 128, 4.172e-7, true, 0.0, 0.0),
     // docs/tolerance.md: cosine d=512 (laion-small-clip), 4 × max(qdrant 2.384e-7,
     // strawmann 2.384e-7), 2026-09-29 over 8 forced-ISA arms and two Qdrant arms
     // (the native build and the v1.19.0 image), n=10,000 scores.
-    (Metric::Cosine, 512, 9.537e-7, false),
+    (
+        Metric::Cosine,
+        512,
+        9.537e-7,
+        false,
+        2.384185791015625e-7,
+        2.384185791015625e-7,
+    ),
     // docs/tolerance.md: cosine d=2048 (h-and-m-2048-angular-filters), same arms,
     // same spreads, same ε.
-    (Metric::Cosine, 2048, 9.537e-7, false),
+    (
+        Metric::Cosine,
+        2048,
+        9.537e-7,
+        false,
+        2.384185791015625e-7,
+        2.384185791015625e-7,
+    ),
 ];
 
 /// Where a default ε came from, so the run can print it.
@@ -385,10 +416,17 @@ pub fn default_epsilon(metric: Metric, dim: usize) -> (Epsilon, EpsilonSource) {
         Distribution::default(),
         DEFAULT_MULTIPLE,
     );
-    for &(m, d, value, relative) in CALIBRATED {
+    for &(m, d, value, relative, q, s) in CALIBRATED {
         if m == metric && d == dim {
             e.value = value;
             e.relative = relative;
+            if relative {
+                e.qdrant_spread.max_relative = q;
+                e.strawmann_spread.max_relative = s;
+            } else {
+                e.qdrant_spread.max = q;
+                e.strawmann_spread.max = s;
+            }
             return (e, EpsilonSource::Calibrated);
         }
     }
@@ -674,10 +712,28 @@ mod tests {
             floored.rust_literal()
         );
         assert!(
-            floored.rust_literal().contains("false),"),
+            floored.rust_literal().contains("false, 0e0, 0e0),"),
             "{}",
             floored.rust_literal()
         );
+    }
+
+    /// A calibrated default says how it was derived, not that it is the floor.
+    #[test]
+    fn a_calibrated_default_describes_its_measurement() {
+        for dim in [512, 1536, 2048] {
+            let (e, source) = default_epsilon(Metric::Cosine, dim);
+            assert_eq!(source, EpsilonSource::Calibrated);
+            assert!(!e.describe().contains("floor"), "{}", e.describe());
+            assert!(
+                e.describe().contains("strawmann 2.384e-7"),
+                "{}",
+                e.describe()
+            );
+        }
+        // The euclid cell measured zero, and the floor is what it reports.
+        let (e, _) = default_epsilon(Metric::Euclid, 128);
+        assert!(e.describe().contains("floor"), "{}", e.describe());
     }
 
     /// One calibration writes one cell; the others in the document survive.

@@ -258,6 +258,10 @@ class MemoryFields:
     #: file and let the kernel decide what stays.
     rss_anon_bytes: int | None = None
     rss_file_bytes: int | None = None
+    #: Resident bytes in 2 MiB mappings after the row (`procstat.huge_pages`),
+    #: read outside the bracket: the walk takes the engine's `mmap_lock`.
+    anon_huge_bytes: int | None = None
+    file_pmd_bytes: int | None = None
     rss_shmem_bytes: int | None = None
 
 

@@ -403,7 +403,7 @@ def ingest_run(db, label: str, root: Path) -> int:
 
     if conf:
         insert_conformance(db, conf)
-        print(f"recorded conformance {conf['hash']} "
+        print(f"{label}: recorded conformance {conf['hash']} "
               f"(tier {conf.get('tier_reached')}, "
               f"{'licenses' if conf.get('licenses_perf') else 'does NOT license'} perf)")
 
@@ -515,10 +515,15 @@ def ingest_run(db, label: str, root: Path) -> int:
         except RejectedRow as e:
             rejected += 1
             refused.append((r["id"], r.get("collection") or "", str(e)))
-            if rejected == 1:
-                print(f"REJECTED, and this is the gate working: {e}", file=sys.stderr)
 
-    print(f"{accepted} perf row(s) recorded, {rejected} refused by §8")
+    joinable = {r["id"]: r.get("recall_joinable", True) for r in rows}
+    # The headline is for a refusal the gate caught, not for rows that can
+    # never carry recall and say so below ("refused by design").
+    caught = [(rid, why) for rid, _c, why in refused if joinable.get(rid, True)]
+    if caught:
+        print(f"{label}: REJECTED, and this is the gate working: "
+              + "; ".join(f"{rid}: {why.split('. ')[0]}" for rid, why in caught), file=sys.stderr)
+    print(f"{label}: {accepted} perf row(s) recorded, {rejected} refused by §8")
     if rejected:
         for rid, _coll, why in refused:
             print(f"  refused {rid}: {why.split('. ')[0]}", file=sys.stderr)
@@ -530,14 +535,15 @@ def ingest_run(db, label: str, root: Path) -> int:
         # collection can never have a sweep, and naming it among the rows whose
         # sweep is "not on disk" sent readers of three nights looking for a
         # file that exists (bench2's sweep is on disk; W11 wrote over bench2).
-        joinable = {r["id"]: r.get("recall_joinable", True) for r in rows}
         by_design = [(rid, coll) for rid, coll in without if not joinable.get(rid, True)]
         missing = [(rid, coll) for rid, coll in without if joinable.get(rid, True)]
         if by_design:
             print("  refused by design: "
                   + ", ".join(f"{rid} on {coll or '?'}" for rid, coll in by_design)
-                  + " mutates the collection it searches, so no sweep can speak "
-                  "for it.", file=sys.stderr)
+                  + (" mutate the collections they search, so no sweep can speak "
+                     "for them." if len(by_design) > 1 else
+                     " mutates the collection it searches, so no sweep can speak for it."),
+                  file=sys.stderr)
         if missing:
             # The hint used to send the operator to sweep a collection that
             # W11 had just mutated, or W12's that nothing swept. `bench12` is

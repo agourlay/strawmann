@@ -2695,6 +2695,18 @@ class RowConfigAndStorageTests(unittest.TestCase):
         self.assertIn("before W11", html)
         # The peak is still the peak, so it keeps the mutating row.
         self.assertIn(rep.procstat.human_bytes(99), html)
+        # A run with no engine named makes no claim about how it allocates.
+        self.assertNotIn("allocated at --capacity", html)
+
+    def test_strawmanns_storage_says_it_is_the_allocation(self):
+        """findings 65: its arenas are sized at --capacity when created, so the
+        figure is what it allocated (dbpedia 0930: 35.5 GiB against 26.5)."""
+        rep = self.m["report"]
+        rows = [_row("W13", 2000.0, storage_bytes=3_700_000_000)]
+        sm = rep.storage_table([rep.Run("sm", rows, "", True, "h", meta={"strawmann": {"commit": "c"}})])
+        qd = rep.storage_table([rep.Run("qd", rows, "", True, "h", meta={"qdrant": {"version": "1"}})])
+        self.assertIn("allocated at --capacity", sm)
+        self.assertNotIn("allocated at --capacity", qd)
 
 
 class ReportReadabilityTests(unittest.TestCase):
@@ -2750,6 +2762,29 @@ class ReportReadabilityTests(unittest.TestCase):
                                                         "status": "ok"})))
         self.assertEqual(cell(pd.Series({"qps": 4562.0, "rps": 4542.0, "status": "ok"})),
                          '<td class="num">4,562</td>')
+        # A mixed row's two figures are two spans, not a batch (dbpedia 0930:
+        # "580" over "504,237 requests/s").
+        self.assertEqual(cell(pd.Series({"qps": 580.0, "rps": 237.0, "status": "ok",
+                                         "qps_basis": "write-window"})),
+                         '<td class="num">580</td>')
+
+    def test_a_mixed_rows_cpu_is_divided_by_its_writer_when_that_ran_longer(self):
+        """dbpedia 0930 W11 read 1,503% of wall on eight cpus: its CPU spans
+        the 60 s append, and it was divided by the 31.7 s search."""
+        f = self.report.row_bracket_s
+        self.assertEqual(f({"wall_s": 31.7, "background_s": 60.0}), 60.0)
+        self.assertEqual(f({"wall_s": 31.7}), 31.7)
+        self.assertEqual(f({"wall_s": 90.0, "background_s": 60.0}), 90.0)
+        self.assertEqual(self.report._pct_of_wall(
+            {"cpu_user_s": 470.0, "cpu_system_s": 6.4, "wall_s": 31.7, "background_s": 60.0}), "794%")
+
+    def test_the_reproduction_commands_name_the_runs_own_dataset(self):
+        Run = self.report.Run
+        got = self.report.repro_paths([Run("sm-laion", [], "", True, "h",
+                                           meta={"dataset": {"name": "laion-small-clip"}})])
+        self.assertEqual(got["base"], "$DATA/laion-small-clip/base.fbin")
+        self.assertEqual(got["metric"], "cosine")
+        self.assertNotIn("sift1m", "".join(got.values()))
 
     def test_engine_names_replace_labels_except_where_the_label_is_the_point(self):
         report = self.report

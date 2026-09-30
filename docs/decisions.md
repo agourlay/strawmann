@@ -1883,7 +1883,11 @@ times 1.5·ef·m0), per row:
 A scanned row streams every value, so it grows with `dim`; a walked row is a
 random fetch. The rule now compares `selected x (240 + dim)` against
 `walk x 1500`, which makes the choice the measurements make on all four at
-every ef they ran, and leaves dbpedia's and laion's decisions where they were.
+every ef they ran, and leaves dbpedia's decisions where they were. Not
+laion's, as this said: at d=512 the 9,999 matched rows cost 7.52M against the
+walk's 9.22M at ef 128, so the plan moved to the scan there, and laion 0930
+read 1,335 q/s at recall 1.0000 against 0928's two-hop 1,263 at 0.9972. The
+test now pins laion's two points as well (findings 66).
 Through the server, the same probe both ways: sift1m W12-sel10 at ef 256,
 746 to 1,289 q/s (now the scan, recall 1.0000); h-and-m at ef 256, 387 to 672
 (now the walk). At ef 128 sift1m sits on the crossover and ties (1,261 against
@@ -2022,4 +2026,27 @@ search, so during the append it is behind and costs nearly what it saves
 (+8 to 17% over the window); it is the collection after the append that it
 changes, 7 to 13x. W11 appends 20% at 3,300 points/s, which the drainer does
 not keep up with, so that row still crosses the ratio and rebuilds.
+
+## The drainer's traversal bound costs under 1%, and stays; findings 57 closed, 2026-09-30
+
+sift1m 0930 read strawmANN's graph rows 1.6 to 2.8% slower than 0929, with
+about 1.9% more instructions per query, and the suspect was `Index.bound`,
+compared on every neighbour of every search since 1fb2e43. Measured
+in-process, fullrun's arguments, two reps each, against the commit before it
+(99d2776): W4 693.6k against 681.8k instructions per query (+1.7%) and 634.1k
+against 630.6k cycles (+0.6%), 23,345 against 23,496 q/s (-0.6%); W10-ef128
+-0.4%. The compare sits beside a cache-missing score, so it costs instructions
+and almost no time, and most of the night's 2% was the pass's own spread.
+Removing it safely needs readers and the drainer to agree when a drain is in
+flight, a handshake to buy back under 1%, so it stays.
+
+## findings 63 is findings 34, 2026-09-30
+
+sift1m 0930's report printed strawmANN's graphs disagreeing with each other
+36x as much as Qdrant's at a fixed seed (recall@10 at `ef` 512 0.9934 against
+0.9955 and 0.9952). That is the property findings 34 closed on 2026-09-23:
+concurrent upload order gives a different graph each pass, 0.0017 to 0.0033
+against Qdrant's 0.00004, and 0.0021 sits inside it. What would reopen it is
+unchanged: the order-independent build through the keyed level draw, measured
+over several keyed seeds.
 

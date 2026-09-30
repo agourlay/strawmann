@@ -10,7 +10,7 @@ import html
 import perfstat
 
 import procstat
-from report_data import Run, describe
+from report_data import Run, describe, row_bracket_s
 
 
 def storage_rows_table(runs: list[Run]) -> str:
@@ -157,7 +157,7 @@ def scheduler_rows_table(runs: list[Run]) -> str:
         for run in runs:
             row = run.by_id().get(wid, {})
             cpu = (row.get("cpu_user_s") or 0) + (row.get("cpu_system_s") or 0)
-            wall = row.get("wall_s") or row.get("duration_s")
+            wall = row_bracket_s(row)
             busy = (f"{cpu / wall * 100:,.0f}%" if cpu and wall else "-")
             for i, (text, present) in enumerate((
                     (f"{cpu:,.1f} s" if cpu else "-", bool(cpu)),

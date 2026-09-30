@@ -548,8 +548,18 @@ def estimated_minutes(dataset: str, reps: int) -> tuple[float, str] | None:
     row times are the per-row medians, which is one pass's worth; their wall
     clocks come from `run.json`'s `passes` rather than from the rows' own `when`
     stamps, for the reason given below.
+
+    An engine's arms measured under today's harness stamp are the basis when
+    there are any, and every arm otherwise: the heaviest arm ever run priced
+    dbpedia 0930 from 0924 (9.4 h against 7 h 19 min) and sift1m's 46 minutes
+    long, long after the harness that made those arms slow had changed.
     """
     per_engine: dict[str, tuple[float, str, list[float]]] = {}
+    current: dict[str, tuple[float, str, list[float]]] = {}
+    try:
+        today = workloads.stamp_hash(workloads.harness_stamp())
+    except Exception:  # an estimate never fails a run
+        today = None
     table_ids = planned_rows()
     for d in sorted(RESULTS.glob("*/rows.json")):
         try:
@@ -606,7 +616,9 @@ def estimated_minutes(dataset: str, reps: int) -> tuple[float, str] | None:
         spans = [s for s in spans if s >= row_s]
         if not spans:
             continue
-        heaviest, label, ratios = per_engine.get(engine, (0.0, "", []))
+        same_stamp = today is not None and any(r.get("harness_hash") == today for r in rows)
+        pool = current if same_stamp else per_engine
+        heaviest, label, ratios = pool.get(engine, (0.0, "", []))
         ratios.extend(s / row_s for s in spans)
         # The rows *this* run will make, priced from that arm. The table grew
         # from 32 to 43 rows between rel-0903 and perf-0924 and the estimate,
@@ -618,7 +630,8 @@ def estimated_minutes(dataset: str, reps: int) -> tuple[float, str] | None:
         priced = row_s if table_ids is None else sum(by_id.get(i, mean) for i in table_ids)
         if priced > heaviest:
             heaviest, label = priced, d.parent.name
-        per_engine[engine] = (heaviest, label, ratios)
+        pool[engine] = (heaviest, label, ratios)
+    per_engine.update(current)
     if not per_engine:
         return None
 
@@ -1358,9 +1371,33 @@ def paging_warning(what: str, before: int | None, after: int | None, secs: float
     """
     if before is None or after is None or after <= before:
         return ""
-    return (f"  !! recall sweep ({what}) took {secs:.0f} s with {after - before:,} major "
+    n = after - before
+    free = mem_available_gib()
+    tail = f"; {free:.1f} GiB available now" if free is not None else ""
+    if n < PAGING_WARN_FAULTS:
+        # dbpedia 0930 printed six `!!`, several for a few thousand faults: a
+        # count that small moves no row, and the warning it earned drowned the
+        # 298,000 on W11.
+        return f"  note: recall sweep ({what}) took {secs:.0f} s with {n:,} major faults{tail}"
+    return (f"  !! recall sweep ({what}) took {secs:.0f} s with {n:,} major "
             f"faults: the engine was paging its arenas back in, and the rows after it "
-            f"may be measured on a collection that was not resident")
+            f"may be measured on a collection that was not resident{tail}")
+
+
+#: Major faults a recall sweep may take before `paging_warning` says `!!`:
+#: 10,000 4 KiB pages, 40 MB, a fraction of a percent of any corpus here.
+PAGING_WARN_FAULTS = 10_000
+
+
+def mem_available_gib() -> float | None:
+    """`MemAvailable` from /proc/meminfo, the page cache the next rows can have."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / (1 << 20)
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
 
 
 def qdrant_target() -> str:

@@ -934,6 +934,30 @@ class ResultsSinkTests(unittest.TestCase):
         # three nights named bench2's, which was there all along.
         self.assertIn("none is on disk for W12 on bench12.", out)
         self.assertNotIn("none is on disk for W11", out)
+        # The headline names what the gate caught, W12, and neither W11 row,
+        # which can never carry recall; and it says which label it is.
+        headline = next(ln for ln in out.splitlines() if "REJECTED" in ln)
+        self.assertTrue(headline.startswith("arm: REJECTED"))
+        self.assertIn("W12", headline)
+        self.assertNotIn("W11", headline)
+        self.assertIn("mutate the collections they search", out)
+
+    def test_ingest_prints_no_rejected_headline_for_by_design_refusals_alone(self):
+        import contextlib
+        import io
+        res = self.res
+        root = Path(self.tmp.name)
+        meta = {"dataset": {"name": "sift1m"}, "isa_build": "avx512",
+                "strawmann": {"commit": "abcdef123456", "dirty": True}}
+        d = self._label("arm", meta, self.CONF)
+        (d / "rows.json").write_text(json.dumps([
+            _row("W11", 1200.0, collection="bench2", recall_joinable=False)]))
+        db = res.connect(":memory:")
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            res.ingest_run(db, "arm", root)
+        self.assertNotIn("REJECTED", err.getvalue())
+        self.assertIn("refused by design: W11 on bench2 mutates the collection it searches", err.getvalue())
 
     def test_ingest_binds_the_row_to_the_conformance_build(self):
         import contextlib

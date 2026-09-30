@@ -723,6 +723,14 @@ class WorkloadTests(unittest.TestCase):
         self.assertIsNone(w.write_window_qps(stamps, 1, 130.0, 140.0))
         self.assertIsNone(w.write_window_qps([], 1, 104.0, 110.0))
 
+    def test_huge_pages_reads_the_rollup_and_is_blank_without_one(self):
+        import procstat
+        roll = ("Rss:  100 kB\nAnonHugePages:  4096 kB\nFilePmdMapped:  2048 kB\n")
+        with mock.patch.object(procstat, "_read", lambda p: roll if p.endswith("smaps_rollup") else None):
+            self.assertEqual(procstat.huge_pages(1),
+                             {"anon_huge_bytes": 4096 * 1024, "file_pmd_bytes": 2048 * 1024})
+        self.assertEqual(procstat.huge_pages(None), dict.fromkeys(procstat.HUGE_FIELDS))
+
     def test_search_completions_reads_bfbs_timestamps_and_skips_the_rest(self):
         p = Path(self.tmp.name) / "s.jsonl"
         p.write_text('{"timestamp": 1.5, "request_latency": 0.1}\n'
@@ -2575,6 +2583,22 @@ class RunEstimateTests(unittest.TestCase):
         self._label("long", "sift1m", self._rows(4, 120, 30))
         self.assertEqual(f.estimated_minutes("sift1m", 3)[1], "long")
 
+    def test_arms_under_todays_stamp_are_the_basis_when_there_are_any(self):
+        """dbpedia 0930 was priced from 0924's arms, 2.1 h long: the heaviest
+        arm ever run, under a harness that has since changed."""
+        f = self.f
+        today = f.workloads.stamp_hash(f.workloads.harness_stamp())
+        old = self._rows(4, 120, 30)
+        new = [dict(r, harness_hash=today) for r in self._rows(4, 30, 10)]
+        self._label("old", "sift1m", old)
+        self._label("new", "sift1m", new)
+        self.assertEqual(f.estimated_minutes("sift1m", 3)[1], "new")
+        # With none under today's stamp, the heaviest arm still wins.
+        for p in (f.RESULTS / "new").iterdir():
+            p.unlink()
+        (f.RESULTS / "new").rmdir()
+        self.assertEqual(f.estimated_minutes("sift1m", 3)[1], "old")
+
 
 class SegmentPolicyTests(unittest.TestCase):
     """The two Qdrant experiments, named rather than spelled as a number.
@@ -3530,6 +3554,10 @@ class ArmStorageTests(unittest.TestCase):
         warn = fullrun.paging_warning("--collections bench2 --limit 100", 100, 182_655, 297.4)
         self.assertIn("took 297 s with 182,555 major faults", warn)
         self.assertTrue(warn.startswith("  !! recall sweep (--collections bench2 --limit 100)"))
+        # A few thousand faults move no row: a note, not a warning.
+        small = fullrun.paging_warning("x", 0, 2_500, 75.0)
+        self.assertTrue(small.startswith("  note: recall sweep (x)"), small)
+        self.assertNotIn("!!", small)
         # And `run_recall` asks around each sweep.
         faults = iter([0, 0, 5, 90_005])
         out = io.StringIO()

@@ -380,9 +380,13 @@ def w11_throttle(points: int, span_s: float) -> int:
 
 #: W11-steady's write volume, as a fraction of the corpus, and below
 #: `collection.rebuild_ratio` (0.10) on purpose. W11 sits at 0.20 on every
-#: corpus, so it trips a from-scratch rebuild by construction and can only
-#: measure the rebuild path (0.47x sift1m, 0.51x dbpedia-100K). This row is the
-#: ordinary case: writes that do not provoke one.
+#: corpus, which crosses the ratio only if the tail builds up: since strawmANN
+#: links appends in the background (1fb2e43, and from upserts since
+#: 2026-09-30) that happens only where the writer outruns the drainer, as at
+#: d=1536 (3,300 points/s against about 1,000 linked), and not at d=128 or
+#: d=512. So W11 measures the engine's incremental path at the rate it can
+#: sustain and its rebuild beyond it, whichever the corpus puts it in; this
+#: row is the ordinary case, writes a rebuild would not answer anyway.
 W11_STEADY_RATIO = 0.05
 
 
@@ -2540,6 +2544,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
     perf_row = car.stop() if car is not None else perfstat.blank(perf or "")
     banked = sampler.stop() if sampler is not None else None
     io = procstat.delta(io0, procstat.snapshot(storage), banked)
+    huge = procstat.huge_pages(io0.pid if io0 is not None else None)
     stdout_path.write_text(proc.stdout + proc.stderr)
     # Every number bracketing the row is closed here, ambient ones included,
     # because `foreign_between` divides foreign CPU by `after.t - before.t`: a
@@ -2625,7 +2630,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
             qps_search, qps = qps, round(window[0], 1)
             window_s = round(window[1], 3)
             overlap_pct = round(min(100.0, 100 * window_s / max(bg_wall, 1e-9)), 1)
-            notes.append(f"qps over the {window_s:.1f} s the append ran"
+            notes.append(f"qps over the {window_s:.1f} s of the append the search saw"
                          + (f" ({qps_search:,.0f} over the whole search)" if qps_search else ""))
         if status == Status.ok and overlap_pct < 100 * W11_MIN_OVERLAP:
             # The reader's qps spans its whole duration whether or not the
@@ -2666,6 +2671,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
         **{k: io.get(k) for k in procstat.PSI_FIELDS},
         **{k: io.get(k) for k in procstat.RSS_FIELDS},
         psi_scope=io.get("psi_scope", ""),
+        **huge,
         **perf_row,
         collection=collection_of(w), recall_joinable=w.recall_joinable,
         qps_bfb_median=qps_med,
@@ -3296,7 +3302,9 @@ def main(argv: list[str]) -> int:
             if r.qps is not None:
                 unit = f"  {r.qps:.0f} qps"
                 # Only worth showing both where batching makes them differ.
-                if r.rps is not None and abs(r.rps - r.qps) > 0.5:
+                # A mixed row's qps is its write window and its rps bfb's whole
+                # search: two spans, not a batch (8,033 qps "3,805 req/s").
+                if r.rps is not None and abs(r.rps - r.qps) > 0.5 and batch_size_of(w) > 1:
                     unit += f" ({r.rps:.0f} req/s)"
             wall = f"{r.wall_s:.1f}" if r.wall_s is not None else str(r.seconds)
             print(f"    ok in {wall}s  load {r.load_start}%->{r.load_end}%{unit}")

@@ -119,6 +119,7 @@ from report_data import (  # noqa: F401
     purposes,
     ratio_value,
     recall_band,
+    row_bracket_s,
     run_colour,
     run_meta_tag,
     segment_note,
@@ -278,7 +279,11 @@ def _num_cell(r: pd.Series | None) -> str:
     sub = ""
     # `4,562` above `4,542 rps` read as one broken number, `4,5624,542`, and
     # said nothing: the two differ only on a batched row.
-    if pd.notna(r["rps"]) and r["rps"] > 0 and r["qps"] / r["rps"] >= RPS_SHOWN_ABOVE:
+    # A mixed row's qps is its write window and its rps the whole search, two
+    # spans rather than a batch: dbpedia 0930's W11-steady read "580" over
+    # "504,237 requests/s".
+    if (pd.notna(r["rps"]) and r["rps"] > 0 and r["qps"] / r["rps"] >= RPS_SHOWN_ABOVE
+            and r.get("qps_basis") != "write-window"):
         sub = f'<span class="sub">{r["rps"]:,.0f} requests/s</span>'
     return f'<td class="num">{r["qps"]:,.0f}{sub}</td>'
 
@@ -680,9 +685,25 @@ WORKLOAD_METRICS: list[tuple[str, object, object, str]] = [
 ]
 
 
+def repro_paths(runs) -> dict[str, str]:
+    """The files the "Reproducing this" commands name, for the run's own
+    dataset: the section printed sift1m's paths on every dataset's page."""
+    import paths
+    name = next(((r.meta.get("dataset") or {}).get("name") for r in runs
+                 if (r.meta.get("dataset") or {}).get("name")), None) or "sift1m"
+    try:
+        c = paths.dataset(name)
+        metric = paths.metric(name)
+    except SystemExit:
+        return {"base": "$DATA/<base>.fbin", "queries": "$DATA/<queries>.fbin",
+                "gt": "$DATA/gt/<ground truth>.json", "metric": "<metric>"}
+    return {"base": f"$DATA/{name}/{c.base.name}", "queries": f"$DATA/{name}/{c.queries.name}",
+            "gt": f"$DATA/{name}/gt/{c.ground_truth.name}", "metric": metric}
+
+
 def _pct_of_wall(r: dict) -> str:
     cpu = (r.get("cpu_user_s") or 0) + (r.get("cpu_system_s") or 0)
-    wall = r.get("wall_s") or r.get("duration_s")
+    wall = row_bracket_s(r)
     return f"{cpu / wall * 100:,.0f}%" if cpu and wall else "-"
 
 
@@ -2747,12 +2768,17 @@ def storage_table(runs: list[Run], compact: bool = False) -> str:
                         f'{procstat.human_bytes(max(pre))} before the writers</span></td>')
         # Named rather than silently dropped: the reader is owed the row the
         # level came from when it is not the run's last one.
+        # strawmANN sizes every arena at `--capacity` when it is created, so its
+        # figure is what it allocated, not what it holds: a 200,000-point W12
+        # upload moved dbpedia 0930's from 28.4 to 35.5 GiB (findings 65).
+        alloc = ('<span class="sub">allocated at --capacity</span>'
+                 if key == "storage_bytes" and "strawmann" in (run.meta or {}) else "")
         if (kind == "level" and not key.startswith("rss_") and len(src) != len(run.rows)
                 and not compact):  # the compact card's note says it once
             skipped = [r.get("id") for r in run.rows if procstat.is_mutating(r)]
             return (f'<td class="num">{shown}'
-                    f'<span class="sub">before {", ".join(str(x) for x in skipped)}</span></td>')
-        return f'<td class="num">{shown}</td>'
+                    f'<span class="sub">before {", ".join(str(x) for x in skipped)}</span>{alloc}</td>')
+        return f'<td class="num">{shown}{alloc}</td>'
 
     body = []
     rows = ([(COMPACT_STORAGE[lab], k, f, kd) for lab, k, f, kd in STORAGE_ROWS
@@ -3338,6 +3364,7 @@ def build(runs: list[Run], title: str) -> str:
     summ = summary(runs, df)
 
     body = tpl.render(
+        repro=repro_paths(runs),
         title=title,
         glance=glance_of(runs),
         # Surfaced at the top as well as in Storage. Residency can move
