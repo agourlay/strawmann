@@ -151,9 +151,11 @@ class WorkloadTests(unittest.TestCase):
             self.assertIn(c, after_sweeps)
 
         # Every created collection is accounted for exactly once: dropped at
-        # one of the two points, or still live at the end.
+        # one of the two points or in its own phase, or still live at the end.
+        isolated = w.isolated_collections()
         self.assertTrue(after_rows.isdisjoint(after_sweeps))
-        survivors = created - after_rows - after_sweeps
+        self.assertTrue(isolated.isdisjoint(after_rows | after_sweeps))
+        survivors = created - after_rows - after_sweeps - isolated
         self.assertEqual(survivors, {"bench2"})
 
     def test_w1s_collection_is_dropped_before_w2_rather_than_waited_on(self):
@@ -704,9 +706,9 @@ class WorkloadTests(unittest.TestCase):
         # ...and no stamp given, no hash invented.
         self.assertIsNone(w.run_one(t["W3"], "http://localhost:1", results, []).harness_hash)
 
-    def test_the_binary_encodings_have_rows_where_the_host_holds_them(self):
-        """W7-2bit and W7-1p5bit on corpora of 2 GiB of fp32 or less; dbpedia-
-        openai-1m's 6.1 GB would take Qdrant's arm past the host's memory."""
+    def test_the_binary_encodings_have_rows_on_every_corpus(self):
+        """W7-2bit and W7-1p5bit, each in its own phase (`isolated_groups`),
+        so dbpedia-openai-1m's arm never holds them beside the table's."""
         w = self.w
         ids = [x.id for x in w.table()]
         for suffix, _, _ in w.BINARY_ENCODINGS:
@@ -720,19 +722,19 @@ class WorkloadTests(unittest.TestCase):
         self.assertEqual(strip(t["W7"]), strip(t["W7-2bit"]))
         with mock.patch.object(w, "upload_n", lambda: 990_000), \
                 mock.patch.object(w, "DIM", 1536):
-            self.assertEqual([x.id for x in w.binary_encoding_rows()], [])
+            self.assertEqual(len(w.binary_encoding_rows()), 4)
+        self.assertEqual(w.isolated_collections(), {"bench7b2", "bench7b15"})
         # Every oversampling policy treats them as it treats W7.
         self.assertIn("bench7b15", w.quantized_collections())
         pool = w._pool_oversampling(t["W7-2bit"])
         self.assertEqual(w.quant_of(pool)["quantization_oversampling"],
                          w.quant_of(w._pool_oversampling(t["W7"]))["quantization_oversampling"])
 
-    def test_the_recall_sweep_defaults_to_the_collections_the_table_searches(self):
+    def test_the_main_recall_sweep_leaves_the_isolated_collections_to_their_phase(self):
         import recall
-        self.assertIn("bench7b2", recall.default_collections())
-        with mock.patch.object(self.w, "binary_encoding_rows", list):
-            self.assertNotIn("bench7b2", recall.default_collections())
-            self.assertIn("bench7", recall.default_collections())
+        got = recall.default_collections()
+        self.assertIn("bench7", got)
+        self.assertFalse(set(got) & self.w.isolated_collections())
 
     def test_the_write_window_counts_only_searches_inside_the_append(self):
         w = self.w
@@ -1804,6 +1806,51 @@ class FullrunRowInvocationTests(unittest.TestCase):
                              math.ceil(420.0 * 49_500 / 1_900 * f.W11_SPAN_MARGIN))
             self.assertEqual(got["W11_QUERIES"], math.ceil(150.0 * 60.0 * f.W11_SPAN_MARGIN))
 
+    def test_the_binary_encodings_run_one_collection_at_a_time_after_the_sweeps(self):
+        """Two more quantized collections beside the table's would take
+        Qdrant's dbpedia-openai-1m arm past the host's 54 GiB: each variant
+        is uploaded, searched, swept, read back and dropped in turn, once the
+        table's own quantized collections are gone."""
+        f, w = self.f, self.f.workloads
+        calls = []
+        with mock.patch.object(f, "run_workloads",
+                               lambda *a, only=None, **k: calls.append(("rows", tuple(only or ()))) or 0), \
+                mock.patch.object(f, "run_recall",
+                                  lambda *a, collections=None: calls.append(("sweep", tuple(collections or ("*",)))) or 0), \
+                mock.patch.object(f, "capture_collections",
+                                  lambda *a, names=None, **k: calls.append(("capture", tuple(names or ())))), \
+                mock.patch.object(f, "drop_collections",
+                                  lambda uri, cpus, names: calls.append(("drop", tuple(names)))), \
+                mock.patch.object(f, "say", lambda *a: None):
+            f.measure("http://x", "lbl", "0-3", None)
+        groups = w.isolated_groups()
+        self.assertEqual(len(groups), 2)
+        # The main sweep is the only whole-table one, and the variants' rows are
+        # not in the stable invocations.
+        main_sweep = calls.index(("sweep", ("*",)))
+        for kind, arg in calls[:main_sweep]:
+            if kind == "rows":
+                self.assertFalse(set(arg) & {r for g, _ in groups for r in g})
+        swept_drop = next(i for i, c in enumerate(calls) if i > main_sweep and c[0] == "drop")
+        self.assertTrue(set(calls[swept_drop][1]) >= {"bench6", "bench7", "bench8"})
+        self.assertFalse(set(calls[swept_drop][1]) & w.isolated_collections())
+        # Then each group in turn: rows, its own sweep, read-back, drop.
+        at = swept_drop + 1
+        for rows, coll in groups:
+            while calls[at][0] == "capture" and calls[at][1] != (coll,):
+                at += 1
+            self.assertEqual(calls[at:at + 4], [("rows", tuple(rows)), ("sweep", (coll,)),
+                                                 ("capture", (coll,)), ("drop", (coll,))])
+            at += 4
+        # And the mutating rows after, with no read-back naming a variant.
+        mutating = [i for i, c in enumerate(calls) if c[0] == "rows" and "W11" in c[1]]
+        self.assertTrue(mutating and mutating[0] > at - 1)
+        for kind, arg in calls[at:]:
+            if kind == "capture":
+                self.assertFalse(set(arg) & w.isolated_collections())
+        self.assertEqual(f.invocations_per_arm(),
+                         sum(1 for c in calls if c[0] == "rows"))
+
     def test_the_search_is_bounded_by_time_on_the_slower_engine_not_by_queries(self):
         """0930: `min(QUERIES, n)` left sift1m's and laion's searches inside
         the append's first 7 to 37%. The bound is now the slower engine's time."""
@@ -2433,8 +2480,9 @@ class RunEstimateTests(unittest.TestCase):
         self.assertAlmostEqual(mins, 2 * (100 + 300 + 200 + 200) / 60, places=2)
 
     def test_settles_are_counted_from_the_invocations_measure_makes(self):
-        # Stable rows in two parts around W1, then the mutating rows.
-        self.assertEqual(self.f.invocations_per_arm(), 3)
+        # Stable rows in two parts around W1, one per binary encoding's own
+        # phase, then the mutating rows.
+        self.assertEqual(self.f.invocations_per_arm(), 5)
 
     def _label(self, name, dataset, rows, engine="qdrant"):
         d = self.f.RESULTS / name

@@ -313,11 +313,15 @@ second bits in pairs. Searched exactly as W7 is, each in its own collection
 (`bench7b2`, `bench7b15`) with its own upload row and recall sweep, and
 rewritten by the oversampling policies as W7 is (`quantized_collections`).
 
-**Left out of dbpedia-openai-1m.** Two more quantized collections of 6.1 GB of
-fp32 each, on both engines, would take Qdrant's arm past this host's 54 GiB
-from its 43.6 GiB peak on 0930 (`BINARY_ENCODINGS_MAX_CORPUS_BYTES`, 2 GiB).
-Every other corpus is 0.9 GB or less. The rows change the table's row set, so
-the first pairs with them are STALE against every pair before, by design.
+**Run in a phase of their own, one collection at a time.** Two more quantized
+collections of 6.1 GB of fp32 each, alive beside the table's on both engines,
+would take Qdrant's dbpedia-openai-1m arm past this host's 54 GiB from its
+43.6 GiB peak on 0930. So `fullrun.measure` runs them after the main sweep,
+once `bench6`, `bench7` and `bench8` are dropped: each variant's upload and
+search rows, its own sweep, its read-back, its drop, then the next
+(`workloads.isolated_groups`). An arm makes five `workloads.py` invocations
+rather than three. The rows change the table's row set, so the first pairs
+with them are STALE against every pair before, by design.
 
 ### W8, quantized: PQ
 

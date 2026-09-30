@@ -392,15 +392,17 @@ def quant_params_of(collection: str) -> QuantParams:
 def default_collections() -> list[str]:
     """The collections this dataset's table searches, in `COLLECTIONS` order.
 
-    The binary-encoding rows are left out of large corpora
-    (`workloads.binary_encoding_rows`), and a sweep of a collection nobody
-    created only fails.
+    The binary-encoding collections are swept in their own phase, after this
+    one (`workloads.isolated_groups`), and a sweep of a collection that does
+    not exist yet only fails.
     """
     try:
         import workloads
     except ImportError:  # pragma: no cover
         return list(COLLECTIONS)
     queried = {w.query_collection for w in workloads.table() if w.query_collection}
+    # Swept in their own phase, each right after its rows (`isolated_groups`).
+    queried -= workloads.isolated_collections()
     return [c for c in COLLECTIONS if c in queried]
 
 

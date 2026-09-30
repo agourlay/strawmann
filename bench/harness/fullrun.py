@@ -1322,7 +1322,8 @@ def placement_mismatch(labels: list[str]) -> str | None:
 RECALL_100_COLLECTION = "bench2"
 
 
-def run_recall(uri: str, label: str, client_cpus: str) -> int:
+def run_recall(uri: str, label: str, client_cpus: str,
+               collections: list[str] | None = None) -> int:
     """§7.4's other half: a qps without its recall is not publishable.
 
     Two passes. The first is the sweep the W10 rows join on `ef`, at limit 10. The
@@ -1339,8 +1340,12 @@ def run_recall(uri: str, label: str, client_cpus: str) -> int:
     # re-derived in `recall.py`: `workloads` owns `W12_N` and its corpus cap,
     # and a second derivation is a second definition that can drift.
     prefix = ["--filtered-base-n", str(workloads.w12_n())]
-    for extra in ([*prefix],
-                  ["--collections", RECALL_100_COLLECTION, "--limit", "100"]):
+    passes = ([*prefix], ["--collections", RECALL_100_COLLECTION, "--limit", "100"])
+    if collections is not None:
+        # One phase's own collections, at the rows' limit only: recall@100 is
+        # `bench2`'s (`RECALL_100_COLLECTION`).
+        passes = (["--collections", ",".join(collections)],)
+    for extra in passes:
         argv = ["taskset", "-c", client_cpus,
                 str(ROOT / "bench/harness/recall.py"), label, "--engine", uri, *extra]
         print(f"  {' '.join(argv)}", flush=True)
@@ -1775,8 +1780,10 @@ def invocations_per_arm() -> int:
     the mutating rows."""
     rows = [w.id for w in workloads.table()]
     mutators = mutating_rows()
-    _, rest, _ = split_after_dead_writers([r for r in rows if r not in mutators])
-    return 1 + bool(rest) + any(r in mutators for r in rows)
+    isolated = {r for group, _ in workloads.isolated_groups() for r in group}
+    _, rest, _ = split_after_dead_writers([r for r in rows if r not in mutators and r not in isolated])
+    return (1 + bool(rest) + len(workloads.isolated_groups())
+            + any(r in mutators for r in rows))
 
 
 def measure(uri: str, label: str, client_cpus: str, storage: str | None,
@@ -1784,7 +1791,9 @@ def measure(uri: str, label: str, client_cpus: str, storage: str | None,
     """Every row, the recall sweeps, then the rows that would invalidate them."""
     rows = [w.id for w in workloads.table()]
     mutators = mutating_rows()
-    stable = [r for r in rows if r not in mutators]
+    groups = workloads.isolated_groups()
+    isolated = {r for group, _ in groups for r in group}
+    stable = [r for r in rows if r not in mutators and r not in isolated]
     mutating = [r for r in rows if r in mutators]
 
     say(f"{label}: §4's rows, except {', '.join(mutating)}")
@@ -1815,10 +1824,19 @@ def measure(uri: str, label: str, client_cpus: str, storage: str | None,
     capture_collections(uri, label, client_cpus, names=swept)
     drop_collections(uri, client_cpus, swept)
 
+    # One collection at a time, with the table's quantized ones gone: rows,
+    # sweep, read-back, drop (`workloads.isolated_groups`).
+    for group, coll in groups:
+        say(f"{label}: {', '.join(group)} in {coll}, then its sweep, then it goes")
+        rc |= run_workloads(uri, label, client_cpus, storage, only=group, placement=placement)
+        rc |= run_recall(uri, label, client_cpus, collections=[coll])
+        capture_collections(uri, label, client_cpus, names=[coll])
+        drop_collections(uri, client_cpus, [coll])
+
     # Only the survivors: the rest were read back before they were dropped,
     # and the merge above keeps all of it in one file.
     survivors = [c for c in workloads.upload_collections()
-                 if c not in set(early) | set(dead) | set(swept)]
+                 if c not in set(early) | set(dead) | set(swept) | workloads.isolated_collections()]
 
     # Before the mutating rows, not only after them. The survivor read-back
     # used to happen once, at the end of the arm, and the mutating rows append

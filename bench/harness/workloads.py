@@ -504,6 +504,8 @@ def collections_droppable_after_sweeps() -> list[str]:
     rebuild of the whole of `bench2` wants the memory.
     """
     keep = {w.query_collection for w in table() if w.background and w.query_collection}
+    # Not created until their own phase, after this drop.
+    keep |= isolated_collections()
     return [c for c in collections_read_after_rows() if c not in keep]
 
 
@@ -1331,13 +1333,6 @@ C = "bench"
 #: --quantization, collection)`.
 BINARY_ENCODINGS = (("2bit", "binary2bit", "bench7b2"), ("1p5bit", "binary1p5bit", "bench7b15"))
 
-#: The fp32 corpus past which the binary-encoding rows are left out. Two more
-#: quantized collections on dbpedia-openai-1m (6.1 GB of fp32 each, on both
-#: engines) would take Qdrant's arm past this 54 GiB host from its 43.6 GiB
-#: peak on 0930; sift1m, laion, h-and-m and dbpedia-100K are 0.5 GB or less.
-BINARY_ENCODINGS_MAX_CORPUS_BYTES = 2 << 30
-
-
 def quantized_collections() -> set[str]:
     """The collections a quantized search row reads: SQ8, binary in each of
     its encodings, and PQ. The oversampling policies rewrite exactly these."""
@@ -1345,9 +1340,13 @@ def quantized_collections() -> set[str]:
 
 
 def binary_encoding_rows() -> list[Workload]:
-    """W7-2bit and W7-1p5bit, with their uploads, on corpora small enough."""
-    if upload_n() * DIM * 4 > BINARY_ENCODINGS_MAX_CORPUS_BYTES:
-        return []
+    """W7-2bit and W7-1p5bit, with their uploads.
+
+    Run in a phase of their own (`isolated_groups`), one collection at a
+    time: two more quantized collections alive beside the table's would take
+    Qdrant's dbpedia-openai-1m arm past this 54 GiB host from its 43.6 GiB
+    peak on 0930.
+    """
     out = []
     for suffix, quant_arg, coll in BINARY_ENCODINGS:
         out.append(Workload(f"W7-{suffix}-upload", f"binary quantization, {quant_arg}: load",
@@ -1360,6 +1359,20 @@ def binary_encoding_rows() -> list[Workload]:
                                   "--quantization-oversampling", 4,
                                   "--quantization-rescore", "true"), query_collection=coll))
     return out
+
+
+def isolated_groups() -> list[tuple[list[str], str]]:
+    """Rows `fullrun` runs after the sweeps, one collection at a time: each
+    group's rows, then that collection's own sweep, read-back and drop, so no
+    two of them are ever alive together or beside the table's own quantized
+    collections (dropped before this phase). `(row ids, collection)`."""
+    ids = {w.id for w in table()}
+    return [([f"W7-{s}-upload", f"W7-{s}"], coll) for s, _, coll in BINARY_ENCODINGS
+            if f"W7-{s}" in ids]
+
+
+def isolated_collections() -> set[str]:
+    return {coll for _, coll in isolated_groups()}
 
 
 def table() -> list[Workload]:
