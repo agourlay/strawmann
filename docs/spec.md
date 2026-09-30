@@ -528,13 +528,14 @@ This has a direct read-across to Qdrant, which ships one binary to a heterogeneo
 
 ### 6.7 Quantization
 
-Match bfb's flags, minus the Qdrant-proprietary `turbo*` variants (return a clear error; document the exclusion so nobody accidentally compares against them).
+Match bfb's flags, `turbo*` included: Qdrant 1.19's TurboQuantization at 1, 1.5, 2 and 4 bits is in scope since 2026-09-30 (`decisions.md`), where this section excluded it until then. The `Turbo4` *vector datatype* stays excluded (a clear error): it is a storage type, not a quantization, and nothing measures it.
 
 | mode | encoding | distance | notes |
 |---|---|---|---|
 | `scalar` | int8, global quantile bounds (bfb uses 0.99) | VNNI `vpdpbusd` where available, else `vpmaddubsw`+`vpmaddwd` | symmetric (query also quantized, the served path) and asymmetric variants, both measured. Not Qdrant 1.19's quantizer: 256 levels vs 127, order-statistic quantile vs effectively min/max (`src/quant/scalar.zig`); a recall-matched SQ8 row is not like-for-like |
 | `binary` | 1 bit/dim, sign-based | XOR + `@popCount` over `@Vector(u64)` | fastest; needs oversampling + rescore. With `rescore = false` the score on the wire is Qdrant's sign-dot scale, `dim − 2·hamming` (before metric postprocess), not `−hamming` |
 | `product-x{4,8,16,32,64}` | PQ, 8 bit/subquantizer | LUT ADC, scalar gather baseline | k-means codebooks trained on a sample |
+| `turbo{1,1p5,2,4}bit` | TurboQuant: randomised Hadamard rotation, then per-coordinate Lloyd-Max codes | asymmetric, fp32-side query against the codes | Qdrant 1.19's `encoded_vectors_tq.rs` is the reference; implemented to its API path |
 | PQ4 / FastScan | 4 bit, `vpshufb`-based LUT | in-register table lookup | stretch goal; the version that actually competes |
 
 Rescoring: quantized search produces `limit × oversampling` candidates, rescored with the full-precision (or next-tier) representation. Given §5.3, the rescore stage is often the dominant cost at low `ef`, so measure the **combined** curve of (recall, latency) across `(ef, oversampling, rescore-encoding)` rather than tuning stages independently.

@@ -762,6 +762,16 @@ fn healthCheck(req: *const server.Request, out: *server.ResponseBuf) server.Comp
 /// The one unavoidable copy is the memcpy out of the network frame into the
 /// arena row, which `DenseVector.copyInto` performs. There is no intermediate
 /// list of points and no per-point allocation.
+/// Qdrant's default when a request does not say: rescore on, except for
+/// TurboQuant at 4 bits (`quantized_vectors.rs:198-203`), whose scores it
+/// serves as they are.
+fn defaultRescore(coll: *const core.Collection) bool {
+    return switch (coll.quant_mode) {
+        .turbo => |bits| bits != .b4,
+        else => true,
+    };
+}
+
 fn upsert(ctx: *Context, req: *const server.Request, body: []const u8, out: *server.ResponseBuf) server.Completion {
     var r = wire.Reader.init(body);
     const up = msg.UpsertPoints.decode(&r) catch |e| return decodeErr(req, e);
@@ -1367,7 +1377,7 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
         // core/collection.zig).
         const qp = core.quantized_search.QuantParams{
             .ignore = q.params.quantization.ignore orelse false,
-            .rescore = q.params.quantization.rescore orelse true,
+            .rescore = q.params.quantization.rescore orelse defaultRescore(coll),
             .oversampling = q.params.quantization.oversampling orelse 1.0,
         };
         ctx.workspace.ensureQuant(ctx.engine.alloc, coll.config.dim) catch

@@ -2050,3 +2050,48 @@ against Qdrant's 0.00004, and 0.0021 sits inside it. What would reopen it is
 unchanged: the order-independent build through the keyed level draw, measured
 over several keyed seeds.
 
+## TurboQuant is in scope, decided 2026-09-30
+
+Spec §6.7 excluded the "Qdrant-proprietary `turbo*` variants" and the engine
+refused them with a clear error, so that nothing would compare against an
+encoding strawmANN did not implement. That was a statement about scope, and
+the scope changed: the user asked for the quantization effort to focus on
+scalar, binary and TurboQuant, and dropped PQ.
+
+What is in scope is Qdrant 1.19's `TurboQuantization { bits }` at 1, 1.5, 2
+and 4 bits, the collection-level quantization that bfb reaches as
+`--quantization turbo1bit` through `turbo4bit`, implemented to the path that
+API takes in Qdrant (`lib/quantization/src/encoded_vectors_tq.rs` at
+`878843e6`, the build this project benchmarks). The `Turbo4` vector datatype
+is not: it is a storage type, and it stays a clear error. The exclusion in
+the earlier entry above that lists what the engine refuses is superseded for
+the quantization and stands for the datatype.
+
+Implemented the same day (`quant/turbo.zig`), to the path Qdrant's API takes:
+TQ+ at every width, the rotation over the zero-padded vector (block
+Walsh-Hadamard over power-of-two chunks and three permutations from Qdrant's
+seeded LCG), its fixed Lloyd-Max codebooks, the per-vector `sf`, `l2` and
+`xm`, and its score formulas; the 2- and 4-bit kernels score an integerised
+query against Qdrant's x86 integer codebook with `vpshufb` and `vpdpbusd`.
+Two differences, neither a comparison's business: the TQ+ quantiles are the
+exact ones of a deterministic strided sample, where Qdrant runs a streaming
+estimator over an OS-seeded sample and so differs from itself build to build;
+and Manhattan is refused, which Qdrant serves by dequantising every
+candidate. 4 bits defaults to no rescore, as in Qdrant.
+
+Through the server on dbpedia-100K (d=1536), W7's search (`ef` 128,
+oversampling 4, rescore on), against Qdrant `878843e6`:
+
+| bits | strawmANN q/s | Qdrant q/s | ratio | recall@10, strawmANN / Qdrant |
+|---|--:|--:|--:|---|
+| 1 | 3,686 | 2,244 | 1.64x | 0.9759 / 0.9626 |
+| 1.5 | 3,059 | 2,976 | 1.03x | 0.9774 / 0.9678 |
+| 2 | 4,163 | 2,952 | 1.41x | 0.9769 / 0.9719 |
+| 4 | 3,722 | 3,731 | parity | 0.9794 / 0.9801 |
+
+Three steps got there from 0.37x at 4 bits: codes unpacked as whole vectors
+(1,376 to 2,200), the integer kernel (to 3,255), and the whole code row
+prefetched, 768 bytes at 4 bits where the SQ8 rule stops at 512 (to 3,722).
+Qdrant rescores 40 candidates at that oversampling where strawmANN rescores
+its `ef` pool, which the pool policy of the published runs equalises.
+

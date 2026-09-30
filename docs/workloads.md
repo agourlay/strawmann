@@ -129,9 +129,9 @@ compared to another one. §7.1 already requires an environment hash; these
 belong to the same category, and `compare.py` refuses to ratio two labels
 whose stamps disagree or that lack one.
 
-**`--datatype Turbo4` is never used.** §6.7 excludes the Qdrant-proprietary
-`turbo*` variants and strawmann returns a clear error for them; benchmarking
-against one would compare against something we deliberately do not implement.
+**`--datatype Turbo4` is never used.** It is a vector *storage type*, which
+§6.7 still excludes and strawmann refuses with a clear error. TurboQuant as a
+*quantization* (`--quantization turbo*bit`) is in scope since 2026-09-30.
 
 ## 3. The rows
 

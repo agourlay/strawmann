@@ -1891,7 +1891,9 @@ const CodeScorer = struct {
             // Searched on codes, edges chosen on fp32 (`Scorer.select`).
             .scalar => .{ .ctx = @ptrCast(self), .between = sq8, .select_ctx = @ptrCast(coll), .select = fp32Between },
             .binary => if (kernel == .dot) .{ .ctx = @ptrCast(self), .between = binary } else null,
-            .none, .product => null,
+            // TurboQuant builds on fp32 until it has a code-to-code score
+            // (Qdrant's symmetric TQ+ form).
+            .none, .product, .turbo => null,
         };
     }
 
@@ -2236,6 +2238,7 @@ fn buildQuantStore(coll: *Collection, mode: quant_mod.Mode, threads: usize) !qua
     return quantized.buildWith(coll.alloc, mode, src, coll.config.capacity, .{
         .quantile = coll.quant_quantile,
         .threads = threads,
+        .metric = coll.config.metric,
     });
 }
 

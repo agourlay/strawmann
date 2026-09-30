@@ -21,6 +21,7 @@ const std = @import("std");
 pub const scalar = @import("scalar.zig");
 pub const binary = @import("binary.zig");
 pub const pq = @import("pq.zig");
+pub const turbo = @import("turbo.zig");
 
 /// The five PQ compression ratios, as one closed set.
 ///
@@ -85,6 +86,8 @@ pub const Mode = union(enum) {
     binary: binary.Encoding,
     /// `product-xN`; the payload is the compression ratio.
     product: CompressionRatio,
+    /// TurboQuant (`turbo.zig`); the payload is the bits per coordinate.
+    turbo: turbo.Bits,
 
     /// Parse bfb's `--quantization` value.
     ///
@@ -106,16 +109,18 @@ pub const Mode = union(enum) {
                 },
                 // Parameterised by an encoding and by a compression ratio;
                 // handled below.
-                .binary, .product => {},
+                .binary, .product, .turbo => {},
             }
         }
         // bfb's spellings (`--quantization binary2bit`, `binary1p5bit`).
         if (std.mem.eql(u8, s, "binary")) return .{ .mode = .{ .binary = .one } };
         if (std.mem.eql(u8, s, "binary2bit")) return .{ .mode = .{ .binary = .two } };
         if (std.mem.eql(u8, s, "binary1p5bit")) return .{ .mode = .{ .binary = .one_half } };
-        if (std.mem.startsWith(u8, s, "turbo")) {
-            return .{ .rejected = "Qdrant-proprietary turbo quantization is deliberately not implemented (spec §6.7)" };
-        }
+        // bfb's spellings (`--quantization turbo1bit` ... `turbo4bit`).
+        if (std.mem.eql(u8, s, "turbo1bit")) return .{ .mode = .{ .turbo = .b1 } };
+        if (std.mem.eql(u8, s, "turbo1p5bit")) return .{ .mode = .{ .turbo = .b1_5 } };
+        if (std.mem.eql(u8, s, "turbo2bit")) return .{ .mode = .{ .turbo = .b2 } };
+        if (std.mem.eql(u8, s, "turbo4bit")) return .{ .mode = .{ .turbo = .b4 } };
         if (std.mem.startsWith(u8, s, "product-x")) {
             const n = std.fmt.parseInt(usize, s["product-x".len..], 10) catch {
                 return .{ .rejected = "malformed product quantization ratio" };
@@ -137,6 +142,12 @@ pub const Mode = union(enum) {
                 .one_half => "binary1p5bit",
             },
             .product => "product",
+            .turbo => |b| switch (b) {
+                .b1 => "turbo1bit",
+                .b1_5 => "turbo1p5bit",
+                .b2 => "turbo2bit",
+                .b4 => "turbo4bit",
+            },
         };
     }
 
@@ -153,6 +164,9 @@ pub const Mode = union(enum) {
             // The count the store builds, not the one the ratio asks for:
             // they differ whenever `dim` does not divide evenly.
             .product => |cr| pq.effectiveSubquantizerCount(dim, cr.ratio()),
+            // The codes and the two scalars every metric keeps (`sf`, `xm`);
+            // Euclid's raw norm is four more.
+            .turbo => |b| b.codeBytes(dim) + 8,
         };
     }
 };
@@ -182,12 +196,17 @@ test {
     _ = pq;
 }
 
-test "§6.7: turbo variants are rejected by name, not silently substituted" {
+test "§6.7: bfb's turbo spellings parse, and nothing near them does" {
     const testing = std.testing;
-    for ([_][]const u8{ "turbo", "turbo-x4", "turbo_scalar" }) |s| {
+    try testing.expectEqual(Mode{ .turbo = .b1 }, Mode.parse("turbo1bit").mode);
+    try testing.expectEqual(Mode{ .turbo = .b1_5 }, Mode.parse("turbo1p5bit").mode);
+    try testing.expectEqual(Mode{ .turbo = .b2 }, Mode.parse("turbo2bit").mode);
+    try testing.expectEqual(Mode{ .turbo = .b4 }, Mode.parse("turbo4bit").mode);
+    try testing.expectEqualStrings("turbo1p5bit", Mode.name(.{ .turbo = .b1_5 }));
+    for ([_][]const u8{ "turbo", "turbo-x4", "turbo3bit" }) |s| {
         switch (Mode.parse(s)) {
-            .rejected => |msg| try testing.expect(std.mem.indexOf(u8, msg, "turbo") != null),
-            .mode => return error.TurboShouldBeRejected,
+            .rejected => {},
+            .mode => return error.ShouldBeRejected,
         }
     }
 }

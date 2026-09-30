@@ -1286,14 +1286,71 @@ test "e2e: §6.7 quantization is configured on the collection and used for searc
     }
 }
 
-test "e2e: §6.7 turbo quantization is refused by name" {
-    // "return a clear error; document the exclusion so nobody accidentally
-    // compares against them". There is no `turbo` field in the proto, so the
-    // parser-level rejection is exercised directly here.
-    const quant = @import("../quant/quant.zig");
-    switch (quant.Mode.parse("turbo-x8")) {
-        .rejected => |why| try testing.expect(std.mem.indexOf(u8, why, "turbo") != null),
-        .mode => return error.ShouldReject,
+test "e2e: a TurboQuant collection serves its nearest neighbours, and with Manhattan is refused" {
+    // `QuantizationConfig { TurboQuantization turbo = 4 { bits = 2 } }`, in
+    // scope since 2026-09-30 (§6.7).
+    var h = try Harness.start(testing.allocator);
+    defer h.stop();
+    var c = try Client.connect(h.port);
+    defer c.close();
+    var req_buf: [1 << 18]u8 = undefined;
+    var out: [1 << 18]u8 = undefined;
+    const dim = 32;
+
+    const Create = struct {
+        fn body(buf: []u8, name: []const u8, d: u32, distance: u64, bits: u64) ![]const u8 {
+            var w = wire.Writer.init(buf);
+            try w.writeStringField(1, name);
+            {
+                const vc = try w.beginNested(10, 2);
+                const p = try w.beginNested(1, 2);
+                try w.writeVarintField(1, d);
+                try w.writeVarintField(2, distance);
+                try w.endNested(p);
+                try w.endNested(vc);
+            }
+            {
+                const qc = try w.beginNested(14, 2);
+                const tq = try w.beginNested(4, 2);
+                try w.writeVarintFieldAlways(2, bits);
+                try w.endNested(tq);
+                try w.endNested(qc);
+            }
+            return w.written();
+        }
+    };
+    // Manhattan (4) is the one distance it does not serve.
+    {
+        const resp = try c.call("/qdrant.Collections/Create", try Create.body(&req_buf, "tqm", dim, 4, 3), &out);
+        try testing.expectEqual(grpc.Status.unimplemented, resp.status);
+    }
+    for ([_]u64{ 0, 1, 2, 3 }) |bits| {
+        var name_buf: [8]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "tq{d}", .{bits});
+        // Dot (3), so each stored vector's own score leads.
+        const resp = try c.call("/qdrant.Collections/Create", try Create.body(&req_buf, name, dim, 3, bits), &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+        var prng = std.Random.DefaultPrng.init(0x7b0 + bits);
+        const rnd = prng.random();
+        const n = 400;
+        const stored = try testing.allocator.alloc(f32, n * dim);
+        defer testing.allocator.free(stored);
+        for (stored) |*x| x.* = rnd.floatNorm(f32);
+        try uploadRandom(&c, name, dim, stored, &req_buf, &out);
+        _ = try waitGreen(&c, name, &req_buf, &out);
+        const coll = h.engine.find(name).?;
+        try testing.expect(coll.quant.load(.acquire).?.* == .turbo);
+        // Rescored top-1 of a stored vector is itself, at every width.
+        var hits: usize = 0;
+        for (0..20) |i| {
+            const q = stored[i * dim ..][0..dim];
+            const r = try c.call("/qdrant.Points/QueryBatch", try buildQuery(&req_buf, name, q, .{ .limit = 1 }), &out);
+            try testing.expectEqual(grpc.Status.ok, r.status);
+            var got_ids: [1]u64 = undefined;
+            var got_scores: [1]f32 = undefined;
+            if (try readFirstBatch(r.body, &got_ids, &got_scores) == 1 and got_ids[0] == i) hits += 1;
+        }
+        try testing.expect(hits >= 18);
     }
 }
 

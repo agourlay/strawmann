@@ -209,15 +209,19 @@ pub fn createCollection(ctx: *Context, req: *const server.Request, body: []const
         return err(req, .already_exists, "collection already exists");
     }
 
-    // §6.7: the quantization mode arrives with the collection. `turbo*` is
-    // rejected by name rather than approximated, so nobody can accidentally
-    // compare against an encoding we never implemented.
+    // §6.7: the quantization mode arrives with the collection.
     var qspec: QuantSpec = .{};
     if (p.quantization_raw) |raw| {
         switch (parseQuantizationConfig(raw)) {
             .spec => |sp| qspec = sp,
             .rejected => |rj| return err(req, rj.status, rj.why),
         }
+    }
+    // Qdrant scores TurboQuant's Manhattan by dequantising and inverse-
+    // rotating every candidate; that path is not implemented, and accepting
+    // the collection would leave a build that fails on every attempt.
+    if (qspec.mode == .turbo and metric == .manhattan) {
+        return err(req, .unimplemented, "quantization_config.turbo with Manhattan distance is not implemented");
     }
 
     // §6.5 builds the graph with `M` neighbours per upper level and `2M` on
@@ -502,11 +506,32 @@ fn writeCollectionConfig(w: *wire.Writer, coll: *const core.Collection) wire.Wri
             try w.endNested(pq);
             try w.endNested(qc);
         },
-        .binary => {
+        .binary => |enc| {
             const qc = try w.beginNested(5, 2);
             const bq = try w.beginNested(3, 2);
             try w.writeBoolField(1, true);
+            // `BinaryQuantizationEncoding { OneBit = 0; TwoBits = 1; OneAndHalfBits = 2; }`
+            try w.writeVarintField(2, switch (enc) {
+                .one => 0,
+                .two => 1,
+                .one_half => 2,
+            });
             try w.endNested(bq);
+            try w.endNested(qc);
+        },
+        .turbo => |bits| {
+            const qc = try w.beginNested(5, 2);
+            // `TurboQuantization { always_ram = 1; bits = 2; }` at oneof field 4,
+            // `TurboQuantBitSize { Bits1 = 0; Bits1_5 = 1; Bits2 = 2; Bits4 = 3; }`.
+            const tq = try w.beginNested(4, 2);
+            try w.writeBoolField(1, true);
+            try w.writeVarintFieldAlways(2, switch (bits) {
+                .b1 => 0,
+                .b1_5 => 1,
+                .b2 => 2,
+                .b4 => 3,
+            });
+            try w.endNested(tq);
             try w.endNested(qc);
         },
     }
@@ -652,12 +677,29 @@ fn parseQuantizationConfig(raw: []const u8) QuantParse {
                 }
                 return .{ .spec = .{ .mode = .{ .binary = encoding } } };
             },
-            // §6.7: "minus the Qdrant-proprietary `turbo*` variants (return a
-            // clear error; document the exclusion so nobody accidentally
-            // compares against them)". qdrant 1.19 puts TurboQuantization at
-            // field 4 of the oneof, so it is rejectable by number rather than
-            // only by the `--quantization turbo*` string.
-            4 => return .{ .rejected = .{ .status = .unimplemented, .why = "Qdrant-proprietary turbo quantization is deliberately not implemented (spec §6.7)" } },
+            4 => {
+                // TurboQuantization { optional bool always_ram = 1;
+                //                     optional TurboQuantBitSize bits = 2;
+                //                     optional Memory memory = 3; }
+                // In scope since 2026-09-30 (§6.7, `quant/turbo.zig`). Bits4
+                // when absent, as Qdrant's `bits.unwrap_or_default()`.
+                var sub = r.nested() catch return malformedQuant("malformed turbo quantization");
+                var bits: quant.turbo.Bits = .b4;
+                while (!sub.atEnd()) {
+                    const st = sub.tag() catch return malformedQuant("malformed turbo quantization");
+                    if (st.field == 2) {
+                        const v = sub.varint() catch return malformedQuant("malformed turbo quantization bits");
+                        bits = switch (v) {
+                            0 => .b1,
+                            1 => .b1_5,
+                            2 => .b2,
+                            3 => .b4,
+                            else => return .{ .rejected = .{ .status = .invalid_argument, .why = "quantization_config.turbo.bits: unknown bit size" } },
+                        };
+                    } else sub.skip(st.wire_type) catch return malformedQuant("malformed turbo quantization");
+                }
+                return .{ .spec = .{ .mode = .{ .turbo = bits } } };
+            },
             else => r.skip(t.wire_type) catch return malformedQuant("malformed quantization_config"),
         }
     }

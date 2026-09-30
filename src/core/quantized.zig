@@ -42,6 +42,30 @@ pub const Store = union(enum) {
     scalar: Scalar,
     binary: Binary,
     product: Product,
+    turbo: Turbo,
+
+    /// TurboQuant (`quant.turbo`): the trained model, the codes, and each
+    /// row's three scalars in arrays of their own.
+    pub const Turbo = struct {
+        model: quant.turbo.Model,
+        /// `capacity × row_bytes`.
+        codes: []u8,
+        row_bytes: usize,
+        scalars: []quant.turbo.Scalars,
+
+        pub fn row(self: *const Turbo, offset: u32) []const u8 {
+            return self.codes[@as(usize, offset) * self.row_bytes ..][0..self.row_bytes];
+        }
+
+        /// An overwritten row, encoded against the trained model. Allocates
+        /// its scratch: the write path is not the query path.
+        fn setRow(self: *Turbo, alloc: std.mem.Allocator, offset: u32, vec: []const f32) void {
+            const scratch = alloc.alloc(f64, self.model.scratchLen()) catch return;
+            defer alloc.free(scratch);
+            const dst = self.codes[@as(usize, offset) * self.row_bytes ..][0..self.row_bytes];
+            self.scalars[offset] = self.model.encode(vec, dst, scratch);
+        }
+    };
 
     pub const Scalar = struct {
         params: quant.scalar.Params,
@@ -98,6 +122,7 @@ pub const Store = union(enum) {
             .none => {},
             .scalar => |*s| s.setRow(offset, vec),
             .binary => |*b| b.setRow(offset, vec),
+            .turbo => |*t| t.setRow(std.heap.page_allocator, offset, vec),
             .product => |*p| quant.pq.encode(&p.codebook, p.codes[@as(usize, offset) * p.codebook.m ..][0..p.codebook.m], vec),
         }
     }
@@ -117,6 +142,11 @@ pub const Store = union(enum) {
                 p.codebook.deinit(alloc);
                 alloc.free(p.codes);
             },
+            .turbo => |*t| {
+                t.model.deinit(alloc);
+                alloc.free(t.codes);
+                alloc.free(t.scalars);
+            },
         }
         self.* = .none;
     }
@@ -132,6 +162,7 @@ pub const Store = union(enum) {
             .scalar => .scalar,
             .binary => .binary,
             .product => .product,
+            .turbo => .turbo,
         };
     }
 
@@ -140,7 +171,7 @@ pub const Store = union(enum) {
     /// by the encoding itself.
     pub fn achievedCompression(self: *const Store) ?f64 {
         return switch (self.*) {
-            .none, .scalar, .binary => null,
+            .none, .scalar, .binary, .turbo => null,
             .product => |p| p.codebook.compressionRatio(),
         };
     }
@@ -153,6 +184,7 @@ pub const Store = union(enum) {
             .scalar => |s| s.dim,
             .binary => |b| b.codes.words * @sizeOf(u64),
             .product => |p| p.codebook.m,
+            .turbo => |t| t.row_bytes + @sizeOf(quant.turbo.Scalars),
         };
     }
 };
@@ -190,6 +222,9 @@ pub const BuildOptions = struct {
     /// the result: PQ codebook training (one subspace per task) and PQ
     /// encoding (rows in ranges). The store is bit-identical for any value.
     threads: usize = 1,
+    /// The collection's metric, which TurboQuant's per-vector scalars depend
+    /// on (Qdrant keeps Cosine apart from Dot there).
+    metric: dist.Metric = .dot,
 };
 
 /// Build the quantized store for a collection, with the default options.
@@ -203,7 +238,100 @@ pub fn buildWith(alloc: std.mem.Allocator, mode: Mode, src: Source, capacity: us
         .scalar => try buildScalar(alloc, src, capacity, opts.quantile),
         .binary => |enc| try buildBinary(alloc, src, capacity, enc),
         .product => |cr| try buildProduct(alloc, src, capacity, cr, opts.threads),
+        .turbo => |bits| try buildTurbo(alloc, src, capacity, bits, opts),
     };
+}
+
+fn buildTurbo(alloc: std.mem.Allocator, src: Source, capacity: usize, bits: quant.turbo.Bits, opts: BuildOptions) Error!Store {
+    const kind: quant.turbo.Kind = switch (opts.metric) {
+        .cosine => .cosine,
+        .dot => .dot,
+        .euclid => .euclid,
+        // Qdrant scores Manhattan by dequantising and inverse-rotating every
+        // candidate; the API refuses it before a build gets here.
+        .manhattan => return Error.Unsupported,
+    };
+    // Qdrant samples `sampleSize` vectors for the TQ+ fit; here every
+    // `count / R`-th row, so the fit is reproducible.
+    const want = @min(bits.sampleSize(), src.count);
+    const stride = @max(1, src.count / @max(want, 1));
+    const sample_data = alloc.alloc(f32, want * src.dim) catch return Error.OutOfMemory;
+    defer alloc.free(sample_data);
+    const sample = alloc.alloc([]const f32, want) catch return Error.OutOfMemory;
+    defer alloc.free(sample);
+    for (0..want) |k| {
+        const dst = sample_data[k * src.dim ..][0..src.dim];
+        @memcpy(dst, src.row(src.ctx, @intCast(k * stride)));
+        sample[k] = dst;
+    }
+    var model = quant.turbo.train(alloc, bits, kind, src.dim, sample) catch return Error.OutOfMemory;
+    errdefer model.deinit(alloc);
+    const row_bytes = bits.codeBytes(src.dim);
+    // 64 bytes of slack: the integer kernel reads whole 64-byte steps, and
+    // the last row's must not run off the allocation (`turbo.dotInt`).
+    const codes = alloc.alloc(u8, capacity * row_bytes + 64) catch return Error.OutOfMemory;
+    errdefer alloc.free(codes);
+    @memset(codes, 0);
+    const scalars = alloc.alloc(quant.turbo.Scalars, capacity) catch return Error.OutOfMemory;
+    errdefer alloc.free(scalars);
+    @memset(scalars, .{ .sf = 0, .l2 = 0, .xm = 0 });
+    var store = Store.Turbo{ .model = model, .codes = codes, .row_bytes = row_bytes, .scalars = scalars };
+    try encodeAllTurbo(alloc, &store, src, opts.threads);
+    return .{ .turbo = store };
+}
+
+/// Every row of `src` into `store`, in contiguous ranges over up to `threads`
+/// threads: a row's codes are a pure function of it and the model.
+fn encodeAllTurbo(alloc: std.mem.Allocator, store: *Store.Turbo, src: Source, threads: usize) Error!void {
+    const Task = struct {
+        store: *Store.Turbo,
+        src: Source,
+        widen: []f32,
+        scratch: []f64,
+        lo: usize,
+        hi: usize,
+
+        fn run(self: *@This()) void {
+            var n = self.lo;
+            while (n < self.hi) : (n += 1) {
+                const off: u32 = @intCast(n);
+                const v = if (self.src.row_into) |ri| ri(self.src.ctx, off, self.widen) else self.src.row(self.src.ctx, off);
+                const dst = self.store.codes[n * self.store.row_bytes ..][0..self.store.row_bytes];
+                self.store.scalars[n] = self.store.model.encode(v, dst, self.scratch);
+            }
+        }
+    };
+    const t = if (src.row_into == null or src.count < 4_096) 1 else @max(1, @min(threads, 64));
+    const sl = store.model.scratchLen();
+    const tasks = alloc.alloc(Task, t) catch return Error.OutOfMemory;
+    defer alloc.free(tasks);
+    const widen = alloc.alloc(f32, t * src.dim) catch return Error.OutOfMemory;
+    defer alloc.free(widen);
+    const scratch = alloc.alloc(f64, t * sl) catch return Error.OutOfMemory;
+    defer alloc.free(scratch);
+    const per = (src.count + t - 1) / t;
+    for (tasks, 0..) |*task, i| task.* = .{
+        .store = store,
+        .src = src,
+        .widen = widen[i * src.dim ..][0..src.dim],
+        .scratch = scratch[i * sl ..][0..sl],
+        .lo = @min(i * per, src.count),
+        .hi = @min((i + 1) * per, src.count),
+    };
+    if (t == 1) {
+        tasks[0].run();
+        return;
+    }
+    const handles = alloc.alloc(std.Thread, t - 1) catch return Error.OutOfMemory;
+    defer alloc.free(handles);
+    var spawned: usize = 0;
+    for (tasks[1..], 0..) |*task, i| {
+        handles[i] = std.Thread.spawn(.{}, Task.run, .{task}) catch break;
+        spawned += 1;
+    }
+    tasks[0].run();
+    for (tasks[1 + spawned ..]) |*task| task.run();
+    for (handles[0..spawned]) |h| h.join();
 }
 
 fn sampleStride(count: usize) usize {
@@ -414,6 +542,9 @@ pub const Query = struct {
     // Product
     table: ?*quant.pq.QueryTable = null,
 
+    // TurboQuant: the rotated, corrected query and its scalars.
+    turbo: ?quant.turbo.PreparedQuery = null,
+
     /// Score one node with the quantized representation.
     pub fn score(ctx: *const anyopaque, node: u32) f32 {
         const self: *const Query = @ptrCast(@alignCast(ctx));
@@ -431,6 +562,7 @@ pub const Query = struct {
             },
             .binary => |b| quant.binary.signDot(b.dim, self.bin_codes, b.codes.rowConst(node)),
             .product => |p| self.table.?.score(p.row(node)),
+            .turbo => |*t| t.model.score(&self.turbo.?, t.row(node), t.scalars[node]),
         };
     }
 
@@ -481,6 +613,12 @@ pub const Query = struct {
                 const row = p.row(node);
                 pf(row.ptr, row.len);
             },
+            // Whole: a row is 1,032 bytes at most (4 bits, d=2048).
+            .turbo => |t| {
+                const row = t.row(node);
+                pf(row.ptr, row.len);
+                @prefetch(&t.scalars[node], hint);
+            },
         }
     }
 };
@@ -500,6 +638,10 @@ pub const QueryScratch = struct {
     candidates: []u32,
     /// Rescored results.
     rescored: []quant.binary.Scored,
+    /// TurboQuant: the prepared query and the rotation's scratch.
+    tq_query: []f32,
+    tq_work: []f64,
+    tq_planes: []i8,
 
     pub fn init(alloc: std.mem.Allocator, max_dim: usize, max_candidates: usize) !QueryScratch {
         // Two bits a component at most (`binary.Encoding.two`).
@@ -512,7 +654,18 @@ pub const QueryScratch = struct {
         const candidates = try alloc.alloc(u32, max_candidates);
         errdefer alloc.free(candidates);
         const rescored = try alloc.alloc(quant.binary.Scored, max_candidates);
+        errdefer alloc.free(rescored);
+        // TurboQuant pads to 1.5x at most (`turbo.Bits.b1_5`), plus alignment.
+        const tq_len = max_dim * 3 / 2 + 8;
+        const tq_query = try alloc.alloc(f32, tq_len);
+        errdefer alloc.free(tq_query);
+        const tq_work = try alloc.alloc(f64, 2 * tq_len);
+        errdefer alloc.free(tq_work);
+        const tq_planes = try alloc.alloc(i8, quant.turbo.planeBytes(.b2, tq_len));
         return .{
+            .tq_query = tq_query,
+            .tq_work = tq_work,
+            .tq_planes = tq_planes,
             .bin_codes = bin_codes,
             .sq_signed = sq_signed,
             .sq_unsigned = sq_unsigned,
@@ -529,6 +682,9 @@ pub const QueryScratch = struct {
         if (self.table_valid) self.table.deinit(alloc);
         alloc.free(self.candidates);
         alloc.free(self.rescored);
+        alloc.free(self.tq_query);
+        alloc.free(self.tq_work);
+        alloc.free(self.tq_planes);
     }
 
     pub fn ensureTable(self: *QueryScratch, alloc: std.mem.Allocator, cb: *const quant.pq.Codebook) !void {
@@ -568,6 +724,10 @@ pub fn prepareQuery(
             try scratch.ensureTable(alloc, &p.codebook);
             scratch.table.build(&p.codebook, kernel, query);
             q.table = &scratch.table;
+        },
+        .turbo => |*t| {
+            q.turbo = t.model.prepareQuery(query, scratch.tq_query, scratch.tq_work);
+            quant.turbo.prepareInt(&q.turbo.?, t.model.bits, scratch.tq_planes);
         },
     }
     return q;
