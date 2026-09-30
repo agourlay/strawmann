@@ -10,29 +10,58 @@ Ranked by what a wrong or missing number costs.
 
 ### P1. What costs a number on the headline page
 
-The d=1536 comparison is licensed since 2026-09-24, and the current page is
-`sm/qd-dbp1m-perf-0927`, the first with Qdrant in production mode (T4 with T3
-passing, 1.01x to 1.32x at matched recall; the account of the licence is in
-`decisions.md`). What that page publishes wrongly, or still refuses and could
+The current pages are the 0930 pairs for sift1m, laion-small-clip and
+dbpedia-openai-1m and the 0929 pair for h-and-m, all T4 with T3 passing and
+production-mode Qdrant. What they publish wrongly, or still refuse and could
 not:
 
-**3. W11's write rate is fixed, and its search is sized to fit.** The 25 s
-and 60 s spans were sized for d=128, where a 50,000-query search ends inside
-them; at d=1536 the writer covered 12 to 23% of the search and both mixed rows
-measured the rebuild the append provoked. Since 2026-09-25 the rate is fixed
-(1,900 and 3,300 points/s at 1M) and hashed into the stamp, and the search was
-sized to end inside the append from the previous pair's qps. That never held:
-0927 covered 10 to 12% of W11-steady's append, and on 0929 W11's search saw
-51% (strawmANN) and 84% (Qdrant) of it, with `W11-steady` drifting +24%
-monotonically over three passes. The qps it sized from was set by the search's
-own length, since the tail past the writer ran against a different collection.
-Since 2026-09-29 the row is measured over the append alone: bfb stamps every
-search, `workloads.write_window_qps` counts those that completed while the
-writer ran, and `resolve_w11_queries` sizes the search to *outlast* the append
-on the faster engine (`decisions.md`). What is open is the next dbpedia pair
-confirming it: both rows' `write overlap` (now the share of the append the qps
-saw) at 90% or more, and `W11-steady` flat across passes. Item 8 is what the
+**3. W11's search still ends inside its append on three corpora of four.**
+The write rate is fixed (1,900 and 3,300 points/s at 1M, hashed into the
+stamp), and since 10a274a the row is measured over the append alone
+(`workloads.write_window_qps`), with the search sized to outlast the append on
+the faster engine (`decisions.md`, 2026-09-29). The 0930 pairs show the sizing
+does not hold:
+
+- **sift1m and laion:** the sizing asks for 305,000 to 633,000 queries and
+  `min(QUERIES, n)` caps it at 50,000, so the search covered 7 to 37% of the
+  append while fullrun printed "running 25% past the append". README's
+  `mixed read/write` cell (8,033 against 2,387) is therefore the append's first
+  10%, published under its note.
+- **dbpedia:** W11-steady covered 100% on both engines. W11 covered 53% on
+  strawmANN, because it was sized from 0929's faster engine (Qdrant, 106 q/s)
+  and the drainer made strawmANN the faster one (251 q/s), and Qdrant's writer
+  ran 2,344 to 2,729 points/s against the 3,300 asked, so its append lasted 72
+  to 84 s, not 60.
+
+What it needs: no cap at `QUERIES`, each label's own measured writer span
+(`background_s`) in place of the nominal one, a time bound on the slower
+engine instead (an operator choice of how long), and the print derived from
+the numbers. It closes when a pair shows both rows' `write overlap` at 90% or
+more on every corpus and `W11-steady` flat across passes. Item 8 is what the
 row shows once it measures what it claims to.
+
+**57. strawmANN's graph searches got about 2% slower with 1fb2e43.** On sift1m
+0930 every graph row executes about 1.9% more instructions per query (W4
+681.0k to 695.3k, the same on W3, W5 and W10) and reads 1.6 to 2.8% slower,
+while Qdrant's count did not move. Instruction counts do not depend on the
+host, so this is the engine. The suspect is `Index.bound`, the drainer's
+traversal bound, now compared on every neighbour of every search; 14b8df2
+also changed the search path's handler. On dbpedia the fp32 rows moved -0.3
+to -0.9%, inside the bands. What it needs: a pinned A/B of W3 and W4 at
+`e149208` and `1fb2e43` with perf. If the bound is the cost, skip the
+compare when no drain is in flight (bound equal to the graph count), with a
+test that a bounded traversal at `bound == count` returns what an unbounded
+one does.
+
+**58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**
+W10-ef128 +10.4%, W10-ef256 +11.5%, W12-sel1 +10.2%, W11 +10%, with cycles
+per query down 10% at the same recall, a byte-identical binary (sha256
+`dbeb0f73dea2d371`), the same stamp and the same `env_hash`. On sift1m and
+dbpedia the same binary moved under 2.3%. Nothing in the files explains it, so
+part of every laion ratio move between the two pairs is Qdrant's, and the
+laion W4/W10 moves cannot be read as strawmANN's. What it needs: a Qdrant-only
+same-binary A/B on laion at two times of day (`qdrant_ab.py` with one build on
+both sides).
 
 ### P2. What the licensed numbers are made of, and what the run costs
 
@@ -65,11 +94,22 @@ Since 2026-09-29 a background drainer links the tail into the live graph
 about 1,020 points/s against the search, so during the append it is behind
 and search reads within 8 to 17% of `--no-drain` (412 and 445 against 381
 q/s); 22 s after the append the tail is gone and search runs 900 to 1,800
-q/s, where `--no-drain` stays at 134 for as long as the tail stands. What is
-open: the published row (W11-steady on the next dbpedia pair, with item 3's
-window), and the in-append half, which is the drainer's CPU against the
-search's: at 2 ms of core per insertion at d=1536, keeping up with 1,900
-points/s is about four of the eight cores.
+q/s, where `--no-drain` stays at 134 for as long as the tail stands. On the dbpedia
+0930 pair W11-steady read 580 q/s over the append (Qdrant 504), and about 850
+over the 17 to 21 s the search outlived it; the first night cannot say how
+much of that is the drainer, since W11 changed definition with it and there
+is no `--no-drain` arm. At d=128 and d=512 the drainer kept up with the writer
+while a search ran (`drain linked=58000 ... pending=0` on sift1m).
+
+What is open. First, the drainer starts only from a search or an info call,
+so once W11's search ended the rest of its tail waited for the read-back's
+rebuild (`rebuild start points=1250000 pending=179100` on sift1m, 18,300 on
+laion): it needs a start from `upsert` on a `.ready` collection, which is an
+operator choice because W11 then never crosses `rebuild_ratio` at the laion and
+sift1m rates, and the row stops being the rebuild row
+`workloads.W11_STEADY_RATIO` describes. Second, the in-append half at d=1536:
+at 2 ms of core per insertion, keeping up with 1,900 points/s is about four of
+the eight cores.
 
 **10. Exact search at d=1536 is lost to scan contention, and a shared pass
 wins it back.** `W9` read 0.77x on the development-profile dbpedia page and
@@ -108,6 +148,86 @@ published within the row (`rebuild start points=1089100 pending=99100` and no
 the exhaustive tail. The drainer (item 8) does not reach this row: W11's fifth of the
 corpus arrives at 3,300 points/s, faster than it links, so the tail crosses
 `rebuild_ratio` and the rebuild takes over as before.
+
+**59. sift1m's exact search (W9) fell 7.9% with no commit claiming it.** 202
+to 186 q/s on 0930, with demand DRAM per query 23.7 to 35.1 MB (+48%), IPC 2.19
+to 2.01, instructions unchanged and dTLB walks down; Qdrant flat at 124. The
+0.5 GB scan is below the 4 GB cap (99d2776), so the cap cannot be it, but
+99d2776, 65def65 and 1fb2e43 all change `collection.zig`. Concurrent scans at
+this size shared lines through the cache (`decisions.md`, the cap sweep), and
+something now stops them sharing. What it needs: `w9_ab.py` pinned, three reps
+each, at `e149208`, `65def65`, `99d2776` and `1fb2e43`.
+
+**60. Exact search past 4 GB admits waiting scans in no order, and W9's tail
+doubled.** dbpedia 0930 W9 reads 13.06 q/s (1.33x, from parity) with the cap,
+and p99 1,505 ms, p99.9 2,481 ms, max 3,292 ms against p50 576 ms (0929 p99
+1,109 ms). `acquireScanSlot` is a compare-exchange plus a 50 us sleep, so a
+waiter can lose every race. What it needs: a ticket gate (admission in arrival
+order, at most `exact_scan_cap` in flight), a test that admission order is
+ticket order, and a W9 run on dbpedia-1m to read qps and p99 against 13.06
+and 1,505 ms.
+
+**61. W11's qps changed meaning without its stamp saying so.** Since 10a274a
+the row's `qps` is `write_window_qps`, but `run.json` still describes it as
+`n_queries / duration_secs`, and 0929 and 0930 carry one `harness_hash`. So
+0929's W11-steady 956 (whole search) and 0930's 580 (the append) look like one
+measurement to `compare` and `regression`. What it needs: the definition text
+made true, and either a per-row basis field that `compare` refuses to relate
+across (no STALE) or `qps_definition` in `STAMP_KEYS` (every pair STALE
+against everything before it); an operator choice.
+
+**62. strawmANN's third pass is 6 to 7% slower on every W10 point on
+dbpedia, two nights running.** W10-ef32 10,625 / 10,752 / 9,934 on 0930 and
+10,525 / 10,546 / 9,888 on 0929, while W3 and W4 on the same `bench2` are
+flat. Unexplained. What it needs: a residency probe (W10-ef128 again at the end
+of each strawmANN arm, a row-set change) or `smaps_rollup` per row
+(`AnonHugePages`, `FilePmdMapped`), fields only.
+
+**63. strawmANN's graphs disagree with each other 36x as much as Qdrant's at a
+fixed seed on sift1m.** 0930's rep3 build drew recall@10 0.9934 at `ef` 512
+against 0.9955 and 0.9952, seed `0x57ea3111`, no unreachable node, and the
+report prints the 36x. On laion and dbpedia the spreads are equal (0.00012
+against 0.00034, 0.00035 against 0.00033). It is what moved sift1m's matched
+range from 1.29x to 1.81x at its low end between two nights with no code
+change. What it needs: N same-seed builds in-process to price the spread, then
+an operator choice between publishing it and a deterministic parallel build
+at an unmeasured build-time cost.
+
+**64. At d=512 strawmANN's SQ8 reads 2.9x Qdrant's memory per query.** laion
+0930 W6: 742.8 against 256.3 KiB of demand DRAM per query, IPC 0.99 against
+1.73, parity in q/s; on dbpedia 3,025 against 748 KiB at 1.50x. The quantized
+prefetch (f7c9ecb) that took sift1m's W6 up 11% did not move laion's. What it
+needs: an in-process SQ8 sweep on laion of the whole-row prefetch 2ed2a97
+measured only at d=1536, and of the SQ8 stats load.
+
+**65. strawmANN's storage figure is the arena at `--capacity`, not the data.**
+dbpedia 0930: a 200,000-point `W12-upload` moved storage from 28.4 to 35.5 GiB,
+and the report sets strawmANN's 35.5 GiB beside Qdrant's 26.5. The comparison
+is of allocations, not of what either engine stores. What it needs: per-
+collection sizing that grows, or the report saying `allocated at --capacity`
+beside the figure; an operator choice.
+
+**66. The harness says several things that are not true of the row.** None
+costs a published ratio; each is a unit test.
+- `REJECTED, and this is the gate working` prints for by-design W11 refusals,
+  which `refused by design` already names (`results.py`); ingest lines do not
+  name their label.
+- W11 shows `requests/s` although it is not batched (8,033 qps "3,805 req/s",
+  and 504,237 requests/s on dbpedia's page), and its "% of wall" divides by the
+  search's wall, not the writer's (1,503% on eight cpus).
+- The note "qps over the 2.7 s the append ran" describes a 25 s append.
+- A calibrated ε is described as the §8.4 floor with `max(qdrant 0, strawmann
+  0)` (`tolerance.rs` `describe`), since `CALIBRATED` carries no spreads.
+- 14b8df2 said laion's filtered choices were unchanged; at `ef` 128 laion now
+  scans (1,335 against 1,263 q/s, recall 1.0000), and the crossover test has no
+  d=512 case.
+- The run estimate prices arms from the 0923 and 0924 pairs (9.4 h estimated
+  against 7 h 19 min on dbpedia, 46 min over on sift1m).
+- The report's "Reproducing this" section names sift1m's files on every
+  dataset's page.
+- The recall sweeps' paging `!!` fires at any count, 6 times on dbpedia 0930
+  (PSI stalls on the W7, W8 and W12 uploads, and 298,000 major faults on W11 in
+  two passes); it does not say what memory was free, nor which rows follow.
 
 ### P3. What the datasets offer that no row measures yet
 
