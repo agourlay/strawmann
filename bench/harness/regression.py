@@ -460,6 +460,7 @@ def cmd_compare(args) -> int:
     regressions = improvements = inconclusive = unknown = 0
     contaminated: list[str] = []
     reoffered: list[str] = []
+    redefined: list[str] = []
     for row in [r for r in a if r in b]:
         qa, qb = a[row].get("qps"), b[row].get("qps")
         if qa is None or qb is None or qa <= 0:
@@ -478,7 +479,15 @@ def cmd_compare(args) -> int:
                  and all(isinstance(o, (int, float)) for o in offered)
                  and offered[0] != offered[1])
 
-        if moved:
+        basis = (a[row].get("qps_basis") or "", b[row].get("qps_basis") or "")
+        if basis[0] != basis[1]:
+            # One harness hash covers both definitions of a mixed row's qps
+            # (findings 61): 0929's W11-steady 956 was its whole search, 0930's
+            # 580 the append alone.
+            verdict, colour = (f"not attributable: qps measured differently "
+                               f"({basis[0] or 'whole search'} -> {basis[1] or 'whole search'})"), YELLOW
+            redefined.append(row)
+        elif moved:
             verdict, colour = (f"not attributable: offered rate changed "
                                f"({offered[0]:,.0f} -> {offered[1]:,.0f} rps)"), YELLOW
             reoffered.append(row)
@@ -517,6 +526,10 @@ def cmd_compare(args) -> int:
         print(f"  {YELLOW}{len(reoffered)} open-loop row(s) not attributable: the two runs "
               f"were given different `--rps-reference`, so their qps is the offered rate "
               f"and not a result ({', '.join(reoffered)}); excluded from the tally and "
+              f"the exit code.{OFF}")
+    if redefined:
+        print(f"  {YELLOW}{len(redefined)} row(s) not attributable: their qps counts different "
+              f"things in the two runs ({', '.join(redefined)}); excluded from the tally and "
               f"the exit code.{OFF}")
     if unknown:
         print(f"  {DIM}Rows without a noise estimate get no verdict. A fixed threshold")

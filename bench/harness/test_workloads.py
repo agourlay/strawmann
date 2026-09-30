@@ -695,6 +695,8 @@ class WorkloadTests(unittest.TestCase):
         self.assertLess(r11.write_window_s, 0.5)
         self.assertIsNotNone(r11.qps_search)
         self.assertIn("qps over the", r11.notes)
+        self.assertEqual(r11.qps_basis, "write-window")
+        self.assertEqual(r.qps_basis, "")
         self.assertIn("append finished", r11.notes)
         self.assertIsNotNone(r11.write_overlap_pct)
         # A row with no writer is not windowed.
@@ -1764,7 +1766,9 @@ class FullrunRowInvocationTests(unittest.TestCase):
                              math.ceil(420.0 * 49_500 / 1_900 * f.W11_SPAN_MARGIN))
             self.assertEqual(got["W11_QUERIES"], math.ceil(150.0 * 60.0 * f.W11_SPAN_MARGIN))
 
-    def test_the_search_is_never_longer_than_queries(self):
+    def test_the_search_is_bounded_by_time_on_the_slower_engine_not_by_queries(self):
+        """0930: `min(QUERIES, n)` left sift1m's and laion's searches inside
+        the append's first 7 to 37%. The bound is now the slower engine's time."""
         f, w = self.f, self.f.workloads
         rates = {"W11-steady": 1_900, "W11": 3_300}
         with mock.patch.object(w, "upload_n", lambda: 990_000), \
@@ -1773,12 +1777,41 @@ class FullrunRowInvocationTests(unittest.TestCase):
                 "sm": {"W11-steady": (9_000.0, 50_000, 100.0), "W11": (3.0, 50_000, 100.0)},
                 "qd": {"W11-steady": (8_000.0, 50_000, 100.0), "W11": (100.0, 50_000, 100.0)}},
                 rates=rates)
-            got = f.resolve_w11_queries(["sm-dbp1m-perf-0927", "qd-dbp1m-perf-0927"])
-            self.assertEqual(got["W11_STEADY_QUERIES"], w.QUERIES)
-            # An absurdly slow engine does not size the search: the faster does.
-            self.assertEqual(got["W11_QUERIES"], math.ceil(100.0 * 60.0 * f.W11_SPAN_MARGIN))
+            got = f.resolve_w11_sizing(["sm-dbp1m-perf-0927", "qd-dbp1m-perf-0927"])
+            # A fast corpus runs past QUERIES: the append is what it must cover.
+            n, cover = got["W11_STEADY_QUERIES"]
+            self.assertEqual(n, math.ceil(9_000.0 * 49_500 / 1_900 * f.W11_SPAN_MARGIN))
+            self.assertGreater(n, w.QUERIES)
+            self.assertEqual(cover, 1.0)
+            # An absurdly slow engine is held to the time bound, and says so.
+            n, cover = got["W11_QUERIES"]
+            self.assertEqual(n, math.floor(3.0 * f.W11_MAX_SEARCH_S))
+            self.assertAlmostEqual(cover, n / (100.0 * 60.0))
+            self.assertIn("!!", f.w11_sizing_line("W11_QUERIES", n, cover))
+            self.assertNotIn("!!", f.w11_sizing_line("W11_STEADY_QUERIES", 1, 1.0))
         # Nothing to read, or nothing at this rate: QUERIES stands.
         self.assertEqual(f.resolve_w11_queries(["strawmann", "qdrant"]), {})
+
+    def test_each_label_is_sized_over_its_own_writer_span(self):
+        """dbpedia 0930: Qdrant's writer ran 2,344 points/s against 3,300
+        asked, so its append lasted 84.5 s, and a search sized for 60 s
+        covered 53% of strawmANN's."""
+        f, w = self.f, self.f.workloads
+        rates = {"W11-steady": 1_900, "W11": 3_300}
+        with mock.patch.object(w, "upload_n", lambda: 990_000), \
+                mock.patch.object(w, "w11_n", lambda: 198_000):
+            self._w11_pair("0926", None, {
+                "sm": {"W11-steady": (500.0, 5_000, 100.0), "W11": (79.0, 5_000, 100.0)},
+                "qd": {"W11-steady": (400.0, 5_000, 100.0), "W11": (106.0, 5_000, 100.0)}},
+                rates=rates)
+            for eng, span in (("sm", 60.0), ("qd", 84.5)):
+                p = f.ROOT / "bench/results" / f"{eng}-dbp1m-perf-0926" / "rows.json"
+                rows = json.loads(p.read_text())
+                for r in rows:
+                    r["background_s"] = span if r["id"] == "W11" else 26.0
+                p.write_text(json.dumps(rows))
+            got = f.resolve_w11_queries(["sm-dbp1m-perf-0927", "qd-dbp1m-perf-0927"])
+            self.assertEqual(got["W11_QUERIES"], math.ceil(106.0 * 84.5 * f.W11_SPAN_MARGIN))
 
     def test_the_write_rate_is_in_the_hash_and_old_stamps_keep_theirs(self):
         w = self.f.workloads

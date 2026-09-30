@@ -33,10 +33,10 @@ does not hold:
   ran 2,344 to 2,729 points/s against the 3,300 asked, so its append lasted 72
   to 84 s, not 60.
 
-What it needs: no cap at `QUERIES`, each label's own measured writer span
-(`background_s`) in place of the nominal one, a time bound on the slower
-engine instead (an operator choice of how long), and the print derived from
-the numbers. It closes when a pair shows both rows' `write overlap` at 90% or
+Since 2026-09-30 `resolve_w11_sizing` has no cap at `QUERIES`, sizes each
+label over its own measured writer span (`background_s`), bounds the slower
+engine's search at `W11_MAX_SEARCH_S` (240 s), and prints `!!` when that
+bound bites. It closes when a pair shows both rows' `write overlap` at 90% or
 more on every corpus and `W11-steady` flat across passes. Item 8 is what the
 row shows once it measures what it claims to.
 
@@ -166,15 +166,6 @@ waiter can lose every race. What it needs: a ticket gate (admission in arrival
 order, at most `exact_scan_cap` in flight), a test that admission order is
 ticket order, and a W9 run on dbpedia-1m to read qps and p99 against 13.06
 and 1,505 ms.
-
-**61. W11's qps changed meaning without its stamp saying so.** Since 10a274a
-the row's `qps` is `write_window_qps`, but `run.json` still describes it as
-`n_queries / duration_secs`, and 0929 and 0930 carry one `harness_hash`. So
-0929's W11-steady 956 (whole search) and 0930's 580 (the append) look like one
-measurement to `compare` and `regression`. What it needs: the definition text
-made true, and either a per-row basis field that `compare` refuses to relate
-across (no STALE) or `qps_definition` in `STAMP_KEYS` (every pair STALE
-against everything before it); an operator choice.
 
 **62. strawmANN's third pass is 6 to 7% slower on every W10 point on
 dbpedia, two nights running.** W10-ef32 10,625 / 10,752 / 9,934 on 0930 and

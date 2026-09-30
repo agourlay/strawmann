@@ -851,7 +851,9 @@ def harness_stamp() -> dict:
         # Hashed, so the two quantized experiments can never share a table.
         "oversampling_policy": str(OVERSAMPLING_POLICY),
         "ef": {w.id: ef_of(w) for w in table() if not w.upload_only},
-        "qps_definition": "n_queries / duration_secs from bfb's JSON (qps_bfb_median kept beside it)",
+        "qps_definition": ("n_queries / duration_secs from bfb's JSON (qps_bfb_median kept beside it); "
+                           "a mixed row's is the searches completed while its writer ran over the "
+                           "writer's span (qps_basis write-window, qps_search the whole search)"),
     }
 
 
@@ -2673,6 +2675,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
         harness_hash=stamp_hash(stamp) if stamp is not None else None,
         ratio_policy=w.ratio_policy, write_overlap_pct=overlap_pct,
         append_covered_pct=covered_pct, qps_search=qps_search, write_window_s=window_s,
+        qps_basis="write-window" if window_s is not None else "",
         needs_payload_index=w.needs_payload_index,
         payload_index_suppressed=payload_index_suppressed(w),
         warmup_s=warmup_s,

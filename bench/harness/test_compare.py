@@ -1010,6 +1010,14 @@ class CompareTests(unittest.TestCase):
         self.assertIn("[search-during-write; no recall join]", rows["W11"].note_text)
         self.assertNotIn("write overlap", rows["W11"].note_text)
 
+    def test_rows_whose_qps_counts_different_things_get_no_ratio(self):
+        """findings 61: one harness hash covers 0929's W11-steady (its whole
+        search) and 0930's (the append alone)."""
+        rows, _ = self._joined([_row("W4", 4000, qps_basis="write-window")],
+                               [_row("W4", 2000)], good_stamp(), good_stamp())
+        self.assertEqual(rows["W4"].ratio, "-")
+        self.assertIn("qps measured differently", rows["W4"].note_text)
+
     def test_a_windowed_w11_says_the_search_ended_before_its_append(self):
         """Measured over the write window, a low overlap is a search that
         ended inside its append, not a writer gone for most of the search."""

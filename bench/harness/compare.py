@@ -704,6 +704,12 @@ class Row:
                         + tail)
         else:
             low_note = ""
+        basis = (ra.get("qps_basis") or "", rb.get("qps_basis") or "")
+        if basis[0] != basis[1]:
+            why = (f"qps measured differently: {self.a_label} {basis[0] or 'whole search'}, "
+                   f"{self.b_label} {basis[1] or 'whole search'}")
+            self.notes.append(f"[{why}]")
+            return self._refuse(why)
         if policy:
             self.notes.append(f"[{policy}{'; ' + low_note if low_note else ''}]")
             return self._refuse(policy)

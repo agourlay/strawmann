@@ -223,6 +223,11 @@ class BackgroundWriteFields:
     #: the whole search's, which a search that outlives its writer inflates.
     write_window_s: float | None = None
     qps_search: float | None = None
+    #: What `qps` counts: "" for the whole search (`n_queries / duration_s`),
+    #: "write-window" for a mixed row since 10a274a. One `harness_hash`
+    #: covers both, so `compare` and `regression` read this before relating
+    #: two rows (findings 61).
+    qps_basis: str = ""
 
 
 @dataclass(kw_only=True)

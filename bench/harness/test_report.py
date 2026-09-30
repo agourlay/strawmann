@@ -1412,6 +1412,37 @@ class ReportHostTests(unittest.TestCase):
                 regression.RESULTS = old_results
                 regression.DEFAULT_NOISE = old_default
 
+    def test_regression_does_not_judge_rows_whose_qps_changed_meaning(self):
+        """0929's W11-steady 956 and 0930's 580 carry one harness hash; the
+        second counts the append alone (findings 61)."""
+        import argparse as _argparse
+        import contextlib as _contextlib
+        import io as _io
+        import json as _json
+
+        import regression
+        with tempfile.TemporaryDirectory() as td:
+            old = regression.RESULTS
+            regression.RESULTS = Path(td)
+            try:
+                for lab, qps, basis in (("a", 956.0, None), ("b", 580.0, "write-window")):
+                    (Path(td) / lab).mkdir()
+                    row = {"id": "W11-steady", "qps": qps}
+                    if basis:
+                        row["qps_basis"] = basis
+                    (Path(td) / lab / "rows.json").write_text(_json.dumps([row]))
+                noise = Path(td) / "noise.json"
+                noise.write_text(_json.dumps({"rsd": {"W11-steady": 0.01}, "source": "t"}))
+                buf = _io.StringIO()
+                with _contextlib.redirect_stdout(buf):
+                    code = regression.cmd_compare(_argparse.Namespace(
+                        baseline="a", candidate="b", noise=str(noise)))
+            finally:
+                regression.RESULTS = old
+        self.assertEqual(code, 0)
+        self.assertIn("qps measured differently", buf.getvalue())
+        self.assertNotIn("REGRESSION", buf.getvalue())
+
     def test_segment_claim_finds_qdrant_by_engine_not_by_label(self):
         """A `--dataset` run must relabel both arms, and the split was
         `label != "strawmann"` — so on `sm-dbp100k` vs `qd-dbp100k` it read the

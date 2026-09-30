@@ -298,6 +298,14 @@ W11_QUERIES_ENV = {"W11-steady": "W11_STEADY_QUERIES", "W11": "W11_QUERIES"}
 #: early is the refusal; the margin is on the long side.
 W11_SPAN_MARGIN = 1.25
 
+#: The longest a mixed row's search may run on the slower engine, in seconds.
+#: Nothing else bounds it now that `QUERIES` does not: at d=128 covering
+#: W11's append takes about 630,000 queries, and on 0930 the 50,000 cap left
+#: sift1m's and laion's searches inside the append's first 7 to 37%
+#: (findings 3). 240 s covers every corpus measured so far and bounds the
+#: row at Qdrant's dbpedia-1m rate.
+W11_MAX_SEARCH_S = 240.0
+
 #: The spans every run used before 0a3de76 recorded one.
 W11_SPANS_BEFORE_RECORDING = {"W11-steady": 25.0, "W11": 60.0}
 
@@ -326,17 +334,26 @@ def w11_append_rates_of(label: str) -> dict[str, int] | None:
 
 
 def resolve_w11_queries(labels: list[str]) -> dict[str, int]:
-    """`{env var: queries}` so each mixed row's search outlasts its append.
+    """`{env var: queries}`; see `resolve_w11_sizing`."""
+    return {env: n for env, (n, _) in resolve_w11_sizing(labels).items()}
+
+
+def resolve_w11_sizing(labels: list[str]) -> dict[str, tuple[int, float]]:
+    """`{env var: (queries, cover)}` so each mixed row's search outlasts its
+    append; `cover` is the share of the append that many queries is expected
+    to span on the engine that needs the most, 1.0 unless the time bound bit.
 
     The write rate is fixed (`workloads.W11_STEADY_SPAN_S`); what varies by
     corpus is how long `QUERIES` takes to search: 117 to 345 s at d=1536
     against a 25 s and 60 s append. The row is measured over the append's
     span (`workloads.write_window_qps`), so the search only has to cover it:
     the faster engine's rate on that row times the append, times
-    `W11_SPAN_MARGIN`, never past `QUERIES`. The append lasts its span
-    whatever the corpus, so the search is never short of `MIN_ROW_S`. The
-    slower engine then runs longer than it needs to, and nothing it does past
-    the append is counted.
+    `W11_SPAN_MARGIN`. Each label's own writer span (`background_s`), not the
+    nominal one: on dbpedia 0930 Qdrant's writer ran 2,344 points/s against
+    3,300 asked, so its append lasted 84 s, not 60. `QUERIES` does not bound
+    it (findings 3); `W11_MAX_SEARCH_S` on the slower engine does. The slower
+    engine then runs longer than it needs to, and nothing it does past the
+    append is counted.
 
     Until 2026-09-29 the search was sized to *end* inside the append, from a
     qps its own length had set, and it never held (findings 3: 10 to 12% of
@@ -357,14 +374,14 @@ def resolve_w11_queries(labels: list[str]) -> dict[str, int]:
                 "W11": workloads.w11_n() / want["W11"]}
     pair = (labels if any((ROOT / "bench/results" / x / "rows.json").is_file() for x in labels)
             else previous_pair(labels))
-    out: dict[str, int] = {}
+    out: dict[str, tuple[int, float]] = {}
     seen: set[str] = set()
     while pair and pair[0] not in seen and len(out) < len(W11_QUERIES_ENV):
         seen.add(pair[0])
         for wid, env in W11_QUERIES_ENV.items():
             if env in out:
                 continue
-            qps = []
+            qps, need = [], []
             for label in pair:
                 if (w11_append_rates_of(label) or {}).get(wid) != want[wid]:
                     break
@@ -383,11 +400,25 @@ def resolve_w11_queries(labels: list[str]) -> dict[str, int]:
                 if not (isinstance(q, (int, float)) and q > 0):
                     break
                 qps.append(q)
+                span = r.get("background_s")
+                need.append(q * max(append_s[wid], span if isinstance(span, (int, float)) else 0))
             if len(qps) == len(pair):
-                n = math.ceil(max(qps) * append_s[wid] * W11_SPAN_MARGIN)
-                out[env] = min(workloads.QUERIES, n)
+                want_n = math.ceil(max(need) * W11_SPAN_MARGIN)
+                n = min(want_n, math.floor(min(qps) * W11_MAX_SEARCH_S))
+                out[env] = (n, min(1.0, n * W11_SPAN_MARGIN / want_n))
         pair = previous_pair(pair)
     return out
+
+
+def w11_sizing_line(env: str, n: int, cover: float) -> str:
+    """What the sizing did, from its numbers: the line used to claim the
+    margin whether or not a bound had cut it (0930: "running 25% past the
+    append" over searches that covered 7 to 37% of it)."""
+    if cover < 1.0:
+        return (f"!! {env}={n:,}: bounded at {W11_MAX_SEARCH_S:.0f} s on the slower engine; "
+                f"expected to cover ~{cover:.0%} of the append on the engine that needs most")
+    return (f"{env}={n:,}: each engine's previous search over its own writer span, "
+            f"running {W11_SPAN_MARGIN - 1:.0%} past the append")
 
 
 def stamped_by_run_json(label: str, row: dict) -> bool:
@@ -2392,11 +2423,10 @@ def main(argv: list[str]) -> int:
     os.environ["BENCH_SERVER_CPUS"] = args.server_cpus
     # The mixed rows' search lengths, by the same mechanism as the dataset:
     # bound here and exported, so both arms' subprocesses build the same `-n`.
-    for env, n in resolve_w11_queries(labels).items():
+    for env, (n, cover) in resolve_w11_sizing(labels).items():
         os.environ[env] = str(n)
         setattr(workloads, env, n)
-        print(f"{env}={n:,}: the faster engine's previous search at this write rate, "
-              f"running {W11_SPAN_MARGIN - 1:.0%} past the append")
+        print(w11_sizing_line(env, n, cover), flush=True)
     if RPS_REFERENCE:
         print(f"open-loop arms pinned to {RPS_REFERENCE:,.0f} qps for both engines "
               f"(§4's fractions of one reference, so the two arms are the same "
