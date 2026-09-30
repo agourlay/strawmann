@@ -66,6 +66,14 @@ pub const Store = union(enum) {
     pub const Binary = struct {
         codes: quant.binary.Codes,
         dim: usize,
+        encoding: quant.binary.Encoding = .one,
+        /// Per-dimension mean and deviation, for every encoding but `.one`:
+        /// what an overwritten row and every query are encoded against.
+        stats: ?quant.binary.Stats = null,
+
+        fn setRow(self: *Binary, offset: u32, vec: []const f32) void {
+            quant.binary.encodeWith(self.encoding, if (self.stats) |*st| st else null, self.codes.row(offset), vec);
+        }
     };
 
     pub const Product = struct {
@@ -89,7 +97,7 @@ pub const Store = union(enum) {
         switch (self.*) {
             .none => {},
             .scalar => |*s| s.setRow(offset, vec),
-            .binary => |*b| b.codes.set(offset, vec),
+            .binary => |*b| b.setRow(offset, vec),
             .product => |*p| quant.pq.encode(&p.codebook, p.codes[@as(usize, offset) * p.codebook.m ..][0..p.codebook.m], vec),
         }
     }
@@ -101,7 +109,10 @@ pub const Store = union(enum) {
                 alloc.free(s.codes);
                 alloc.free(s.stats);
             },
-            .binary => |*b| b.codes.deinit(alloc),
+            .binary => |*b| {
+                b.codes.deinit(alloc);
+                if (b.stats) |*st| st.deinit(alloc);
+            },
             .product => |*p| {
                 p.codebook.deinit(alloc);
                 alloc.free(p.codes);
@@ -190,7 +201,7 @@ pub fn buildWith(alloc: std.mem.Allocator, mode: Mode, src: Source, capacity: us
     return switch (mode) {
         .none => .none,
         .scalar => try buildScalar(alloc, src, capacity, opts.quantile),
-        .binary => try buildBinary(alloc, src, capacity),
+        .binary => |enc| try buildBinary(alloc, src, capacity, enc),
         .product => |cr| try buildProduct(alloc, src, capacity, cr, opts.threads),
     };
 }
@@ -241,11 +252,44 @@ fn buildScalar(alloc: std.mem.Allocator, src: Source, capacity: usize, quantile:
     return .{ .scalar = store };
 }
 
-fn buildBinary(alloc: std.mem.Allocator, src: Source, capacity: usize) Error!Store {
-    var codes = quant.binary.Codes.init(alloc, src.dim, capacity) catch return Error.OutOfMemory;
+fn buildBinary(alloc: std.mem.Allocator, src: Source, capacity: usize, enc: quant.binary.Encoding) Error!Store {
+    var codes = quant.binary.Codes.init(alloc, enc.bits(src.dim), capacity) catch return Error.OutOfMemory;
     errdefer codes.deinit(alloc);
-    for (0..src.count) |n| codes.set(@intCast(n), src.row(src.ctx, @intCast(n)));
-    return .{ .binary = .{ .codes = codes, .dim = src.dim } };
+    var store = Store.Binary{ .codes = codes, .dim = src.dim, .encoding = enc };
+    if (enc.needsStats()) store.stats = try binaryStats(alloc, src);
+    for (0..src.count) |n| store.setRow(@intCast(n), src.row(src.ctx, @intCast(n)));
+    return .{ .binary = store };
+}
+
+/// Per-dimension mean and sample deviation over every row, Welford in f64,
+/// as Qdrant's `VectorStats::build` computes them for the 2-bit and 1.5-bit
+/// encodings' zero band.
+fn binaryStats(alloc: std.mem.Allocator, src: Source) Error!quant.binary.Stats {
+    const d = src.dim;
+    const acc = alloc.alloc(f64, 2 * d) catch return Error.OutOfMemory;
+    defer alloc.free(acc);
+    const mean = acc[0..d];
+    const m2 = acc[d..];
+    @memset(acc, 0);
+    for (0..src.count) |n| {
+        const row = src.row(src.ctx, @intCast(n));
+        const c: f64 = @floatFromInt(n + 1);
+        for (row, mean, m2) |x, *mu, *s2| {
+            const v: f64 = x;
+            const delta = v - mu.*;
+            mu.* += delta / c;
+            s2.* += delta * (v - mu.*);
+        }
+    }
+    const out_mean = alloc.alloc(f32, d) catch return Error.OutOfMemory;
+    errdefer alloc.free(out_mean);
+    const out_sd = alloc.alloc(f32, d) catch return Error.OutOfMemory;
+    const count: f64 = @floatFromInt(src.count);
+    for (mean, m2, out_mean, out_sd) |mu, s2, *om, *os| {
+        om.* = @floatCast(mu);
+        os.* = if (src.count > 1) @floatCast(@sqrt(s2 / (count - 1))) else 0;
+    }
+    return .{ .mean = out_mean, .stddev = out_sd };
 }
 
 fn buildProduct(alloc: std.mem.Allocator, src: Source, capacity: usize, cr: quant.CompressionRatio, threads: usize) Error!Store {
@@ -458,7 +502,8 @@ pub const QueryScratch = struct {
     rescored: []quant.binary.Scored,
 
     pub fn init(alloc: std.mem.Allocator, max_dim: usize, max_candidates: usize) !QueryScratch {
-        const bin_codes = try alloc.alloc(u64, quant.binary.paddedWordsFor(max_dim));
+        // Two bits a component at most (`binary.Encoding.two`).
+        const bin_codes = try alloc.alloc(u64, quant.binary.paddedWordsFor(2 * max_dim));
         errdefer alloc.free(bin_codes);
         const sq_signed = try alloc.alloc(i8, max_dim);
         errdefer alloc.free(sq_signed);
@@ -511,11 +556,12 @@ pub fn prepareQuery(
             scratch.sq_unsigned[0..query.len],
             query,
         ),
-        .binary => {
+        .binary => |*b| {
             // Padded, so the query and the stored rows are the same length and
-            // the kernel is fully vectorised on both.
-            const words = quant.binary.paddedWordsFor(query.len);
-            quant.binary.encode(scratch.bin_codes[0..words], query);
+            // the kernel is fully vectorised on both. Encoded as the rows are
+            // (Qdrant's `SameAsStorage`), against the same statistics.
+            const words = quant.binary.paddedWordsFor(b.encoding.bits(query.len));
+            quant.binary.encodeWith(b.encoding, if (b.stats) |*st| st else null, scratch.bin_codes[0..words], query);
             q.bin_codes = scratch.bin_codes[0..words];
         },
         .product => |p| {
@@ -590,7 +636,7 @@ test "§5.4 bytes per vector matches the working-set table" {
     for ([_]struct { Mode, usize }{
         .{ .scalar, 768 },
         // Stored, not logical: padded to a whole vector register.
-        .{ .binary, 128 },
+        .{ .{ .binary = .one }, 128 },
         .{ .{ .product = .x16 }, 192 },
     }) |case| {
         var store = try build(testing.allocator, case[0], src.source(), 100);
@@ -657,7 +703,7 @@ test "binary store scores are consistent with the sign dot product" {
     var src = try makeSource(testing.allocator, n, dim, 3);
     defer testing.allocator.free(src.data);
 
-    var store = try build(testing.allocator, .binary, src.source(), n);
+    var store = try build(testing.allocator, .{ .binary = .one }, src.source(), n);
     defer store.deinit(testing.allocator);
     var scratch = try QueryScratch.init(testing.allocator, dim, 64);
     defer scratch.deinit(testing.allocator);
@@ -736,7 +782,7 @@ test "encodeRow rewrites exactly one row's codes" {
     var src = try makeSource(testing.allocator, n, dim, 8);
     defer testing.allocator.free(src.data);
 
-    for ([_]Mode{ .scalar, .binary, .{ .product = .x4 } }) |m| {
+    for ([_]Mode{ .scalar, .{ .binary = .one }, .{ .product = .x4 } }) |m| {
         var store = try build(testing.allocator, m, src.source(), n);
         defer store.deinit(testing.allocator);
 
@@ -768,7 +814,7 @@ test "none mode produces an empty store" {
 
 test "building over an empty collection does not fault" {
     var src = TestSource{ .data = &.{}, .dim = 16, .n = 0 };
-    for ([_]Mode{ .scalar, .binary, .{ .product = .x16 } }) |m| {
+    for ([_]Mode{ .scalar, .{ .binary = .one }, .{ .product = .x16 } }) |m| {
         var store = try build(testing.allocator, m, src.source(), 4);
         defer store.deinit(testing.allocator);
     }

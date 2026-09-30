@@ -117,6 +117,78 @@ pub fn encode(dst: []u64, v: []const f32) void {
     hamming.packSigns(dst, v);
 }
 
+/// Bits per stored component, as Qdrant 1.19's `BinaryQuantizationEncoding`
+/// names them (`encoded_vectors_binary.rs`).
+///
+/// `two` is binary with a zero band: per dimension, `(−∞, −σ·2/3]` is `00`,
+/// `(−σ·2/3, σ·2/3)` is `10` and `[σ·2/3, ∞)` is `11`, around that dimension's
+/// mean, the first bits of every component then the second bits.
+/// `one_half` is `two` with each pair of consecutive second bits ORed into
+/// one. Scoring is the 1-bit rule for all three, `dim − 2·XOR` over the whole
+/// row with `dim` the vector's own width, so a set second bit weighs as much
+/// as a sign.
+pub const Encoding = enum {
+    one,
+    two,
+    one_half,
+
+    /// Stored bits for a `dim`-wide vector.
+    pub fn bits(self: Encoding, dim: usize) usize {
+        return switch (self) {
+            .one => dim,
+            .two => 2 * dim,
+            .one_half => dim + (dim + 1) / 2,
+        };
+    }
+
+    /// Whether encoding needs the per-dimension `Stats`.
+    pub fn needsStats(self: Encoding) bool {
+        return self != .one;
+    }
+};
+
+/// Per-dimension mean and standard deviation over every stored vector, as
+/// Qdrant's `VectorStats` computes them (Welford in f64, sample deviation).
+pub const Stats = struct {
+    mean: []f32,
+    stddev: []f32,
+
+    pub fn deinit(self: *Stats, alloc: std.mem.Allocator) void {
+        alloc.free(self.mean);
+        alloc.free(self.stddev);
+    }
+};
+
+/// Qdrant's zero band, in standard deviations: `SIGMAS = 2.0 / 3.0`.
+const zero_band_sigmas: f32 = 2.0 / 3.0;
+
+/// One component's two bits under `.two`, Qdrant's `encode_two_bits_value`.
+fn twoBits(v: f32, mean: f32, sd: f32) struct { bool, bool } {
+    // A dimension that never varies has no band: plain sign.
+    if (sd < std.math.floatEps(f32)) return .{ v > 0, false };
+    const z = (v - mean) / sd;
+    if (z <= -zero_band_sigmas) return .{ false, false };
+    if (z < zero_band_sigmas) return .{ true, false };
+    return .{ true, true };
+}
+
+/// Encode `v` under `enc` into `dst`, which must hold `paddedWordsFor(enc.bits(v.len))`
+/// words; `stats` is required for every encoding but `.one`.
+pub fn encodeWith(enc: Encoding, stats: ?*const Stats, dst: []u64, v: []const f32) void {
+    if (enc == .one) return encode(dst, v);
+    @memset(dst, 0);
+    const st = stats.?;
+    const d = v.len;
+    for (v, 0..) |x, i| {
+        const b1, const b2 = twoBits(x, st.mean[i], st.stddev[i]);
+        if (b1) dst[i / 64] |= @as(u64, 1) << @intCast(i % 64);
+        if (b2) {
+            const j = if (enc == .two) d + i else d + i / 2;
+            dst[j / 64] |= @as(u64, 1) << @intCast(j % 64);
+        }
+    }
+}
+
 /// Ranking-only similarity for binary codes: `−hamming`.
 ///
 /// Negated so "higher is better" holds uniformly (§8.3's convention), which is
@@ -148,8 +220,9 @@ pub const Codes = struct {
     words: usize,
     data: []u64,
 
-    pub fn init(alloc: std.mem.Allocator, dim: usize, capacity: usize) !Codes {
-        const w = paddedWordsFor(dim);
+    /// `bits` per row: the vector's width for `.one`, `Encoding.bits` otherwise.
+    pub fn init(alloc: std.mem.Allocator, bits: usize, capacity: usize) !Codes {
+        const w = paddedWordsFor(bits);
         const data = try alloc.alloc(u64, w * capacity);
         @memset(data, 0);
         return .{ .words = w, .data = data };
@@ -639,4 +712,35 @@ test "oversampledLimit is total over the wire's f64 domain" {
     // No overflow at the top of the usize range.
     _ = oversampledLimit(std.math.maxInt(usize), 4.0);
     _ = oversampledLimit(std.math.maxInt(usize) / 2, 1e9);
+}
+
+test "2-bit and 1.5-bit encode as Qdrant's encode_two_bits_value does" {
+    // Qdrant's zones around each dimension's mean, in deviations of 2/3.
+    try testing.expectEqual(.{ false, false }, twoBits(-1.0, 0, 1));
+    try testing.expectEqual(.{ false, false }, twoBits(-2.0 / 3.0, 0, 1)); // closed below
+    try testing.expectEqual(.{ true, false }, twoBits(0.0, 0, 1));
+    try testing.expectEqual(.{ true, true }, twoBits(2.0 / 3.0, 0, 1)); // closed above
+    try testing.expectEqual(.{ true, true }, twoBits(5.0, 0, 1));
+    // A dimension that never varies falls back to the sign.
+    try testing.expectEqual(.{ true, false }, twoBits(0.5, 0.5, 0));
+    try testing.expectEqual(.{ false, false }, twoBits(-0.5, 0.5, 0));
+
+    var mean = [_]f32{ 0, 0, 0 };
+    var sd = [_]f32{ 1, 1, 1 };
+    const st = Stats{ .mean = &mean, .stddev = &sd };
+    const v = [_]f32{ -1.0, 0.1, 2.0 }; // 00, 10, 11
+    // Two bits: first bits 0,1,1 at 0..2, second bits 0,0,1 at 3..5.
+    var two = [_]u64{0};
+    encodeWith(.two, &st, &two, &v);
+    try testing.expectEqual(@as(u64, 0b100_110), two[0]);
+    try testing.expectEqual(@as(usize, 6), Encoding.two.bits(3));
+    // One and a half: the first bits, then second bits ORed by pair: (0|0), (1).
+    var half = [_]u64{0};
+    encodeWith(.one_half, &st, &half, &v);
+    try testing.expectEqual(@as(u64, 0b10_110), half[0]);
+    try testing.expectEqual(@as(usize, 5), Encoding.one_half.bits(3));
+    // One bit is the sign, whatever the stats say.
+    var one = [_]u64{0};
+    encodeWith(.one, null, &one, &v);
+    try testing.expectEqual(@as(u64, 0b110), one[0]);
 }

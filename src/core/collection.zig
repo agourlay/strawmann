@@ -2872,7 +2872,7 @@ test "a quantized build searches on codes, SQ8 choosing its edges on fp32, and t
     const dim = 64;
     var prng = std.Random.DefaultPrng.init(0xc0de);
     const rnd = prng.random();
-    inline for (.{ .binary, .scalar }) |mode| {
+    inline for (.{ quant_mod.Mode{ .binary = .one }, quant_mod.Mode.scalar }) |mode| {
         var c = try makeCollection(dim, .dot, 256);
         defer c.deinit();
         c.quant_mode = mode;
@@ -2911,7 +2911,7 @@ test "a quantized build searches on codes, SQ8 choosing its edges on fp32, and t
     // Euclid has no binary code score.
     var e = try makeCollection(dim, .euclid, 16);
     defer e.deinit();
-    e.quant_mode = .binary;
+    e.quant_mode = .{ .binary = .one };
     var v: [dim]f32 = @splat(1);
     for (0..4) |i| _ = try e.upsert(.{ .num = i }, &v);
     try buildIndex(&e, .serial, 1);
@@ -4055,7 +4055,7 @@ test "an overwrite re-encodes the quantized row in place" {
     // codes still described its old vector would be admitted to the rescore
     // set on the strength of a position it no longer holds, so a query at
     // its new position could miss it entirely.
-    for ([_]quant_mod.Mode{ .scalar, .binary, .{ .product = .x4 } }) |mode| {
+    for ([_]quant_mod.Mode{ .scalar, .{ .binary = .one }, .{ .product = .x4 } }) |mode| {
         const dim = 16;
         var c = try makeCollection(dim, .dot, 1024);
         defer c.deinit();
@@ -4104,7 +4104,7 @@ test "the quantized store is published as one pointer and retired, never freed, 
 
     // A reader that loaded `first` and is still scoring against it.
     const guard = SearchGuard.begin(&c);
-    try quantize(&c, .binary);
+    try quantize(&c, .{ .binary = .one });
     const second = c.quant.load(.acquire).?;
     try testing.expect(second != first);
     try testing.expect(second.* == .binary);

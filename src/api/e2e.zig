@@ -2384,7 +2384,7 @@ test "e2e: a top-level hnsw_config asking for an on-disk graph is refused, on_di
     }
 }
 
-test "e2e: binary encodings other than OneBit and a bad quantile are refused by name" {
+test "e2e: the binary storage encodings are accepted, and scalar query encodings and a bad quantile refused by name" {
     var h = try Harness.start(testing.allocator);
     defer h.stop();
     var c = try Client.connect(h.port);
@@ -2394,8 +2394,11 @@ test "e2e: binary encodings other than OneBit and a bad quantile are refused by 
 
     const Case = struct { oneof: u32, field: u32, value: u64, nested_setting: bool = false, want: grpc.Status, name_in_msg: []const u8 };
     for ([_]Case{
-        // binary.encoding = TwoBits
-        .{ .oneof = 3, .field = 2, .value = 1, .want = .unimplemented, .name_in_msg = "encoding" },
+        // binary.encoding = TwoBits and OneAndHalfBits: implemented
+        .{ .oneof = 3, .field = 2, .value = 1, .want = .ok, .name_in_msg = "" },
+        .{ .oneof = 3, .field = 2, .value = 2, .want = .ok, .name_in_msg = "" },
+        // binary.encoding past the enum: not a request anyone can mean
+        .{ .oneof = 3, .field = 2, .value = 9, .want = .invalid_argument, .name_in_msg = "encoding" },
         // binary.query_encoding { setting = Scalar8Bits }
         .{ .oneof = 3, .field = 3, .value = 3, .nested_setting = true, .want = .unimplemented, .name_in_msg = "query_encoding" },
         // binary.query_encoding { setting = Binary }: fine

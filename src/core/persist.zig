@@ -1047,7 +1047,7 @@ test "a re-quantize retires the old store" {
 
     try quantize(&c, .scalar);
     try testing.expectEqual(@as(usize, 0), c.retired_quant.items.len);
-    try quantize(&c, .binary);
+    try quantize(&c, .{ .binary = .one });
     try testing.expectEqual(@as(usize, 1), c.retired_quant.items.len);
     // The live store is the new one.
     try testing.expect(c.quant.load(.acquire).?.* == .binary);

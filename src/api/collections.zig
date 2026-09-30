@@ -608,21 +608,27 @@ fn parseQuantizationConfig(raw: []const u8) QuantParse {
                 //                      optional BinaryQuantizationQueryEncoding query_encoding = 3;
                 //                      optional Memory memory = 4; }
                 //
-                // §6.7's binary is 1 bit/dim, sign-based. Qdrant 1.19 also
-                // offers `TwoBits` and `OneAndHalfBits` storage encodings and
-                // `Scalar4Bits`/`Scalar8Bits` asymmetric query encodings, and
-                // bfb reaches them (`--quantization binary-2bit`,
-                // `binary-1.5bit`). Skipping the fields would answer those
-                // requests with the 1-bit encoding and publish a comparison
-                // against a store that was never built.
+                // Qdrant 1.19's three storage encodings, one, two and one and
+                // a half bits (`quant.binary.Encoding`), which bfb reaches as
+                // `--quantization binary`, `binary2bit` and `binary1p5bit`.
+                // Its `Scalar4Bits`/`Scalar8Bits` asymmetric query encodings
+                // are not implemented, and skipping the field would answer
+                // them with a query encoded like the rows and publish a
+                // comparison against a path that was never built.
                 var sub = r.nested() catch return malformedQuant("malformed binary quantization");
+                var encoding: quant.binary.Encoding = .one;
                 while (!sub.atEnd()) {
                     const st = sub.tag() catch return malformedQuant("malformed binary quantization");
                     switch (st.field) {
                         2 => {
                             // `BinaryQuantizationEncoding { OneBit = 0; TwoBits = 1; OneAndHalfBits = 2; }`
                             const v = sub.varint() catch return malformedQuant("malformed binary quantization encoding");
-                            if (v != 0) return .{ .rejected = .{ .status = .unimplemented, .why = "quantization_config.binary.encoding: only OneBit is implemented (§6.7: 1 bit/dim, sign-based); TwoBits and OneAndHalfBits are not" } };
+                            encoding = switch (v) {
+                                0 => .one,
+                                1 => .two,
+                                2 => .one_half,
+                                else => return .{ .rejected = .{ .status = .invalid_argument, .why = "quantization_config.binary.encoding: unknown encoding" } },
+                            };
                         },
                         3 => {
                             // `BinaryQuantizationQueryEncoding { oneof variant { Setting setting = 4; } }`
@@ -644,7 +650,7 @@ fn parseQuantizationConfig(raw: []const u8) QuantParse {
                         else => sub.skip(st.wire_type) catch return malformedQuant("malformed binary quantization"),
                     }
                 }
-                return .{ .spec = .{ .mode = .binary } };
+                return .{ .spec = .{ .mode = .{ .binary = encoding } } };
             },
             // §6.7: "minus the Qdrant-proprietary `turbo*` variants (return a
             // clear error; document the exclusion so nobody accidentally

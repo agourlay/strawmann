@@ -81,7 +81,8 @@ pub const Encoding = std.meta.Tag(Mode);
 pub const Mode = union(enum) {
     none,
     scalar,
-    binary,
+    /// The payload is the storage encoding: 1, 2 or 1.5 bits per component.
+    binary: binary.Encoding,
     /// `product-xN`; the payload is the compression ratio.
     product: CompressionRatio,
 
@@ -100,13 +101,18 @@ pub const Mode = union(enum) {
         // "unknown quantization mode".
         inline for (comptime std.enums.values(Encoding)) |e| {
             switch (e) {
-                .none, .scalar, .binary => {
+                .none, .scalar => {
                     if (std.mem.eql(u8, s, @tagName(e))) return .{ .mode = @unionInit(Mode, @tagName(e), {}) };
                 },
-                // Parameterised by a compression ratio; handled below.
-                .product => {},
+                // Parameterised by an encoding and by a compression ratio;
+                // handled below.
+                .binary, .product => {},
             }
         }
+        // bfb's spellings (`--quantization binary2bit`, `binary1p5bit`).
+        if (std.mem.eql(u8, s, "binary")) return .{ .mode = .{ .binary = .one } };
+        if (std.mem.eql(u8, s, "binary2bit")) return .{ .mode = .{ .binary = .two } };
+        if (std.mem.eql(u8, s, "binary1p5bit")) return .{ .mode = .{ .binary = .one_half } };
         if (std.mem.startsWith(u8, s, "turbo")) {
             return .{ .rejected = "Qdrant-proprietary turbo quantization is deliberately not implemented (spec §6.7)" };
         }
@@ -125,7 +131,11 @@ pub const Mode = union(enum) {
         return switch (self) {
             .none => "none",
             .scalar => "scalar",
-            .binary => "binary",
+            .binary => |e| switch (e) {
+                .one => "binary",
+                .two => "binary2bit",
+                .one_half => "binary1p5bit",
+            },
             .product => "product",
         };
     }
@@ -139,7 +149,7 @@ pub const Mode = union(enum) {
             // touches. §5.4's table quotes the logical 96 B at d=768; the
             // padding to a whole vector register makes it 128 B, and reporting
             // the logical number would understate the working set.
-            .binary => binary.paddedWordsFor(dim) * 8,
+            .binary => |e| binary.paddedWordsFor(e.bits(dim)) * 8,
             // The count the store builds, not the one the ratio asks for:
             // they differ whenever `dim` does not divide evenly.
             .product => |cr| pq.effectiveSubquantizerCount(dim, cr.ratio()),
@@ -186,7 +196,10 @@ test "§6.7: the modes bfb can emit all parse" {
     const testing = std.testing;
     try testing.expectEqual(Mode.none, Mode.parse("none").mode);
     try testing.expectEqual(Mode.scalar, Mode.parse("scalar").mode);
-    try testing.expectEqual(Mode.binary, Mode.parse("binary").mode);
+    try testing.expectEqual(Mode{ .binary = .one }, Mode.parse("binary").mode);
+    try testing.expectEqual(Mode{ .binary = .two }, Mode.parse("binary2bit").mode);
+    try testing.expectEqual(Mode{ .binary = .one_half }, Mode.parse("binary1p5bit").mode);
+    try testing.expectEqualStrings("binary1p5bit", Mode.name(.{ .binary = .one_half }));
     for ([_]usize{ 4, 8, 16, 32, 64 }) |n| {
         var buf: [32]u8 = undefined;
         const s = try std.fmt.bufPrint(&buf, "product-x{d}", .{n});
@@ -213,7 +226,12 @@ test "§5.4 working-set sizes per encoding at d=768" {
     // 128 B. Reporting the logical number here would understate the working set
     // that §5.4's cache-residency argument depends on.
     try testing.expectEqual(@as(usize, 96), binary.wordsFor(dim) * 8);
-    try testing.expectEqual(@as(usize, 128), Mode.bytesPerVector(.binary, dim));
+    try testing.expectEqual(@as(usize, 128), Mode.bytesPerVector(.{ .binary = .one }, dim));
+    // Two bits a component is 1,536 bits, 24 words exactly; 1.5 bits is 1,152
+    // bits, 18 words, padded to the same 24.
+    try testing.expectEqual(@as(usize, 192), Mode.bytesPerVector(.{ .binary = .two }, dim));
+    try testing.expectEqual(@as(usize, 192), Mode.bytesPerVector(.{ .binary = .one_half }, dim));
+    try testing.expectEqual(@as(usize, 1152), binary.Encoding.one_half.bits(dim));
 }
 
 test "§5.4 product bytes/vector reports the subquantizer count the store builds" {

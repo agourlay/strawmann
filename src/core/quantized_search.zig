@@ -514,7 +514,7 @@ test "§6.7: quantization.ignore falls back to the fp32 path" {
         _ = try c.upsert(.{ .num = i }, &v);
     }
     try buildIndex(&c, .serial, 1);
-    try quantize(&c, .binary);
+    try quantize(&c, .{ .binary = .one });
 
     var hs = try hnsw.Index.Scratch.init(testing.allocator, 512, 256);
     defer hs.deinit(testing.allocator);
@@ -544,7 +544,7 @@ test "points written after the build are found on the quantized path too" {
     // build, quantize, write, query - dropped the tail on the quantized path
     // and returned a result set missing the best answer. No §4 workload writes
     // to a quantized collection, so nothing measured it.
-    for ([_]quant_mod.Mode{ .scalar, .binary, .{ .product = .x16 } }) |mode| {
+    for ([_]quant_mod.Mode{ .scalar, .{ .binary = .one }, .{ .product = .x16 } }) |mode| {
         const dim = 32;
         const indexed = 600;
         var c = try makeCollection(dim, .dot, 1024);
@@ -647,7 +647,7 @@ test "§6.7: the (oversampling, rescore) frontier for binary quantization" {
         _ = try c.upsert(.{ .num = i }, &v);
     }
     try buildIndex(&c, .serial, 1);
-    try quantize(&c, .binary);
+    try quantize(&c, .{ .binary = .one });
 
     var hs = try hnsw.Index.Scratch.init(testing.allocator, 2048, 2048);
     defer hs.deinit(testing.allocator);
