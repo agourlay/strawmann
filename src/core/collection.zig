@@ -1850,6 +1850,65 @@ pub fn scorerFor(coll: *const Collection) build_hnsw.Scorer {
     return .{ .ctx = @ptrCast(coll), .between = S.between };
 }
 
+/// The build's `between` over a quantized store's codes, where that is
+/// measured to pay: binary (dot, cosine), with the sign dot the traversal
+/// uses (`quant.binary.signDot`). Null otherwise, and the build scores fp32
+/// (`scorerFor`).
+///
+/// Measured through the server on dbpedia-100K (d=1536, two builds each,
+/// 2026-09-30): binary's graph built in 3.4 s against 16.4 with recall@10 at
+/// `ef` 128 0.9655 and 0.9654 against 0.9655 and 0.9678, inside two fp32-built
+/// graphs' own spread; SQ8's built in 8.6 s against 16.0 and lost 0.0018
+/// (0.9781 and 0.9783 against 0.9800 and 0.9801, a spread of 0.0001), which
+/// a ratio at matched recall would pay for. So SQ8 builds on fp32, and its
+/// score here (`sq8`) is kept for the hybrid findings 68 names next: codes
+/// for the construction's search, fp32 for the stored selection.
+///
+/// SQ8 is reconstructed from the row sums the store keeps (`RowStats`), with
+/// `x = lo + α·c` per component: `Σxy = d·lo² + lo·α·(Σa + Σb) + α²·Σab` and
+/// `Σ(x − y)² = α²·(Σa² − 2Σab + Σb²)`, `Σab` one `u8 × u8` kernel call.
+const CodeScorer = struct {
+    /// Off: SQ8 on codes cost 0.0018 of recall (above).
+    const build_sq8_on_codes = false;
+
+    store: *const quantized.Store,
+    euclid: bool,
+
+    fn bind(self: *CodeScorer, coll: *const Collection, store: *const quantized.Store) ?build_hnsw.Scorer {
+        const kernel = coll.config.metric.kernel();
+        if (kernel == .manhattan) return null;
+        self.* = .{ .store = store, .euclid = kernel == .euclid };
+        return switch (store.*) {
+            .scalar => if (build_sq8_on_codes) .{ .ctx = @ptrCast(self), .between = sq8 } else null,
+            .binary => if (kernel == .dot) .{ .ctx = @ptrCast(self), .between = binary } else null,
+            .none, .product => null,
+        };
+    }
+
+    fn sq8(ctx: *const anyopaque, a: u32, b: u32) f32 {
+        const self: *const CodeScorer = @ptrCast(@alignCast(ctx));
+        const s = &self.store.scalar;
+        const ab: f32 = @floatFromInt(dist.dot_i8.u8u8_native.call(s.row(a), s.row(b)));
+        const sa = s.stats[a];
+        const sb = s.stats[b];
+        const alpha = s.params.alpha;
+        if (self.euclid) {
+            const sq: f32 = @as(f32, @floatFromInt(sa.sq)) + @as(f32, @floatFromInt(sb.sq)) - 2 * ab;
+            return -(alpha * alpha * sq);
+        }
+        const lo = s.params.lo;
+        const d: f32 = @floatFromInt(s.dim);
+        const sums: f32 = @as(f32, @floatFromInt(sa.sum)) + @as(f32, @floatFromInt(sb.sum));
+        return d * lo * lo + lo * alpha * sums + alpha * alpha * ab;
+    }
+
+    fn binary(ctx: *const anyopaque, a: u32, b: u32) f32 {
+        const self: *const CodeScorer = @ptrCast(@alignCast(ctx));
+        const bin = &self.store.binary;
+        return quant_mod.binary.signDot(bin.dim, bin.codes.rowConst(a), bin.codes.rowConst(b));
+    }
+};
+
 pub const BuildMode = enum {
     /// §8.7 option (c): deterministic, single-threaded. What conformance uses.
     serial,
@@ -1971,14 +2030,34 @@ pub fn buildIndex(coll: *Collection, mode: BuildMode, threads: usize) !void {
         "index: extending from {d} rather than rebuilding {d}\n",
         .{ extend_from, n },
     );
+    // §6.7's codes first, and the graph built with them where a code-to-code
+    // score exists (`CodeScorer`): findings 68, a quantized collection's graph
+    // cost what the fp32 one does (dbpedia W7-upload 275 s against Qdrant's
+    // 137, its cycles its W2's), where Qdrant's cost a fraction of its own.
+    //
+    // A failure here fails the build, like every other allocation in it: the
+    // `catch {}` that used to sit here published the graph over the codes of
+    // the *previous* build, zero for every row appended since, on a
+    // collection that told its client it was quantized. `quantize` publishes
+    // nothing on error, so the previous store stays served, the errdefers
+    // above drop the graph and close the log, and the caller
+    // (`ensureIndexBuilding`) returns the collection to `.absent` for the
+    // next poll to retry. Built here and published with the graph below.
+    var pending: ?quantized.Store = if (coll.quant_mode != .none)
+        try buildQuantStore(coll, coll.quant_mode, threads)
+    else
+        null;
+    errdefer if (pending) |*st| st.deinit(coll.alloc);
+    var code_scorer: CodeScorer = undefined;
+    const scorer = (if (pending) |*st| code_scorer.bind(coll, st) else null) orelse scorerFor(coll);
     switch (mode) {
         .serial => {
-            var b = try build_hnsw.Builder.init(coll.alloc, g, scorerFor(coll));
+            var b = try build_hnsw.Builder.init(coll.alloc, g, scorer);
             defer b.deinit(coll.alloc);
             try b.buildSerial(n);
         },
         .parallel => {
-            const stats = try build_hnsw.extendParallel(coll.alloc, g, scorerFor(coll), extend_from, n, threads);
+            const stats = try build_hnsw.extendParallel(coll.alloc, g, scorer, extend_from, n, threads);
             // §6.5: "Measure lock contention explicitly; if it shows,
             // partition-then-merge is the fallback." The measurement was
             // taken and then parked on a `build_stats` field that nothing
@@ -1997,21 +2076,12 @@ pub fn buildIndex(coll: *Collection, mode: BuildMode, threads: usize) !void {
     // Free any previous graph only after the new one is ready, so a concurrent
     // search never observes a freed pointer.
     const old = coll.graph;
-    // §6.7's codes are built alongside the graph: both are bulk, post-ingest
-    // artefacts of the same Yellow -> Green transition, and publishing the
-    // graph before the codes exist would let a query traverse with one and
-    // rescore against the other.
-    //
-    // A failure here fails the build, like every other allocation in it: the
-    // `catch {}` that used to sit here published the graph over the codes of
-    // the *previous* build, zero for every row appended since, on a
-    // collection that told its client it was quantized. `quantize` publishes
-    // nothing on error, so the previous store stays served, the errdefers
-    // above drop the graph and close the log, and the caller
-    // (`ensureIndexBuilding`) returns the collection to `.absent` for the
-    // next poll to retry.
-    if (coll.quant_mode != .none) {
-        try quantizeWith(coll, coll.quant_mode, threads);
+    // The codes the graph was built with go out first and whole, at the point
+    // they always did: a build that fails before here publishes neither, and
+    // the overwrite log below replays into this store.
+    if (pending) |st| {
+        pending = null;
+        try publishQuantStore(coll, st);
     }
 
     if (coll.build_hook) |hook| hook(coll);
@@ -2122,6 +2192,11 @@ pub fn quantize(coll: *Collection, mode: quant_mod.Mode) !void {
 /// without changing the store (PQ training and encoding, `quantized.
 /// BuildOptions.threads`). The index build passes its own thread count.
 pub fn quantizeWith(coll: *Collection, mode: quant_mod.Mode, threads: usize) !void {
+    try publishQuantStore(coll, try buildQuantStore(coll, mode, threads));
+}
+
+/// Train and encode a store from the arena, publishing nothing.
+fn buildQuantStore(coll: *Collection, mode: quant_mod.Mode, threads: usize) !quantized.Store {
     // Quantization trains and encodes from fp32. On a narrow collection that
     // means widening each row into scratch: quantizing an already-narrow store
     // is a second lossy step, and §6.7's codebooks are defined over the values,
@@ -2148,10 +2223,16 @@ pub fn quantizeWith(coll: *Collection, mode: quant_mod.Mode, threads: usize) !vo
         .count = coll.id_space.count(),
         .dim = coll.config.dim,
     };
-    var store = try quantized.buildWith(coll.alloc, mode, src, coll.config.capacity, .{
+    return quantized.buildWith(coll.alloc, mode, src, coll.config.capacity, .{
         .quantile = coll.quant_quantile,
         .threads = threads,
     });
+}
+
+/// Publish `store` in place of the served one, taking ownership of it: freed
+/// here if the publish cannot happen.
+fn publishQuantStore(coll: *Collection, store_in: quantized.Store) !void {
+    var store = store_in;
     errdefer store.deinit(coll.alloc);
 
     // A `.none` store (mode `.none`) is published as *no* store, so
@@ -2775,6 +2856,56 @@ test "the scan gate admits in ticket order and never more than its cap at once" 
     try testing.expect(G.worst.load(.acquire) <= 3);
     try testing.expectEqual(@as(u32, 0), G.out_of_order.load(.acquire));
     try testing.expectEqual(@as(u32, 1600), G.gate.served.load(.acquire));
+}
+
+test "a quantized build scores on codes where measured to pay, and SQ8's code score is sound" {
+    const dim = 64;
+    var prng = std.Random.DefaultPrng.init(0xc0de);
+    const rnd = prng.random();
+    inline for (.{ .binary, .scalar }) |mode| {
+        var c = try makeCollection(dim, .dot, 256);
+        defer c.deinit();
+        c.quant_mode = mode;
+        for (0..200) |i| {
+            var v: [dim]f32 = undefined;
+            for (&v) |*x| x.* = rnd.floatNorm(f32);
+            _ = try c.upsert(.{ .num = i }, &v);
+        }
+        try buildIndex(&c, .serial, 1);
+        const store = c.quant.load(.acquire).?;
+        var cs: CodeScorer = undefined;
+        const bound = cs.bind(&c, store);
+        switch (mode) {
+            .binary => try testing.expect(bound != null),
+            .scalar => {
+                try testing.expect(bound == null);
+                // The kept SQ8 score tracks fp32's dot: rank agreement over
+                // pairs against one base row.
+                cs = .{ .store = store, .euclid = false };
+                var agree: usize = 0;
+                var pairs: usize = 0;
+                for (1..60) |i| for (i + 1..60) |j| {
+                    const qi = CodeScorer.sq8(@ptrCast(&cs), 0, @intCast(i));
+                    const qj = CodeScorer.sq8(@ptrCast(&cs), 0, @intCast(j));
+                    const ei = scoreStoredRaw(&c, 0, @intCast(i));
+                    const ej = scoreStoredRaw(&c, 0, @intCast(j));
+                    pairs += 1;
+                    if ((qi > qj) == (ei > ej)) agree += 1;
+                };
+                try testing.expect(@as(f64, @floatFromInt(agree)) / @as(f64, @floatFromInt(pairs)) > 0.95);
+            },
+            else => unreachable,
+        }
+    }
+    // Euclid has no binary code score.
+    var e = try makeCollection(dim, .euclid, 16);
+    defer e.deinit();
+    e.quant_mode = .binary;
+    var v: [dim]f32 = @splat(1);
+    for (0..4) |i| _ = try e.upsert(.{ .num = i }, &v);
+    try buildIndex(&e, .serial, 1);
+    var cs: CodeScorer = undefined;
+    try testing.expect(cs.bind(&e, e.quant.load(.acquire).?) == null);
 }
 
 test "fp32 rows are prefetched whole up to eight lines, and by their first past it" {

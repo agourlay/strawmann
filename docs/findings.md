@@ -159,21 +159,20 @@ flat. Unexplained. Since 2026-09-30 every row records its engine's
 `mmap_lock`). What is open is reading them on the next dbpedia pair: whether
 pass 3's arenas are mapped by smaller pages.
 
-**68. strawmANN builds a quantized collection's graph at fp32 cost, and
-Qdrant does not.** Time to Green on dbpedia 0930: binary (W7-upload) 275
-against 137 s, SQ8 (W6-upload) 268 against 213 s, where the fp32 W2 is 263
-against 410 s in strawmANN's favour. The engine cycles say why. strawmANN's
-W6-upload and W7-upload cost what its W2 does (4.05T, 4.02T against 4.06T):
-it builds the fp32 graph and then encodes. Qdrant's cost a fraction of its W2
-(2.39T and 1.14T against 5.53T), which fits it building the graph with the
-quantized scorer. On h-and-m 0929 W7-upload is 28 against 16 s and W8-upload
-177 against 150 s; W6-upload's 88 against 24 s predates the SQ8 training fix
-(d8df6d2). laion's are within 3 to 9%, and sift1m's lead. What it needs: an
-in-process build with the SQ8 and binary scorers in the construction's own
-searches, fp32 kept for the stored neighbour selection or not, and the recall
-that graph reaches at W6's and W7's `ef` against today's. Nothing is published
-from W6-upload or W7-upload as a ratio, so this costs the build rows, not a
-headline.
+**68. strawmANN builds an SQ8 or PQ collection's graph at fp32 cost, and
+Qdrant does not.** Time to Green on dbpedia 0930: SQ8 (W6-upload) 268 against
+213 s and binary (W7-upload) 275 against 137, where the fp32 W2 is 263 against
+410 in strawmANN's favour; its quantized builds cost the cycles its W2 does,
+Qdrant's a fraction of its own. Since 2026-09-30 a binary collection's graph
+is built on its codes (`collection.CodeScorer`): on dbpedia-100K (d=1536) 3.4 s
+against 16.4, recall@10 at `ef` 128 inside two fp32-built graphs' spread. SQ8
+on its codes built in 8.6 s against 16.0 and lost 0.0018 of recall beyond a
+0.0001 spread, which a ratio at matched recall would pay for, so SQ8 still
+builds on fp32. What is open: the hybrid, codes for the construction's
+search and fp32 for the stored neighbour selection, measured the same way;
+PQ has no code-to-code score yet (h-and-m W8-upload 177 against 150 s).
+Nothing is published from the upload rows as a ratio, so this costs the build
+rows, not a headline.
 
 ### P3. What the datasets offer that no row measures yet
 
