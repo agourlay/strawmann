@@ -159,13 +159,6 @@ flat. Unexplained. Since 2026-09-30 every row records its engine's
 `mmap_lock`). What is open is reading them on the next dbpedia pair: whether
 pass 3's arenas are mapped by smaller pages.
 
-**64. At d=512 strawmANN's SQ8 reads 2.9x Qdrant's memory per query.** laion
-0930 W6: 742.8 against 256.3 KiB of demand DRAM per query, IPC 0.99 against
-1.73, parity in q/s; on dbpedia 3,025 against 748 KiB at 1.50x. The quantized
-prefetch (f7c9ecb) that took sift1m's W6 up 11% did not move laion's. What it
-needs: an in-process SQ8 sweep on laion of the whole-row prefetch 2ed2a97
-measured only at d=1536, and of the SQ8 stats load.
-
 ### P3. What the datasets offer that no row measures yet
 
 **55. h-and-m and laion ship real filtered queries, and W12 uses synthetic

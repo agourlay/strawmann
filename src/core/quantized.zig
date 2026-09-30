@@ -407,7 +407,17 @@ pub const Query = struct {
     /// 1,536 bytes (3,583 to 3,564), because past the first line the hardware
     /// prefetcher streams the row and SQ8 is bound by its kernel. So PQ and
     /// binary codes, a few lines at most (`dim/4` and `dim/8` bytes), are
-    /// asked for whole, and SQ8 for its first line.
+    /// asked for whole.
+    ///
+    /// SQ8 is asked for whole up to `sq8_whole_row_bytes` and for its first
+    /// line past it. Swept through the server on 2026-09-30 (W6, pool
+    /// oversampling, two or three runs each, the fp32 W4 flat as a control),
+    /// the whole row read +24% on sift1m (d=128, 4,697 to 5,835 q/s) and +18%
+    /// on laion (d=512, 4,867 to 5,726, demand fills 10,615 to 2,647 per
+    /// query), flat at d=1536 as above, and -10% on h-and-m (d=2048, 3,878 to
+    /// 3,478): 32 hints per neighbour flood the fill buffers even while fills
+    /// drop 3.5x. Capped at 512 bytes, h-and-m still read -1.5%. So the rule is
+    /// the measured one, and nothing past d=512 changes.
     pub fn prefetch(ctx: *const anyopaque, node: u32) void {
         const self: *const Query = @ptrCast(@alignCast(ctx));
         const hint: std.builtin.PrefetchOptions = .{ .rw = .read, .locality = 3, .cache = .data };
@@ -415,7 +425,8 @@ pub const Query = struct {
         switch (self.store.*) {
             .none => {},
             .scalar => |s| {
-                @prefetch(s.row(node).ptr, hint);
+                const row = s.row(node);
+                if (row.len <= sq8_whole_row_bytes) pf(row.ptr, row.len) else @prefetch(row.ptr, hint);
                 @prefetch(&s.stats[node], hint);
             },
             .binary => |b| {
@@ -429,6 +440,9 @@ pub const Query = struct {
         }
     }
 };
+
+/// The widest SQ8 code row `Query.prefetch` asks for whole: eight lines.
+pub const sq8_whole_row_bytes: usize = 512;
 
 /// Scratch a worker needs to run a quantized query.
 pub const QueryScratch = struct {
@@ -616,6 +630,25 @@ test "scalar store round-trips and scores close to fp32" {
     const pairs = n * (n - 1) / 2;
     const concordance = @as(f64, @floatFromInt(agree)) / @as(f64, @floatFromInt(pairs));
     try testing.expect(concordance > 0.95);
+}
+
+test "SQ8 rows are prefetched whole up to eight lines, and by their first past it" {
+    // The widths the rule was measured at: sift1m's and laion's rows whole,
+    // dbpedia's and h-and-m's by their first line, where whole read flat and -10%.
+    try testing.expect(128 <= sq8_whole_row_bytes and 512 <= sq8_whole_row_bytes);
+    try testing.expect(1536 > sq8_whole_row_bytes and 2048 > sq8_whole_row_bytes);
+    // Both branches run over a real store, every row.
+    inline for (.{ 128, 1536 }) |dim| {
+        const n = 40;
+        var src = try makeSource(testing.allocator, n, dim, 3);
+        defer testing.allocator.free(src.data);
+        var store = try build(testing.allocator, .scalar, src.source(), n);
+        defer store.deinit(testing.allocator);
+        var scratch = try QueryScratch.init(testing.allocator, dim, 64);
+        defer scratch.deinit(testing.allocator);
+        const query = try prepareQuery(&store, .dot, src.data[0..dim], &scratch, testing.allocator);
+        for (0..n) |i| Query.prefetch(@ptrCast(&query), @intCast(i));
+    }
 }
 
 test "binary store scores are consistent with the sign dot product" {
