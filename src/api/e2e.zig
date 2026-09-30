@@ -9,6 +9,7 @@ const proto = @import("../proto/proto.zig");
 const api = @import("handlers.zig");
 const dist = @import("../dist/dist.zig");
 const core = @import("../core/core.zig");
+const build_options = @import("build_options");
 const h2 = strawmann_net.h2;
 const grpc = strawmann_net.grpc;
 const server = strawmann_net.server;
@@ -2571,6 +2572,48 @@ test "e2e: a small write after Green keeps the collection Green, and a query sta
         const info = try getInfo(&c, "tail", &req_buf, &out);
         try testing.expectEqual(info.points, info.indexed);
     }
+}
+
+test "e2e: an append to a built collection is linked with no read after it" {
+    // findings 8: the drainer started only from a search or an info call, so
+    // once W11's search stopped, the rest of its tail waited for the next
+    // rebuild. An upsert starts it now; nothing below reads the collection
+    // over the wire after the append, and the graph must still cover it.
+    if (build_options.live_insert) return error.SkipZigTest;
+    var h = try Harness.start(testing.allocator);
+    defer h.stop();
+    var c = try Client.connect(h.port);
+    defer c.close();
+    var req_buf: [1 << 18]u8 = undefined;
+    var out: [1 << 18]u8 = undefined;
+
+    _ = try c.call("/qdrant.Collections/Create", try buildCreateCollection(&req_buf, "drain", 8, 2), &out);
+    var prng = std.Random.DefaultPrng.init(0xd4a4);
+    const rnd = prng.random();
+    const n = 500;
+    const stored = try testing.allocator.alloc(f32, n * 8);
+    defer testing.allocator.free(stored);
+    for (stored) |*x| x.* = rnd.floatNorm(f32);
+    try uploadRandom(&c, "drain", 8, stored, &req_buf, &out);
+    _ = try waitGreen(&c, "drain", &req_buf, &out);
+
+    const coll = h.engine.find("drain").?;
+    var extra: [40][8]f32 = undefined;
+    var sl: [40][]const f32 = undefined;
+    var ids: [40]u64 = undefined;
+    for (&extra, 0..) |*e, i| {
+        for (e) |*x| x.* = rnd.floatNorm(f32);
+        sl[i] = e;
+        ids[i] = n + i;
+    }
+    _ = try c.call("/qdrant.Points/Upsert", try buildUpsert(&req_buf, "drain", true, &ids, &sl), &out);
+    var spins: usize = 0;
+    while (coll.graph_count.load(.acquire) < n + 40) : (spins += 1) {
+        if (spins > 10_000) return error.DrainerNeverPublished;
+        const ts: linux.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
+        _ = linux.nanosleep(&ts, null);
+    }
+    try testing.expectEqual(core.collection.IndexState.ready, coll.index_state.load(.acquire));
 }
 
 test "e2e: score_threshold is strict, as Qdrant's check_threshold is" {

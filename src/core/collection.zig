@@ -2689,7 +2689,36 @@ pub fn searchFiltered(
 pub const exact_scan_cap: u32 = 4;
 /// The scan size from which `exact_scan_cap` applies.
 pub const exact_scan_large_bytes: usize = 4 << 30;
-var exact_scans_in_flight = std.atomic.Value(u32).init(0);
+/// The slots, admitted in arrival order.
+///
+/// Was a compare-exchange on an in-flight count plus a 50 us sleep, which
+/// admits whichever waiter wakes first: a scan could lose every race, and on
+/// dbpedia 0930 W9's p99 rose to 1,505 ms and its max to 3,292 ms over a
+/// 576 ms p50 (findings 60). A ticket is admitted once fewer than `cap`
+/// tickets before it are still out, so a scan waits for at most the `cap`
+/// ahead of it, and waiters sleep on `served` rather than poll.
+pub const ScanGate = struct {
+    cap: u32,
+    next: std.atomic.Value(u32) = .init(0),
+    served: std.atomic.Value(u32) = .init(0),
+
+    pub fn acquire(self: *ScanGate) u32 {
+        const ticket = self.next.fetchAdd(1, .acq_rel);
+        while (true) {
+            const done = self.served.load(.acquire);
+            // Wrapping: tickets and releases both count modulo 2^32.
+            if (ticket -% done < self.cap) return ticket;
+            lock.futexWait(&self.served, done);
+        }
+    }
+
+    pub fn release(self: *ScanGate) void {
+        _ = self.served.fetchAdd(1, .acq_rel);
+        lock.futexWake(&self.served, std.math.maxInt(u32));
+    }
+};
+
+var exact_scan_gate: ScanGate = .{ .cap = exact_scan_cap };
 
 /// Whether an exact scan of `bytes` of vectors waits for one of
 /// `exact_scan_cap` slots.
@@ -2698,19 +2727,39 @@ pub fn exactScanCapped(bytes: usize) bool {
 }
 
 fn acquireScanSlot() void {
-    while (true) {
-        const cur = exact_scans_in_flight.load(.acquire);
-        if (cur < exact_scan_cap and
-            exact_scans_in_flight.cmpxchgWeak(cur, cur + 1, .acq_rel, .acquire) == null) return;
-        // A scan of this size takes hundreds of milliseconds, so a 50 µs
-        // sleep costs nothing and a spin would take a core from the scans.
-        var ts = std.os.linux.timespec{ .sec = 0, .nsec = 50 * std.time.ns_per_us };
-        _ = std.os.linux.nanosleep(&ts, null);
-    }
+    _ = exact_scan_gate.acquire();
 }
 
 fn releaseScanSlot() void {
-    _ = exact_scans_in_flight.fetchSub(1, .release);
+    exact_scan_gate.release();
+}
+
+test "the scan gate admits in ticket order and never more than its cap at once" {
+    const G = struct {
+        var gate: ScanGate = .{ .cap = 3 };
+        var in_flight = std.atomic.Value(u32).init(0);
+        var worst = std.atomic.Value(u32).init(0);
+        var out_of_order = std.atomic.Value(u32).init(0);
+        fn run() void {
+            for (0..200) |_| {
+                const t = gate.acquire();
+                const now = in_flight.fetchAdd(1, .acq_rel) + 1;
+                _ = worst.fetchMax(now, .acq_rel);
+                // Admitted only once every ticket `cap` or more before it has
+                // been released.
+                if (t -% gate.served.load(.acquire) >= gate.cap) _ = out_of_order.fetchAdd(1, .monotonic);
+                std.atomic.spinLoopHint();
+                _ = in_flight.fetchSub(1, .acq_rel);
+                gate.release();
+            }
+        }
+    };
+    var handles: [8]std.Thread = undefined;
+    for (&handles) |*h| h.* = try std.Thread.spawn(.{}, G.run, .{});
+    for (handles) |h| h.join();
+    try testing.expect(G.worst.load(.acquire) <= 3);
+    try testing.expectEqual(@as(u32, 0), G.out_of_order.load(.acquire));
+    try testing.expectEqual(@as(u32, 1600), G.gate.served.load(.acquire));
 }
 
 test "only an exact scan past the cache-sized regime waits for a slot" {

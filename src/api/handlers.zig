@@ -255,7 +255,7 @@ pub const Engine = struct {
     /// is running. Two atomic loads on the steady state, since every search
     /// comes through here; the spawn itself takes `build_thread_lock`, as a
     /// build does, so the join-then-store cannot interleave.
-    fn ensureTailDraining(self: *Engine, coll: *core.Collection) void {
+    pub fn ensureTailDraining(self: *Engine, coll: *core.Collection) void {
         if (!self.drain_tail or build_options.live_insert) return;
         if (coll.graph_count.load(.acquire) >= coll.count()) return;
         if (coll.drain_running.load(.acquire)) return;
@@ -780,7 +780,14 @@ fn upsert(ctx: *Context, req: *const server.Request, body: []const u8, out: *ser
     // `indexed_count < count()`. `status()` then reports Yellow forever *and*
     // `ensureIndexBuilding` can never win its compare-exchange, so no rebuild
     // ever runs and the ingested points are permanently unsearchable.
-    defer if (written > 0) core.collection.invalidateIndex(coll);
+    defer if (written > 0) {
+        core.collection.invalidateIndex(coll);
+        // Only from `.ready`: `ensureIndexBuilding` would start builds during
+        // bulk ingest. Before this the drainer started only from a read, so a
+        // write-only stretch left its tail for the next rebuild (findings 8:
+        // 179,100 points on sift1m 0930 once W11's search had stopped).
+        if (coll.index_state.load(.acquire) == .ready) ctx.engine.ensureTailDraining(coll);
+    };
 
     while (it.next() catch |e| return decodeErr(req, e)) |pt| {
         const dense = if (pt.vectors.single) |v| v.dense else {
@@ -2023,6 +2030,10 @@ test "the scan-or-walk crossover follows the dimension" {
     // dbpedia (d=1536, 19,895 of 200,000): unchanged, the scan only at ef 512.
     try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(19_895, 200_000, 256, 32, 1536));
     try testing.expectEqual(FilteredPlan.scan, filteredPlan(19_895, 200_000, 512, 32, 1536));
+    // laion (d=512, 9,999 of 100,000): the walk at ef 64, the scan from 128,
+    // which read faster (1,335 against 1,263 q/s) at recall 1.0000.
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(9_999, 100_000, 64, 32, 512));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(9_999, 100_000, 128, 32, 512));
     // h-and-m's 1% filter still scans, below the two-hop floor.
     try testing.expectEqual(FilteredPlan.scan, filteredPlan(1_044, 105_100, 32, 32, 2048));
 }
