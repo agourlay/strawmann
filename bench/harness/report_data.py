@@ -56,7 +56,8 @@ FALLBACK = ("#4C9AFF", "#2EA44F", "#A970FF")
 
 #: Upload and index rows: a duration, not a query rate.
 UPLOAD_ROWS = ("W0-upload", "W1", "W2", "W6-upload", "W7-upload", "W7-2bit-upload",
-               "W7-1p5bit-upload", "W8-upload",
+               "W7-1p5bit-upload", "W8-upload", "W14-1bit-upload", "W14-1p5bit-upload",
+               "W14-2bit-upload", "W14-4bit-upload",
                "W12-upload")
 
 def colour(label: str, i: int = 0) -> str:
@@ -823,6 +824,10 @@ DESCRIPTIONS = {
     "W7": "search, binary quantization",
     "W7-2bit": "search, binary quantization, 2 bits",
     "W7-1p5bit": "search, binary quantization, 1.5 bits",
+    "W14-1bit": "search, TurboQuant, 1 bit",
+    "W14-1p5bit": "search, TurboQuant, 1.5 bits",
+    "W14-2bit": "search, TurboQuant, 2 bits",
+    "W14-4bit": "search, TurboQuant, 4 bits",
     "W8": "search, product quantization",
     "W9": "exact search (brute force)",
     "W10": "recall/latency frontier",
@@ -863,7 +868,8 @@ def ratio_value(rs: str | None) -> float | None:
 #: records no phase split — it is declined by one engine — so it appears only
 #: when it has something to show.
 BUILD_ROWS = ["W0-upload", "W1", "W2", "W6-upload", "W7-upload", "W7-2bit-upload",
-              "W7-1p5bit-upload", "W8-upload", "W12-upload"]
+              "W7-1p5bit-upload", "W8-upload", "W14-1bit-upload", "W14-1p5bit-upload",
+              "W14-2bit-upload", "W14-4bit-upload", "W12-upload"]
 
 #: The encodings §4 measures, the collection each lives in, and a hue.
 #:

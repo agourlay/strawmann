@@ -62,6 +62,10 @@ COLLECTIONS = {
     "bench7": "binary quantization",
     "bench7b2": "binary quantization, 2 bits",
     "bench7b15": "binary quantization, 1.5 bits",
+    "bench14t1": "TurboQuant, 1 bit",
+    "bench14t15": "TurboQuant, 1.5 bits",
+    "bench14t2": "TurboQuant, 2 bits",
+    "bench14t4": "TurboQuant, 4 bits",
     "bench8": "product quantization x16",
     # Swept once per grade rather than once: W12's rows differ only in
     # selectivity (`FILTER_GRADES`), and each grade needs its own restricted

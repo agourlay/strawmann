@@ -1327,33 +1327,50 @@ CREATE = ["--distance", METRIC, *collection_flags()]
 C = "bench"
 
 
-#: The binary storage encodings beside W7's one bit: Qdrant 1.19's TwoBits and
-#: OneAndHalfBits (`quant.binary.Encoding` in the engine), one upload and one
-#: search row each, searched exactly as W7 is. `(row suffix, bfb's
-#: --quantization, collection)`.
-BINARY_ENCODINGS = (("2bit", "binary2bit", "bench7b2"), ("1p5bit", "binary1p5bit", "bench7b15"))
+#: The quantizations measured one collection at a time (`isolated_groups`),
+#: each an upload row and a search row searched exactly as W7 is:
+#: `(row id, what, bfb's --quantization, collection)`.
+#:
+#: Binary's two other storage encodings beside W7's one bit, Qdrant 1.19's
+#: TwoBits and OneAndHalfBits (`quant.binary.Encoding` in the engine), and
+#: TurboQuant at its four widths (`quant.turbo`, W14). Rescore on, as W7:
+#: Qdrant's TurboQuant defaults 4 bits to off, and a row that let each
+#: engine's default decide would compare two different searches.
+ISOLATED_ENCODINGS = (
+    ("W7-2bit", "binary quantization, 2 bits", "binary2bit", "bench7b2"),
+    ("W7-1p5bit", "binary quantization, 1.5 bits", "binary1p5bit", "bench7b15"),
+    ("W14-1bit", "TurboQuant, 1 bit", "turbo1bit", "bench14t1"),
+    ("W14-1p5bit", "TurboQuant, 1.5 bits", "turbo1p5bit", "bench14t15"),
+    ("W14-2bit", "TurboQuant, 2 bits", "turbo2bit", "bench14t2"),
+    ("W14-4bit", "TurboQuant, 4 bits", "turbo4bit", "bench14t4"),
+)
+
 
 def quantized_collections() -> set[str]:
     """The collections a quantized search row reads: SQ8, binary in each of
-    its encodings, and PQ. The oversampling policies rewrite exactly these."""
-    return {f"{C}6", f"{C}7", f"{C}8", *(coll for _, _, coll in BINARY_ENCODINGS)}
+    its encodings, PQ and TurboQuant. The oversampling policies rewrite
+    exactly these."""
+    return {f"{C}6", f"{C}7", f"{C}8", *(coll for *_, coll in ISOLATED_ENCODINGS)}
 
 
-def binary_encoding_rows() -> list[Workload]:
-    """W7-2bit and W7-1p5bit, with their uploads.
+def isolated_encoding_rows(family: str) -> list[Workload]:
+    """The upload and search rows of `ISOLATED_ENCODINGS` whose id starts
+    with `family` ("W7-" or "W14-").
 
     Run in a phase of their own (`isolated_groups`), one collection at a
-    time: two more quantized collections alive beside the table's would take
+    time: more quantized collections alive beside the table's would take
     Qdrant's dbpedia-openai-1m arm past this 54 GiB host from its 43.6 GiB
     peak on 0930.
     """
     out = []
-    for suffix, quant_arg, coll in BINARY_ENCODINGS:
-        out.append(Workload(f"W7-{suffix}-upload", f"binary quantization, {quant_arg}: load",
+    for rid, what, quant_arg, coll in ISOLATED_ENCODINGS:
+        if not rid.startswith(family):
+            continue
+        out.append(Workload(f"{rid}-upload", f"{what}: load",
                             flags(*CREATE, "--collection-name", coll, "--fbin", corpus(), "-n",
                                   upload_n(), "-d", DIM, "--quantization", quant_arg),
                             upload_only=True))
-        out.append(Workload(f"W7-{suffix}", f"quantized: binary, {quant_arg} + oversampling",
+        out.append(Workload(rid, f"quantized: {what} + oversampling",
                             flags("--collection-name", coll, "--skip-setup", "-n", QUERIES, "--search",
                                   "--search-limit", 10, "--search-hnsw-ef", 128,
                                   "--quantization-oversampling", 4,
@@ -1367,8 +1384,7 @@ def isolated_groups() -> list[tuple[list[str], str]]:
     two of them are ever alive together or beside the table's own quantized
     collections (dropped before this phase). `(row ids, collection)`."""
     ids = {w.id for w in table()}
-    return [([f"W7-{s}-upload", f"W7-{s}"], coll) for s, _, coll in BINARY_ENCODINGS
-            if f"W7-{s}" in ids]
+    return [([f"{rid}-upload", rid], coll) for rid, _, _, coll in ISOLATED_ENCODINGS if rid in ids]
 
 
 def isolated_collections() -> set[str]:
@@ -1504,7 +1520,7 @@ def table() -> list[Workload]:
                        "--search-limit", 10, "--search-hnsw-ef", 128,
                        "--quantization-oversampling", 4,
                        "--quantization-rescore", "true"), query_collection="bench7"),
-        *binary_encoding_rows(),
+        *isolated_encoding_rows("W7-"),
         Workload("W8-upload", "PQ: load",
                  flags(*CREATE, "--collection-name", f"{C}8", "--fbin", corpus(), "-n", upload_n(), "-d", DIM,
                        "--quantization", "product-x16"), upload_only=True),
@@ -1512,6 +1528,8 @@ def table() -> list[Workload]:
                  flags("--collection-name", f"{C}8", "--skip-setup", "-n", QUERIES, "--search",
                        "--search-limit", 10, "--search-hnsw-ef", 128,
                        "--quantization-rescore", "true"), query_collection="bench8"),
+        # W14: TurboQuant at 1, 1.5, 2 and 4 bits, each in its own phase.
+        *isolated_encoding_rows("W14-"),
 
         Workload("W9", "exact / brute force",
                  flags("--collection-name", f"{C}2", "--skip-setup", "-n", EXACT_QUERIES,

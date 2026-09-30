@@ -323,6 +323,21 @@ search rows, its own sweep, its read-back, its drop, then the next
 rather than three. The rows change the table's row set, so the first pairs
 with them are STALE against every pair before, by design.
 
+### W14-1bit, W14-1p5bit, W14-2bit and W14-4bit, TurboQuant, **added 2026-09-30**
+
+```
+W7 with --quantization turbo1bit, turbo1p5bit, turbo2bit and turbo4bit
+```
+
+Qdrant 1.19's `TurboQuantization` at its four widths, which strawmANN
+implements to Qdrant's API path (`quant/turbo.zig`, `decisions.md`). Searched
+exactly as W7 is, rescore on at every width: Qdrant defaults 4 bits to no
+rescore, and a row that left each engine its default would compare two
+different searches. Each in its own collection (`bench14t1`, `bench14t15`,
+`bench14t2`, `bench14t4`) and, like W7-2bit and W7-1p5bit, in the one-at-a-
+time phase after the main sweep (`workloads.ISOLATED_ENCODINGS`). With the
+four of them an arm makes nine `workloads.py` invocations.
+
 ### W8, quantized: PQ
 
 W3 with `--quantization product-x16`. Unchanged.

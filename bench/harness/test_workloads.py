@@ -706,27 +706,32 @@ class WorkloadTests(unittest.TestCase):
         # ...and no stamp given, no hash invented.
         self.assertIsNone(w.run_one(t["W3"], "http://localhost:1", results, []).harness_hash)
 
-    def test_the_binary_encodings_have_rows_on_every_corpus(self):
-        """W7-2bit and W7-1p5bit, each in its own phase (`isolated_groups`),
-        so dbpedia-openai-1m's arm never holds them beside the table's."""
+    def test_the_isolated_encodings_have_rows_on_every_corpus(self):
+        """Binary's 2- and 1.5-bit encodings and TurboQuant's four widths,
+        each in its own phase (`isolated_groups`), so dbpedia-openai-1m's arm
+        never holds them beside the table's."""
         w = self.w
         ids = [x.id for x in w.table()]
-        for suffix, _, _ in w.BINARY_ENCODINGS:
-            self.assertIn(f"W7-{suffix}-upload", ids)
-            self.assertIn(f"W7-{suffix}", ids)
+        for rid, _, _, _ in w.ISOLATED_ENCODINGS:
+            self.assertIn(f"{rid}-upload", ids)
+            self.assertIn(rid, ids)
         t = {x.id: x for x in w.table()}
         self.assertEqual(w.collection_of(t["W7-2bit"]), "bench7b2")
+        self.assertEqual(w.collection_of(t["W14-4bit"]), "bench14t4")
         self.assertIn("binary1p5bit", [str(a) for a in t["W7-1p5bit-upload"].args])
+        self.assertIn("turbo1p5bit", [str(a) for a in t["W14-1p5bit-upload"].args])
         # Searched as W7 is: same ef, limit, oversampling and rescore.
-        strip = lambda x: [str(a) for a in x.args if str(a) not in ("bench7", "bench7b2")]
-        self.assertEqual(strip(t["W7"]), strip(t["W7-2bit"]))
+        colls = {"bench7", *(c for *_, c in w.ISOLATED_ENCODINGS)}
+        strip = lambda x: [str(a) for a in x.args if str(a) not in colls]
+        for rid, *_ in w.ISOLATED_ENCODINGS:
+            self.assertEqual(strip(t["W7"]), strip(t[rid]), rid)
         with mock.patch.object(w, "upload_n", lambda: 990_000), \
                 mock.patch.object(w, "DIM", 1536):
-            self.assertEqual(len(w.binary_encoding_rows()), 4)
-        self.assertEqual(w.isolated_collections(), {"bench7b2", "bench7b15"})
+            self.assertEqual(len(w.isolated_encoding_rows("W14-")), 8)
+        self.assertEqual(w.isolated_collections(), {c for *_, c in w.ISOLATED_ENCODINGS})
         # Every oversampling policy treats them as it treats W7.
-        self.assertIn("bench7b15", w.quantized_collections())
-        pool = w._pool_oversampling(t["W7-2bit"])
+        self.assertIn("bench14t15", w.quantized_collections())
+        pool = w._pool_oversampling(t["W14-2bit"])
         self.assertEqual(w.quant_of(pool)["quantization_oversampling"],
                          w.quant_of(w._pool_oversampling(t["W7"]))["quantization_oversampling"])
 
@@ -1824,7 +1829,7 @@ class FullrunRowInvocationTests(unittest.TestCase):
                 mock.patch.object(f, "say", lambda *a: None):
             f.measure("http://x", "lbl", "0-3", None)
         groups = w.isolated_groups()
-        self.assertEqual(len(groups), 2)
+        self.assertEqual(len(groups), len(w.ISOLATED_ENCODINGS))
         # The main sweep is the only whole-table one, and the variants' rows are
         # not in the stable invocations.
         main_sweep = calls.index(("sweep", ("*",)))
@@ -2480,9 +2485,9 @@ class RunEstimateTests(unittest.TestCase):
         self.assertAlmostEqual(mins, 2 * (100 + 300 + 200 + 200) / 60, places=2)
 
     def test_settles_are_counted_from_the_invocations_measure_makes(self):
-        # Stable rows in two parts around W1, one per binary encoding's own
-        # phase, then the mutating rows.
-        self.assertEqual(self.f.invocations_per_arm(), 5)
+        # Stable rows in two parts around W1, one per isolated encoding's own
+        # phase (two binary, four TurboQuant), then the mutating rows.
+        self.assertEqual(self.f.invocations_per_arm(), 9)
 
     def _label(self, name, dataset, rows, engine="qdrant"):
         d = self.f.RESULTS / name
