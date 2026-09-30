@@ -60,6 +60,8 @@ COLLECTIONS = {
     "bench2": "fp32",
     "bench6": "SQ8 scalar quantization",
     "bench7": "binary quantization",
+    "bench7b2": "binary quantization, 2 bits",
+    "bench7b15": "binary quantization, 1.5 bits",
     "bench8": "product quantization x16",
     # Swept once per grade rather than once: W12's rows differ only in
     # selectivity (`FILTER_GRADES`), and each grade needs its own restricted
@@ -387,6 +389,21 @@ def quant_params_of(collection: str) -> QuantParams:
     return QuantParams()
 
 
+def default_collections() -> list[str]:
+    """The collections this dataset's table searches, in `COLLECTIONS` order.
+
+    The binary-encoding rows are left out of large corpora
+    (`workloads.binary_encoding_rows`), and a sweep of a collection nobody
+    created only fails.
+    """
+    try:
+        import workloads
+    except ImportError:  # pragma: no cover
+        return list(COLLECTIONS)
+    queried = {w.query_collection for w in workloads.table() if w.query_collection}
+    return [c for c in COLLECTIONS if c in queried]
+
+
 def quant_sweeps_of(collection: str) -> list[tuple[QuantParams, list[int] | None]]:
     """Each distinct parameter set §4's rows send to `collection`, with the
     `ef` values the rows that send it search.
@@ -641,7 +658,7 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("label", help="result directory the sweeps belong to")
     ap.add_argument("--engine", default="http://localhost:6334")
-    ap.add_argument("--collections", default=",".join(COLLECTIONS))
+    ap.add_argument("--collections", default=",".join(default_collections()))
     ap.add_argument("--queries", type=int, default=RECALL_QUERIES,
                     help=f"held-out queries per ef (§4.2's split); default is "
                          f"every query {DATASET} ships ({RECALL_QUERIES:,})")

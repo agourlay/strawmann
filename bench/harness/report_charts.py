@@ -1221,7 +1221,7 @@ def encoding_name(collection: str, default: str) -> str:
     policy: under `pool` binary is not "4x", it is `ef / limit` per row."""
     import workloads
     if workloads.OVERSAMPLING_POLICY is workloads.OversamplingPolicy.pool and \
-            collection in ("bench6", "bench7", "bench8"):
+            collection in workloads.quantized_collections():
         return default.split(",")[0] + ", rescore pool matched to ef"
     return default
 

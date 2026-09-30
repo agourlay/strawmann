@@ -1325,6 +1325,43 @@ CREATE = ["--distance", METRIC, *collection_flags()]
 C = "bench"
 
 
+#: The binary storage encodings beside W7's one bit: Qdrant 1.19's TwoBits and
+#: OneAndHalfBits (`quant.binary.Encoding` in the engine), one upload and one
+#: search row each, searched exactly as W7 is. `(row suffix, bfb's
+#: --quantization, collection)`.
+BINARY_ENCODINGS = (("2bit", "binary2bit", "bench7b2"), ("1p5bit", "binary1p5bit", "bench7b15"))
+
+#: The fp32 corpus past which the binary-encoding rows are left out. Two more
+#: quantized collections on dbpedia-openai-1m (6.1 GB of fp32 each, on both
+#: engines) would take Qdrant's arm past this 54 GiB host from its 43.6 GiB
+#: peak on 0930; sift1m, laion, h-and-m and dbpedia-100K are 0.5 GB or less.
+BINARY_ENCODINGS_MAX_CORPUS_BYTES = 2 << 30
+
+
+def quantized_collections() -> set[str]:
+    """The collections a quantized search row reads: SQ8, binary in each of
+    its encodings, and PQ. The oversampling policies rewrite exactly these."""
+    return {f"{C}6", f"{C}7", f"{C}8", *(coll for _, _, coll in BINARY_ENCODINGS)}
+
+
+def binary_encoding_rows() -> list[Workload]:
+    """W7-2bit and W7-1p5bit, with their uploads, on corpora small enough."""
+    if upload_n() * DIM * 4 > BINARY_ENCODINGS_MAX_CORPUS_BYTES:
+        return []
+    out = []
+    for suffix, quant_arg, coll in BINARY_ENCODINGS:
+        out.append(Workload(f"W7-{suffix}-upload", f"binary quantization, {quant_arg}: load",
+                            flags(*CREATE, "--collection-name", coll, "--fbin", corpus(), "-n",
+                                  upload_n(), "-d", DIM, "--quantization", quant_arg),
+                            upload_only=True))
+        out.append(Workload(f"W7-{suffix}", f"quantized: binary, {quant_arg} + oversampling",
+                            flags("--collection-name", coll, "--skip-setup", "-n", QUERIES, "--search",
+                                  "--search-limit", 10, "--search-hnsw-ef", 128,
+                                  "--quantization-oversampling", 4,
+                                  "--quantization-rescore", "true"), query_collection=coll))
+    return out
+
+
 def table() -> list[Workload]:
     """§4's table. `docs/workloads.md` carries the per-flag reasoning."""
     rows: list[Workload] = [
@@ -1454,6 +1491,7 @@ def table() -> list[Workload]:
                        "--search-limit", 10, "--search-hnsw-ef", 128,
                        "--quantization-oversampling", 4,
                        "--quantization-rescore", "true"), query_collection="bench7"),
+        *binary_encoding_rows(),
         Workload("W8-upload", "PQ: load",
                  flags(*CREATE, "--collection-name", f"{C}8", "--fbin", corpus(), "-n", upload_n(), "-d", DIM,
                        "--quantization", "product-x16"), upload_only=True),
@@ -1799,7 +1837,7 @@ def _matched_oversampling(w: Workload) -> Workload:
     """
     if w.upload_only or "--search" not in [str(a) for a in w.args]:
         return w
-    if collection_of(w) not in {f"{C}6", f"{C}7", f"{C}8"}:
+    if collection_of(w) not in quantized_collections():
         return w
     if "--quantization-oversampling" in [str(a) for a in w.args]:
         return w
@@ -1857,7 +1895,7 @@ def _pool_oversampling(w: Workload) -> Workload:
     """
     if w.upload_only or "--search" not in [str(a) for a in w.args]:
         return w
-    if collection_of(w) not in {f"{C}6", f"{C}7", f"{C}8"}:
+    if collection_of(w) not in quantized_collections():
         return w
     args = [str(a) for a in w.args]
     ef, limit = ef_of(w), int(args[args.index("--search-limit") + 1])

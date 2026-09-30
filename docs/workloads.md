@@ -300,6 +300,25 @@ if the final ranking is still by binary score. An oversampling sweep with
 rescore off measures a knob that is inert, and would report that as a finding
 about oversampling. §6.7's insistence on the *combined* curve is the same point.
 
+### W7-2bit and W7-1p5bit, binary in Qdrant's other two encodings, **added 2026-09-30**
+
+```
+W7 with --quantization binary2bit, and with --quantization binary1p5bit
+```
+
+Qdrant 1.19's `TwoBits` and `OneAndHalfBits` storage encodings, which
+strawmANN implements to Qdrant's rule (`quant.binary.Encoding`): three zones
+around each dimension's mean at ±2/3 of its deviation, 1.5 bits ORing the
+second bits in pairs. Searched exactly as W7 is, each in its own collection
+(`bench7b2`, `bench7b15`) with its own upload row and recall sweep, and
+rewritten by the oversampling policies as W7 is (`quantized_collections`).
+
+**Left out of dbpedia-openai-1m.** Two more quantized collections of 6.1 GB of
+fp32 each, on both engines, would take Qdrant's arm past this host's 54 GiB
+from its 43.6 GiB peak on 0930 (`BINARY_ENCODINGS_MAX_CORPUS_BYTES`, 2 GiB).
+Every other corpus is 0.9 GB or less. The rows change the table's row set, so
+the first pairs with them are STALE against every pair before, by design.
+
 ### W8, quantized: PQ
 
 W3 with `--quantization product-x16`. Unchanged.

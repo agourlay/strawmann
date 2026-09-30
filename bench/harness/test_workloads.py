@@ -704,6 +704,36 @@ class WorkloadTests(unittest.TestCase):
         # ...and no stamp given, no hash invented.
         self.assertIsNone(w.run_one(t["W3"], "http://localhost:1", results, []).harness_hash)
 
+    def test_the_binary_encodings_have_rows_where_the_host_holds_them(self):
+        """W7-2bit and W7-1p5bit on corpora of 2 GiB of fp32 or less; dbpedia-
+        openai-1m's 6.1 GB would take Qdrant's arm past the host's memory."""
+        w = self.w
+        ids = [x.id for x in w.table()]
+        for suffix, _, _ in w.BINARY_ENCODINGS:
+            self.assertIn(f"W7-{suffix}-upload", ids)
+            self.assertIn(f"W7-{suffix}", ids)
+        t = {x.id: x for x in w.table()}
+        self.assertEqual(w.collection_of(t["W7-2bit"]), "bench7b2")
+        self.assertIn("binary1p5bit", [str(a) for a in t["W7-1p5bit-upload"].args])
+        # Searched as W7 is: same ef, limit, oversampling and rescore.
+        strip = lambda x: [str(a) for a in x.args if str(a) not in ("bench7", "bench7b2")]
+        self.assertEqual(strip(t["W7"]), strip(t["W7-2bit"]))
+        with mock.patch.object(w, "upload_n", lambda: 990_000), \
+                mock.patch.object(w, "DIM", 1536):
+            self.assertEqual([x.id for x in w.binary_encoding_rows()], [])
+        # Every oversampling policy treats them as it treats W7.
+        self.assertIn("bench7b15", w.quantized_collections())
+        pool = w._pool_oversampling(t["W7-2bit"])
+        self.assertEqual(w.quant_of(pool)["quantization_oversampling"],
+                         w.quant_of(w._pool_oversampling(t["W7"]))["quantization_oversampling"])
+
+    def test_the_recall_sweep_defaults_to_the_collections_the_table_searches(self):
+        import recall
+        self.assertIn("bench7b2", recall.default_collections())
+        with mock.patch.object(self.w, "binary_encoding_rows", list):
+            self.assertNotIn("bench7b2", recall.default_collections())
+            self.assertIn("bench7", recall.default_collections())
+
     def test_the_write_window_counts_only_searches_inside_the_append(self):
         w = self.w
         # 10 q/s for 20 s from t=100 s, the writer from 104 to 110: six
