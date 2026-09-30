@@ -171,7 +171,7 @@
 <div class="panel" id="sift1m">
   <div class="panel-head">
     <strong>sift1m <span>· d=128, euclid, 1M vectors</span></strong>
-    <span>measured 2026-09-28 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-09-29 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -181,32 +181,32 @@
     <tbody>
       <tr>
         <td class="what">At equal recall<small>§7.4's comparison, over 8 anchors</small></td>
-        <td class="num span" colspan="2">best at recall 0.9628, falling to 1.29x at 0.9980</td>
-        <td><div class="ratio win"><span class="track"><i style="width:41.8%"></i></span><b>2.09x</b></div></td>
+        <td class="num span" colspan="2">best at recall 0.9888, falling to 1.81x at 0.9992</td>
+        <td><div class="ratio win"><span class="track"><i style="width:43.2%"></i></span><b>2.16x</b></div></td>
       </tr>
       <tr>
         <td class="what">Saturating<small>closed loop, every core busy</small></td>
-        <td class="num">23,547</td><td class="num">14,312</td>
-        <td><div class="ratio win"><span class="track"><i style="width:33.0%"></i></span><b>1.65x</b></div></td>
-      </tr>
-      <tr>
-        <td class="what">Batched<small>16 queries per request</small></td>
-        <td class="num">23,913</td><td class="num">4,872</td>
-        <td><div class="ratio win"><span class="track"><i style="width:98.2%"></i></span><b>4.91x</b></div></td>
-      </tr>
-      <tr>
-        <td class="what">Exact<small>brute force, no index</small></td>
-        <td class="num">202</td><td class="num">124</td>
+        <td class="num">23,059</td><td class="num">14,135</td>
         <td><div class="ratio win"><span class="track"><i style="width:32.6%"></i></span><b>1.63x</b></div></td>
       </tr>
       <tr>
-        <td class="what">One query at a time<small>single client, latency bound</small></td>
-        <td class="num">1,729</td><td class="num">1,976</td>
-        <td><div class="ratio lose"><span class="track"><i style="width:17.6%"></i></span><b>0.88x</b></div></td>
+        <td class="what">Batched<small>16 queries per request</small></td>
+        <td class="num">23,400</td><td class="num">4,859</td>
+        <td><div class="ratio win"><span class="track"><i style="width:96.4%"></i></span><b>4.82x</b></div></td>
       </tr>
       <tr>
-        <td class="what">Quantized, PQ<small>recall 0.9856 against 0.9780</small></td>
-        <td class="num">4,482</td><td class="num">4,169</td>
+        <td class="what">Exact<small>brute force, no index</small></td>
+        <td class="num">186</td><td class="num">124</td>
+        <td><div class="ratio win"><span class="track"><i style="width:30.0%"></i></span><b>1.50x</b></div></td>
+      </tr>
+      <tr>
+        <td class="what">One query at a time<small>single client, latency bound</small></td>
+        <td class="num">1,702</td><td class="num">2,008</td>
+        <td><div class="ratio lose"><span class="track"><i style="width:17.0%"></i></span><b>0.85x</b></div></td>
+      </tr>
+      <tr>
+        <td class="what">Quantized, PQ<small>recall 0.9825 against 0.9776</small></td>
+        <td class="num">4,490</td><td class="num">4,165</td>
         <td><div class="ratio win"><span class="track"><i style="width:21.6%"></i></span><b>1.08x</b></div></td>
       </tr>
     </tbody>
@@ -217,7 +217,7 @@
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-sift1m.md"><code>comparison-sift1m.md</code></a>.
     These ratios are this dimension's and do not carry to another.
-    <a class="report-link" href="reports/report-sift1m-sm-sift-perf-0929-vs-qd-sift-perf-0929-2026-09-28-1619.html">Full report for this run</a>
+    <a class="report-link" href="reports/report-sift1m-sm-sift-perf-0930-vs-qd-sift-perf-0930-2026-09-29-1620.html">Full report for this run</a>
   </div>
 </div>
 <!-- END landing-sift1m -->
@@ -226,7 +226,7 @@
 <div class="panel" id="dbpedia-openai-1m">
   <div class="panel-head">
     <strong>dbpedia-openai-1m <span>· d=1536, cosine, 1M vectors</span></strong>
-    <span>measured 2026-09-28 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-09-29 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -236,33 +236,33 @@
     <tbody>
       <tr>
         <td class="what">At equal recall<small>§7.4's comparison, over 8 anchors</small></td>
-        <td class="num span" colspan="2">best at recall 0.8920, falling to 1.12x at 0.9892</td>
-        <td><div class="ratio win"><span class="track"><i style="width:28.8%"></i></span><b>1.44x</b></div></td>
+        <td class="num span" colspan="2">best at recall 0.8945, falling to 1.09x at 0.9892</td>
+        <td><div class="ratio win"><span class="track"><i style="width:28.0%"></i></span><b>1.40x</b></div></td>
       </tr>
       <tr>
         <td class="what">Saturating<small>closed loop, every core busy</small></td>
-        <td class="num">3,589</td><td class="num">3,481</td>
-        <td><div class="ratio even"><b>parity</b></div></td>
+        <td class="num">3,556</td><td class="num">3,483</td>
+        <td><div class="ratio win"><span class="track"><i style="width:20.4%"></i></span><b>1.02x</b></div></td>
       </tr>
       <tr>
         <td class="what">Batched<small>16 queries per request</small></td>
-        <td class="num">3,554</td><td class="num">1,310</td>
+        <td class="num">3,530</td><td class="num">1,303</td>
         <td><div class="ratio win"><span class="track"><i style="width:54.2%"></i></span><b>2.71x</b></div></td>
       </tr>
       <tr>
         <td class="what">Exact<small>brute force, no index</small></td>
-        <td class="num">10</td><td class="num">10</td>
-        <td><div class="ratio even"><b>parity</b></div></td>
+        <td class="num">13</td><td class="num">10</td>
+        <td><div class="ratio win"><span class="track"><i style="width:26.6%"></i></span><b>1.33x</b></div></td>
       </tr>
       <tr>
         <td class="what">One query at a time<small>single client, latency bound</small></td>
-        <td class="num">1,069</td><td class="num">625</td>
-        <td><div class="ratio win"><span class="track"><i style="width:34.2%"></i></span><b>1.71x</b></div></td>
+        <td class="num">1,060</td><td class="num">624</td>
+        <td><div class="ratio win"><span class="track"><i style="width:34.0%"></i></span><b>1.70x</b></div></td>
       </tr>
       <tr>
-        <td class="what">Quantized, PQ<small>recall 0.9649 against 0.9660</small></td>
-        <td class="num">1,291</td><td class="num">1,091</td>
-        <td><div class="ratio win"><span class="track"><i style="width:23.6%"></i></span><b>1.18x</b></div></td>
+        <td class="what">Quantized, PQ<small>recall 0.9654 against 0.9644</small></td>
+        <td class="num">1,482</td><td class="num">1,106</td>
+        <td><div class="ratio win"><span class="track"><i style="width:26.8%"></i></span><b>1.34x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -272,7 +272,7 @@
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-dbpedia-openai-1m.md"><code>comparison-dbpedia-openai-1m.md</code></a>.
     These ratios are this dimension's and do not carry to another.
-    <a class="report-link" href="reports/report-dbpedia-openai-1m-sm-dbp1m-perf-0929-vs-qd-dbp1m-perf-0929-2026-09-28-2051.html">Full report for this run</a>
+    <a class="report-link" href="reports/report-dbpedia-openai-1m-sm-dbp1m-perf-0930-vs-qd-dbp1m-perf-0930-2026-09-29-2134.html">Full report for this run</a>
   </div>
 </div>
 <!-- END landing-dbpedia-openai-1m -->
@@ -280,7 +280,7 @@
 <div class="panel" id="laion-small-clip">
   <div class="panel-head">
     <strong>laion-small-clip <span>· d=512, cosine, 100K vectors</span></strong>
-    <span>measured 2026-09-28 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-09-29 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -290,33 +290,33 @@
     <tbody>
       <tr>
         <td class="what">At equal recall<small>§7.4's comparison, over 8 anchors</small></td>
-        <td class="num span" colspan="2">best at recall 0.9624, falling to 1.65x at 0.9979</td>
-        <td><div class="ratio win"><span class="track"><i style="width:37.0%"></i></span><b>1.85x</b></div></td>
+        <td class="num span" colspan="2">best at recall 0.9629, falling to 1.72x at 0.9978</td>
+        <td><div class="ratio win"><span class="track"><i style="width:38.4%"></i></span><b>1.92x</b></div></td>
       </tr>
       <tr>
         <td class="what">Saturating<small>closed loop, every core busy</small></td>
-        <td class="num">10,729</td><td class="num">10,883</td>
-        <td><div class="ratio even"><b>parity</b></div></td>
+        <td class="num">11,442</td><td class="num">10,978</td>
+        <td><div class="ratio win"><span class="track"><i style="width:20.8%"></i></span><b>1.04x</b></div></td>
       </tr>
       <tr>
         <td class="what">Batched<small>16 queries per request</small></td>
-        <td class="num">10,886</td><td class="num">3,754</td>
-        <td><div class="ratio win"><span class="track"><i style="width:58.0%"></i></span><b>2.90x</b></div></td>
+        <td class="num">11,277</td><td class="num">3,762</td>
+        <td><div class="ratio win"><span class="track"><i style="width:60.0%"></i></span><b>3.00x</b></div></td>
       </tr>
       <tr>
         <td class="what">Exact<small>brute force, no index</small></td>
-        <td class="num">318</td><td class="num">315</td>
+        <td class="num">312</td><td class="num">319</td>
         <td><div class="ratio even"><b>parity</b></div></td>
       </tr>
       <tr>
         <td class="what">One query at a time<small>single client, latency bound</small></td>
-        <td class="num">1,688</td><td class="num">1,553</td>
-        <td><div class="ratio win"><span class="track"><i style="width:21.8%"></i></span><b>1.09x</b></div></td>
+        <td class="num">1,626</td><td class="num">1,638</td>
+        <td><div class="ratio even"><b>parity</b></div></td>
       </tr>
       <tr>
-        <td class="what">Quantized, PQ<small>recall 0.9929 against 0.9869</small></td>
-        <td class="num">2,618</td><td class="num">2,749</td>
-        <td><div class="ratio lose"><span class="track"><i style="width:19.0%"></i></span><b>0.95x</b></div></td>
+        <td class="what">Quantized, PQ<small>recall 0.9931 against 0.9864</small></td>
+        <td class="num">3,587</td><td class="num">2,836</td>
+        <td><div class="ratio win"><span class="track"><i style="width:25.2%"></i></span><b>1.26x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -326,7 +326,7 @@
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-laion-small-clip.md"><code>comparison-laion-small-clip.md</code></a>.
     These ratios are this dimension's and do not carry to another.
-    <a class="report-link" href="reports/report-laion-small-clip-sm-laion-perf-0928-vs-qd-laion-perf-0928-2026-09-28-0714.html">Full report for this run</a>
+    <a class="report-link" href="reports/report-laion-small-clip-sm-laion-perf-0930-vs-qd-laion-perf-0930-2026-09-29-1846.html">Full report for this run</a>
   </div>
 </div>
 <!-- END landing-laion-small-clip -->
