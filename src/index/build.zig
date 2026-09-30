@@ -54,6 +54,21 @@ pub const Scorer = struct {
     ctx: *const anyopaque,
     /// Similarity between two stored points, higher is better.
     between: *const fn (ctx: *const anyopaque, a: u32, b: u32) f32,
+    /// A second similarity for choosing which neighbours a node keeps, when
+    /// `between` is a cheaper approximation: the construction's searches run
+    /// on `between`, their candidates are rescored with this before the
+    /// selection heuristic, and back-link pruning uses it throughout. Null:
+    /// `between` does both. findings 68: SQ8 codes alone cost 0.0018 of
+    /// recall; the stored edges are what a search walks, so they are chosen
+    /// on fp32.
+    select_ctx: ?*const anyopaque = null,
+    select: ?*const fn (ctx: *const anyopaque, a: u32, b: u32) f32 = null,
+
+    /// The selection similarity, `between` where none is set.
+    pub fn selectBetween(self: Scorer) struct { f: *const fn (ctx: *const anyopaque, a: u32, b: u32) f32, ctx: *const anyopaque } {
+        if (self.select) |f| return .{ .f = f, .ctx = self.select_ctx.? };
+        return .{ .f = self.between, .ctx = self.ctx };
+    }
 };
 
 /// `(max_level, entry_point)` as one 64-bit word: `level << 32 | entry`.
@@ -349,14 +364,26 @@ pub const Builder = struct {
             // `beginQuery` just ran, so `ep` passes `testAndSet` and is always
             // the first result: the search cannot come back empty.
             std.debug.assert(found.len > 0);
+            // The next level's search starts here, in the search's own scale.
+            const next_ep = found[0];
 
-            // Select this node's neighbours from the search result.
+            // Select this node's neighbours from the search result, rescored
+            // first where selection has its own similarity (`Scorer.select`).
+            const sel = self.scorer.selectBetween();
+            if (self.scorer.select != null) {
+                for (found) |*c| c.score = sel.f(sel.ctx, node, c.id);
+                std.mem.sort(Candidate, found, {}, struct {
+                    fn lt(_: void, a: Candidate, b: Candidate) bool {
+                        return a.better(b);
+                    }
+                }.lt);
+            }
             const selected = self.selectionAt(l);
             const n_sel = hnsw.selectNeighboursHeuristic(
                 found,
                 m_select,
-                self.scorer.between,
-                self.scorer.ctx,
+                sel.f,
+                sel.ctx,
                 selected[0..m_select],
             );
             n_sel_at[l] = n_sel;
@@ -374,8 +401,8 @@ pub const Builder = struct {
                 @memset(list[n_sel..], empty_neighbour);
             }
 
-            ep = found[0].id;
-            ep_score = found[0].score;
+            ep = next_ep.id;
+            ep_score = next_ep.score;
             if (lvl == 0) break;
         }
 
@@ -457,16 +484,18 @@ pub const Builder = struct {
             }
         }
 
-        // Full. Re-run selection over the existing neighbours plus the new one.
+        // Full. Re-run selection over the existing neighbours plus the new one,
+        // on the selection similarity: this decides a stored edge.
+        const sel = self.scorer.selectBetween();
         var n: usize = 0;
         for (list) |existing| {
             self.candidates[n] = .{
                 .id = existing,
-                .score = self.scorer.between(self.scorer.ctx, from, existing),
+                .score = sel.f(sel.ctx, from, existing),
             };
             n += 1;
         }
-        self.candidates[n] = .{ .id = to, .score = self.scorer.between(self.scorer.ctx, from, to) };
+        self.candidates[n] = .{ .id = to, .score = sel.f(sel.ctx, from, to) };
         n += 1;
 
         const cands = self.candidates[0..n];
@@ -479,8 +508,8 @@ pub const Builder = struct {
         const kept = hnsw.selectNeighboursHeuristic(
             cands,
             m,
-            self.scorer.between,
-            self.scorer.ctx,
+            sel.f,
+            sel.ctx,
             self.link_selected[0..m],
         );
         // In place, tail last: same invariant as `insertOne`, an unlocked

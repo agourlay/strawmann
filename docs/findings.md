@@ -159,21 +159,6 @@ flat. Unexplained. Since 2026-09-30 every row records its engine's
 `mmap_lock`). What is open is reading them on the next dbpedia pair: whether
 pass 3's arenas are mapped by smaller pages.
 
-**68. strawmANN builds an SQ8 or PQ collection's graph at fp32 cost, and
-Qdrant does not.** Time to Green on dbpedia 0930: SQ8 (W6-upload) 268 against
-213 s and binary (W7-upload) 275 against 137, where the fp32 W2 is 263 against
-410 in strawmANN's favour; its quantized builds cost the cycles its W2 does,
-Qdrant's a fraction of its own. Since 2026-09-30 a binary collection's graph
-is built on its codes (`collection.CodeScorer`): on dbpedia-100K (d=1536) 3.4 s
-against 16.4, recall@10 at `ef` 128 inside two fp32-built graphs' spread. SQ8
-on its codes built in 8.6 s against 16.0 and lost 0.0018 of recall beyond a
-0.0001 spread, which a ratio at matched recall would pay for, so SQ8 still
-builds on fp32. What is open: the hybrid, codes for the construction's
-search and fp32 for the stored neighbour selection, measured the same way;
-PQ has no code-to-code score yet (h-and-m W8-upload 177 against 150 s).
-Nothing is published from the upload rows as a ratio, so this costs the build
-rows, not a headline.
-
 ### P3. What the datasets offer that no row measures yet
 
 **55. h-and-m and laion ship real filtered queries, and W12 uses synthetic

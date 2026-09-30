@@ -1850,26 +1850,35 @@ pub fn scorerFor(coll: *const Collection) build_hnsw.Scorer {
     return .{ .ctx = @ptrCast(coll), .between = S.between };
 }
 
-/// The build's `between` over a quantized store's codes, where that is
-/// measured to pay: binary (dot, cosine), with the sign dot the traversal
-/// uses (`quant.binary.signDot`). Null otherwise, and the build scores fp32
-/// (`scorerFor`).
+/// The build's `between` over a quantized store's codes: binary (dot,
+/// cosine) with the sign dot the traversal uses (`quant.binary.signDot`),
+/// and SQ8 (dot, cosine, euclid) searched on its codes with its stored edges
+/// chosen on fp32 (`Scorer.select`). Null otherwise, and the build scores
+/// fp32 (`scorerFor`).
 ///
 /// Measured through the server on dbpedia-100K (d=1536, two builds each,
-/// 2026-09-30): binary's graph built in 3.4 s against 16.4 with recall@10 at
-/// `ef` 128 0.9655 and 0.9654 against 0.9655 and 0.9678, inside two fp32-built
-/// graphs' own spread; SQ8's built in 8.6 s against 16.0 and lost 0.0018
-/// (0.9781 and 0.9783 against 0.9800 and 0.9801, a spread of 0.0001), which
-/// a ratio at matched recall would pay for. So SQ8 builds on fp32, and its
-/// score here (`sq8`) is kept for the hybrid findings 68 names next: codes
-/// for the construction's search, fp32 for the stored selection.
+/// 2026-09-30), recall@10 at `ef` 128:
+///
+/// | store  | graph      | build           | recall            |
+/// |--------|------------|-----------------|-------------------|
+/// | binary | fp32       | 16.4 s          | 0.9655, 0.9678    |
+/// | binary | codes      | 3.4 s           | 0.9655, 0.9654    |
+/// | SQ8    | fp32       | 16.0, 15.7 s    | 0.9794 to 0.9801  |
+/// | SQ8    | codes      | 8.6 s           | 0.9781, 0.9783    |
+/// | SQ8    | hybrid     | 9.5, 9.6 s      | 0.9816, 0.9794    |
+///
+/// SQ8 on codes alone lost 0.0018 beyond a 0.0001 spread, and choosing the
+/// edges on fp32 took it back. Binary's selection stays on codes: its
+/// recall already sits inside the fp32 graphs' spread.
 ///
 /// SQ8 is reconstructed from the row sums the store keeps (`RowStats`), with
 /// `x = lo + α·c` per component: `Σxy = d·lo² + lo·α·(Σa + Σb) + α²·Σab` and
 /// `Σ(x − y)² = α²·(Σa² − 2Σab + Σb²)`, `Σab` one `u8 × u8` kernel call.
 const CodeScorer = struct {
-    /// Off: SQ8 on codes cost 0.0018 of recall (above).
-    const build_sq8_on_codes = false;
+    fn fp32Between(ctx: *const anyopaque, a: u32, b: u32) f32 {
+        const c: *const Collection = @ptrCast(@alignCast(ctx));
+        return scoreStored(c, a, b);
+    }
 
     store: *const quantized.Store,
     euclid: bool,
@@ -1879,7 +1888,8 @@ const CodeScorer = struct {
         if (kernel == .manhattan) return null;
         self.* = .{ .store = store, .euclid = kernel == .euclid };
         return switch (store.*) {
-            .scalar => if (build_sq8_on_codes) .{ .ctx = @ptrCast(self), .between = sq8 } else null,
+            // Searched on codes, edges chosen on fp32 (`Scorer.select`).
+            .scalar => .{ .ctx = @ptrCast(self), .between = sq8, .select_ctx = @ptrCast(coll), .select = fp32Between },
             .binary => if (kernel == .dot) .{ .ctx = @ptrCast(self), .between = binary } else null,
             .none, .product => null,
         };
@@ -2858,7 +2868,7 @@ test "the scan gate admits in ticket order and never more than its cap at once" 
     try testing.expectEqual(@as(u32, 1600), G.gate.served.load(.acquire));
 }
 
-test "a quantized build scores on codes where measured to pay, and SQ8's code score is sound" {
+test "a quantized build searches on codes, SQ8 choosing its edges on fp32, and the SQ8 code score is sound" {
     const dim = 64;
     var prng = std.Random.DefaultPrng.init(0xc0de);
     const rnd = prng.random();
@@ -2876,9 +2886,10 @@ test "a quantized build scores on codes where measured to pay, and SQ8's code sc
         var cs: CodeScorer = undefined;
         const bound = cs.bind(&c, store);
         switch (mode) {
-            .binary => try testing.expect(bound != null),
+            .binary => try testing.expect(bound != null and bound.?.select == null),
             .scalar => {
-                try testing.expect(bound == null);
+                // Searched on codes, edges chosen on fp32.
+                try testing.expect(bound != null and bound.?.select != null);
                 // The kept SQ8 score tracks fp32's dot: rank agreement over
                 // pairs against one base row.
                 cs = .{ .store = store, .euclid = false };
