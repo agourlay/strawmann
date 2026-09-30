@@ -1751,15 +1751,30 @@ pub const Probe = struct {
         return self.scoreNode(node);
     }
 
-    /// The first line of `node`'s row, so the traversal can ask for it before
-    /// it scores (`hnsw.Scorer.prefetch`). One line, not the row: at d=1536
-    /// a row is 96 lines and a 32-neighbour list would be 3,000 prefetches
-    /// for 32 that matter first; the hardware prefetcher follows the rest of
-    /// a row once the kernel starts streaming it.
+    /// `node`'s row, so the traversal can ask for it before it scores
+    /// (`hnsw.Scorer.prefetch`): whole up to `whole_row_bytes`, its first line
+    /// past it. At d=1536 a row is 96 lines and a 32-neighbour list would be
+    /// 3,000 prefetches for 32 that matter first; the hardware prefetcher
+    /// follows the rest of a row once the kernel starts streaming it.
+    ///
+    /// At d=128 a row is 8 lines, and one of them left the other seven to
+    /// demand misses the next hop waited on (findings 67). Whole, on sift1m
+    /// through the server (2026-09-30, three runs each, the quiet two quoted):
+    /// W3 1,538 and 1,950 to 2,231 and 2,302 q/s with cycles per query down
+    /// about 19%, where Qdrant reads 2,008; W4 22,440 and 22,904 to 25,696
+    /// and 25,717; demand fills about 12,400 to 3,000 per query. The SQ8 rule
+    /// (`quantized.sq8_whole_row_bytes`), measured to the same width.
     pub fn prefetch(ctx: *const anyopaque, node: u32) void {
         const self: *const Probe = @ptrCast(@alignCast(ctx));
-        @prefetch(self.coll.space.rowBytes(node).ptr, .{ .rw = .read, .locality = 3, .cache = .data });
+        const row = self.coll.space.rowBytes(node);
+        if (row.len <= whole_row_bytes)
+            dist.common.prefetchRow(row.ptr, row.len)
+        else
+            @prefetch(row.ptr, .{ .rw = .read, .locality = 3, .cache = .data });
     }
+
+    /// The widest row `prefetch` asks for whole: eight lines, d=128 in fp32.
+    pub const whole_row_bytes: usize = 512;
 };
 
 /// Compare two stored rows, without converting either.
@@ -2760,6 +2775,21 @@ test "the scan gate admits in ticket order and never more than its cap at once" 
     try testing.expect(G.worst.load(.acquire) <= 3);
     try testing.expectEqual(@as(u32, 0), G.out_of_order.load(.acquire));
     try testing.expectEqual(@as(u32, 1600), G.gate.served.load(.acquire));
+}
+
+test "fp32 rows are prefetched whole up to eight lines, and by their first past it" {
+    // sift1m's 512-byte rows whole; laion's 2 KB and wider by their first line.
+    try testing.expect(strideFor(128, .float32) <= Probe.whole_row_bytes);
+    try testing.expect(strideFor(512, .float32) > Probe.whole_row_bytes);
+    inline for (.{ 128, 512 }) |dim| {
+        var c = try makeCollection(dim, .euclid, 16);
+        defer c.deinit();
+        var v: [dim]f32 = @splat(1);
+        for (0..8) |i| _ = try c.upsert(.{ .num = i }, &v);
+        var buf: [Probe.max_buffer]u8 align(Probe.buffer_align) = undefined;
+        const probe = Probe.init(&c, &v, &buf);
+        for (0..8) |i| Probe.prefetch(@ptrCast(&probe), @intCast(i));
+    }
 }
 
 test "only an exact scan past the cache-sized regime waits for a slot" {

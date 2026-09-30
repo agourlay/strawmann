@@ -50,21 +50,6 @@ laion W4/W10 moves cannot be read as strawmANN's. What it needs: a Qdrant-only
 same-binary A/B on laion at two times of day (`qdrant_ab.py` with one build on
 both sides).
 
-**67. On sift1m a single query is 15% slower than Qdrant's, the one fp32
-search loss.** W3 on 0930: 1,702 against 2,008 q/s (0.85x; 0.88x on 0929),
-server p50 492 against 409 us, at equal recall (0.9888 against 0.9875).
-strawmANN does less work per query, 713k instructions against 1,072k and 777
-against 1,023 KiB of demand DRAM, but at IPC 0.75 against 1.19, so it spends
-more cycles (948k against 901k). With one query on the core its traversal is
-latency-bound: nothing overlaps the next hop's miss, which is what the
-`searchLayer` comment measured at `-p 1` (972k cycles against W4's 650k for
-the same work). It does not carry: laion's W3 is parity (though its p99 is
-932 against 789 us) and dbpedia's and h-and-m's lead 1.70x and 1.30x, where a
-wider row gives the prefetcher more to overlap. What it needs: a W3 profile
-on sift1m, both engines, pinned, to see where the stall is (the next
-candidate's list, the visited stamps, the heap) and what Qdrant overlaps that
-strawmANN does not.
-
 ### P2. What the licensed numbers are made of, and what the run costs
 
 **7. At 1% selectivity strawmANN offers only the exact answer.** On 0925,
