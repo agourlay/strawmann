@@ -50,6 +50,21 @@ laion W4/W10 moves cannot be read as strawmANN's. What it needs: a Qdrant-only
 same-binary A/B on laion at two times of day (`qdrant_ab.py` with one build on
 both sides).
 
+**67. On sift1m a single query is 15% slower than Qdrant's, the one fp32
+search loss.** W3 on 0930: 1,702 against 2,008 q/s (0.85x; 0.88x on 0929),
+server p50 492 against 409 us, at equal recall (0.9888 against 0.9875).
+strawmANN does less work per query, 713k instructions against 1,072k and 777
+against 1,023 KiB of demand DRAM, but at IPC 0.75 against 1.19, so it spends
+more cycles (948k against 901k). With one query on the core its traversal is
+latency-bound: nothing overlaps the next hop's miss, which is what the
+`searchLayer` comment measured at `-p 1` (972k cycles against W4's 650k for
+the same work). It does not carry: laion's W3 is parity (though its p99 is
+932 against 789 us) and dbpedia's and h-and-m's lead 1.70x and 1.30x, where a
+wider row gives the prefetcher more to overlap. What it needs: a W3 profile
+on sift1m, both engines, pinned, to see where the stall is (the next
+candidate's list, the visited stamps, the heap) and what Qdrant overlaps that
+strawmANN does not.
+
 ### P2. What the licensed numbers are made of, and what the run costs
 
 **7. At 1% selectivity strawmANN offers only the exact answer.** On 0925,
@@ -158,6 +173,22 @@ flat. Unexplained. Since 2026-09-30 every row records its engine's
 `file_pmd_bytes`, read outside the bracket since the walk takes
 `mmap_lock`). What is open is reading them on the next dbpedia pair: whether
 pass 3's arenas are mapped by smaller pages.
+
+**68. strawmANN builds a quantized collection's graph at fp32 cost, and
+Qdrant does not.** Time to Green on dbpedia 0930: binary (W7-upload) 275
+against 137 s, SQ8 (W6-upload) 268 against 213 s, where the fp32 W2 is 263
+against 410 s in strawmANN's favour. The engine cycles say why. strawmANN's
+W6-upload and W7-upload cost what its W2 does (4.05T, 4.02T against 4.06T):
+it builds the fp32 graph and then encodes. Qdrant's cost a fraction of its W2
+(2.39T and 1.14T against 5.53T), which fits it building the graph with the
+quantized scorer. On h-and-m 0929 W7-upload is 28 against 16 s and W8-upload
+177 against 150 s; W6-upload's 88 against 24 s predates the SQ8 training fix
+(d8df6d2). laion's are within 3 to 9%, and sift1m's lead. What it needs: an
+in-process build with the SQ8 and binary scorers in the construction's own
+searches, fp32 kept for the stored neighbour selection or not, and the recall
+that graph reaches at W6's and W7's `ef` against today's. Nothing is published
+from W6-upload or W7-upload as a ratio, so this costs the build rows, not a
+headline.
 
 ### P3. What the datasets offer that no row measures yet
 
