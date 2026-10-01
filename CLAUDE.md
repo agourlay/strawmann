@@ -11,6 +11,10 @@
 - Conformance (Rust) is in `conformance/`: `cargo test --release`,
   `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`, all
   gated.
+- To find a hanging Zig test (ptrace is blocked by Yama, so no debugger
+  attach), run the compiled `.zig-cache/o/*/test` binary directly under
+  `timeout` in a loop. It prints `N/M name...` as each test starts, so the
+  last line names the one that hung.
 
 ## Benchmarks
 
