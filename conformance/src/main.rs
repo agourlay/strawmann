@@ -186,6 +186,10 @@ struct FilteredTruthRun {
     page: u32,
     #[arg(long)]
     out: PathBuf,
+    /// Where a truth is kept between runs, under `oracle::filtered_cache_key`,
+    /// and read back when everything it was computed from still holds.
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
 }
 
 // There is deliberately no `--limit-queries` here. `relevance` compares a
@@ -772,6 +776,46 @@ async fn run_filtered_truth(a: FilteredTruthRun) -> anyhow::Result<()> {
         b.dim,
         q.dim
     );
+    let cached = a.cache_dir.as_ref().map(|d| {
+        d.join(oracle::filtered_cache_key(
+            &a.collection,
+            b.n,
+            m,
+            a.k,
+            &condition,
+            &matching,
+        ))
+    });
+    if let Some(p) = cached.as_ref().filter(|p| p.exists()) {
+        let want = oracle::FilteredRequest {
+            metric: m,
+            n_base: b.n,
+            n_queries: q.n,
+            dim: b.dim,
+            k: a.k,
+            base_checksum: oracle::checksum_f32(&b.data),
+            query_checksum: oracle::checksum_f32(&q.data),
+            condition: &condition,
+            n_matching: matching.iter().filter(|&&i| (i as usize) < b.n).count(),
+        };
+        match oracle::load(p).map(|gt| (gt.reuse_refusal(&want), gt)) {
+            Ok((None, gt)) => {
+                oracle::save(&gt, &a.out)?;
+                println!(
+                    "wrote {} (reused {}), {} matching, base checksum {:016x}, \
+                     query checksum {:016x}",
+                    a.out.display(),
+                    p.display(),
+                    gt.n_matching.unwrap_or(0),
+                    gt.base_checksum,
+                    gt.query_checksum
+                );
+                return Ok(());
+            }
+            Ok((Some(why), _)) => eprintln!("cached {} not reused: {why}", p.display()),
+            Err(e) => eprintln!("cached {} not reused: {e}", p.display()),
+        }
+    }
     eprintln!(
         "computing fp64 ground truth over the condition: {} of {} base x {} queries, \
          d={}, {}, k={}",
@@ -786,6 +830,12 @@ async fn run_filtered_truth(a: FilteredTruthRun) -> anyhow::Result<()> {
         m, &b.data, b.n, &q.data, q.n, b.dim, a.k, &condition, &matching,
     );
     oracle::save(&gt, &a.out)?;
+    if let Some(p) = &cached {
+        if let Some(dir) = p.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        oracle::save(&gt, p)?;
+    }
     println!(
         "wrote {} ({}), {} matching, base checksum {:016x}, query checksum {:016x}",
         a.out.display(),

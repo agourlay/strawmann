@@ -41,6 +41,20 @@ class RecallTests(unittest.TestCase):
         self.assertFalse(p.exists())
         self.assertTrue(p.with_suffix(".mismatch.json").exists())
 
+    def test_the_filtered_truth_is_cached_beside_the_unfiltered_one(self):
+        """dbpedia 0930 recomputed the same two filtered truths in all six
+        sweeps; `filtered-truth` reuses one only when given a cache."""
+        rc = self.m["recall"]
+        seen = []
+        with mock.patch.object(rc.subprocess, "run",
+                               lambda cmd, **k: seen.append(cmd) or mock.Mock(returncode=0)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNotNone(rc.build_filtered_truth(
+                "http://x", "lbl", "bench12", "sel1", ["keyword_0"], 200_000))
+        cmd = seen[0]
+        gt = rc.paths.dataset(rc.DATASET).ground_truth
+        self.assertEqual(cmd[cmd.index("--cache-dir") + 1], str(gt.parent))
+
     def test_stamp_refuses_a_sweep_that_scored_a_different_corpus(self):
         """The names lining up does not mean the contents do.
 

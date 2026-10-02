@@ -826,6 +826,83 @@ pub fn cache_key_for(
     }
 }
 
+/// `cache_key_for` with the condition, keyed by the matching id set as well.
+///
+/// The condition names the question and the engine decides who answers it:
+/// `filtered-truth` asks the collection which ids match, so one condition over
+/// a collection built from different payloads is a different truth under the
+/// same condition key. Each pass of a night run rebuilt the same two filtered
+/// truths from scratch (12 times on dbpedia-openai-1m 0930) because nothing
+/// could tell an identical id set from a different one.
+pub fn filtered_cache_key(
+    dataset: &str,
+    subset: usize,
+    metric: Metric,
+    k: usize,
+    condition: &str,
+    matching: &[u32],
+) -> String {
+    let key = cache_key_for(dataset, subset, metric, k, Some(condition));
+    let stem = key.strip_suffix(".gt.json").unwrap_or(&key);
+    format!("{stem}.ids-{:016x}.gt.json", checksum_ids(matching))
+}
+
+/// FNV-1a over the ids' little-endian bytes, as `checksum_f32` over floats.
+pub fn checksum_ids(ids: &[u32]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &x in ids {
+        for b in x.to_le_bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
+/// What a filtered truth must have been computed from to stand in for a fresh
+/// one; see `GroundTruth::reuse_refusal`.
+pub struct FilteredRequest<'a> {
+    pub metric: Metric,
+    pub n_base: usize,
+    pub n_queries: usize,
+    pub dim: usize,
+    pub k: usize,
+    pub base_checksum: u64,
+    pub query_checksum: u64,
+    pub condition: &'a str,
+    pub n_matching: usize,
+}
+
+impl GroundTruth {
+    /// Why this cached filtered truth cannot answer `want`, `None` when it can.
+    ///
+    /// The file name carries the condition and the matching ids; everything
+    /// else the truth depends on is checked here, so a cache file left by a
+    /// different corpus, query set or `k` is recomputed rather than read.
+    pub fn reuse_refusal(&self, want: &FilteredRequest) -> Option<String> {
+        let checks = [
+            ("metric", self.metric == want.metric),
+            ("base size", self.n_base == want.n_base),
+            ("query count", self.n_queries == want.n_queries),
+            ("dimension", self.dim == want.dim),
+            ("k", self.k == want.k),
+            ("base checksum", self.base_checksum == want.base_checksum),
+            ("query checksum", self.query_checksum == want.query_checksum),
+            (
+                "condition",
+                self.condition.as_deref() == Some(want.condition),
+            ),
+            ("matching count", self.n_matching == Some(want.n_matching)),
+        ];
+        let differ: Vec<&str> = checks
+            .iter()
+            .filter(|(_, ok)| !ok)
+            .map(|(n, _)| *n)
+            .collect();
+        (!differ.is_empty()).then(|| format!("{} differ", differ.join(", ")))
+    }
+}
+
 /// A stable 64-bit digest of a condition expression, for `cache_key_for`.
 ///
 /// Written out rather than using `DefaultHasher`, whose output std explicitly
@@ -1281,6 +1358,76 @@ mod tests {
         assert_ne!(a, plain);
         assert_eq!(condition_hash("a=keyword_7"), condition_hash("a=keyword_7"));
         assert_ne!(condition_hash("a=keyword_7"), condition_hash("a=keyword_8"));
+    }
+
+    #[test]
+    fn a_filtered_cache_file_is_keyed_by_its_matching_ids() {
+        // The engine decides who matches, so one condition over two id sets
+        // is two truths and must be two files.
+        let c = "a in {keyword_0}";
+        let k1 = filtered_cache_key("bench12", 200_000, Metric::Cosine, 100, c, &[1, 5, 9]);
+        assert_eq!(
+            k1,
+            filtered_cache_key("bench12", 200_000, Metric::Cosine, 100, c, &[1, 5, 9])
+        );
+        assert_ne!(
+            k1,
+            filtered_cache_key("bench12", 200_000, Metric::Cosine, 100, c, &[1, 5, 10])
+        );
+        assert_ne!(
+            k1,
+            filtered_cache_key(
+                "bench12",
+                200_000,
+                Metric::Cosine,
+                100,
+                "a in {keyword_1}",
+                &[1, 5, 9]
+            )
+        );
+        assert!(k1.ends_with(".gt.json"), "{k1}");
+    }
+
+    #[test]
+    fn a_cached_filtered_truth_is_reused_only_for_its_own_inputs() {
+        let (dim, n, k) = (4usize, 40usize, 5usize);
+        let base: Vec<f32> = (0..n * dim).map(|i| (i as f32 * 0.37).sin()).collect();
+        let queries: Vec<f32> = (0..3 * dim).map(|i| (i as f32 * 0.11).cos()).collect();
+        let matching: Vec<u32> = (0..n as u32).step_by(3).collect();
+        let c = "a in {keyword_0}";
+        let gt = compute_filtered(Metric::Euclid, &base, n, &queries, 3, dim, k, c, &matching);
+        let want = FilteredRequest {
+            metric: Metric::Euclid,
+            n_base: n,
+            n_queries: 3,
+            dim,
+            k,
+            base_checksum: checksum_f32(&base),
+            query_checksum: checksum_f32(&queries),
+            condition: c,
+            n_matching: matching.len(),
+        };
+        assert_eq!(gt.reuse_refusal(&want), None);
+
+        let other_base: Vec<f32> = base.iter().map(|x| x + 1.0).collect();
+        let refused = gt.reuse_refusal(&FilteredRequest {
+            base_checksum: checksum_f32(&other_base),
+            k: 10,
+            ..want
+        });
+        assert_eq!(refused.as_deref(), Some("k, base checksum differ"));
+
+        // An unfiltered truth never stands in for a filtered one.
+        let plain = compute(Metric::Euclid, &base, n, &queries, 3, dim, k);
+        assert_eq!(
+            plain
+                .reuse_refusal(&FilteredRequest {
+                    n_matching: n,
+                    ..want
+                })
+                .as_deref(),
+            Some("condition, matching count differ")
+        );
     }
 
     #[test]
