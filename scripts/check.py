@@ -51,19 +51,20 @@ def steps() -> list[Step]:
         Step("format", "zig fmt is not advisory; an unformatted tree makes every diff noisy",
              ["zig", "fmt", "--check", "src", "bench", "build.zig"]),
 
-        # zlint's config is an allowlist: naming any rule disables the rest. The
+        # zlint.json names every rule. Up to v0.9 naming any rule disabled the
+        # rest; v0.10 runs unnamed rules at their defaults. Either way the
         # canary below is what stops this step from passing vacuously.
-        Step("zlint", "lint with the explicit allowlist in zlint.json",
+        Step("zlint", "lint with every rule named in zlint.json",
              ["zlint", "--deny-warnings"]),
 
-        Step("zlint-not-vacuous", "prove zlint would still fail: a config that names any "
-                                  "rule disables every rule it does not name",
+        Step("zlint-not-vacuous", "prove zlint would still fail: a config or a version can "
+                                  "silence rules nobody turned off",
              [sys.executable, str(Path(__file__).resolve()), "--canary"]),
 
         # The Python half of the toolchain. `src/` has zlint and `conformance/`
         # has clippy; the harness that produces every number in the reports had
         # nothing, and the rule set is an explicit `select` in ruff.toml for the
-        # same reason zlint's is an allowlist. Run through `uv` so it is the
+        # same reason zlint's names every rule. Run through `uv` so it is the
         # version bench/uv.lock pins, not whatever is on the machine.
         Step("ruff", "lint the harness against the explicit select in ruff.toml",
              ["uv", "run", "--project", str(ROOT / "bench"), "ruff", "check", "."]),
@@ -199,10 +200,11 @@ def steps() -> list[Step]:
 def canary() -> int:
     """Add an unused declaration and confirm zlint fails on it.
 
-    A `zlint.json` listing three rules as `off` and nothing else silently
-    disables every other rule; a tree in that state reports `0 errors, 0
-    warnings` vacuously, and can stay that way for weeks. A clean lint run is only evidence if a deliberate
-    violation would break it.
+    Up to zlint v0.9, a `zlint.json` listing three rules as `off` and nothing
+    else silently disabled every other rule; a tree in that state reports `0
+    errors, 0 warnings` vacuously, and can stay that way for weeks. v0.10 changed
+    those semantics, which is the other way a rule goes quiet unasked. A clean
+    lint run is only evidence if a deliberate violation would break it.
     """
     target = ROOT / "src/dist/common.zig"
     original = target.read_text()

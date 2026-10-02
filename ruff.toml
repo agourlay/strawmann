@@ -1,6 +1,6 @@
 # The Python half of the toolchain's lint set.
 #
-# `src/` is linted by zlint against an explicit allowlist and `conformance/` by
+# `src/` is linted by zlint against an explicit rule list and `conformance/` by
 # clippy against a named set in Cargo.toml; the harness that produces every
 # number in the reports had nothing. This is that gate, written the same way:
 # an explicit `select`, so adding a rule is a decision someone made rather than
