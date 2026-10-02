@@ -479,6 +479,36 @@ class NoiseTests(unittest.TestCase):
                              "spread is a trend, not noise, and a band built from it would "
                              "call a real change parity (major", text)
 
+    def test_passes_that_disagree_on_huge_pages_are_named_beside_their_qps(self):
+        """findings 62: dbpedia's W10 read 10,625 / 10,752 / 9,934, under
+        `DRIFT_MIN` and not monotone, and the fold medians the huge-page
+        fields, so a third pass mapped by smaller pages left no trace."""
+        import importlib
+        gib = 1 << 30
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _reload(root)
+            agg = importlib.reload(importlib.import_module("aggregate"))
+            for i, (q, huge) in enumerate(((10625.0, 4 * gib), (10752.0, 4 * gib),
+                                           (9934.0, gib)), start=1):
+                self._rep(root, f"lbl-rep{i}", [
+                    _row("W10-ef32", q, anon_huge_bytes=huge, file_pmd_bytes=0),
+                    # Agreeing passes, all zeros, and a pass from before the
+                    # fields were recorded each say nothing.
+                    _row("W3", 1000.0, anon_huge_bytes=4 * gib, file_pmd_bytes=0),
+                    _row("W4", 900.0, anon_huge_bytes=0, file_pmd_bytes=0),
+                    _row("W9", 13.0, **({"anon_huge_bytes": 4 * gib} if i > 1 else {}))])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                self.assertEqual(agg.main(["aggregate.py", "lbl",
+                                           "lbl-rep1", "lbl-rep2", "lbl-rep3"]), 0)
+            text = out.getvalue()
+            self.assertIn("W10-ef32: huge pages differ across the 3 passes "
+                          "(AnonHugePages 4.0 GiB, 4.0 GiB, 1.0 GiB) beside qps "
+                          "10,625, 10,752, 9,934", text)
+            for wid in ("W3", "W4", "W9"):
+                self.assertNotIn(f"{wid}: huge pages", text)
+
     def test_a_folded_floor_says_mixed_when_the_passes_disagree(self):
         import importlib
         with tempfile.TemporaryDirectory() as tmp:

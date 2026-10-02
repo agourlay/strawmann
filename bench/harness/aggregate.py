@@ -142,6 +142,42 @@ def _paging_note(got: list[dict]) -> str:
     return f" (major faults {mf[0]:,.0f} to {mf[-1]:,.0f} across them: the engine was paging)"
 
 
+#: How far the passes' huge-page bytes must disagree, as a share of the
+#: largest, before `_huge_page_note` names them. See there.
+HUGE_SPREAD_MIN = 0.10
+
+#: `/proc/<pid>/smaps_rollup`'s names for `procstat.HUGE_FIELDS`, which is
+#: what a reader greps for.
+_HUGE_NAMES = {"anon_huge_bytes": "AnonHugePages", "file_pmd_bytes": "FilePmdMapped"}
+
+
+def _huge_page_note(wid: str, got: list[dict]) -> str | None:
+    """Each pass's huge-page bytes beside its qps, when the passes disagree.
+
+    findings 62: strawmANN's third pass reads 6 to 7% slower on every W10
+    point on dbpedia, two nights running. That is below `DRIFT_MIN` and not
+    monotone, so no drift note fires, and the fold medians the huge-page
+    fields like any measured column, which hides a third pass mapped by
+    smaller pages behind the two that were not. Keyed on the pages alone, so
+    the note appears whether or not qps moved with them.
+    """
+    parts = []
+    for k in procstat.HUGE_FIELDS:
+        vals = [r.get(k) for r in got]
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in vals):
+            continue
+        top = max(vals)
+        if top == 0 or (top - min(vals)) / top < HUGE_SPREAD_MIN:
+            continue
+        parts.append(f"{_HUGE_NAMES[k]} {', '.join(procstat.human_bytes(v) for v in vals)}")
+    if not parts:
+        return None
+    qps = [r.get("qps") for r in got]
+    qps_text = ", ".join(f"{q:,.0f}" if isinstance(q, (int, float)) else "n/a" for q in qps)
+    return (f"{wid}: huge pages differ across the {len(got)} passes "
+            f"({'; '.join(parts)}) beside qps {qps_text}")
+
+
 def _rep_drift(vals: list) -> float | None:
     """Relative first-to-last change, when the passes moved one way only.
 
@@ -336,6 +372,8 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
                          f"{n} passes; that spread is a trend, not noise, and a "
                          f"band built from it would call a real change parity"
                          + _paging_note(got))
+        if (huge := _huge_page_note(wid, got)) is not None:
+            notes.append(huge)
         out.append(merged)
     return out, rsd, notes
 
