@@ -115,6 +115,10 @@ pub fn fuzzConnection(alloc: std.mem.Allocator, input: []const u8) !void {
 ///
 /// §8.8 lists "wrong wire types, deeply nested messages, dimension mismatches"
 /// All three land here.
+///
+/// Every decode error is discarded (`catch {}`): an error is the decoder
+/// rejecting bad input, which is the correct outcome. What this hunts is a
+/// panic, a hang or UB on the way to that error.
 pub fn fuzzProtoMessages(input: []const u8) void {
     const msg = proto.messages;
 

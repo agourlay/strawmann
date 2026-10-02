@@ -530,7 +530,8 @@ pub fn boundPort(fd: linux.fd_t) !u16 {
 /// sends the next request. That shows up as a bimodal latency distribution with
 /// a ~40 ms mode, which would wreck the p99 numbers §7.4 asks for.
 pub fn setNoDelay(fd: linux.fd_t) void {
-    // TCP_NODELAY == 1.
+    // TCP_NODELAY == 1. Fails only on a socket that is not TCP, which an
+    // accepted connection always is.
     sys.setsockoptInt(fd, linux.IPPROTO.TCP, 1, 1) catch {};
 }
 
@@ -567,6 +568,8 @@ pub fn pinToCpus(cpus: []const usize) void {
     }
     // Affinity may legitimately be denied in a container; a benchmark run
     // that cannot pin is a §7.1 environment failure to report, not a crash.
+    // The report is the harness's: `provenance.affinity` reads every thread's
+    // mask back from `/proc`, so a refused pin shows on the row.
     linux.sched_setaffinity(0, &set) catch {};
 }
 
@@ -1287,7 +1290,14 @@ fn parseInput(server: *Server, t: *IoThread, c: *Connection, ci: usize) void {
             return;
         };
         pos += consumed;
-        c.h2c.sendInitialFrames(&c.out) catch {};
+        // Cannot run out of room: nothing has been written to a connection
+        // that has only now sent its preface. Closed rather than ignored if it
+        // ever did, as the preface failure above is: a peer that never sees our
+        // SETTINGS waits on them, and the connection would hang without a word.
+        c.h2c.sendInitialFrames(&c.out) catch {
+            closeConn(t, c, ci);
+            return;
+        };
     }
 
     while (pos < c.in_len) {
@@ -1313,6 +1323,8 @@ fn parseInput(server: *Server, t: *IoThread, c: *Connection, ci: usize) void {
                 h2.Error.CompressionError => .compression_error,
                 else => .protocol_error,
             };
+            // Best effort: the connection closes on the next line whether or
+            // not the peer can be told why.
             c.h2c.sendGoaway(&c.out, code) catch {};
             flushOut(t, c, ci);
             closeConn(t, c, ci);
@@ -1511,6 +1523,8 @@ fn flushOut(t: *IoThread, c: *Connection, ci: usize) void {
                 return;
             } orelse {
                 // Socket buffer full: wait for writability rather than spinning.
+                // `epoll_ctl(MOD)` fails only on an fd epoll does not hold, and
+                // `c.fd` is registered for as long as `c` is live.
                 sys.epollMod(t.epfd, c.fd, wantEvents(c, true), @intCast(ci)) catch {};
                 return;
             };
@@ -1525,6 +1539,7 @@ fn flushOut(t: *IoThread, c: *Connection, ci: usize) void {
         resumePending(c);
         if (c.out.len == 0) break;
     }
+    // As above: `c.fd` is registered while `c` is live.
     sys.epollMod(t.epfd, c.fd, wantEvents(c, false), @intCast(ci)) catch {};
 }
 

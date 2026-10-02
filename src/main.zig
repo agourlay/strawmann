@@ -547,6 +547,7 @@ pub fn main(init: std.process.Init) !void {
             "\nstats: accepted={d} connections_refused={d} requests={d} submit_full={d}\n",
             .{ st.accepted, st.connections_refused, st.requests, st.submit_full },
         ) catch "";
+        // A closing stats line on stderr; a failed write has nowhere to go.
         w.print("{s}", .{line}) catch {};
         w.flush() catch {};
     }
