@@ -154,8 +154,7 @@ class RecallTests(unittest.TestCase):
         settle findings 42: each run overwrote the last and the results had to
         be copied aside by hand between sweeps. A standard `fullrun` never hits
         it -- §4 gives each collection one parameter set -- so it bites exactly
-        the repeated-sweep experiment findings 42 and `validation.md` item 6
-        both call for.
+        the repeated-sweep experiment findings 42 called for.
         """
         rc = self.m["recall"]
         base = rc.recall_path("lbl", "dbpedia-openai-1m", "bench6")

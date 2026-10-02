@@ -319,14 +319,7 @@ a second microarchitecture, a two-socket host, or a documented cost model.
 
 In rough order of how much each would buy:
 
-1. ~~A gated host.~~ **Done for the `as-deployed` profile** (2026-08-17: fixed
-   governor, boost off, quiescent; not isolated cores, which selects the
-   profile rather than failing the gate). An `isolated` run does not exist.
-2. ~~A measured noise floor.~~ **Done, and redone on a gated host** (see
-   above). The suspicion recorded here was correct: W13's 18.63% was something
-   specific rather than general jitter, and on a quiet gated box the same row
-   measures 1.25%.
-3. **One regression a Qdrant developer already understands.** Two commits from
+1. **One regression a Qdrant developer already understands.** Two commits from
    their history where the performance delta is known, run through this harness
    blind. If the verdict matches what they know, the tool has demonstrated the
    thing it claims. If it does not, that is the more valuable outcome.
@@ -337,107 +330,13 @@ In rough order of how much each would buy:
    `qdrant_ab.py <img-a> <img-b> --reps 3`. Deferred is not the same as
    unnecessary, which is why it stays on this list rather than being struck
    from it.
-4. **A second pair of eyes on the workload table.** §4's rows encode assumptions
+
+2. **A second pair of eyes on the workload table.** §4's rows encode assumptions
    about what is worth measuring. W12 has already proven unusable as specified,
    and W11 was silently corrupting W13 until an audit caught the ordering. There
    are likely more.
 
-5. **A licence for the 2026-08-28 dbpedia-openai-1m rows.** That run was
-   stopped after five of its six arms, so it has two complete interleaved
-   passes per engine and no conformance row: the differ runs after the passes.
-   The rows are measured and the report renders, banner and all; only §8's
-   licence is missing. It needs no re-measurement and is immune to load,
-   because it grades correctness rather than speed:
-
-   ```
-   fullrun.py --dataset dbpedia-openai-1m --skip build \
-              --skip strawmann --skip qdrant \
-              --strawmann-label strawmann --qdrant-label qdrant
-   ```
-
-   About thirty minutes, and it would also produce this project's first T0-T4
-   row at 1M x 1536. The build must still be the one those rows were measured
-   at (2026-08-27 22:25, "The header names the engine the run will actually
-   measure") against Qdrant 1.19.0.
-
-6. ~~Whether Qdrant's SQ8 plateau is the rescore pool.~~ **Done, and it is**
-   (2026-08-28, findings 42). `bench6` swept at oversampling none/2/4/8:
-   recall@10 rises 0.8929 -> 0.9888 at `ef` 512 while recall@1 stays invariant
-   to four decimals across the whole eightfold range at `ef` >= 128. The
-   plateau is the pool and nothing else, `oversampling 2` recovers ~90% of it,
-   and at that setting Qdrant reaches 0.9888 against strawmANN's 0.9891 -- so
-   §7.4's refusal of the quantized rows is measuring a default rather than an
-   engine that recalls worse.
-
-   **What it did not settle** is whether the comparison should therefore be
-   re-run at matched oversampling. §7.4 compares at equal recall, and reaching
-   equality by giving one engine a knob the other did not need is a different
-   experiment from the one the table holds. That question is now the open one,
-   and it is a spec question rather than a measurement.
-
-7. ~~A `sched_coverage` that survives a thread exiting.~~ **Done, and the
-   answer reverses the reading** (2026-08-28, findings 41).
-   `procstat.SchedSampler` banks per-thread counters during the row, so a
-   thread that exits is still counted; it costs a measured `threads x 45 us`
-   per poll, which is 0.2% of a core for strawmANN and 1.4% for Qdrant, and is
-   charged to the client cpuset rather than the engine's. On by default since,
-   with `--no-sched-sampler` to opt out, and every row carries `sched_sampled`
-   beside a `sched_coverage` that still means what it always did. The share of
-   the row's CPU the surviving threads account for, which is the engine's
-   thread churn and the signal this whole entry rests on.
-
-   Measured, W3 and W4 do not show the effect the W10 sweep does: Qdrant waits
-   0.02% of its on-cpu time on W3 (*less* than strawmANN's 0.75%) and 0.61% on
-   W4, against 143x-264x on the W10 rows. The entry's refusal to extend the
-   claim to those rows was right.
-
-   **What is now open** is why W10 differs. It runs at about twice W4's
-   throughput; and W3/W4 follow an upload whose indexing threads exit during
-   them, so they may be measuring an engine still finishing background work.
-   Neither is established, and the second would be a different problem from
-   scheduling.
-
-   **Both candidates resolved, 2026-08-29.** The second was right: findings 44
-   traced W3 to Qdrant's optimizer still running, and `settle_engine` removes
-   it. On the settled pair Qdrant's W3 wait is 0.003 s against strawmANN's
-   0.027 s. The first is right too, and it inverts findings 41's title. Across
-   the settled W10 sweep the wait *falls* as `ef` rises (2.81 / 2.45 / 2.09 /
-   1.55 s at `ef` 32 / 64 / 128 / 512, three passes agreeing to two decimals),
-   because a wider search serves fewer queries per second and so makes fewer
-   scheduling decisions per second. Queueing tracks the arrival rate rather
-   than the depth of each search, which is why the high-throughput row is the
-   one that shows it. The ratio to strawmANN stays in the hundreds to
-   thousands and that half of findings 41 stands; "it scales with `ef`" does
-   not.
-
-8. ~~A per-engine noise floor, from one completed `--reps 3`.~~ **Done**
-   (2026-08-28, `sm-sift-perf` / `qd-sift-perf`). Three interleaved passes on
-   sift1m with `--perf`, all 192 rows `foreign=0` and `gate=pass`, T4 licensed.
-   Qdrant's W3 floor is **28.16%** against strawmANN's 0.51%, so findings 38 is
-   confirmed and understated, and `compare.py` now bands W3 at ±84.5% and
-   prints `parity`. Findings 44 has the cause.
-
-   **Quantified 2026-08-29** (findings 44): with `settle_engine` on, Qdrant's
-   W3 reads 1,951 / 1,965 / 1,977 across three passes, RSD 0.66%, at 541 µs
-   per query on every pass, and the headline `search, p=1` inverts to 0.86x.
-   The shared `--rps-reference` also landed, so the open-loop rows ran both
-   engines at one offered load. What is still not on disk is a *complete*
-   clean pair: the settled run's strawmANN rep1 carries five `foreign` rows
-   from builds on the host. One more three-pass sift1m run on a box with
-   nothing else on it (this session closed too, since the CLI idles at 8 to 10%
-   of a core and was the margin on at least one refused row) is what the
-   front page needs before it can quote either engine's W3.
-
-   **The clean pair landed 2026-08-29 16:03 to 18:02.** `foreign=0` and
-   `gate=pass` on all 8 label directories x 32 rows, `perf=32` and
-   `sampled=32` on each, T4 `licenses_comparative=true`, hash
-   `8983d7b1b8da68b4`. Both arms fold W3 at **0.56%** (strawmANN 1,671,
-   Qdrant 1,971) so the ratio is banded at ±2.38% instead of ±84.5% and
-   `search, p=1` reads **0.85x** rather than `parity`. strawmANN's 3.24%
-   in the note above was `rep1`'s contamination, not the engine. The front
-   page may now quote either engine's W3.
-
-9. **A corpus that separates dimension from metric** (findings 34). The
+3. **A corpus that separates dimension from metric** (findings 34). The
    per-build graph draw is ~7x narrower at d=1536 than at SIFT1M, uniformly
    across fp32, SQ8, binary and PQ. Corpus size is now ruled out directly,
    dbpedia-openai-100K at the same d=1536 spreads 0.0002 to 0.0006 at `ef` 512,
@@ -445,97 +344,15 @@ In rough order of how much each would buy:
    together. A d=1536 euclid corpus, or SIFT1M scored under cosine, would
    separate them.
 
-10. ~~Software prefetch in the scan and the search loop.~~ **Refuted**
-   (findings 45). At
-   d=1536 strawmANN's brute force demand-misses 24% of the corpus per query
-   against Qdrant's 2.5%, at IPC 0.26, and W4's workers run at 0.31 against
-   0.68 on the same DRAM traffic. Prefetching row `off + k` in
-   `bruteForceRange` and the neighbour rows in the HNSW loop, then W9 and W4
-   on db100k with counters on, is the experiment; findings 2 already measured
-   the window it would be filling.
-
-   ~~**Done, and the answer is no** (2026-08-30).~~ Both prefetch shapes were
-   built and measured. The whole-row version halves W9's demand DRAM fills
-   (4.56 G to 2.14 G) and changes the time by 1%: the scan runs at 61.8 GB/s
-   against a 73.1 GB/s bus, so it is bandwidth-bound and there is no latency
-   left to hide. Findings 37 had already measured 61 GB/s on a corpus ten times
-   larger and called it bandwidth-bound; findings 45 contradicted it and was
-   wrong. The code is reverted and this item is closed as refuted rather than
-   done.
-
-
-11. ~~A refusal when an aggregate's environment hash is not the run's.~~
-   **Done** (findings 46). `bench/results/noise.json` and the twelve-run table in
-   findings 38 are scoped to one environment hash, and the harness has no
-   opinion when a figure from a different one is read against them. The
-   SMT-off/SMT-on comparison that cost this session two diagnostic runs was
-   made in prose, by a reader who had the hash on screen. The cross-corpus
-   and cross-engine refusals already exist and are the same shape;
-   `regression.floor_for` already knows which run it is judging. Cheap, and
-   it forecloses a mistake that reads as a 30% engine regression.
-
-   ~~**Done** (2026-08-30).~~ `bench/setup.py` already printed `env_hash=` and
-   nothing read it. `workloads.py` now parses it from the gate's own output.
-   Beside `profile`, and for the reason that comment gives, so `setup.py` stays
-   the one definition, and stamps it into `run.json`. `aggregate.py` copies it
-   into each folded `noise.json` next to `dataset`, `regression.floor_for`
-   carries it through a fold and resolves a disagreement to `None`, and
-   `compare.parity_band` refuses a floor whose environment is not the run's.
-   Permissive where it cannot know, like the dataset rule: an unstamped floor
-   predates this and stays usable, a run with no hash cannot contradict
-   anything, and only a disagreement refuses. One arm disagreeing is enough,
-   because a ratio's band is both arms' spread.
-
-12. **An SMT-off pass over the settled sift1m labels** (findings 46). Across
+4. **An SMT-off pass over the settled sift1m labels** (findings 46). Across
    the SMT change strawmANN moved 1.5% and Qdrant 30%, which is what findings
    36 and 41 predict from one-thread-per-core pinning against 43 multiplexed
    threads, but it is one environment against a recollection of another, and
    that is the error findings 46 is about. One pass at SMT-off, same labels,
    settles whether the asymmetry is real. Until it exists the pairing is a
    hypothesis and must not be quoted.
-13. ~~What Qdrant's W9 is actually doing.~~ **Done** (findings 45). It
-   serves 128.1 qps
-   where a full fp32 scan of the 614.4 MB corpus would need 78.7 GB/s, above
-   the 73.1 GB/s this host delivers, with a quarter of strawmANN's demand
-   fills. Something is reading less than the corpus. Until it is known whether
-   that is cross-query caching, a narrower representation, or a non-exhaustive
-   path, W9 is not an exact-search comparison and its ratio must not be quoted
-  . The same defect findings 21 found in the first recall run.
 
-   **Both sides read, 2026-08-30.** strawmANN's exact path is
-   `search(..., .exact, ...)` falling straight through to
-   `bruteForce(coll, query, out)`: one full scan of the collection, per query,
-   on the worker that dequeued it. There is no batching interface anywhere on
-   that path. Qdrant's plain (exact) index is built around the opposite shape,
-   `search(query_vectors: &[&QueryVector], ...) -> Vec<Vec<ScoredPointOffset>>`,
-   feeding a `BatchFilteredSearcher` whose `peek_top_visible` walks the storage
-   once and scores *every query in the batch* per harvested block of points
-   (`point_scorer.rs`, `VECTOR_READ_BATCH_SIZE`). One engine re-reads the
-   corpus per query; the other is written to read it once per batch.
-
-   What is not yet established is whether W9 fills that batch. bfb sends one
-   query per request at `-p 8`, so the slice may well arrive length-1 and the
-   amortisation come from somewhere else. Eight concurrent scans of one
-   614 MB array can convoy in LLC, the follower riding lines the leader pulled.
-
-   **The measurement that separates them, and a number that makes it
-   falsifiable.** At `-p 1` no sharing of any kind is available, so a full
-   fp32 scan is bounded by the bus: 73.1 GB/s / 614.4 MB = **119 qps, for
-   either engine**. Run W9 at `-p 1` and `-p 8` on both. If Qdrant exceeds 119
-   at `-p 1`, it is not scanning the corpus and this is a correctness question
-   about the row rather than an efficiency one. If it obeys the bound at `-p 1`
-   and beats it at `-p 8`, the amortisation is real and the only question left
-   is which mechanism.
-
-   ~~**Answered 2026-08-30: the amortisation is real.**~~ Qdrant obeys the
-   bound alone (57.7 qps, and *slower* than strawmANN's 66.7, so nothing is
-   being skipped) and beats it concurrently (128.1 qps, an implied 78.7 GB/s
-   against a 73.1 GB/s bus). W9 is a fair row and its ratio stands. strawmANN
-   runs at 90% of single-core bandwidth at `-p 1` and 85% of aggregate at
-   `-p 8`, so it is at the ceiling of a design that re-reads the corpus per
-   query. Closed; what it opens is item 14.
-
-14. **Gathering concurrent exact queries into one scan** (findings 45). The
+5. **Gathering concurrent exact queries into one scan** (findings 45). The
    only lever on a bandwidth-bound row is reading fewer bytes, and W9 has eight
    queries in flight over one 614 MB arena. Concurrency scaling is 1.51x
    against Qdrant's 2.22x. `handlers.BatchJob` already fans one request's
@@ -545,7 +362,7 @@ In rough order of how much each would buy:
    patch, and it is the only named change with a quantified ceiling at
    d=1536.
 
-15. **A decision on whether to keep an h5 copy per tier.** bfb's accuracy
+6. **A decision on whether to keep an h5 copy per tier.** bfb's accuracy
    path needs h5, tar or sparse (see
    [ground-truth.md](ground-truth.md) §1.1), so scoring recall with bfb
    would mean a second copy of every dataset, scored against a third
