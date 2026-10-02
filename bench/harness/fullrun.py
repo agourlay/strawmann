@@ -101,8 +101,44 @@ def sh(argv: list[str], timeout: int = 600, **kw) -> tuple[int, str]:
         return 127, str(e)
 
 
+#: `(phase, monotonic start)` for every `say`. On dbpedia-openai-1m 0930 the
+#: rows' own wall time covered 5.4 of the run's 8.2 hours, and nothing said
+#: where the other 2.8 went: recall sweeps, setup, drops and the differ print
+#: headers and no times.
+PHASES: list[tuple[str, float]] = []
+
+#: Phases shorter than this are counted in the summary rather than listed.
+PHASE_LIST_MIN_S = 30.0
+
+
 def say(msg: str) -> None:
-    print(f"\n=== {msg} ===", flush=True)
+    PHASES.append((msg, time.monotonic()))
+    print(f"\n=== {msg} === [{dt.datetime.now(dt.UTC).astimezone():%H:%M:%S}]", flush=True)
+
+
+def phase_summary(phases: list[tuple[str, float]], end: float) -> list[str]:
+    """Each phase's duration, in run order, ending at `end`.
+
+    A phase lasts until the next one starts, so a pass header that is
+    followed at once by its first arm reads as seconds and is folded into the
+    short-phase line with the others.
+    """
+    if not phases:
+        return []
+    def hms(s: float) -> str:
+        s = round(s)
+        return f"{s // 3600}:{s // 60 % 60:02d}:{s % 60:02d}"
+    ends = [t for _, t in phases[1:]] + [end]
+    lines = [f"=== where the {hms(end - phases[0][1])} went ==="]
+    short, short_s = 0, 0.0
+    for (msg, start), stop in zip(phases, ends, strict=True):
+        if stop - start < PHASE_LIST_MIN_S:
+            short, short_s = short + 1, short_s + stop - start
+            continue
+        lines.append(f"  {hms(stop - start):>8}  {msg}")
+    if short:
+        lines.append(f"  {hms(short_s):>8}  {short} phases under {PHASE_LIST_MIN_S:.0f} s each")
+    return lines
 
 
 def qdrant_segment_env() -> dict[str, str]:
@@ -2696,4 +2732,9 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    try:
+        sys.exit(main(sys.argv))
+    finally:
+        # On the way out whatever the exit, since a run that stopped halfway
+        # is the one whose hours most need accounting for.
+        print("\n" + "\n".join(phase_summary(PHASES, time.monotonic())), flush=True)

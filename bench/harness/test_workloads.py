@@ -3613,6 +3613,32 @@ class DriverRobustnessTests(unittest.TestCase):
         self.assertIn("2 engine processes alive", out.getvalue())
 
 
+class PhaseSummaryTests(unittest.TestCase):
+    """dbpedia 0930: the rows covered 5.4 of 8.2 hours and nothing said where
+    the rest went."""
+
+    def test_each_phase_lasts_until_the_next_one_starts(self):
+        import fullrun
+        phases = [("pass 1 of 3", 0.0), ("strawmann: §4's rows -> x", 2.0),
+                  ("x: recall sweeps", 3600.0), ("§8 conformance", 5400.0)]
+        self.assertEqual(fullrun.phase_summary(phases, 6000.0), [
+            "=== where the 1:40:00 went ===",
+            "   0:59:58  strawmann: §4's rows -> x",
+            "   0:30:00  x: recall sweeps",
+            "   0:10:00  §8 conformance",
+            "   0:00:02  1 phases under 30 s each",
+        ])
+        self.assertEqual(fullrun.phase_summary([], 1.0), [])
+
+    def test_say_records_the_phase_and_stamps_the_header(self):
+        import fullrun
+        out = io.StringIO()
+        with mock.patch.object(fullrun, "PHASES", []), contextlib.redirect_stdout(out):
+            fullrun.say("W0")
+            self.assertEqual([m for m, _ in fullrun.PHASES], ["W0"])
+        self.assertRegex(out.getvalue(), r"^\n=== W0 === \[\d\d:\d\d:\d\d\]\n$")
+
+
 class ArmStorageTests(unittest.TestCase):
     """An arm frees its engine's storage when it ends."""
 
