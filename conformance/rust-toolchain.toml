@@ -7,5 +7,5 @@
 # `.github/workflows/ci.yml` reads the channel out of this file rather than
 # naming a version of its own, so there is one pin and not two that can drift.
 [toolchain]
-channel = "1.98"
+channel = "1.99"
 components = ["clippy", "rustfmt"]
