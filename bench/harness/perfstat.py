@@ -281,7 +281,7 @@ def attach_blocked(pid: int) -> str | None:
     except OSError:
         return None
     me = os.geteuid()
-    if uid == me or me == 0:
+    if me in (uid, 0):
         return None
     return (f"the engine runs as uid {uid} and this harness as uid {me}; "
             f"perf_event_open on another user's process needs ptrace permission, "

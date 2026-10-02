@@ -594,7 +594,7 @@ def estimated_minutes(dataset: str, reps: int) -> tuple[float, str] | None:
     current: dict[str, tuple[float, str, list[float]]] = {}
     try:
         today = workloads.stamp_hash(workloads.harness_stamp())
-    except Exception:  # an estimate never fails a run
+    except Exception:  # noqa: BLE001  (an estimate never fails a run)
         today = None
     table_ids = planned_rows()
     for d in sorted(RESULTS.glob("*/rows.json")):
@@ -1545,7 +1545,7 @@ def foreign_load() -> list[str]:
                                setup.QUIESCENT_SAMPLE_S) <= setup.FOREIGN_BUDGET_CORES:
             return []
         return setup.busy_processes(before, after, setup.QUIESCENT_SAMPLE_S)
-    except Exception:
+    except Exception:  # noqa: BLE001  (a warning about other load, not a gate)
         return []
 
 

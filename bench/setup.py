@@ -443,7 +443,7 @@ def check_toolchain(e: Env) -> None:
     try:
         ver = subprocess.run(["zig", "version"], capture_output=True, text=True,
                              timeout=30).stdout.strip()
-    except Exception:
+    except Exception:  # noqa: BLE001  (failed below as zig=missing)
         ver = "missing"
     e.note(f"zig={ver}")
     (e.ok if ver.startswith("0.16") else e.fail)(f"zig={ver}"
@@ -627,7 +627,7 @@ def check_quiescent(e: Env) -> None:
         after = _cpu_seconds()
         busy = busy_processes(before, after, QUIESCENT_SAMPLE_S)
         foreign = foreign_cores(before, after, QUIESCENT_SAMPLE_S)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  (reported as a failure, see below)
         # Not `pass`. This check exists to catch foreign load; swallowing the
         # error makes it report a clean machine when it could not look, which
         # is the one outcome worse than not having the check.

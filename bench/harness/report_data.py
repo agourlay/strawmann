@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import itertools
 import json
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -850,7 +851,7 @@ def describe(wid: str) -> str:
     global _PURPOSES
     if _PURPOSES is None:
         _PURPOSES = purposes()
-    return _PURPOSES.get(wid) or VARIANTS.get(wid) or DESCRIPTIONS.get(wid.split("-")[0], "")
+    return _PURPOSES.get(wid) or VARIANTS.get(wid) or DESCRIPTIONS.get(wid.split("-", maxsplit=1)[0], "")
 
 def ratio_value(rs: str | None) -> float | None:
     """`compare.Row.ratio` as a number, or None when it is a refusal or a word
@@ -895,7 +896,7 @@ def row_bracket_s(r) -> float | None:
     on eight cpus (dbpedia 0930, W11)."""
     wall = r.get("wall_s") or r.get("duration_s")
     bg = r.get("background_s")
-    if isinstance(bg, (int, float)) and bg == bg and (not wall or bg > wall):
+    if isinstance(bg, (int, float)) and not math.isnan(bg) and (not wall or bg > wall):
         return bg
     return wall
 

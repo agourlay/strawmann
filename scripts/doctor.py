@@ -200,7 +200,7 @@ def section_host(quick: bool) -> tuple[Section, dict]:
         so the first token is sometimes a word like "machine" and sometimes a
         `key=value`. Take the key when there is one, else the first few words.
         """
-        head = text.split(":")[0].split(",")[0].strip()
+        head = text.split(":", maxsplit=1)[0].split(",", maxsplit=1)[0].strip()
         if "=" in head:
             return head.split("=")[0]
         return " ".join(head.split()[:3])[:22]

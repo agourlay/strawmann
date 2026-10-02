@@ -1953,7 +1953,7 @@ def matched_anchors(a_label: str, b_label: str) -> tuple[dict, dict, int] | None
         a, b = rd.load_run(a_label), rd.load_run(b_label)
         rows = rd.matched_ratios(rd.frontier_points(a, bfb_only=True),
                                  rd.frontier_points(b, bfb_only=True))
-    except (Exception, SystemExit):
+    except (Exception, SystemExit):  # noqa: BLE001  (no anchor line, never a failed compare)
         return None
     if len(rows) < 2:
         return None

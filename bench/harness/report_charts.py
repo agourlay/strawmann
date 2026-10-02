@@ -1222,7 +1222,7 @@ def encoding_name(collection: str, default: str) -> str:
     import workloads
     if workloads.OVERSAMPLING_POLICY is workloads.OversamplingPolicy.pool and \
             collection in workloads.quantized_collections():
-        return default.split(",")[0] + ", rescore pool matched to ef"
+        return default.split(",", maxsplit=1)[0] + ", rescore pool matched to ef"
     return default
 
 

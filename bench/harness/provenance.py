@@ -151,7 +151,7 @@ def affinity(pid: int | None) -> str | None:
     # thread. The comparison's central fairness fact was stated backwards.
     def first_cpu(mask: str) -> int:
         """Lowest CPU in a list like `4-11` or `10`, for ordering."""
-        head = mask.split(",")[0].split("-")[0]
+        head = mask.split(",", maxsplit=1)[0].split("-", maxsplit=1)[0]
         return int(head) if head.isdigit() else -1
 
     # Ordered by thread count then by *number*, not by string: strawmANN pins
@@ -515,7 +515,7 @@ def qdrant_native_build(pid: int | None) -> dict:
             out.update(version=str(got.get("version")) or None,
                        version_source=f"server REST :{port}")
             break
-        except Exception:
+        except Exception:  # noqa: BLE001  (no server answering is a missing version)
             continue
     return out
 

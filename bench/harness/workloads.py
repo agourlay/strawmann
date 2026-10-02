@@ -2584,7 +2584,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
         def _reap() -> None:
             try:
                 bg_done["text"] = bg.communicate()[0]
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  (recorded, and the row reports it)
                 bg_done["error"] = f"{type(e).__name__}: {e}"
             finally:
                 bg_done["t1"], bg_done["e1"] = time.monotonic(), time.time()

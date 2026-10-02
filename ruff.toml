@@ -52,6 +52,16 @@ select = [
               # overwritten inside its own loop.
     "PGH",    # blanket `noqa` and `type: ignore`.
     "T10",    # a debugger breakpoint left in.
+    "A",      # a builtin shadowed: an `id` or `max` that is no longer the
+              # builtin three lines further down.
+    "BLE",    # `except Exception`. Every one here is deliberate and says why
+              # in its `noqa`, so a new one that swallows a mid-run failure has
+              # to as well.
+    "RSE",    # redundant parentheses on a raised exception.
+    "YTT",    # `sys.version` compared as a string or a one-digit tuple.
+    "PLR0124", "PLR1714",  # a name compared with itself; repeated equality
+              # comparisons against one name.
+    "PLC0207",  # `split` with no `maxsplit` where only the first part is read.
 ]
 
 # `sys.path.insert` before the local imports is how every entry point here

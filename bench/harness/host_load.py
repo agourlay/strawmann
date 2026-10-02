@@ -111,7 +111,7 @@ def foreign_load(threshold: float = 20.0) -> str:
     try:
         out = subprocess.run(["ps", "-eo", "pcpu=,args="], capture_output=True,
                              text=True, timeout=10).stdout
-    except Exception:
+    except Exception:  # noqa: BLE001  (a moment's view; none is not a failure)
         return ""
     return foreign_from_ps(out, threshold)
 
