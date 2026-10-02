@@ -650,16 +650,35 @@ W9_PARALLEL = int(os.environ.get("W9_PARALLEL", 8))
 #: builder" in #176 is the serverless collections module, not the field index
 #: W12 depends on, which bfb still builds the same way.
 #:
-#: A pin move is still a change of instrument. Rows measured under `0c1aafee`
+#: Moved forward to `29240511` on 2026-10-02, seven commits on: #177 to #183,
+#: multivector and hybrid (prefetch, fusion) queries, `--acorn`, and a
+#: serverless fix. Advanced for the same reason: none of it changes a request
+#: §4's rows send, which are dense, file-sourced, unfused and without prefetch:
+#:
+#:   * `search/from_config.rs`, the path every dataset-sourced row takes
+#:     (`search --file`), moves the search params into `search_params()`
+#:     unchanged and builds the dense query through `DenseQuery::Single`'s
+#:     `into_vector_input`, which is the same `VectorInput::new_dense`.
+#:     Prefetch and fusion are taken only when a config asks for them.
+#:   * `--acorn` and `--acorn-max-selectivity` default off and are read only
+#:     there; with the flag off the request carries no ACORN params.
+#:   * `generators/queries.rs` keeps `FromStart` at `req_id % n` and
+#:     `RandomSample` per element, so W5's batch reasoning (`search_config`)
+#:     still holds; filter generation is untouched.
+#:   * `search/from_args.rs` builds the same dense `VectorInput` earlier.
+#:   * `Cargo.lock` moves `qdrant-client` 1.16.1-dev from rust-client
+#:     `31b5f12` to `18002ab`, whose one commit (#297) is serverless only.
+#:
+#: A pin move is still a change of instrument. Rows measured under `fc6632e5`
 #: and rows measured under this one carry different `bfb_pin` stamps, and
 #: `compare.py` reads that stamp — which is the mechanism working, not a
 #: problem to route around.
-BFB_PIN = ("dev @ fc6632e5 (qdrant/bfb#176; carries #172, findings 32's "
+BFB_PIN = ("dev @ 29240511 (qdrant/bfb#183; carries #172, findings 32's "
            "--rps reaping fix)")
 
 #: The short hash inside `BFB_PIN`, which is what the checkout is checked
 #: against. Written once, parsed once, rather than repeated.
-BFB_COMMIT = "fc6632e"
+BFB_COMMIT = "2924051"
 BFB_CLIENT = "qdrant-client 1.16.1-dev (git dev branch)"
 HARNESS_CLIENT = "qdrant-client =1.19.0"
 

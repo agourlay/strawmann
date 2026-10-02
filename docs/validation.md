@@ -291,8 +291,8 @@ own in about half an hour; the report's own banner now prints the command.
 The §9 blocker this paragraph used to name is gone: the pin needed a bfb built
 at `6f216634`, a one-commit fork, and the checkout kept drifting off it. The
 patch merged upstream as qdrant/bfb#172 on 2026-08-27, and `BFB_PIN` has been
-plain upstream `dev` ever since (`0c1aafee` then, `fc6632e5` since
-2026-09-08) which any clone can check out.
+plain upstream `dev` ever since (`0c1aafee` then, `fc6632e5` from
+2026-09-08, `29240511` since 2026-10-02) which any clone can check out.
 
 ## Milestone status
 

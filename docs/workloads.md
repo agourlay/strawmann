@@ -14,11 +14,16 @@ manifest and digest work in Python.
 Pinned reference, per §8.9 and §4.1:
 
 ```
-qdrant/bfb  branch dev  HEAD fc6632e5  "paginated serverless ListCollections
-                                        and KeywordIndex builder (#176)"  2026-09-08
+qdrant/bfb  branch dev  HEAD 29240511  "Introduce hybrid queries (#183)"  2026-09-24
 ```
 
-Advanced from `0c1aafee` (#172, "--rps reaped at most one completion per
+Advanced from `fc6632e5` on 2026-10-02. The seven commits between them (#177
+to #183) add multivector and hybrid queries, `--acorn`, and a serverless fix;
+none of them changes a request these rows send, which are dense,
+file-sourced, unfused and without prefetch. `workloads.BFB_PIN` records the
+reading, file by file.
+
+`fc6632e5` had itself advanced from `0c1aafee` (#172, "--rps reaped at most one completion per
 rate-limiter tick", 2026-08-27), whose fix this still carries. The three
 commits between them add a serverless multi-collection mode in new files, and
 the shared code they touch keeps the single-collection path these rows measure:

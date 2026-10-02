@@ -283,7 +283,7 @@ flowchart LR
         qd["Qdrant 1.19<br/><i>image by digest, or a native<br/>binary by sha256 (--qdrant-binary)</i>"]
     end
 
-    bfb["bfb - dev @ fc6632e5<br/><b>load generator</b><br/>throughput, latency, tails"]
+    bfb["bfb - dev @ 29240511<br/><b>load generator</b><br/>throughput, latency, tails"]
     conf["conformance - Rust<br/><b>relevance generator</b><br/>T0-T4, recall, nDCG"]
     gate["bench/setup.py<br/><b>§7.1 host gate</b><br/>governor, boost, isolation<br/>+ is the machine idle?"]
     wl["workloads.py<br/>W0-W13"]
