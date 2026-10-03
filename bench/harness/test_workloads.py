@@ -3561,6 +3561,59 @@ class W9CpuSetTests(unittest.TestCase):
         self.assertEqual(ab.cpu_set("0-1,8,10-11"), {0, 1, 8, 10, 11})
 
 
+class CommitAbTests(unittest.TestCase):
+    """findings 69's driver: several builds of the engine, the same rows."""
+
+    def setUp(self):
+        self.ab = importlib.import_module("commit_ab")
+
+    def test_every_rep_runs_every_build_in_a_rotated_order(self):
+        self.assertEqual(self.ab.plan(["a", "b", "c"], 3), [
+            (1, "a"), (1, "b"), (1, "c"),
+            (2, "b"), (2, "c"), (2, "a"),
+            (3, "c"), (3, "a"), (3, "b")])
+
+    def test_a_parent_commit_gets_a_plain_directory(self):
+        self.assertEqual(self.ab.worktree_dir("b3ca8d2^").name, "b3ca8d2-parent")
+        self.assertNotEqual(self.ab.worktree_dir("b3ca8d2^"), self.ab.worktree_dir("b3ca8d2"))
+
+    def test_the_engine_binary_is_the_one_given(self):
+        import fullrun
+        seen = []
+
+        class Dead:
+            pid = 1
+            def poll(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(fullrun.subprocess, "Popen",
+                                  lambda argv, **k: seen.append(argv) or Dead()), \
+                mock.patch.object(fullrun, "wipe_strawmann_storage", lambda: None), \
+                mock.patch.object(fullrun.time, "sleep", lambda _s: None), \
+                mock.patch.object(fullrun, "maybe_scope", lambda argv, _unit: argv), \
+                mock.patch.object(fullrun, "stop_scope", lambda _unit: None), \
+                contextlib.redirect_stderr(io.StringIO()):
+            fullrun.start_strawmann("4-11", 1, Path(tmp) / "server.log", 7, 10,
+                                    binary=Path("/x/zig-out/bin/strawmann"))
+        self.assertIn("/x/zig-out/bin/strawmann", seen[0])
+
+    def test_drain_lines_and_the_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "server.log"
+            log.write_text("listening\nindex: drain linked=58000 pending=0\nother\n")
+            self.assertEqual(self.ab.drain_lines(log), ["index: drain linked=58000 pending=0"])
+            self.assertEqual(self.ab.drain_lines(Path(tmp) / "missing.log"), [])
+            rows = [{"id": "W4", "commit": c, "qps": q, "n_queries": 1000,
+                     "perf_cycles": 1.3e9, "perf_instructions": 6.8e8, "dram_bytes": 1.8e9}
+                    for c, q in (("old", 11400.0), ("old", 11500.0), ("new", 10800.0))]
+            self.ab.write_summary(Path(tmp), rows, ["old", "new"])
+            text = (Path(tmp) / "summary.txt").read_text()
+            self.assertIn("11,450", text)
+            self.assertLess(text.index("old"), text.index("new"))
+            self.assertIn("1,758", text)
+
+
 class RunContextTests(unittest.TestCase):
     """A render binds the run's own dataset and policies."""
 

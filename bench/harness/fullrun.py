@@ -772,15 +772,18 @@ def wipe_strawmann_storage() -> None:
 
 
 def start_strawmann(server_cpus: str, port: int, log: Path,
-                    workers: int, capacity: int) -> subprocess.Popen | None:
+                    workers: int, capacity: int,
+                    binary: Path | None = None) -> subprocess.Popen | None:
     """Start the engine pinned to `server_cpus`.
 
     One I/O thread plus `workers` must fit the set, because `--cpus` refuses
     rather than wrapping around — a pool short by one used to mean a worker
     landed on a core the run had isolated *away* from the server.
+
+    `binary` is another build of the engine, for `commit_ab.py`.
     """
     argv = [
-        str(ROOT / "zig-out/bin/strawmann"),
+        str(binary or ROOT / "zig-out/bin/strawmann"),
         "--port", str(port),
         "--capacity", str(capacity),
         # bfb opens ~threads x connections sockets; a server with fewer closes
