@@ -64,12 +64,18 @@ sides).
 -5.0 to -6.1% (ef512 1.07x to parity), every pass alike (W4 10,800 / 10,710 /
 10,821) and recall unchanged (0.9940 at `ef` 128). Per W4 query: cycles +6.1%,
 instructions +1.6%, demand DRAM +2.8%. W3 and W0 did not move, and Qdrant moved
-1.4% at most on the same rows. b3ca8d2 says rows wider than 512 bytes are
-unchanged by construction; the other candidates are 0509410 (an upsert starts
-the drainer), f346aea, and the kernel, 7.0.0-34 to -38, which the env hash
-does not cover. What it needs: W4 and W10-ef128 on laion at 1fb2e43,
-0509410, b3ca8d2^, b3ca8d2 and f346aea, alternating, three reps each, with the
-`index: drain` lines of each server.log.
+1.4% at most on the same rows. Not the kernel and not the drainer: an
+in-process A/B on 2026-10-03 (`commit_ab.py`, three rotated reps per build on
+today's kernel, no foreign load, no drain lines during the rows) reads W4
+11,255 at 1fb2e43, 11,295 at 0509410, 11,252 at b3ca8d2^, 11,213 at b3ca8d2
+and 10,734 at f346aea (10,691 / 10,748 / 10,734, three different graphs), and
+W10-ef128 the same shape (11,067 to 10,603). b3ca8d2 costs +1.6% instructions
+and no throughput, as it claimed. The step is after it, at the same
+instructions per query (684k) with cycles +4.9% and demand DRAM +4.3%: the
+same work, waiting longer on memory. Five commits touch `src` in
+b3ca8d2..f346aea: cc154f9 and e8be580 (graph build on codes, `index/build.zig`),
+d892e27 and 41327d2 (quantization modes and storage), f346aea (server
+connection setup). What it needs: the same A/B over those five.
 
 ### P2. What the licensed numbers are made of, and what the run costs
 
