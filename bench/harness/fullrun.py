@@ -1868,6 +1868,9 @@ def measure(uri: str, label: str, client_cpus: str, storage: str | None,
         capture_collections(uri, label, client_cpus, names=early)
         drop_collections(uri, client_cpus, early)
     if rest:
+        # Its own header, or "where the hours went" charges these rows to the
+        # drop above: laion 1003 printed 0:11:09 against dropping bench1.
+        say(f"{label}: §4's rows {rest[0]} to {rest[-1]}")
         rc |= run_workloads(uri, label, client_cpus, storage, only=rest, placement=placement)
 
     # Read back, *then* drop: `collections.json` is provenance and

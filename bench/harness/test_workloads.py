@@ -3700,6 +3700,34 @@ class PhaseSummaryTests(unittest.TestCase):
                 self.assertEqual(fullrun.build_strawmann(), not fail)
             self.assertEqual(calls, [("zig", fullrun.ROOT), ("cargo", fullrun.CONF)])
 
+    def test_every_run_of_rows_has_a_header_of_its_own(self):
+        """laion 1003 charged W2 to W13 to `dropping collections ... bench1`."""
+        import fullrun
+        seen = []
+
+        def run_workloads(uri, label, cpus, storage, only, placement=None):
+            seen.append((fullrun.PHASES[-1][0], list(only)))
+            return 0
+
+        quiet = lambda *a, **k: 0
+        with mock.patch.object(fullrun, "PHASES", []), \
+                mock.patch.object(fullrun, "run_workloads", run_workloads), \
+                mock.patch.object(fullrun, "run_recall", quiet), \
+                mock.patch.object(fullrun, "capture_collections", quiet), \
+                mock.patch.object(fullrun, "drop_collections", quiet), \
+                contextlib.redirect_stdout(io.StringIO()):
+            fullrun.measure("http://x", "lbl", "0-3", None)
+        _, rest, _ = fullrun.split_after_dead_writers(
+            [w.id for w in fullrun.workloads.table()])
+        self.assertTrue(rest, "the table no longer splits; this test checks nothing")
+        header, rows = next((h, r) for h, r in seen if r[0] == rest[0])
+        self.assertIn(rest[0], header)
+        # Every header that runs rows names a row it runs, or says it is the
+        # whole table.
+        for header, rows in seen:
+            self.assertTrue(any(r in header for r in rows) or "§4's rows, except" in header,
+                            header)
+
     def test_say_records_the_phase_and_stamps_the_header(self):
         import fullrun
         out = io.StringIO()
