@@ -1848,6 +1848,10 @@ class FoldedOverlapTests(unittest.TestCase):
         out = compare.with_folded_overlap(note, row)
         self.assertIn("append 2,758 points/s", out)
         self.assertIn("(88% of the append was covered)", out)
+        # laion 1003's Qdrant W11-steady: pass 1's whole-search figure.
+        whole = "qps over the 25.0 s of the append the search saw (7,523 over the whole search)"
+        self.assertIn("(7,576 over the whole search)",
+                      compare.with_folded_overlap(whole, {"qps_search": 7576.048}))
         # A row from before the coverage field keeps its text, not a blank.
         self.assertIn("(95% of the append", compare.with_folded_overlap(note, {}))
 

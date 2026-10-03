@@ -1576,12 +1576,17 @@ def with_folded_overlap(note: str, row: dict) -> str:
     strawmANN W11 printed "write overlap 82%" (pass 1) beside "the last 19%"
     (100 minus the median, 81.0): 101% of one row. 0927's Qdrant W11 printed
     pass 1's "append 2,440 points/s" beside a folded `background_pps` of
-    2,758, so the rate and the append's coverage are rewritten as well.
+    2,758, so the rate and the append's coverage are rewritten as well, and
+    laion 1003's Qdrant W11-steady printed pass 1's "(7,523 over the whole
+    search)" beside a folded 7,576, so that figure is too.
     """
     if (pct := row.get("write_overlap_pct")) is not None:
         note = re.sub(r"write overlap \d+(?:\.\d+)?%", f"write overlap {pct:.0f}%", note)
     if (pps := row.get("background_pps")) is not None:
         note = re.sub(r"append [\d,]+ points/s", f"append {pps:,.0f} points/s", note)
+    if (whole := row.get("qps_search")) is not None:
+        note = re.sub(r"\([\d,]+ over the whole search\)",
+                      f"({whole:,.0f} over the whole search)", note)
     if (cov := row.get("append_covered_pct")) is not None:
         note = re.sub(r"\(\d+% of the append was covered\)",
                       f"({cov:.0f}% of the append was covered)", note)
