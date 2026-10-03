@@ -538,7 +538,7 @@ def build_filtered_truth(engine: str, label: str, collection: str, grade: str,
     """
     out = filtered_truth_path(label, DATASET, collection, grade)
     out.parent.mkdir(parents=True, exist_ok=True)
-    base, queries_file, gt = paths.dataset(DATASET)
+    base, queries_file, _ = paths.dataset(DATASET)
     cmd = [
         "cargo", "run", "--release", "--quiet", "--",
         "filtered-truth",
@@ -558,10 +558,11 @@ def build_filtered_truth(engine: str, label: str, collection: str, grade: str,
         # the whole query file and caps afterwards, so a truth over a truncated
         # query set is refused by §4.3 however right it otherwise is.
         "--out", str(out),
-        # Beside the unfiltered truth, and reused when the condition, the
-        # matching ids, the corpus and the queries all still hold: every pass
-        # of a night run used to recompute the same two truths.
-        "--cache-dir", str(gt.parent),
+        # No `--cache-dir`. bfb draws the keyword payloads unseeded at every
+        # upload, so the matching ids differ every pass and a truth keyed by
+        # them never hits: laion 1003 wrote twelve, read none, and said
+        # nothing. A cache is for conditions whose matching set repeats, as
+        # the datasets' shipped filters would (findings 55).
     ]
     print(f"\n=== {collection} filtered truth, {grade}: "
           f"{FILTER_FIELD} in {{{','.join(values)}}} ===", flush=True)
