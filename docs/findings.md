@@ -72,10 +72,16 @@ and 10,734 at f346aea (10,691 / 10,748 / 10,734, three different graphs), and
 W10-ef128 the same shape (11,067 to 10,603). b3ca8d2 costs +1.6% instructions
 and no throughput, as it claimed. The step is after it, at the same
 instructions per query (684k) with cycles +4.9% and demand DRAM +4.3%: the
-same work, waiting longer on memory. Five commits touch `src` in
-b3ca8d2..f346aea: cc154f9 and e8be580 (graph build on codes, `index/build.zig`),
-d892e27 and 41327d2 (quantization modes and storage), f346aea (server
-connection setup). What it needs: the same A/B over those five.
+same work, waiting longer on memory. A second round over the five
+commits that touch `src` in between reads W4 11,106 to 11,155 at b3ca8d2,
+cc154f9, e8be580, d892e27 and 41327d2, and 10,714 at f346aea (W10-ef128
+10,969 to 11,015, then 10,580). f346aea's only functional change runs once per
+connection (`sendInitialFrames` closes on failure); the rest is comments. It
+adds 704 bytes to the binary and moves 270 of 543 functions, every distance
+kernel and search loop among them, 16 bytes down against a 64-byte line. So
+the 4% is most likely code placement, not the change. What it needs: f346aea
+with that hunk reverted (fast again would confirm placement), then the hot
+kernels given `align(64)` so a change elsewhere cannot move them.
 
 ### P2. What the licensed numbers are made of, and what the run costs
 
