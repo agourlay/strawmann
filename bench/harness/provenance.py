@@ -388,7 +388,22 @@ def _native_launch(pid: int) -> dict:
         out["run_mode"] = env.get("RUN_MODE") or "development (RUN_MODE unset)"
     with contextlib.suppress(OSError):
         out["cwd"] = os.readlink(f"/proc/{pid}/cwd")
+    if "cwd" in out:
+        out["config"] = qdrant_config_files(Path(out["cwd"]), out.get("run_mode", ""))
     return out
+
+
+def qdrant_config_files(cwd: Path, run_mode: str) -> str:
+    """The config files Qdrant merged from `cwd`, or that it merged none.
+
+    `settings.rs` layers `config/config.yaml`, `config/<RUN_MODE>.yaml` and
+    `config/local.yaml` over the copy compiled into the binary, each only if
+    present.
+    """
+    mode = run_mode.split(" ", 1)[0] or "development"
+    found = [f"config/{n}" for n in ("config.yaml", f"{mode}.yaml", "local.yaml")
+             if (cwd / "config" / n).exists()]
+    return " + ".join(found) if found else "compiled-in only"
 
 
 def qdrant_build(pid: int | None) -> dict:

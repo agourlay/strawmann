@@ -3776,6 +3776,34 @@ class NativeQdrantLaunchTests(unittest.TestCase):
         self.assertIsNone(provenance.server_banner_build("no banner here"))
         self.assertIsNone(provenance.server_banner_build(""))
 
+    def test_the_config_files_qdrant_merged_are_named(self):
+        """0930 merged a checkout's config/ and 1003 did not, unrecorded."""
+        import provenance
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self.assertEqual(provenance.qdrant_config_files(d, "production"),
+                             "compiled-in only")
+            (d / "config").mkdir()
+            for n in ("config.yaml", "production.yaml", "development.yaml"):
+                (d / "config" / n).write_text("")
+            self.assertEqual(provenance.qdrant_config_files(d, "production"),
+                             "config/config.yaml + config/production.yaml")
+            self.assertEqual(provenance.qdrant_config_files(
+                d, "development (RUN_MODE unset)"),
+                "config/config.yaml + config/development.yaml")
+
+    def test_qdrant_starts_in_an_empty_directory_unless_told(self):
+        import fullrun
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(fullrun.paths, "CACHE", Path(tmp)), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("QDRANT_CWD", None)
+            d = fullrun.qdrant_cwd()
+            self.assertEqual(d, Path(tmp) / "qdrant-cwd")
+            self.assertEqual(list(d.iterdir()), [])
+            os.environ["QDRANT_CWD"] = "/somewhere/qdrant"
+            self.assertEqual(fullrun.qdrant_cwd(), Path("/somewhere/qdrant"))
+
     def test_run_mode_cwd_and_stdout_are_read_from_the_process(self):
         import subprocess
         import tempfile

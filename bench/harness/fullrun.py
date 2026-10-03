@@ -1058,9 +1058,9 @@ def start_qdrant_binary(server_cpus: str, grpc: int, rest: int,
     so `provenance.qdrant_build` records the sha256 and the version the server
     reports. A run that does not need counters should keep the image.
 
-    Run from the root of its own checkout, because Qdrant reads
-    `config/config.yaml` relative to the working directory — without that it starts
-    on built-in defaults and a storage path the harness never wipes.
+    Run from an empty directory (`qdrant_cwd`), so Qdrant serves the config
+    compiled into the binary plus the `QDRANT__` variables below, and nothing
+    from a checkout whose `config/` moves with the operator's branch.
 
     `wipe=False` keeps the storage for a restart of the same binary within one
     experiment, which reloads its segments instead of paying a full ingest:
@@ -1089,11 +1089,7 @@ def start_qdrant_binary(server_cpus: str, grpc: int, rest: int,
     if wipe and not wipe_qdrant_storage():
         return None
 
-    cwd = Path(os.environ.get("QDRANT_CWD") or QDRANT_BINARY.parent.parent.parent)
-    if not (cwd / "config" / "config.yaml").exists():
-        print(f"  !! no config/config.yaml under {cwd}; qdrant will use its "
-              f"built-in defaults. Set $QDRANT_CWD to its checkout root if the "
-              f"storage path or ports come out wrong.", flush=True)
+    cwd = qdrant_cwd()
     env = {
         **os.environ,
         # Qdrant's `settings.rs` defaults RUN_MODE to `development` and layers
@@ -1123,6 +1119,24 @@ def start_qdrant_binary(server_cpus: str, grpc: int, rest: int,
     QDRANT_PROC = subprocess.Popen(argv, stdout=fh, stderr=subprocess.STDOUT,
                                    cwd=str(cwd), env=env)
     return await_qdrant(server_cpus, grpc, rest, f"binary {QDRANT_BINARY}")
+
+
+def qdrant_cwd() -> Path:
+    """Where Qdrant starts, which decides the `config/*.yaml` it merges.
+
+    An empty directory unless `$QDRANT_CWD` names one. Qdrant embeds
+    `config/config.yaml` at build time (`settings.rs`, `DEFAULT_CONFIG`), so
+    from an empty directory its config is a function of the binary's sha256
+    alone. The old default, three levels above the binary, was a checkout for
+    `target/release/qdrant` and `~/.cache` for the cached copy the night runs
+    use: 0930 merged the checkout's `config/` and 1003 did not, and nothing
+    said so between the pairs. `provenance` records which it was.
+    """
+    if env := os.environ.get("QDRANT_CWD"):
+        return Path(env)
+    d = paths.CACHE / "qdrant-cwd"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def await_qdrant(server_cpus: str, grpc: int, rest: int, what: str) -> str | None:
