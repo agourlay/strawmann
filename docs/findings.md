@@ -10,9 +10,9 @@ Ranked by what a wrong or missing number costs.
 
 ### P1. What costs a number on the headline page
 
-The current pages are the 0930 pairs for sift1m, laion-small-clip and
-dbpedia-openai-1m and the 0929 pair for h-and-m, all T4 with T3 passing and
-production-mode Qdrant. What they publish wrongly, or still refuse and could
+The current pages are the 0930 pairs for sift1m and dbpedia-openai-1m, the
+1003 pair for laion-small-clip and the 0929 pair for h-and-m, all T4 with T3
+passing and production-mode Qdrant. What they publish wrongly, or still refuse and could
 not:
 
 **3. W11's search still ends inside its append on three corpora of four.**
@@ -37,7 +37,13 @@ Since 2026-09-30 `resolve_w11_sizing` has no cap at `QUERIES`, sizes each
 label over its own measured writer span (`background_s`), bounds the slower
 engine's search at `W11_MAX_SEARCH_S` (240 s), and prints `!!` when that
 bound bites. It closes when a pair shows both rows' `write overlap` at 90% or
-more on every corpus and `W11-steady` flat across passes. Item 8 is what the
+more on every corpus and `W11-steady` flat across passes. laion 1003 is the
+first pair measured with it: `write overlap` 100% on both rows, both engines,
+every pass, with the search running 38% (strawmANN) and 75% (Qdrant) past the
+append and no `!!` bound line. strawmANN's W11-steady is flat (10,108 / 10,094
+/ 10,102); Qdrant's is not (6,996 / 7,651 / 7,170, rsd 4.7%), while its
+optimizer rebuilt on the same eight CPUs (run-queue wait 196 to 249 s a pass).
+What is open is sift1m and dbpedia, and whether Qdrant's spread is its own. Item 8 is what the
 row shows once it measures what it claims to.
 
 **58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**
@@ -46,9 +52,24 @@ per query down 10% at the same recall, a byte-identical binary (sha256
 `dbeb0f73dea2d371`), the same stamp and the same `env_hash`. On sift1m and
 dbpedia the same binary moved under 2.3%. Nothing in the files explains it, so
 part of every laion ratio move between the two pairs is Qdrant's, and the
-laion W4/W10 moves cannot be read as strawmANN's. What it needs: a Qdrant-only
-same-binary A/B on laion at two times of day (`qdrant_ab.py` with one build on
-both sides).
+laion W4/W10 moves cannot be read as strawmANN's. laion 1003 reproduced the 0930
+level within 1.5% (W10-ef128 8,312 to 8,268, W12-sel1 3,331 to 3,368), on a
+newer kernel and with Qdrant on its compiled-in config rather than the
+checkout's, so 0928 is the odd pair. What it needs: a Qdrant-only same-binary
+A/B on laion at two times of day (`qdrant_ab.py` with one build on both
+sides).
+
+**69. strawmANN's fp32 graph search on laion lost 5 to 6% between 0930 and
+1003.** W4 11,442 to 10,800 (1.04x to parity), W5 -5.6%, W10-ef32 to ef512
+-5.0 to -6.1% (ef512 1.07x to parity), every pass alike (W4 10,800 / 10,710 /
+10,821) and recall unchanged (0.9940 at `ef` 128). Per W4 query: cycles +6.1%,
+instructions +1.6%, demand DRAM +2.8%. W3 and W0 did not move, and Qdrant moved
+1.4% at most on the same rows. b3ca8d2 says rows wider than 512 bytes are
+unchanged by construction; the other candidates are 0509410 (an upsert starts
+the drainer), f346aea, and the kernel, 7.0.0-34 to -38, which the env hash
+does not cover. What it needs: W4 and W10-ef128 on laion at 1fb2e43,
+0509410, b3ca8d2^, b3ca8d2 and f346aea, alternating, three reps each, with the
+`index: drain` lines of each server.log.
 
 ### P2. What the licensed numbers are made of, and what the run costs
 

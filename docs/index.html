@@ -280,7 +280,7 @@
 <div class="panel" id="laion-small-clip">
   <div class="panel-head">
     <strong>laion-small-clip <span>· d=512, cosine, 100K vectors</span></strong>
-    <span>measured 2026-09-29 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-10-03 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -290,33 +290,33 @@
     <tbody>
       <tr>
         <td class="what">At equal recall<small>§7.4's comparison, over 8 anchors</small></td>
-        <td class="num span" colspan="2">best at recall 0.9629, falling to 1.72x at 0.9978</td>
-        <td><div class="ratio win"><span class="track"><i style="width:38.4%"></i></span><b>1.92x</b></div></td>
+        <td class="num span" colspan="2">best at recall 0.9630, falling to 1.61x at 0.9979</td>
+        <td><div class="ratio win"><span class="track"><i style="width:36.2%"></i></span><b>1.81x</b></div></td>
       </tr>
       <tr>
         <td class="what">Saturating<small>closed loop, every core busy</small></td>
-        <td class="num">11,442</td><td class="num">10,978</td>
-        <td><div class="ratio win"><span class="track"><i style="width:20.8%"></i></span><b>1.04x</b></div></td>
+        <td class="num">10,800</td><td class="num">10,924</td>
+        <td><div class="ratio even"><b>parity</b></div></td>
       </tr>
       <tr>
         <td class="what">Batched<small>16 queries per request</small></td>
-        <td class="num">11,277</td><td class="num">3,762</td>
-        <td><div class="ratio win"><span class="track"><i style="width:60.0%"></i></span><b>3.00x</b></div></td>
+        <td class="num">10,643</td><td class="num">3,754</td>
+        <td><div class="ratio win"><span class="track"><i style="width:56.6%"></i></span><b>2.83x</b></div></td>
       </tr>
       <tr>
         <td class="what">Exact<small>brute force, no index</small></td>
-        <td class="num">312</td><td class="num">319</td>
+        <td class="num">311</td><td class="num">311</td>
         <td><div class="ratio even"><b>parity</b></div></td>
       </tr>
       <tr>
         <td class="what">One query at a time<small>single client, latency bound</small></td>
-        <td class="num">1,626</td><td class="num">1,638</td>
+        <td class="num">1,646</td><td class="num">1,637</td>
         <td><div class="ratio even"><b>parity</b></div></td>
       </tr>
       <tr>
-        <td class="what">Quantized, PQ<small>recall 0.9931 against 0.9864</small></td>
-        <td class="num">3,587</td><td class="num">2,836</td>
-        <td><div class="ratio win"><span class="track"><i style="width:25.2%"></i></span><b>1.26x</b></div></td>
+        <td class="what">Quantized, PQ<small>recall 0.9927 against 0.9863</small></td>
+        <td class="num">3,440</td><td class="num">2,888</td>
+        <td><div class="ratio win"><span class="track"><i style="width:23.8%"></i></span><b>1.19x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -326,7 +326,7 @@
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-laion-small-clip.md"><code>comparison-laion-small-clip.md</code></a>.
     These ratios are this dimension's and do not carry to another.
-    <a class="report-link" href="reports/report-laion-small-clip-sm-laion-perf-0930-vs-qd-laion-perf-0930-2026-09-29-1846.html">Full report for this run</a>
+    <a class="report-link" href="reports/report-laion-small-clip-sm-laion-perf-1003-vs-qd-laion-perf-1003-2026-10-03-0654.html">Full report for this run</a>
   </div>
 </div>
 <!-- END landing-laion-small-clip -->
