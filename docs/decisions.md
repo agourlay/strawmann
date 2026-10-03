@@ -2095,3 +2095,37 @@ prefetched, 768 bytes at 4 bits where the SQ8 rule stops at 512 (to 3,722).
 Qdrant rescores 40 candidates at that oversampling where strawmANN rescores
 its `ef` pool, which the pool policy of the published runs equalises.
 
+## The fp32 search kernels are aligned to 64 bytes; findings 69 closed, 2026-10-03
+
+laion 1003 read strawmANN's fp32 graph rows 5 to 6% slower than 0930 at the
+same recall (W4 11,442 to 10,800, W10-ef512 1.07x to parity), with cycles per
+query up 6% and instructions up 1.6%. Three in-process A/Bs on today's kernel
+(`commit_ab.py`, three rotated reps per build, no foreign load) found it:
+
+- across 1fb2e43 to b3ca8d2, W4 held at 11,213 to 11,295, so neither the
+  kernel update nor the drainer (0509410) nor the wide-row prefetch (b3ca8d2);
+- across the five later commits that touch `src`, it held at 11,106 to 11,155
+  until f346aea, which read 10,714 at the same instructions per query, cycles
+  +4.9% and demand DRAM +4.3%;
+- f346aea's only functional change runs once per connection, and adds 704
+  bytes that move 270 of 543 functions 16 bytes against a 64-byte line,
+  `handlers.searchOne` (where the graph walk is inlined), `Dot(16,8).call` and
+  `Euclid(16,8).call` among them.
+
+| build (W4 q/s, three reps) | median | kcyc/q |
+|---|--:|--:|
+| 41327d2, f346aea's parent | 11,206 | 1,306 |
+| f346aea | 10,710 | 1,365 |
+| f346aea, that hunk reverted (kernels back at 41327d2's offsets) | 11,146 | 1,309 |
+| f346aea + `align(64)` on the three | 11,199 | 1,304 |
+| the revert + `align(64)` | 11,246 | 1,301 |
+
+Reverting the hunk restores the speed, so it was where the code landed and not
+the change; aligning the three functions gives two builds of different code
+the same speed. They are now `align(64)`, and a test holds the alignment
+(it reads 16 without it). Two things follow. Nothing else is aligned, so
+another hot function, a quantized kernel say, can still move with unrelated
+code; this was found because it was 4%, and a 1% move would not have been.
+And the 1003 laion page stands as measured: its W4 parity and W10 ratios are
+what that binary did, and the next laion pair should read W4 near 0930's.
+

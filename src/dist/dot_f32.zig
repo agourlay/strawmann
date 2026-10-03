@@ -41,7 +41,12 @@ pub fn Dot(comptime L: usize, comptime NACC: usize) type {
         /// same bits), not that the emitted shape is the source's. What the
         /// float mode buys is contraction and the freedom to keep the
         /// accumulators in registers.
-        pub fn call(a: []const f32, b: []const f32) f32 {
+        ///
+        /// `align(64)`: the loop's place against cache lines and fetch windows is
+        /// then this function's own, not wherever the code before it ends. A change
+        /// that added 704 bytes elsewhere (f346aea) moved it 16 bytes and cost fp32
+        /// search 4% at the same instructions (findings 69).
+        pub fn call(a: []const f32, b: []const f32) align(64) f32 {
             @setFloatMode(.optimized);
             std.debug.assert(a.len == b.len);
 
@@ -175,4 +180,10 @@ test "dot of a unit vector with itself is 1" {
     @memset(&v, val);
     const got = native.call(&v, &v);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), got, 1e-6);
+}
+
+test "the fp32 kernels start on a cache line (findings 69)" {
+    const l2 = @import("l2_f32.zig");
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(&Dot(16, 8).call) % 64);
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(&l2.Euclid(16, 8).call) % 64);
 }

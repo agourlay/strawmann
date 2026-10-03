@@ -33,7 +33,8 @@ pub fn Euclid(comptime L: usize, comptime NACC: usize) type {
         const V = @Vector(L, f32);
         const block = L * NACC;
 
-        pub fn call(a: []const f32, b: []const f32) f32 {
+        /// Aligned for the reason `dot_f32.Dot.call` is.
+        pub fn call(a: []const f32, b: []const f32) align(64) f32 {
             @setFloatMode(.optimized);
             std.debug.assert(a.len == b.len);
 

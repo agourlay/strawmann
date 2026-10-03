@@ -59,30 +59,6 @@ checkout's, so 0928 is the odd pair. What it needs: a Qdrant-only same-binary
 A/B on laion at two times of day (`qdrant_ab.py` with one build on both
 sides).
 
-**69. strawmANN's fp32 graph search on laion lost 5 to 6% between 0930 and
-1003.** W4 11,442 to 10,800 (1.04x to parity), W5 -5.6%, W10-ef32 to ef512
--5.0 to -6.1% (ef512 1.07x to parity), every pass alike (W4 10,800 / 10,710 /
-10,821) and recall unchanged (0.9940 at `ef` 128). Per W4 query: cycles +6.1%,
-instructions +1.6%, demand DRAM +2.8%. W3 and W0 did not move, and Qdrant moved
-1.4% at most on the same rows. Not the kernel and not the drainer: an
-in-process A/B on 2026-10-03 (`commit_ab.py`, three rotated reps per build on
-today's kernel, no foreign load, no drain lines during the rows) reads W4
-11,255 at 1fb2e43, 11,295 at 0509410, 11,252 at b3ca8d2^, 11,213 at b3ca8d2
-and 10,734 at f346aea (10,691 / 10,748 / 10,734, three different graphs), and
-W10-ef128 the same shape (11,067 to 10,603). b3ca8d2 costs +1.6% instructions
-and no throughput, as it claimed. The step is after it, at the same
-instructions per query (684k) with cycles +4.9% and demand DRAM +4.3%: the
-same work, waiting longer on memory. A second round over the five
-commits that touch `src` in between reads W4 11,106 to 11,155 at b3ca8d2,
-cc154f9, e8be580, d892e27 and 41327d2, and 10,714 at f346aea (W10-ef128
-10,969 to 11,015, then 10,580). f346aea's only functional change runs once per
-connection (`sendInitialFrames` closes on failure); the rest is comments. It
-adds 704 bytes to the binary and moves 270 of 543 functions, every distance
-kernel and search loop among them, 16 bytes down against a 64-byte line. So
-the 4% is most likely code placement, not the change. What it needs: f346aea
-with that hunk reverted (fast again would confirm placement), then the hot
-kernels given `align(64)` so a change elsewhere cannot move them.
-
 ### P2. What the licensed numbers are made of, and what the run costs
 
 **7. At 1% selectivity strawmANN offers only the exact answer.** On 0925,

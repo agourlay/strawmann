@@ -1252,7 +1252,9 @@ fn runGatheredExact(
 /// the ranked candidates, or null with `fail` set. Everything about the query
 /// but the response encoding, so a fanned-out batch and the sequential path
 /// answer a query identically.
-fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: usize, fail: *?QueryFailure) ?[]index.Candidate {
+///
+/// Aligned because the graph walk is inlined here: see `dot_f32.Dot.call`.
+fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: usize, fail: *?QueryFailure) align(64) ?[]index.Candidate {
     // An *empty* `Filter{}` is a filter with no conditions, which Qdrant
     // answers as no filter at all (`QueryPoints.filter`); a condition this
     // engine cannot evaluate is refused by name at decode.
@@ -2360,4 +2362,8 @@ test "fullScanPreferred is Qdrant's rule: count below threshold_kb * 1024 / (dim
     // Saturates rather than overflows on an absurd client value.
     h.config.hnsw_full_scan_threshold_kb = std.math.maxInt(usize);
     try testing.expect(fullScanPreferred(&h));
+}
+
+test "searchOne starts on a cache line (findings 69)" {
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(&searchOne) % 64);
 }
