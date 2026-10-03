@@ -3630,6 +3630,23 @@ class PhaseSummaryTests(unittest.TestCase):
         ])
         self.assertEqual(fullrun.phase_summary([], 1.0), [])
 
+    def test_the_conformance_tool_is_built_before_any_arm(self):
+        """laion 1003 built it on first use, inside strawmANN's first pass."""
+        import fullrun
+        calls = []
+
+        def sh(argv, timeout=600, **kw):
+            calls.append((argv[0], kw.get("cwd")))
+            return (1 if argv[0] == "cargo" and fail else 0), "boom"
+
+        for fail in (False, True):
+            calls.clear()
+            with mock.patch.object(fullrun, "sh", sh), mock.patch.object(fullrun, "PHASES", []), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(fullrun.build_strawmann(), not fail)
+            self.assertEqual(calls, [("zig", fullrun.ROOT), ("cargo", fullrun.CONF)])
+
     def test_say_records_the_phase_and_stamps_the_header(self):
         import fullrun
         out = io.StringIO()

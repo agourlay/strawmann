@@ -733,6 +733,15 @@ def build_strawmann() -> bool:
         print(out.rstrip(), file=sys.stderr)
         return False
     print("  ok", flush=True)
+    # Built here, before any arm, because every reader of it is `cargo run`:
+    # laion 1003 rebuilt it on first use, 1:52 of cargo inside strawmANN's
+    # first pass with the engine up, charged to reading back a config.
+    say("building the conformance tool (release)")
+    code, out = sh(["cargo", "build", "--release", "--quiet"], 1800, cwd=CONF)
+    if code != 0:
+        print(out.rstrip(), file=sys.stderr)
+        return False
+    print("  ok", flush=True)
     return True
 
 
