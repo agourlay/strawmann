@@ -665,6 +665,11 @@ def check_quiescent(e: Env) -> None:
         # first time this appears in the log.
         e.observe(f"foreign_load_cores={foreign:.2f} (budget "
                   f"{FOREIGN_BUDGET_CORES:.2f}, within noise)")
+        # And a verdict, which this branch used to leave out: laion 1003's
+        # env.txt and report read a bare `busy: Xorg(7%)` where the clean
+        # branch prints its `ok`. Printed, not noted, so the hash is unmoved.
+        e.ok(f"machine is quiescent: {foreign:.2f} cores of foreign load, "
+             f"under the {FOREIGN_BUDGET_CORES:.2f} budget")
     elif per_core <= LOAD_PER_CORE_MAX_PCT:
         e.ok(f"machine is quiescent (load {load1} over {cores} cores)")
     else:

@@ -883,6 +883,32 @@ class WorkloadTests(unittest.TestCase):
         self.assertEqual(w.foreign_between(S(0.0, {1: (0.0, "editor")}, 0.0, frozenset()),
                                            one), "")
 
+    def test_foreign_load_under_the_budget_still_gets_a_verdict(self):
+        """laion 1003's gate printed `busy: Xorg(7%)` and no verdict line."""
+        setup = importlib.import_module("setup")
+        b = {1: (0.0, "/usr/bin/Xorg")}
+        busy = {1: (0.7, "/usr/bin/Xorg")}
+        idle = {1: (0.0, "/usr/bin/Xorg")}
+        real_read, real_sleep, real_cpu = setup.read, setup.time.sleep, setup._cpu_seconds
+        setup.read = lambda p: "0.10 0.2 0.3 1/100 1" if "loadavg" in str(p) else real_read(p)
+        hashes, outs = [], []
+        try:
+            for a in (busy, idle):
+                env, err, state = setup.Env(lax=False), io.StringIO(), []
+                setup._cpu_seconds = lambda a=a, state=state: a if state else b
+                setup.time.sleep = lambda _, state=state: state.append(1)
+                with contextlib.redirect_stderr(err):
+                    setup.check_quiescent(env)
+                self.assertEqual(env.failures, 0)
+                hashes.append(env.hash())
+                outs.append(err.getvalue())
+        finally:
+            setup.read, setup.time.sleep, setup._cpu_seconds = real_read, real_sleep, real_cpu
+        self.assertIn("busy: Xorg(70%)", outs[0])
+        self.assertRegex(outs[0], r"ok.*machine is quiescent: 0\.70 cores of foreign load")
+        # A transient process list must not move the hash, verdict or not.
+        self.assertEqual(hashes[0], hashes[1])
+
     def test_the_gate_names_the_cpu_count_in_its_verdict(self):
         """`cores` was rebound to the foreign-core sum before the verdict was
         printed, so env.txt archived "quiescent (load 0.4 over 0.03 cores)"."""
