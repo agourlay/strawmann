@@ -341,6 +341,9 @@ def short_notes(jr: compare.Row | None) -> tuple[list[str], bool]:
         elif "across its passes, monotonically" in t:
             out.append(f'<span class="caveat">drifted: {html.escape(t.split(" across")[0])}'
                        f' across passes</span>')
+        elif "against two passes that agree" in t:
+            out.append(f'<span class="caveat">one pass apart: '
+                       f'{html.escape(t.split(" against")[0])}</span>')
         elif "payload index" in t or "harness" in t:
             out.append(f'<span class="caveat">{html.escape(t.split(", so")[0])}</span>')
     if jr.refusal and not out:

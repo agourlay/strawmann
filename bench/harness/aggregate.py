@@ -216,6 +216,35 @@ def _rep_drift(vals: list) -> float | None:
     return move if abs(move) >= DRIFT_MIN else None
 
 
+def _rep_outlier(vals: list) -> dict | None:
+    """The pass that sits apart from two that agree, and by how much.
+
+    laion 1003's Qdrant W6-ef512 read 1,858, 1,870 and 1,464 qps. Not
+    monotone, so `_rep_drift` let it through, and the one slow pass folded to
+    `rsd 13.3%` and a +/-40% band that called a 1.12x row parity. strawmANN's
+    W12-sel1-ef256 read 4,401, 7,076 and 7,305: monotone, so it was called a
+    +66% trend, when two passes agree and one does not, which three samples
+    cannot tell from a trend and is the likelier reading.
+
+    The pair must agree to within half of `DRIFT_MIN` and the third must sit
+    `DRIFT_MIN` or more from their midpoint, so dbpedia's 3,662, 3,001, 2,764
+    (no two within 5%) is still drift. Checked before drift: a row is one or
+    the other. `pass` is 1-based, `move` is relative to the pair's midpoint.
+    """
+    got = [v for v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if len(got) != 3 or len(got) != len(vals):
+        return None
+    for i in range(3):
+        lo, hi = sorted(got[j] for j in range(3) if j != i)
+        mid = (lo + hi) / 2
+        if mid <= 0:
+            return None
+        move = (got[i] - mid) / mid
+        if (hi - lo) / mid <= DRIFT_MIN / 2 and abs(move) >= DRIFT_MIN:
+            return {"pass": i + 1, "move": move}
+    return None
+
+
 def _rsd(vals: list) -> float | None:
     """Relative standard deviation, or None below three passes.
 
@@ -366,7 +395,13 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
         if s is not None:
             rsd[wid] = s
             merged["rep_rsd"] = s
-        if (drift := _rep_drift([r.get("qps") for r in got])) is not None:
+        if (odd := _rep_outlier([r.get("qps") for r in got])) is not None:
+            merged["rep_outlier"] = odd
+            notes.append(f"{wid}: pass {odd['pass']} read {odd['move']:+.0%} against "
+                         f"two passes that agree; one pass set this row's spread, "
+                         f"and a band built from it would call a real difference parity"
+                         + _paging_note(got))
+        elif (drift := _rep_drift([r.get("qps") for r in got])) is not None:
             merged["rep_drift"] = drift
             notes.append(f"{wid}: qps moved {drift:+.0%} monotonically across the "
                          f"{n} passes; that spread is a trend, not noise, and a "

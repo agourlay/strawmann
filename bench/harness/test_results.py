@@ -433,6 +433,40 @@ class NoiseTests(unittest.TestCase):
             # And the median is still published either way.
             self.assertEqual(rows["W3"]["qps"], 3001.0)
 
+    def test_one_pass_apart_is_an_outlier_and_not_drift_or_spread(self):
+        """laion 1003: Qdrant's W6-ef512 (1,858, 1,870, 1,464) was banded at
+        +/-40% and called parity, and strawmANN's W12-sel1-ef256 (4,401,
+        7,076, 7,305) was called a +66% trend. Each is two passes that agree
+        and one that does not."""
+        import importlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _reload(root)
+            agg = importlib.reload(importlib.import_module("aggregate"))
+            for i, (low, sel) in enumerate(
+                    ((1858.0, 4401.0), (1870.0, 7076.0), (1464.0, 7305.0)), start=1):
+                self._rep(root, f"lbl-rep{i}", [_row("W6", low), _row("W12", sel)])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                self.assertEqual(agg.main(["aggregate.py", "lbl",
+                                           "lbl-rep1", "lbl-rep2", "lbl-rep3"]), 0)
+            rows = {r["id"]: r for r in
+                    json.loads((root / "bench/results/lbl/rows.json").read_text())}
+            self.assertEqual(rows["W6"]["rep_outlier"]["pass"], 3)
+            self.assertAlmostEqual(rows["W6"]["rep_outlier"]["move"], -0.2146, places=3)
+            self.assertEqual(rows["W12"]["rep_outlier"]["pass"], 1)
+            # One or the other: the monotone row is not also called drift.
+            self.assertIsNone(rows["W12"].get("rep_drift"))
+            self.assertIn("W6: pass 3 read -21% against two passes that agree",
+                          out.getvalue())
+        # A real slide has no two passes within half of DRIFT_MIN, so it stays
+        # drift; a steady row and a couple of percent are neither.
+        self.assertIsNone(agg._rep_outlier([3662.0, 3001.0, 2764.0]))
+        self.assertIsNotNone(agg._rep_drift([3662.0, 3001.0, 2764.0]))
+        self.assertIsNone(agg._rep_outlier([10800.0, 10710.0, 10821.0]))
+        self.assertIsNone(agg._rep_outlier([314.0, 311.0, 294.0]))
+        self.assertIsNone(agg._rep_outlier([1000.0, 1000.0]))
+
     def test_the_floored_flag_follows_the_folded_time(self):
         """h-and-m 0929's Qdrant W0-upload kept pass 1's `floored` (3.01 s)
         beside a folded 4.01 s, and the report daggered it."""

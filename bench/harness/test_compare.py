@@ -1817,6 +1817,15 @@ class HarnessBoundRowTests(unittest.TestCase):
         self.assertIsNone(re.fullmatch(r"[\d.]+x", rows["W4"].ratio or ""),
                           f"drifted row published a ratio: {rows['W4'].ratio!r}")
 
+    def test_one_pass_apart_refuses_the_ratio_and_says_which(self):
+        """laion 1003's Qdrant W6-ef512: 1,858, 1,870, 1,464 banded a 1.12x
+        row as parity; the row is refused and names the pass instead."""
+        rows = self._joined([_row("W4", 2072.0)],
+                            [_row("W4", 1858.0, rep_outlier={"pass": 3, "move": -0.214})])
+        self.assertIn("b pass 3 -21% against two passes that agree", rows["W4"].note_text)
+        self.assertIsNone(re.fullmatch(r"[\d.]+x", rows["W4"].ratio or ""),
+                          f"outlying row published a ratio: {rows['W4'].ratio!r}")
+
     def test_a_steady_row_is_not_called_drifted(self):
         rows = self._joined([_row("W4", 1000.0)], [_row("W4", 900.0)])
         self.assertNotIn("monotonically", rows["W4"].note_text)

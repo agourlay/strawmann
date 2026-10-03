@@ -632,6 +632,11 @@ class Row:
                 f"monotonically: the spread on this row is drift rather than "
                 f"noise, so the median is a trend's midpoint and not a "
                 f"repeatable measurement]")
+        if self._outlying(ra, rb):
+            self.notes.append(
+                f"[{', '.join(self._outlying(ra, rb))} against two passes that "
+                f"agree: one pass set the spread on this row, so a band built "
+                f"from it is not a noise band]")
         if ra.get("load_mode") == "open-loop" or wid.startswith("W4-sat"):
             # The number is the offered rate; a ratio would read as a speed
             # comparison when it means "both kept up". Unless one did not:
@@ -766,6 +771,11 @@ class Row:
             # it; what is left here is the refusal, which only a row that got
             # this far could have earned.
             return self._refuse(f"drifted across passes ({', '.join(drifted)})")
+        # The same refusal for one pass apart from two that agree
+        # (`aggregate._rep_outlier`): laion 1003's Qdrant W6-ef512 read 1,858,
+        # 1,870, 1,464, and its +/-40% band called a 1.12x row parity.
+        if outlying := self._outlying(ra, rb):
+            return self._refuse(f"one pass apart from the other two ({', '.join(outlying)})")
         # Said only where the ratio survives every refusal above: a decomposition
         # of a number the page is not going to print would be furniture.
         decomp = self._decomposition(ra, rb)
@@ -856,6 +866,12 @@ class Row:
         return [f"{lbl} {r['rep_drift']:+.0%}"
                 for lbl, r in ((self.a_label, ra), (self.b_label, rb))
                 if r.get("rep_drift") is not None]
+
+    def _outlying(self, ra: dict, rb: dict) -> list[str]:
+        """Arms with one pass apart from two that agree (`aggregate._rep_outlier`)."""
+        return [f"{lbl} pass {r['rep_outlier']['pass']} {r['rep_outlier']['move']:+.0%}"
+                for lbl, r in ((self.a_label, ra), (self.b_label, rb))
+                if r.get("rep_outlier")]
 
     @staticmethod
     def _row_flag(r: dict, key: str, table_default: bool) -> bool:
