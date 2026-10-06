@@ -47,6 +47,7 @@ import json
 import math
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -358,12 +359,52 @@ W11_STEADY_SPAN_S = float(os.environ.get("W11_STEADY_SPAN_S", 25.0))
 W11_SPAN_S = float(os.environ.get("W11_SPAN_S", 60.0))
 
 
-#: Each mixed row's search, in queries. `QUERIES` unless `fullrun` sizes it
-#: to outlast the append from the previous pair's search rate at this write
-#: rate (`fullrun.resolve_w11_queries`); the row counts only the searches
-#: inside the append (`write_window_qps`).
-W11_STEADY_QUERIES = int(os.environ.get("W11_STEADY_QUERIES", QUERIES))
-W11_QUERIES = int(os.environ.get("W11_QUERIES", QUERIES))
+#: Each mixed row's search runs until its append has ended and then
+#: `W11_SEARCH_MARGIN` of the append's span more, and never past
+#: `W11_MAX_SEARCH_S`; the row counts only the searches inside the append
+#: (`write_window_qps`). Until 2026-10-06 it was a query count sized from the
+#: previous pair's rate, which cannot follow an engine that speeds up between
+#: pairs: strawmANN's sift1m W11 ran at 2.25x 0930's rate on 1006 and its
+#: search covered 52% of the append (findings 3). `W11_SEARCH_N` is a count no
+#: search reaches inside the bound, so the clock always ends it
+#: (`run_search_until`).
+W11_SEARCH_MARGIN = float(os.environ.get("W11_SEARCH_MARGIN", 0.25))
+W11_MAX_SEARCH_S = float(os.environ.get("W11_MAX_SEARCH_S", 240.0))
+W11_SEARCH_N = int(os.environ.get("W11_SEARCH_N", 100_000_000))
+
+
+def w11_stop_at(t0: float, bg_t0: float | None, bg_t1: float | None) -> float:
+    """When a mixed row's search stops, on the monotonic clock: the append's
+    end plus `W11_SEARCH_MARGIN` of its span, or `W11_MAX_SEARCH_S` after the
+    search started, whichever is first. While the append runs, the bound."""
+    cap = t0 + W11_MAX_SEARCH_S
+    if bg_t0 is None or bg_t1 is None:
+        return cap
+    # Never in bfb's first second: a SIGINT before it installs its handler
+    # kills it with no output, and a writer that failed at once would then
+    # leave a row that says nothing about why.
+    return max(t0 + 1.0, min(cap, bg_t1 + W11_SEARCH_MARGIN * (bg_t1 - bg_t0)))
+
+
+def run_search_until(cmd: list[str], stop_at, poll_s: float = 0.2) -> subprocess.CompletedProcess:
+    """Run a bfb search and SIGINT it once the monotonic clock passes
+    `stop_at()`, asked again every `poll_s` because the answer moves when the
+    writer ends. bfb stops issuing on SIGINT, prints its summary, writes its
+    JSON and `--jsonl-searches`, and exits 0."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def watch() -> None:
+        while p.poll() is None:
+            if time.monotonic() >= stop_at():
+                p.send_signal(signal.SIGINT)
+                return
+            time.sleep(poll_s)
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    out, err = p.communicate()
+    watcher.join()
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
 
 def w11_append_rate(points: int, span_s: float) -> int:
@@ -868,9 +909,12 @@ def harness_stamp() -> dict:
         "w11_append_rate": {"W11-steady": w11_append_rate(w11_steady_n(), W11_STEADY_SPAN_S),
                             "W11": w11_append_rate(w11_n(), W11_SPAN_S)},
         # Provenance, not hashed: the spans make the rate above, and the
-        # search length is a rate's denominator, as `-n` is on every row.
+        # search length is a rate's denominator, as `-n` is on every row. Not
+        # hashed either for the search's bound: the row is the append's
+        # window whatever outlives it, and each row records its coverage.
         "w11_spans_s": {"W11-steady": W11_STEADY_SPAN_S, "W11": W11_SPAN_S},
-        "w11_queries": {"W11-steady": W11_STEADY_QUERIES, "W11": W11_QUERIES},
+        "w11_search": {"until": "append end", "margin": W11_SEARCH_MARGIN,
+                       "max_s": W11_MAX_SEARCH_S},
         "bfb_pin": BFB_PIN, "bfb_timeout_s": BFB_TIMEOUT_S,
         "collection": collection_settings(),
         # Hashed, so the two quantized experiments can never share a table.
@@ -1687,7 +1731,7 @@ def table() -> list[Workload]:
         # 0.39x against W11's 0.47x.
         Workload("W11-steady", f"mixed read/write below the rebuild threshold: search "
                                f"bench2 while {w11_steady_n():,} synthetic points append",
-                 flags("--collection-name", f"{C}2", "--skip-setup", "-n", W11_STEADY_QUERIES,
+                 flags("--collection-name", f"{C}2", "--skip-setup", "-n", W11_SEARCH_N,
                        "--search", "--search-limit", 10, "--search-hnsw-ef", 128, "-p", 8),
                  query_collection=f"{C}2", recall_joinable=False,
                  ratio_policy="search-during-write; no recall join",
@@ -1705,7 +1749,7 @@ def table() -> list[Workload]:
         # rather than a private collection.
         Workload("W11", f"mixed read/write: search bench2 while {w11_n():,} synthetic "
                         f"points append (runs last)",
-                 flags("--collection-name", f"{C}2", "--skip-setup", "-n", W11_QUERIES,
+                 flags("--collection-name", f"{C}2", "--skip-setup", "-n", W11_SEARCH_N,
                        "--search", "--search-limit", 10, "--search-hnsw-ef", 128, "-p", 8),
                  query_collection=f"{C}2", recall_joinable=False,
                  ratio_policy="search-during-write; no recall join",
@@ -2612,7 +2656,10 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
         reaper.start()
 
     t0 = time.monotonic()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if w.background:
+        proc = run_search_until(cmd, lambda: w11_stop_at(t0, bg_t0, bg_done.get("t1")))
+    else:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
     t1 = time.monotonic()
     wall = t1 - t0
     secs = int(wall)

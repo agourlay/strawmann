@@ -48,8 +48,11 @@ engines' W11-steady covered 100%, but strawmANN's W11 covered 52.3%, its search
 sized from 0930's 8,033 q/s and running at 18,066 (W11_QUERIES=572,856). A
 count sized from the previous pair cannot follow an engine that doubles
 between pairs; a search bounded by the writer's end is the sizing that can.
-dbpedia 1006 measured but is unlicensed (the differ hung, item 60). What is
-open is the sizing, and whether Qdrant's spread is its own. Item 8 is what the
+dbpedia 1006 measured but is unlicensed (the differ hung, item 60). Since
+2026-10-06 there is no count: the search runs until its append ends, then a
+quarter of the append's span more, at most 240 s (`workloads.w11_stop_at`),
+and the harness stops bfb with SIGINT (`decisions.md`). What is open is a pair
+measured with it, and whether Qdrant's spread is its own. Item 8 is what the
 row shows once it measures what it claims to.
 
 **58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**

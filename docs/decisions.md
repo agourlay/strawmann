@@ -2129,3 +2129,29 @@ code; this was found because it was 4%, and a 1% move would not have been.
 And the 1003 laion page stands as measured: its W4 parity and W10 ratios are
 what that binary did, and the next laion pair should read W4 near 0930's.
 
+## The mixed rows' search ends on the clock, not on a count, decided 2026-10-06
+
+findings 3: since 2026-09-29 each mixed row's search was a query count
+sized from the previous pair's rate to outlast the append by 25%. A rate
+read off the previous pair cannot follow an engine that changes between
+pairs: on sift1m 1006 strawmANN's W11 ran at 18,066 q/s against 0930's 8,033,
+and its 572,856 queries covered 52% of the append.
+
+The search now has a count no search reaches (`W11_SEARCH_N`, 100,000,000)
+and the harness ends it: `run_search_until` sends bfb SIGINT once the
+monotonic clock passes `w11_stop_at`, the append's end plus
+`W11_SEARCH_MARGIN` (0.25) of its span, at most `W11_MAX_SEARCH_S` (240 s)
+after the search started, and never in bfb's first second. bfb's own Ctrl-C
+path stops issuing, prints its summary and writes its JSON and the per-search
+jsonl, then exits 0: checked against a running engine (stopped at 3.0 s,
+`duration_secs` 2.999, 22,196 jsonl lines). `fullrun.resolve_w11_sizing` and
+the walk over earlier pairs it needed are gone.
+
+The 2026-09-29 entry turned down a `--duration` flag because it would change
+the client both engines are measured with. SIGINT changes nothing in bfb: it
+is the stop path bfb already has, taken the same way for both engines. The
+bound is not in the stamp. The row is the append's window whatever outlives
+it, every row records its coverage (`write_overlap_pct`), and a hashed key
+would have marked every published row STALE for a change to how long two
+rows search past their window.
+

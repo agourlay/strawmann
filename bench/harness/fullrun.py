@@ -46,7 +46,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import math
 import os
 import re
 import shutil
@@ -325,152 +324,6 @@ def resolve_rps_reference(arg: str | None, labels: list[str]) -> float | None:
     return seen[slower]
 
 
-#: Each mixed row's search length, as the variable `workloads` reads.
-W11_QUERIES_ENV = {"W11-steady": "W11_STEADY_QUERIES", "W11": "W11_QUERIES"}
-
-#: How far past the append the faster engine's search should run. The row is
-#: measured over the write window (`workloads.write_window_qps`), so a search
-#: that outlives its append costs time and nothing else, and one that ends
-#: early is the refusal; the margin is on the long side.
-W11_SPAN_MARGIN = 1.25
-
-#: The longest a mixed row's search may run on the slower engine, in seconds.
-#: Nothing else bounds it now that `QUERIES` does not: at d=128 covering
-#: W11's append takes about 630,000 queries, and on 0930 the 50,000 cap left
-#: sift1m's and laion's searches inside the append's first 7 to 37%
-#: (findings 3). 240 s covers every corpus measured so far and bounds the
-#: row at Qdrant's dbpedia-1m rate.
-W11_MAX_SEARCH_S = 240.0
-
-#: The spans every run used before 0a3de76 recorded one.
-W11_SPANS_BEFORE_RECORDING = {"W11-steady": 25.0, "W11": 60.0}
-
-
-def w11_append_rates_of(label: str) -> dict[str, int] | None:
-    """The mixed rows' write rates a label was measured at, from its `run.json`.
-
-    Recorded since the rate was hashed; before that, rebuilt from the spans
-    and volumes the stamp does carry, at today's rounding of `-T`, so 0924
-    reads as 1,900 and 3,300 points/s and 0925 as 100 and 400. The rate
-    only has to say whether a pair's search speed is today's.
-    """
-    try:
-        h = json.loads((ROOT / "bench/results" / label / "run.json").read_text()).get("harness") or {}
-    except (OSError, json.JSONDecodeError):
-        return None
-    if h.get("w11_append_rate"):
-        return h["w11_append_rate"]
-    up, w11 = h.get("upload_n"), h.get("w11_n")
-    if not up or not w11:
-        return None
-    spans = h.get("w11_spans_s") or W11_SPANS_BEFORE_RECORDING
-    steady = max(1, round(up * workloads.W11_STEADY_RATIO))
-    return {"W11-steady": workloads.w11_append_rate(steady, spans["W11-steady"]),
-            "W11": workloads.w11_append_rate(w11, spans["W11"])}
-
-
-def resolve_w11_queries(labels: list[str]) -> dict[str, int]:
-    """`{env var: queries}`; see `resolve_w11_sizing`."""
-    return {env: n for env, (n, _) in resolve_w11_sizing(labels).items()}
-
-
-def resolve_w11_sizing(labels: list[str]) -> dict[str, tuple[int, float]]:
-    """`{env var: (queries, cover)}` so each mixed row's search outlasts its
-    append; `cover` is the share of the append that many queries is expected
-    to span on the engine that needs the most, 1.0 unless the time bound bit.
-
-    The write rate is fixed (`workloads.W11_STEADY_SPAN_S`); what varies by
-    corpus is how long `QUERIES` takes to search: 117 to 345 s at d=1536
-    against a 25 s and 60 s append. The row is measured over the append's
-    span (`workloads.write_window_qps`), so the search only has to cover it:
-    the faster engine's rate on that row times the append, times
-    `W11_SPAN_MARGIN`. Each label's own writer span (`background_s`), not the
-    nominal one: on dbpedia 0930 Qdrant's writer ran 2,344 points/s against
-    3,300 asked, so its append lasted 84 s, not 60. `QUERIES` does not bound
-    it (findings 3); `W11_MAX_SEARCH_S` on the slower engine does. The slower
-    engine then runs longer than it needs to, and nothing it does past the
-    append is counted.
-
-    Until 2026-09-29 the search was sized to *end* inside the append, from a
-    qps its own length had set, and it never held (findings 3: 10 to 12% of
-    W11-steady's append covered on 0927, 51% and 84% of W11's on 0929). A
-    row measured before the window was measured over its whole search, which
-    a quiet tail makes faster, so its rate sizes a longer search: the safe
-    side.
-
-    The rate comes from the newest pair of this family measured at *this*
-    write rate (these labels' own rows first): a search is faster against a
-    slower writer, so 0925's 2,206 q/s at 200 points/s would size a search
-    nine times too long for 1,900. Empty when no pair was, and `QUERIES` stands.
-    """
-    want = {"W11-steady": workloads.w11_append_rate(workloads.w11_steady_n(),
-                                                    workloads.W11_STEADY_SPAN_S),
-            "W11": workloads.w11_append_rate(workloads.w11_n(), workloads.W11_SPAN_S)}
-    append_s = {"W11-steady": workloads.w11_steady_n() / want["W11-steady"],
-                "W11": workloads.w11_n() / want["W11"]}
-    pair = (labels if any((ROOT / "bench/results" / x / "rows.json").is_file() for x in labels)
-            else previous_pair(labels))
-    out: dict[str, tuple[int, float]] = {}
-    seen: set[str] = set()
-    while pair and pair[0] not in seen and len(out) < len(W11_QUERIES_ENV):
-        seen.add(pair[0])
-        for wid, env in W11_QUERIES_ENV.items():
-            if env in out:
-                continue
-            qps, need = [], []
-            for label in pair:
-                if (w11_append_rates_of(label) or {}).get(wid) != want[wid]:
-                    break
-                try:
-                    got = {r["id"]: r for r in json.loads(
-                        (ROOT / "bench/results" / label / "rows.json").read_text())}
-                except (OSError, json.JSONDecodeError):
-                    break
-                r = got.get(wid) or {}
-                # The rate came from `run.json`, which any later `workloads.py
-                # run` of the label rewrites; it describes this row only if
-                # the row was measured under that stamp.
-                if not stamped_by_run_json(label, r):
-                    break
-                q = r.get("qps")
-                if not (isinstance(q, (int, float)) and q > 0):
-                    break
-                qps.append(q)
-                span = r.get("background_s")
-                need.append(q * max(append_s[wid], span if isinstance(span, (int, float)) else 0))
-            if len(qps) == len(pair):
-                want_n = math.ceil(max(need) * W11_SPAN_MARGIN)
-                n = min(want_n, math.floor(min(qps) * W11_MAX_SEARCH_S))
-                out[env] = (n, min(1.0, n * W11_SPAN_MARGIN / want_n))
-        pair = previous_pair(pair)
-    return out
-
-
-def w11_sizing_line(env: str, n: int, cover: float) -> str:
-    """What the sizing did, from its numbers: the line used to claim the
-    margin whether or not a bound had cut it (0930: "running 25% past the
-    append" over searches that covered 7 to 37% of it)."""
-    if cover < 1.0:
-        return (f"!! {env}={n:,}: bounded at {W11_MAX_SEARCH_S:.0f} s on the slower engine; "
-                f"expected to cover ~{cover:.0%} of the append on the engine that needs most")
-    return (f"{env}={n:,}: each engine's previous search over its own writer span, "
-            f"running {W11_SPAN_MARGIN - 1:.0%} past the append")
-
-
-def stamped_by_run_json(label: str, row: dict) -> bool:
-    """Whether `row` was measured under the harness stamp `label`'s
-    `run.json` holds now. A row without a hash predates row hashing and is
-    taken as the stamp's, as `compare` takes it."""
-    got = row.get("harness_hash")
-    if not got:
-        return True
-    try:
-        h = json.loads((ROOT / "bench/results" / label / "run.json").read_text()).get("harness")
-    except (OSError, json.JSONDecodeError):
-        return False
-    return bool(h) and workloads.stamp_hash(h) == got
-
-
 def previous_pair(labels: list[str]) -> list[str] | None:
     """The newest earlier `sm-`/`qd-` pair of the family these labels belong to.
 
@@ -489,7 +342,7 @@ def previous_pair(labels: list[str]) -> list[str] | None:
         return None
     stem = "sm-" + dated[0].group(2)
     # Strictly earlier than these labels, as the name says. "Newest other
-    # than these" let a walk over pairs (`resolve_w11_queries`) step from the
+    # than these" let a walk over pairs (the old W11 sizing) step from the
     # newest pair to the second and back to the newest, and stop there.
     own = min(int(x[-4:]) for x in labels)
     found = []
@@ -2541,12 +2394,9 @@ def main(argv: list[str]) -> int:
     # for it: strawmANN pins its workers and leaves the main thread free, so
     # the observed mask and the requested set legitimately differ.
     os.environ["BENCH_SERVER_CPUS"] = args.server_cpus
-    # The mixed rows' search lengths, by the same mechanism as the dataset:
-    # bound here and exported, so both arms' subprocesses build the same `-n`.
-    for env, (n, cover) in resolve_w11_sizing(labels).items():
-        os.environ[env] = str(n)
-        setattr(workloads, env, n)
-        print(w11_sizing_line(env, n, cover), flush=True)
+    print(f"mixed rows search until their append ends, then "
+          f"{workloads.W11_SEARCH_MARGIN:.0%} of its span more, at most "
+          f"{workloads.W11_MAX_SEARCH_S:.0f} s", flush=True)
     if RPS_REFERENCE:
         print(f"open-loop arms pinned to {RPS_REFERENCE:,.0f} qps for both engines "
               f"(§4's fractions of one reference, so the two arms are the same "
