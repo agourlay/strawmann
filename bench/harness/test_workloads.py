@@ -3551,6 +3551,17 @@ class QdrantBuildAbTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 self.ab.parse_arms(bad)
 
+    def test_a_binary_the_harness_cannot_recognise_is_refused(self):
+        """`base` ran as process `base` and was counted as foreign load."""
+        arms = self.ab.parse_arms(["a=/x/base", "b=/x/qdrant-avx512", "c=/x/qdrant"])
+        self.assertEqual(self.ab.unrecognised_engines(arms), ["/x/base"])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = self.ab.main(["qdrant_build_ab.py", "--server-cpus", "4-11",
+                               "--client-cpus", "0-3", "--arm", "base=/x/base"])
+        self.assertEqual(rc, 2)
+        self.assertIn("rename the binary", err.getvalue())
+
     def test_a_missing_binary_stops_before_anything_starts(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):

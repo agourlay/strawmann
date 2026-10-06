@@ -48,6 +48,14 @@ def parse_arms(specs: list[str]) -> dict[str, Path]:
     return arms
 
 
+def unrecognised_engines(arms: dict[str, Path]) -> list[str]:
+    """Binaries `procstat` would not take for an engine. A binary named
+    `base` ran as process `base`, so every row counted Qdrant itself as
+    foreign load (`base(711%)`) and each settle waited on it."""
+    return [str(p) for p in arms.values()
+            if not any(p.name.startswith(x) for x in procstat.ENGINE_PREFIXES)]
+
+
 def run_sessions(args, out: Path, arms: dict[str, Path], rows: list[dict]) -> int:
     table = {w.id: w for w in workloads.table()}
     uri = f"http://localhost:{fullrun.QDRANT_GRPC}"
@@ -85,6 +93,10 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv[1:])
 
     arms = parse_arms(args.arm)
+    if unnamed := unrecognised_engines(arms):
+        print(f"{', '.join(unnamed)}: the harness finds the engine by process name "
+              f"({', '.join(procstat.ENGINE_PREFIXES)}*); rename the binary", file=sys.stderr)
+        return 2
     if missing := [str(p) for p in arms.values() if not os.access(p, os.X_OK)]:
         print(f"no executable at {', '.join(missing)}", file=sys.stderr)
         return 2
