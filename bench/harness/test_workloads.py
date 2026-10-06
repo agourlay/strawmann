@@ -3536,6 +3536,30 @@ class CommitAbTests(unittest.TestCase):
             self.assertIn("1,758", text)
 
 
+class QdrantBuildAbTests(unittest.TestCase):
+    """The Qdrant side of `commit_ab.py`: arms are binaries the caller built."""
+
+    def setUp(self):
+        self.ab = importlib.import_module("qdrant_build_ab")
+
+    def test_arms_keep_their_order_and_refuse_a_malformed_or_repeated_one(self):
+        arms = self.ab.parse_arms(["base=/a/qdrant", "prefetch=~/b/qdrant"])
+        self.assertEqual(list(arms), ["base", "prefetch"])
+        self.assertEqual(arms["base"], Path("/a/qdrant"))
+        self.assertFalse(str(arms["prefetch"]).startswith("~"))
+        for bad in (["base"], ["=x"], ["base="], ["a=/x", "a=/y"]):
+            with self.assertRaises(ValueError, msg=bad):
+                self.ab.parse_arms(bad)
+
+    def test_a_missing_binary_stops_before_anything_starts(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = self.ab.main(["qdrant_build_ab.py", "--server-cpus", "4-11",
+                               "--client-cpus", "0-3", "--arm", "base=/nonexistent/qdrant"])
+        self.assertEqual(rc, 2)
+        self.assertIn("/nonexistent/qdrant", err.getvalue())
+
+
 class RunContextTests(unittest.TestCase):
     """A render binds the run's own dataset and policies."""
 
