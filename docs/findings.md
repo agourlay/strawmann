@@ -163,7 +163,16 @@ and p99 1,505 ms, p99.9 2,481 ms, max 3,292 ms against p50 576 ms (0929 p99
 waiter can lose every race. Since 2026-09-30 the slots are a ticket gate
 (`collection.ScanGate`): admission in arrival order, at most `exact_scan_cap`
 in flight, waiters asleep on a futex, and a test that holds both. What is
-open is the dbpedia W9 row read against 13.06 q/s and 1,505 ms.
+open is the dbpedia W9 row read against 13.06 q/s and 1,505 ms. dbpedia
+1006 read it, unlicensed: 12.28 q/s, p99 828 ms and max 842 ms, the tail
+gone. The same night the differ's closed 32-query exact batch hung for 600 s
+and left the pair without a licence: `release` woke one sleeper
+(`maxInt(u32)`, which `lock.zig` documents as waking one), and when that was
+not the next ticket the next ticket slept on with nothing left to wake it.
+W9's continuous arrivals kept rotating the queue, which is why its rows and
+the gate's test passed. Fixed with `lock.wake_all`, and a test that queues
+the admissible ticket second (it hung before). What is open is a licensed
+dbpedia pair with the fix.
 
 **62. strawmANN's third pass is 6 to 7% slower on every W10 point on
 dbpedia, two nights running.** W10-ef32 10,625 / 10,752 / 9,934 on 0930 and

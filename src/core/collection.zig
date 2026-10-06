@@ -2823,7 +2823,9 @@ pub const ScanGate = struct {
 
     pub fn release(self: *ScanGate) void {
         _ = self.served.fetchAdd(1, .acq_rel);
-        lock.futexWake(&self.served, std.math.maxInt(u32));
+        // Every sleeper, not one: only the next ticket may enter, and a wake
+        // that reaches another leaves it asleep with nothing left to wake it.
+        lock.futexWake(&self.served, lock.wake_all);
     }
 };
 
@@ -2869,6 +2871,42 @@ test "the scan gate admits in ticket order and never more than its cap at once" 
     try testing.expect(G.worst.load(.acquire) <= 3);
     try testing.expectEqual(@as(u32, 0), G.out_of_order.load(.acquire));
     try testing.expectEqual(@as(u32, 1600), G.gate.served.load(.acquire));
+}
+
+fn sleepMs(ms: u32) void {
+    var ts = std.os.linux.timespec{ .sec = 0, .nsec = @as(isize, ms) * std.time.ns_per_ms };
+    _ = std.os.linux.nanosleep(&ts, null);
+}
+
+test "the scan gate wakes the admissible ticket when it is not first in the futex queue" {
+    // dbpedia 1006: the differ's closed 32-query exact batch hung for 600 s.
+    // `release` woke one sleeper, and when that sleeper was not the next ticket
+    // it slept again, stranding the one that was: with no later arrival to
+    // release the gate, nothing woke it. Here ticket 2 sleeps before ticket 1,
+    // so a wake-one reaches the wrong ticket first.
+    const G = struct {
+        var gate: ScanGate = .{ .cap = 1 };
+        var done = std.atomic.Value(u32).init(0);
+        fn run() void {
+            _ = gate.acquire();
+            gate.release();
+            _ = done.fetchAdd(1, .acq_rel);
+        }
+    };
+    try testing.expectEqual(@as(u32, 0), G.gate.acquire());
+    G.gate.next.store(2, .release);
+    (try std.Thread.spawn(.{}, G.run, .{})).detach(); // ticket 2, asleep first
+    sleepMs(50);
+    G.gate.next.store(1, .release);
+    (try std.Thread.spawn(.{}, G.run, .{})).detach(); // ticket 1, asleep behind it
+    sleepMs(50);
+    G.gate.release();
+    var waited: usize = 0;
+    while (G.done.load(.acquire) < 2 and waited < 200) : (waited += 1) {
+        sleepMs(10);
+    }
+    // Detached rather than joined: on a regression ticket 1 never returns.
+    try testing.expectEqual(@as(u32, 2), G.done.load(.acquire));
 }
 
 test "a quantized build searches on codes, SQ8 choosing its edges on fp32, and the SQ8 code score is sound" {
