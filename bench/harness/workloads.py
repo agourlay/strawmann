@@ -920,6 +920,11 @@ def harness_stamp() -> dict:
         # Hashed, so the two quantized experiments can never share a table.
         "oversampling_policy": str(OVERSAMPLING_POLICY),
         "ef": {w.id: ef_of(w) for w in table() if not w.upload_only},
+        # Hashed: requests in flight decide how many cores a row can use, and
+        # W5 moved 3.6x on them with nothing in the stamp to say so.
+        "client": {w.id: [client_concurrency(w)[k] for k in
+                          ("client_parallel", "client_threads", "client_connections")]
+                   for w in table() if not w.upload_only},
         "qps_definition": ("n_queries / duration_secs from bfb's JSON (qps_bfb_median kept beside it); "
                            "a mixed row's is the searches completed while its writer ran over the "
                            "writer's span (qps_basis write-window, qps_search the whole search)"),
@@ -944,7 +949,7 @@ def harness_stamp() -> dict:
 #: serves a 28.16% floor over rows whose spread is 0.66%.
 STAMP_KEYS = ["metric", "query_source", "upload_n", "w11_n", "queries",
               "exact_queries", "collection", "ef", "bfb_pin", "engine_settle",
-              "oversampling_policy", "w11_append_rate"]
+              "oversampling_policy", "w11_append_rate", "client"]
 
 #: Keys that did *not* earn the invalidation above, so a stamp from before one
 #: of them hashes exactly as its rows were hashed when they were measured.
@@ -955,8 +960,9 @@ STAMP_KEYS = ["metric", "query_source", "upload_n", "w11_n", "queries",
 #: 0921 and 0908 sift1m pages lost every ratio on re-render. Across eras the
 #: label-level check still refuses: `None` against `defaults` is STALE.
 #: `w11_append_rate` likewise: every run before it recorded no rate, and its
-#: rows are still its rows.
-STAMP_KEYS_SINCE = ("oversampling_policy", "w11_append_rate")
+#: rows are still its rows. `client` too: a run before it is still the run it
+#: was, and the label-level check refuses a ratio across the two eras.
+STAMP_KEYS_SINCE = ("oversampling_policy", "w11_append_rate", "client")
 
 
 def stamp_hash(stamp: dict) -> str:
@@ -1520,9 +1526,15 @@ def table() -> list[Workload]:
         # times per request. `random-sample` is the config path's only
         # per-element draw (see `search_config`); the flag path would give
         # distinct queries too, but uniform-random ones far from the data.
+        # W4's client, so W5 against W4 is batching and nothing else. It ran on
+        # bfb's default of 2 requests in flight, and Qdrant serves a batch on
+        # one thread per segment, one segment under `equal-work`: 1.96 busy
+        # cores against strawmANN's 7.06, which fans a batch out over its
+        # workers. That was 3.6x of every published W5 ratio (sift1m 5.68x).
         Workload("W5", "search batched (16 distinct dataset queries per request)",
                  flags("--collection-name", f"{C}2", "--skip-setup", "-n", QUERIES, "--search",
-                       "--search-limit", 10, "--search-hnsw-ef", 128, "--search-batch-size", 16),
+                       "--search-limit", 10, "--search-hnsw-ef", 128, "--search-batch-size", 16,
+                       "-p", 64, "-t", 16, "-c", W4_CONNS),
                  query_collection="bench2", query_strategy="random-sample"),
 
         # W7 carries --quantization-rescore because oversampling without it is

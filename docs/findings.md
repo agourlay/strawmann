@@ -55,6 +55,13 @@ and the harness stops bfb with SIGINT (`decisions.md`). What is open is a pair
 measured with it, and whether Qdrant's spread is its own. Item 8 is what the
 row shows once it measures what it claims to.
 
+**70. The published W5 ratios are mostly parallelism.** Every current
+page's batched row ran at two requests in flight, where strawmANN used 7 cores
+and Qdrant 2 (`decisions.md`, 2026-10-06): 3.6x of sift1m's 5.68x, laion's
+2.83x and dbpedia's 2.69x, and per batched query Qdrant is the cheaper engine
+on laion and dbpedia. W5 now runs W4's client. It closes when each corpus has
+a pair measured with it.
+
 **58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**
 W10-ef128 +10.4%, W10-ef256 +11.5%, W12-sel1 +10.2%, W11 +10%, with cycles
 per query down 10% at the same recall, a byte-identical binary (sha256

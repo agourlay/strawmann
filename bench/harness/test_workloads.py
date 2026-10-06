@@ -1800,6 +1800,28 @@ class FullrunRowInvocationTests(unittest.TestCase):
         self.assertEqual(f.invocations_per_arm(),
                          sum(1 for c in calls if c[0] == "rows"))
 
+    def test_w5_has_w4s_client_and_the_client_is_in_the_hash(self):
+        """W5 ran at bfb's 2 requests in flight: 1.96 busy cores on Qdrant
+        against W4's 7.61, 3.6x of the published W5 ratio."""
+        w = self.f.workloads
+        t = {x.id: x for x in w.table()}
+        c4, c5 = w.client_concurrency(t["W4"]), w.client_concurrency(t["W5"])
+        self.assertEqual(c5, c4)
+        self.assertEqual(c5["client_defaults"], "")
+        stamp = w.harness_stamp()
+        self.assertIn("client", w.STAMP_KEYS)
+        self.assertEqual(stamp["client"]["W5"], [64, 16, w.W4_CONNS])
+        self.assertNotIn("W0-upload", stamp["client"])
+        moved = {**stamp, "client": {**stamp["client"], "W5": [2, 2, 1]}}
+        self.assertNotEqual(w.stamp_hash(stamp), w.stamp_hash(moved))
+        # A stamp from before the key hashes as its rows were hashed.
+        old = {k: v for k, v in stamp.items() if k != "client"}
+        key = {k: old.get(k) for k in w.STAMP_KEYS if k != "client"
+               and (k in old or k not in w.STAMP_KEYS_SINCE)}
+        import hashlib
+        self.assertEqual(w.stamp_hash(old), hashlib.sha256(
+            json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:12])
+
     def test_the_write_rate_is_in_the_hash_and_old_stamps_keep_theirs(self):
         w = self.f.workloads
         stamp = w.harness_stamp()
@@ -2871,7 +2893,8 @@ class ClientConcurrencyTests(unittest.TestCase):
         self.assertEqual(self._of("W10-ef128")["client_parallel"], 8)
         self.assertEqual(self._of("W6-ef128")["client_parallel"], 2)
         self.assertEqual(self._of("W12-sel10-ef128")["client_parallel"], 2)
-        self.assertEqual(self._of("W5")["client_parallel"], 2)
+        # W5 had bfb's 2 as well until it took W4's client (2026-10-06).
+        self.assertEqual(self._of("W5")["client_parallel"], 64)
 
     def test_open_loop_records_no_parallel(self):
         """bfb ignores `--parallel` under `--rps`, so a number would be fiction."""

@@ -2155,3 +2155,30 @@ it, every row records its coverage (`write_overlap_pct`), and a hashed key
 would have marked every published row STALE for a change to how long two
 rows search past their window.
 
+## W5 takes W4's client, and every row's client is in the stamp, decided 2026-10-06
+
+W5 (16 queries a request) passed no `-p`, so it ran at bfb's default of two
+requests in flight. strawmANN fans a batch out over its workers and used 7.06
+cores; Qdrant serves a batch on one thread per segment, and `equal-work` holds
+it to one populated segment, so it used 1.96. Per query Qdrant got cheaper
+batched (sift1m 1,046k to 795k cycles; on dbpedia 2,991k against strawmANN's
+4,007k). Every published W5 ratio was the core ratio times the per-query one:
+
+| corpus | cores | per-query cost, Qdrant / strawmANN | product | published |
+|---|--:|--:|--:|--:|
+| sift1m 1006 | 3.60x | 1.56x | 5.6x | 5.68x |
+| laion 1003 | 3.57x | 0.78x | 2.8x | 2.83x |
+| dbpedia 1006 | 3.58x | 0.75x | 2.7x | 2.69x |
+
+W5 now runs W4's `-p 64 -t 16 -c 2`, so W5 against W4 is batching and nothing
+else. bfb's flags were not in the stamp, so that change would have moved the
+row under the same hash as every published one; the stamp now carries each
+search row's `[parallel, threads, connections]` (`client`), hashed. A stamp
+holds one run, so the key cannot be scoped to W5: pairs from before and after
+it refuse each other's ratios (STALE), while each pair, measured under one
+stamp, renders as before. `STAMP_KEYS_SINCE` keeps the old rows' hashes.
+
+The quantized rows (W6, W7, W8, W14) and the W12 rows still run at bfb's
+default of two in flight. Both engines then serve one request per thread on
+two cores, so their ratios are like for like, but they are not saturated.
+
