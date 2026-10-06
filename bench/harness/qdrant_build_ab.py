@@ -90,7 +90,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--rows", nargs="+", default=list(ROWS))
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--tag", default=f"qdrant-ab-{time.strftime('%m%d')}")
+    ap.add_argument("--settle-timeout", type=float, default=None, metavar="S",
+                    help="cap each pre-row settle; search-only rows leave no engine work "
+                         "behind, and the load average only lags the CPU")
     args = ap.parse_args(argv[1:])
+    if args.settle_timeout is not None:
+        fullrun.SETTLE_TIMEOUT_S = args.settle_timeout
 
     arms = parse_arms(args.arm)
     if unnamed := unrecognised_engines(arms):

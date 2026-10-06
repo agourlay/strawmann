@@ -3608,6 +3608,43 @@ class W12FairnessTests(unittest.TestCase):
         self.assertIn("collection", self.w.STAMP_KEYS)
 
 
+class PlannerCalibrationTests(unittest.TestCase):
+    """The scan-or-walk calibration for Qdrant's filtered search."""
+
+    def setUp(self):
+        self.c = importlib.import_module("planner_calibration")
+
+    def test_the_plan_covers_every_width_filter_and_arm_once(self):
+        runs = self.c.plan()
+        self.assertEqual(len(runs), len(self.c.DATASETS) * len(self.c.FILTERS) * 2)
+        self.assertEqual(len({(r["dataset"], r["tag"]) for r in runs}), len(runs))
+        walk = next(r for r in runs if r["arm"] == "walk")
+        self.assertEqual(walk["env"]["W12_FULL_SCAN_THRESHOLD_KB"], "10")
+        self.assertEqual(walk["env"]["W12_ACORN"], "0")
+        sels = sorted(v for k, a in self.c.FILTERS for v in self.c.selectivities(k, a).values())
+        self.assertAlmostEqual(sels[0], 0.005)
+        self.assertLess(sels[-1], 0.11)
+
+    def test_the_fit_recovers_an_exponent(self):
+        self.assertAlmostEqual(self.c.fit([(32, 32 ** 0.5), (128, 128 ** 0.5), (512, 512 ** 0.5)]), 0.5)
+        self.assertIsNone(self.c.fit([(32, 1.0)]))
+
+    def test_break_even_interpolates_and_says_when_there_is_none(self):
+        # laion sel1: walk 1.75x scan at ef 32, 0.99x at 128, 0.53x at 512.
+        be = self.c.break_even({32: 1.75, 128: 0.99, 512: 0.53}, 1.0)
+        self.assertTrue(120 < be < 128, be)
+        self.assertIsNone(self.c.break_even({32: 7.2, 128: 3.4, 512: 1.4}, 1.0))
+
+    def test_qdrant_build_ab_caps_the_settle(self):
+        import fullrun
+        ab = importlib.import_module("qdrant_build_ab")
+        with mock.patch.object(fullrun, "SETTLE_TIMEOUT_S", 300.0), \
+                contextlib.redirect_stderr(io.StringIO()):
+            ab.main(["x", "--server-cpus", "4-11", "--client-cpus", "0-3",
+                     "--arm", "a=/nonexistent/qdrant", "--settle-timeout", "20"])
+            self.assertEqual(fullrun.SETTLE_TIMEOUT_S, 20.0)
+
+
 class RunContextTests(unittest.TestCase):
     """A render binds the run's own dataset and policies."""
 
