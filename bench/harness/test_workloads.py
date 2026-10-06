@@ -2877,11 +2877,12 @@ class ClientConcurrencyTests(unittest.TestCase):
         return self.w.client_concurrency(w)
 
     def test_an_unpinned_flag_records_bfbs_default_not_none(self):
-        """The row did offer a concurrency; `None` would read as unknown."""
-        c = self._of("W6-ef128")
-        self.assertEqual(c["client_parallel"], self.w.BFB_DEFAULT_PARALLEL)
-        self.assertEqual(c["client_parallel"], 2)
-        self.assertIn("-p", c["client_defaults"].split())
+        """The row did offer a concurrency; `None` would read as unknown.
+        W3 pins `-p 1` and leaves the threads and connections to bfb."""
+        c = self._of("W3")
+        self.assertEqual(c["client_threads"], self.w.BFB_DEFAULT_THREADS)
+        self.assertEqual(c["client_threads"], 2)
+        self.assertEqual(c["client_defaults"].split(), ["-t", "-c"])
 
     def test_a_pinned_flag_is_recorded_and_not_marked_default(self):
         c = self._of("W10-ef128")
@@ -2889,12 +2890,13 @@ class ClientConcurrencyTests(unittest.TestCase):
         self.assertNotIn("-p", c["client_defaults"].split())
 
     def test_the_pair_that_caused_the_misreading_differs(self):
-        """W10's ladder runs at four times W6's, and the table prints both."""
+        """W10's ladder ran at four times W6's, and the table prints both.
+        W5, the quantized rows and W12 took W4's client on 2026-10-06; W10's
+        ladder stays at 8."""
         self.assertEqual(self._of("W10-ef128")["client_parallel"], 8)
-        self.assertEqual(self._of("W6-ef128")["client_parallel"], 2)
-        self.assertEqual(self._of("W12-sel10-ef128")["client_parallel"], 2)
-        # W5 had bfb's 2 as well until it took W4's client (2026-10-06).
-        self.assertEqual(self._of("W5")["client_parallel"], 64)
+        for wid in ("W5", "W6", "W6-ef128", "W7", "W8", "W14-2bit", "W12-sel1",
+                    "W12-sel10", "W12-sel10-ef128"):
+            self.assertEqual(self._of(wid), self._of("W4"), wid)
 
     def test_open_loop_records_no_parallel(self):
         """bfb ignores `--parallel` under `--rps`, so a number would be fiction."""
@@ -2934,12 +2936,12 @@ class ClientConcurrencyTests(unittest.TestCase):
     def test_a_row_reaching_rows_json_carries_it(self):
         """The field has to survive `Result`, not merely exist in the helper."""
         from dataclasses import asdict
-        r = self.w.Result("W6-ef128", self.w.Status.ok, 1, 0, 0, "", 1.0, 1.0, "",
+        r = self.w.Result("W3", self.w.Status.ok, 1, 0, 0, "", 1.0, 1.0, "",
                           **self.w.client_concurrency(
-                              next(x for x in self.w.table() if x.id == "W6-ef128")))
+                              next(x for x in self.w.table() if x.id == "W3")))
         d = asdict(r)
-        self.assertEqual(d["client_parallel"], 2)
-        self.assertIn("-p", d["client_defaults"])
+        self.assertEqual(d["client_parallel"], 1)
+        self.assertIn("-t", d["client_defaults"])
 
 
 class NightrunTests(unittest.TestCase):

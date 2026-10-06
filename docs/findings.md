@@ -87,7 +87,9 @@ cost, in-process), while Qdrant's walk trades recall for speed and at `ef` 64
 serves 2,383 q/s at 0.9963. That point reads 0.79x and is a trade strawmANN
 has no setting for; at equal recall it leads (1.61x at 0.9999). The query is
 latency-bound at the client's two in flight, 0.96 ms on one core reading 11.7
-MB of scattered rows at about 12 GB/s. Two ways to offer the trade were looked
+MB of scattered rows at about 12 GB/s. Since 2026-10-06 the W12 rows run W4's
+client (64 in flight), so the next pairs read sel1 under load, where the
+exact scan's cost per query decides it rather than its latency. Two ways to offer the trade were looked
 at on 2026-09-25 and not taken: an SQ8 pre-score needs codes `bench12` does not
 have (it is unquantized), and a first stage whose SQ8 bounds were only fixed
 at this width on the 0927 pair (T4 `|Δscore|` p50 9.7e-4, from 4.9e-1);

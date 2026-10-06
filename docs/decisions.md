@@ -2178,7 +2178,11 @@ holds one run, so the key cannot be scoped to W5: pairs from before and after
 it refuse each other's ratios (STALE), while each pair, measured under one
 stamp, renders as before. `STAMP_KEYS_SINCE` keeps the old rows' hashes.
 
-The quantized rows (W6, W7, W8, W14) and the W12 rows still run at bfb's
-default of two in flight. Both engines then serve one request per thread on
-two cores, so their ratios are like for like, but they are not saturated.
+The quantized rows (W6, W7, W8, W14) and the W12 rows ran at bfb's default
+of two in flight as well. Both engines serve one request per thread there, so
+their ratios were like for like, but two cores of an eight-core server is not
+throughput under load: strawmANN's sift1m W6 read 5,480 q/s against W4's
+27,454. The same day they took W4's client too (`SATURATING_CLIENT`), their
+recall ladders with them, since a rung reproduces its row. W10's ladder stays
+at `-p 8`, and W3, W9, W13 and the mixed rows keep their own.
 

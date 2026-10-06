@@ -655,6 +655,13 @@ def strawmann_start_requirements(comm: str, wanted: set[str],
 #: to that.
 W4_CONNS = int(os.environ.get("W4_CONNS", 2))
 
+#: W4's client: enough requests in flight to fill every server core on both
+#: engines, each of which serves one request on one thread. W5, the quantized
+#: rows and W12 ran at bfb's default of two until 2026-10-06, so they measured
+#: two cores of either engine; a recall ladder takes its row's client, since
+#: the rung is the row's reproduction check. The stamp's `client` holds it.
+SATURATING_CLIENT = ("-p", 64, "-t", 16, "-c", W4_CONNS)
+
 #: W9's client concurrency, eight by default. The override exists because at
 #: `-p 1` the row is falsifiable: no engine can share a scan between queries, so
 #: one above `aggregate_bandwidth / corpus_bytes` (119 qps on dbpedia-100K here)
@@ -1443,7 +1450,8 @@ def isolated_encoding_rows(family: str) -> list[Workload]:
                             flags("--collection-name", coll, "--skip-setup", "-n", QUERIES, "--search",
                                   "--search-limit", 10, "--search-hnsw-ef", 128,
                                   "--quantization-oversampling", 4,
-                                  "--quantization-rescore", "true"), query_collection=coll))
+                                  "--quantization-rescore", "true", *SATURATING_CLIENT),
+                            query_collection=coll))
     return out
 
 
@@ -1501,7 +1509,7 @@ def table() -> list[Workload]:
         Workload("W4", "search, saturating (closed loop)",
                  flags("--collection-name", f"{C}2", "--skip-setup", "-n", QUERIES, "--search",
                        "--search-limit", 10, "--search-hnsw-ef", 128,
-                       "-p", 64, "-t", 16, "-c", W4_CONNS), query_collection="bench2"),
+                       *SATURATING_CLIENT), query_collection="bench2"),
     ]
 
     # §4 asks for "R x measured saturation", R in {0.5, 0.7, 0.9}. These were
@@ -1534,7 +1542,7 @@ def table() -> list[Workload]:
         Workload("W5", "search batched (16 distinct dataset queries per request)",
                  flags("--collection-name", f"{C}2", "--skip-setup", "-n", QUERIES, "--search",
                        "--search-limit", 10, "--search-hnsw-ef", 128, "--search-batch-size", 16,
-                       "-p", 64, "-t", 16, "-c", W4_CONNS),
+                       *SATURATING_CLIENT),
                  query_collection="bench2", query_strategy="random-sample"),
 
         # W7 carries --quantization-rescore because oversampling without it is
@@ -1549,7 +1557,7 @@ def table() -> list[Workload]:
         Workload("W6", "quantized: scalar",
                  flags("--collection-name", f"{C}6", "--skip-setup", "-n", QUERIES, "--search",
                        "--search-limit", 10, "--search-hnsw-ef", 128,
-                       "--quantization-rescore", "true"), query_collection="bench6"),
+                       "--quantization-rescore", "true", *SATURATING_CLIENT), query_collection="bench6"),
     ]
 
     # W6's frontier, for the same reason W10 is bench2's. W6/W7/W8 are refused a
@@ -1575,7 +1583,7 @@ def table() -> list[Workload]:
             f"W6-ef{ef}", f"SQ8 recall control, ef={ef} (latency only)",
             flags("--collection-name", f"{C}6", "--skip-setup", "-n", QUERIES, "--search",
                   "--search-limit", 10, "--search-hnsw-ef", ef,
-                  "--quantization-rescore", "true"), query_collection=f"{C}6"))
+                  "--quantization-rescore", "true", *SATURATING_CLIENT), query_collection=f"{C}6"))
 
     rows += [
         Workload("W7-upload", "binary quantization: load",
@@ -1594,7 +1602,7 @@ def table() -> list[Workload]:
                  flags("--collection-name", f"{C}7", "--skip-setup", "-n", QUERIES, "--search",
                        "--search-limit", 10, "--search-hnsw-ef", 128,
                        "--quantization-oversampling", 4,
-                       "--quantization-rescore", "true"), query_collection="bench7"),
+                       "--quantization-rescore", "true", *SATURATING_CLIENT), query_collection="bench7"),
         *isolated_encoding_rows("W7-"),
         Workload("W8-upload", "PQ: load",
                  flags(*CREATE, "--collection-name", f"{C}8", "--fbin", corpus(), "-n", upload_n(), "-d", DIM,
@@ -1602,7 +1610,7 @@ def table() -> list[Workload]:
         Workload("W8", "quantized: PQ",
                  flags("--collection-name", f"{C}8", "--skip-setup", "-n", QUERIES, "--search",
                        "--search-limit", 10, "--search-hnsw-ef", 128,
-                       "--quantization-rescore", "true"), query_collection="bench8"),
+                       "--quantization-rescore", "true", *SATURATING_CLIENT), query_collection="bench8"),
         # W14: TurboQuant at 1, 1.5, 2 and 4 bits, each in its own phase.
         *isolated_encoding_rows("W14-"),
 
@@ -1670,14 +1678,16 @@ def table() -> list[Workload]:
         Workload("W12-sel1", f"filtered search, one keyword "
                               f"(~{100 / W12_KEYWORDS:.0f}% of bench12)",
                  flags("--collection-name", f"{C}12", "--skip-setup", "-n", FILTERED_QUERIES,
-                       "--search", "--search-limit", 10, "--search-hnsw-ef", 128),
+                       "--search", "--search-limit", 10, "--search-hnsw-ef", 128,
+                       *SATURATING_CLIENT),
                  query_collection=f"{C}12", needs_payload_index=True,
                  keyword_filter=("a", W12_KEYWORDS, None)),
         Workload("W12-sel10", f"filtered search, any of {W12_MATCH_ANY} keywords "
                                f"(~{100 * (1 - (1 - 1 / W12_KEYWORDS) ** W12_MATCH_ANY):.0f}% "
                                f"of bench12)",
                  flags("--collection-name", f"{C}12", "--skip-setup", "-n", FILTERED_QUERIES,
-                       "--search", "--search-limit", 10, "--search-hnsw-ef", 128),
+                       "--search", "--search-limit", 10, "--search-hnsw-ef", 128,
+                       *SATURATING_CLIENT),
                  query_collection=f"{C}12", needs_payload_index=True,
                  keyword_filter=("a", W12_KEYWORDS, W12_MATCH_ANY)),
 
@@ -1699,7 +1709,8 @@ def table() -> list[Workload]:
             f"W12-sel1-ef{ef}",
             f"filtered recall control, one keyword, ef={ef} (latency only)",
             flags("--collection-name", f"{C}12", "--skip-setup", "-n", FILTERED_QUERIES,
-                  "--search", "--search-limit", 10, "--search-hnsw-ef", ef),
+                  "--search", "--search-limit", 10, "--search-hnsw-ef", ef,
+                  *SATURATING_CLIENT),
             query_collection=f"{C}12", needs_payload_index=True,
             keyword_filter=("a", W12_KEYWORDS, None))
           for ef in (32, 64, 128, 256, 512)],
@@ -1715,7 +1726,8 @@ def table() -> list[Workload]:
             # measuring a concurrency its own row does not. The rung *is* the
             # reproduction check, so it has to be the same search.
             flags("--collection-name", f"{C}12", "--skip-setup", "-n", FILTERED_QUERIES,
-                  "--search", "--search-limit", 10, "--search-hnsw-ef", ef),
+                  "--search", "--search-limit", 10, "--search-hnsw-ef", ef,
+                  *SATURATING_CLIENT),
             query_collection=f"{C}12", needs_payload_index=True,
             keyword_filter=("a", W12_KEYWORDS, W12_MATCH_ANY))
           for ef in (32, 64, 128, 256, 512)],
