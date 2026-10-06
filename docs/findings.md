@@ -62,6 +62,14 @@ and Qdrant 2 (`decisions.md`, 2026-10-06): 3.6x of sift1m's 5.68x, laion's
 on laion and dbpedia. W5 now runs W4's client. It closes when each corpus has
 a pair measured with it.
 
+**71. The published W12 ratios are partly harness configuration.** Every
+current page ran Qdrant's filtered search with a 10 KB full-scan threshold (5
+points at d=512, so every filter walked the graph) and without ACORN, which
+strawmANN's plan takes on its own (`decisions.md`, 2026-10-06). sel1's
+2.3x to 4.0x at high `ef` and sel10's recall gap at low `ef` (0.94 to 0.99
+against 0.77 to 0.87 at `ef` 32) both carry it. W12 now runs Qdrant's shipped
+threshold and ACORN. It closes when each corpus has a pair measured with them.
+
 **58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**
 W10-ef128 +10.4%, W10-ef256 +11.5%, W12-sel1 +10.2%, W11 +10%, with cycles
 per query down 10% at the same recall, a byte-identical binary (sha256

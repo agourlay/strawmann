@@ -1234,6 +1234,20 @@ INDEXING_THRESHOLD_KB = int(os.environ.get("INDEXING_THRESHOLD_KB", 1))
 FULL_SCAN_THRESHOLD_KB = max(QDRANT_MIN_FULL_SCAN_KB,
                              int(os.environ.get("FULL_SCAN_THRESHOLD_KB",
                                                 QDRANT_MIN_FULL_SCAN_KB)))
+#: W12's collection takes Qdrant's shipped full-scan threshold instead. Qdrant
+#: decides between scanning a filter's matches and walking the graph by the
+#: filter's cardinality against this threshold (`read_view/dispatch.rs`), and
+#: at 10 KB that is 5 points at d=512: every W12 filter walked the graph, which
+#: is not how Qdrant ships, while strawmANN's plan ignores the setting. bench12
+#: is far above 10,000 KB at every tier, so its graph is built all the same.
+W12_FULL_SCAN_THRESHOLD_KB = int(os.environ.get("W12_FULL_SCAN_THRESHOLD_KB", 10_000))
+#: And W12's searches let Qdrant use ACORN, which it ships per request and off
+#: by default (`acorn.enable`, `max_selectivity` 0.4). strawmANN's plan takes
+#: its ACORN-1 two-hop walk on its own, so without the flag sel10 compared one
+#: engine with ACORN against the other without it: recall 0.77 to 0.87 against
+#: 0.94 to 0.99 at `ef` 32. strawmANN skips the field.
+W12_ACORN = os.environ.get("W12_ACORN", "1") != "0"
+W12_SEARCH_FLAGS = ("--acorn",) if W12_ACORN else ()
 #: bfb's own default for `--on-disk-payload` is `true` (`args/mod.rs`); it is
 #: passed rather than defaulted so the row carries it, per docs/workloads.md §2.
 #: `false`, because spec §2 lists "no on-disk payload (`--on-disk-payload
@@ -1283,7 +1297,7 @@ def policy_means() -> str:
     return "Qdrant's own default_segment_number, resolved to the CPU count"
 
 
-def collection_flags() -> list[str]:
+def collection_flags(full_scan_threshold_kb: int | None = None) -> list[str]:
     """What every collection-creating row asks for.
 
     The segment flags are omitted entirely under `as-deployed` rather than
@@ -1299,7 +1313,7 @@ def collection_flags() -> list[str]:
     return flags(*(("--segments", seg) if seg is not None else ()),
                  *(("--max-segment-size", ceiling) if ceiling is not None else ()),
                  "--indexing-threshold", INDEXING_THRESHOLD_KB,
-                 "--full-scan-threshold", FULL_SCAN_THRESHOLD_KB,
+                 "--full-scan-threshold", full_scan_threshold_kb or FULL_SCAN_THRESHOLD_KB,
                  "--on-disk-payload", ON_DISK_PAYLOAD)
 
 
@@ -1320,6 +1334,9 @@ def collection_settings() -> dict:
         "max_segment_size_kb": max_segment_size_kb() or "engine default",
         "indexing_threshold_kb": INDEXING_THRESHOLD_KB,
         "full_scan_threshold_kb": FULL_SCAN_THRESHOLD_KB,
+        # Hashed with the rest: both change what W12 measures.
+        "w12_full_scan_threshold_kb": W12_FULL_SCAN_THRESHOLD_KB,
+        "w12_acorn": "on, Qdrant's default max_selectivity" if W12_ACORN else "off",
         "on_disk_payload": ON_DISK_PAYLOAD,
         # Not the *requested* placement: that is per engine, and this dict is
         # hashed into every row's identity, so an arm-specific value would make
@@ -1647,7 +1664,9 @@ def table() -> list[Workload]:
         # count. `FILTERED_QUERIES` stays cut from the days Qdrant scanned;
         # raising it is a measurement decision.
         Workload("W12-upload", f"filtered search: load {w12_n():,} with payloads",
-                 flags(*CREATE, "--collection-name", f"{C}12", "--fbin", corpus(), "-n", w12_n(),
+                 flags("--distance", METRIC,
+                       *collection_flags(full_scan_threshold_kb=W12_FULL_SCAN_THRESHOLD_KB),
+                       "--collection-name", f"{C}12", "--fbin", corpus(), "-n", w12_n(),
                        "-d", DIM, "-k", W12_KEYWORDS), upload_only=True),
         # `-d` because this row has no query file: it is the only searching row
         # whose queries bfb *generates*, and generation is sized by `-d`, which
@@ -1679,7 +1698,7 @@ def table() -> list[Workload]:
                               f"(~{100 / W12_KEYWORDS:.0f}% of bench12)",
                  flags("--collection-name", f"{C}12", "--skip-setup", "-n", FILTERED_QUERIES,
                        "--search", "--search-limit", 10, "--search-hnsw-ef", 128,
-                       *SATURATING_CLIENT),
+                       *SATURATING_CLIENT, *W12_SEARCH_FLAGS),
                  query_collection=f"{C}12", needs_payload_index=True,
                  keyword_filter=("a", W12_KEYWORDS, None)),
         Workload("W12-sel10", f"filtered search, any of {W12_MATCH_ANY} keywords "
@@ -1687,7 +1706,7 @@ def table() -> list[Workload]:
                                f"of bench12)",
                  flags("--collection-name", f"{C}12", "--skip-setup", "-n", FILTERED_QUERIES,
                        "--search", "--search-limit", 10, "--search-hnsw-ef", 128,
-                       *SATURATING_CLIENT),
+                       *SATURATING_CLIENT, *W12_SEARCH_FLAGS),
                  query_collection=f"{C}12", needs_payload_index=True,
                  keyword_filter=("a", W12_KEYWORDS, W12_MATCH_ANY)),
 
@@ -1710,7 +1729,7 @@ def table() -> list[Workload]:
             f"filtered recall control, one keyword, ef={ef} (latency only)",
             flags("--collection-name", f"{C}12", "--skip-setup", "-n", FILTERED_QUERIES,
                   "--search", "--search-limit", 10, "--search-hnsw-ef", ef,
-                  *SATURATING_CLIENT),
+                  *SATURATING_CLIENT, *W12_SEARCH_FLAGS),
             query_collection=f"{C}12", needs_payload_index=True,
             keyword_filter=("a", W12_KEYWORDS, None))
           for ef in (32, 64, 128, 256, 512)],
@@ -1727,7 +1746,7 @@ def table() -> list[Workload]:
             # reproduction check, so it has to be the same search.
             flags("--collection-name", f"{C}12", "--skip-setup", "-n", FILTERED_QUERIES,
                   "--search", "--search-limit", 10, "--search-hnsw-ef", ef,
-                  *SATURATING_CLIENT),
+                  *SATURATING_CLIENT, *W12_SEARCH_FLAGS),
             query_collection=f"{C}12", needs_payload_index=True,
             keyword_filter=("a", W12_KEYWORDS, W12_MATCH_ANY))
           for ef in (32, 64, 128, 256, 512)],

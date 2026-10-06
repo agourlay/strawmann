@@ -3571,6 +3571,43 @@ class QdrantBuildAbTests(unittest.TestCase):
         self.assertIn("/nonexistent/qdrant", err.getvalue())
 
 
+class W12FairnessTests(unittest.TestCase):
+    """W12 compared strawmANN's own plan against a Qdrant held to the graph
+    (10 KB full-scan threshold, 5 points at d=512) and without ACORN, which
+    strawmANN's plan takes on its own (2026-10-06)."""
+
+    def setUp(self):
+        self.addCleanup(os.environ.pop, "W12_ACORN", None)
+        self.w = importlib.reload(workloads)
+
+    def _args(self, wid):
+        return [str(a) for a in {x.id: x for x in self.w.table()}[wid].args]
+
+    def test_only_bench12_takes_qdrants_shipped_full_scan_threshold(self):
+        def threshold(wid):
+            a = self._args(wid)
+            return int(a[a.index("--full-scan-threshold") + 1])
+        self.assertEqual(threshold("W12-upload"), 10_000)
+        # W0 needs the floor to get a graph at all, and every other collection keeps it.
+        for wid in ("W0-upload", "W2", "W6-upload", "W7-upload"):
+            self.assertEqual(threshold(wid), self.w.FULL_SCAN_THRESHOLD_KB, wid)
+
+    def test_w12_searches_let_qdrant_use_acorn_and_nothing_else_does(self):
+        for wid in ("W12-sel1", "W12-sel10", "W12-sel1-ef32", "W12-sel10-ef512"):
+            self.assertIn("--acorn", self._args(wid), wid)
+        for wid in ("W4", "W5", "W6", "W10-ef128", "W12-upload"):
+            self.assertNotIn("--acorn", self._args(wid), wid)
+        os.environ["W12_ACORN"] = "0"
+        self.w = importlib.reload(workloads)
+        self.assertNotIn("--acorn", self._args("W12-sel10"))
+
+    def test_both_are_in_the_hashed_collection_settings(self):
+        settings = self.w.collection_settings()
+        self.assertEqual(settings["w12_full_scan_threshold_kb"], 10_000)
+        self.assertTrue(settings["w12_acorn"].startswith("on"))
+        self.assertIn("collection", self.w.STAMP_KEYS)
+
+
 class RunContextTests(unittest.TestCase):
     """A render binds the run's own dataset and policies."""
 

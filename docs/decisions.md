@@ -2186,3 +2186,30 @@ throughput under load: strawmANN's sift1m W6 read 5,480 q/s against W4's
 recall ladders with them, since a rung reproduces its row. W10's ladder stays
 at `-p 8`, and W3, W9, W13 and the mixed rows keep their own.
 
+## W12 takes Qdrant's shipped full-scan threshold and ACORN, decided 2026-10-06
+
+Two settings made W12 compare strawmANN's own filtered plan against a Qdrant
+configured differently from how it ships.
+
+- **The full-scan threshold.** Every collection is created with
+  `full_scan_threshold_kb=10`, Qdrant's floor, so W0's d=4 collection gets a
+  graph at all. Qdrant also uses the threshold to choose between scoring a
+  filter's matches and walking the graph (`read_view/dispatch.rs`): at 10 KB
+  that is 5 points at d=512, so every W12 filter walked the graph. strawmANN's
+  plan (`handlers.filteredPlan`) ignores the setting. Under Qdrant's shipped
+  10,000 KB, sift1m's sel1 and sel10, and laion's and h-and-m's sel1, would be
+  scanned.
+- **ACORN.** At 10% selectivity strawmANN takes its ACORN-1 two-hop walk on its
+  own. Qdrant ships the same algorithm per request and off by default
+  (`acorn.enable`, `max_selectivity` 0.4), and no W12 row asked for it. At
+  `ef` 32 that read recall 0.94 to 0.99 for strawmANN against 0.77 to 0.87
+  for Qdrant on every corpus.
+
+`bench12` is now created with `W12_FULL_SCAN_THRESHOLD_KB` (10,000, Qdrant's
+default; still far below bench12 at every tier, so the graph is built), every
+other collection keeps the floor, and the W12 rows and their ladders pass
+`--acorn` (`W12_ACORN=0` turns it off). strawmANN's decoder skips the field.
+Both are in `collection_settings()`, which is hashed, so the change is
+STALE against earlier pairs by design. The published W12 ratios are findings
+71 until each corpus has a pair measured with it.
+
