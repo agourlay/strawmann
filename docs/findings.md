@@ -10,8 +10,8 @@ Ranked by what a wrong or missing number costs.
 
 ### P1. What costs a number on the headline page
 
-The current pages are the 0930 pairs for sift1m and dbpedia-openai-1m, the
-1003 pair for laion-small-clip and the 0929 pair for h-and-m, all T4 with T3
+The current pages are the 1006 pair for sift1m, the 0930 pair for
+dbpedia-openai-1m, the 1003 pair for laion-small-clip and the 0929 pair for h-and-m, all T4 with T3
 passing and production-mode Qdrant. What they publish wrongly, or still refuse and could
 not:
 
@@ -43,7 +43,13 @@ every pass, with the search running 38% (strawmANN) and 75% (Qdrant) past the
 append and no `!!` bound line. strawmANN's W11-steady is flat (10,108 / 10,094
 / 10,102); Qdrant's is not (6,996 / 7,651 / 7,170, rsd 4.7%), while its
 optimizer rebuilt on the same eight CPUs (run-queue wait 196 to 249 s a pass).
-What is open is sift1m and dbpedia, and whether Qdrant's spread is its own. Item 8 is what the
+sift1m 1006 did not hold: Qdrant's W11 and both
+engines' W11-steady covered 100%, but strawmANN's W11 covered 52.3%, its search
+sized from 0930's 8,033 q/s and running at 18,066 (W11_QUERIES=572,856). A
+count sized from the previous pair cannot follow an engine that doubles
+between pairs; a search bounded by the writer's end is the sizing that can.
+dbpedia 1006 measured but is unlicensed (the differ hung, item 60). What is
+open is the sizing, and whether Qdrant's spread is its own. Item 8 is what the
 row shows once it measures what it claims to.
 
 **58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**
