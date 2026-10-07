@@ -2040,6 +2040,11 @@ def unindexed_remainders(label: str, rows: list | None = None) -> list[str]:
             continue
         if searched is not None and c.get("collection") not in searched:
             continue
+        # W15's rows query the text index; its placeholder vectors are never
+        # searched, and Qdrant leaves a collection under its indexing
+        # threshold (scifact's 5,183 points) wholly unindexed by design.
+        if c.get("collection") == workloads.W15_COLLECTION:
+            continue
         # More points than the run uploaded means a mutating row grew it.
         # Survivors are now read back *before* those run, so this branch is for
         # results predating that capture, where the only read-back is the late

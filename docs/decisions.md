@@ -2325,3 +2325,46 @@ order with the rest ties, relative difference 1.9e-7). Truth files carry
 `ORACLE_REVISION` (2 since this change), and `text-relevance` refuses one
 from another revision.
 
+
+## W15 measures BM25 over a text index, decided 2026-10-07
+
+Phase 4 of the BM25 work above. A text corpus (`format` `beir` or `zipf` in
+`datasets.json`) given to `fullrun.py --dataset` runs W15 and nothing else:
+
+- `W15-upload`: the corpus through bfb's `tar` reader, one point per document
+  with a 4-dimensional placeholder vector no row reads, the text field indexed
+  with BM25 scoring and the `parity` keyword beside it.
+- `W15`: the text query at `-p 1`, the per-request latency.
+- `W15-sat`: the same query at W4's saturating client.
+- `W15-filtered`: saturating, filtered to `parity` (`keyword_0` on even rows,
+  `keyword_1` on odd, drawn per query at cardinality 2), so half the points.
+- `W15-k0.9-b0.4` and `W15-b0`: the `k1`/`b` ladder, saturating: Anserini's
+  BEIR setting, and no length normalization.
+
+The tokenizer is the corpus's, chosen by the user: the BEIR sets take
+lowercasing, English stopwords and the English stemmer (the conditions the
+exact tiers were established under), the synthetic Zipf corpora lowercase
+only, since their tokens are not English words. It is in the descriptor
+(`text_index`) and in the collection stamp, which carries text keys only for
+text corpora, so the vector pairs are not made STALE by this.
+
+Recall is exact BM25, not ANN: `text-relevance` runs once per variant the
+table searches (W15 and W15-sat share one; W15-filtered is measured at
+`keyword_0`, against a truth over the even rows with the whole corpus's
+statistics), over `bench15` as the rows left it, and writes
+`text_recall.json`. The sink and the report join a W15 row to its own
+variant's run on its own corpus. nDCG@10 and MRR@10 ride beside it on a
+judged corpus. The conformance step is `text-differ`, whose row licenses the
+W15 rows from strawmANN's T1 with both builds named.
+
+Text pairs run as their own `fullrun` on a text dataset with
+`--qdrant-binary` set to the BM25 build (Qdrant `dev` 850859ec9): no release
+serves the text query. The vector pairs keep dbeb0f73.
+
+The first end-to-end pass, scifact at `--reps 1` (a smoke run, so nothing
+published): every W15 row measured on both engines, every variant's recall@10
+1.0 on both, nDCG@10 equal to the oracle's per variant (0.6886 at the
+defaults, 0.3542 filtered, 0.6796 at 0.9/0.4, 0.6643 at `b = 0`), and the text
+differ's row licensing both arms. Saturating rows on scifact last under a
+second for strawmANN, so its saturating numbers there are dominated by the
+client; fiqa and the Zipf corpora are the measured ones.

@@ -4069,3 +4069,12 @@ class TextArmTests(unittest.TestCase):
         import compare
         recall = self._write("lab", "scifact", {"k1.2-b0.75": pt})
         self.assertEqual(compare.recall_at("lab", "scifact", {}, "W15"), 0.98)
+
+    def test_the_text_collection_is_not_an_unindexed_remainder(self):
+        d = self.f.RESULTS / "lab"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "run.json").write_text(json.dumps({"upload_n": 5183}))
+        (d / "collections.json").write_text(json.dumps({"collections": [
+            {"collection": "bench15", "points_count": 5183, "indexed_vectors_count": 0}]}))
+        rows = [{"id": "W15-sat", "collection": "bench15", "n_queries": 50000}]
+        self.assertEqual(self.f.unindexed_remainders("lab", rows), [])
