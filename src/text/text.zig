@@ -5,6 +5,9 @@ const std = @import("std");
 
 pub const snowball = @import("snowball.zig");
 pub const stem_english = @import("stem_english.zig");
+pub const tokenizer = @import("tokenizer.zig");
+pub const unicode_tables = @import("unicode_tables.zig");
+pub const stopwords_english = @import("stopwords_english.zig");
 
 /// `word` stemmed with the English Snowball stemmer, as Qdrant's
 /// `qdrant-rust-stemmers` 1.2.2 stems it, in `buf`, which must hold
