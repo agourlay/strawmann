@@ -10,7 +10,7 @@ Ranked by what a wrong or missing number costs.
 
 ### P1. What costs a number on the headline page
 
-The current pages are the 1006 pair for sift1m, the 0930 pair for
+The current pages are the 1007 pair for sift1m, the 0930 pair for
 dbpedia-openai-1m, the 1003 pair for laion-small-clip and the 0929 pair for h-and-m, all T4 with T3
 passing and production-mode Qdrant. What they publish wrongly, or still refuse and could
 not:
@@ -51,16 +51,23 @@ between pairs; a search bounded by the writer's end is the sizing that can.
 dbpedia 1006 measured but is unlicensed (the differ hung, item 60). Since
 2026-10-06 there is no count: the search runs until its append ends, then a
 quarter of the append's span more, at most 240 s (`workloads.w11_stop_at`),
-and the harness stops bfb with SIGINT (`decisions.md`). What is open is a pair
-measured with it, and whether Qdrant's spread is its own. Item 8 is what the
-row shows once it measures what it claims to.
+and the harness stops bfb with SIGINT (`decisions.md`). sift1m 1007 is the
+first pair measured with it: `write overlap` 100% on both rows, both engines,
+every pass, the search ending at the append's span times 1.25 (W11: 60.6 s
+append, 75.8 s search). strawmANN's W11-steady is flat (20,727 / 21,082 /
+21,074); Qdrant's is not (4,416 / 4,431 / 3,554, rsd 12.1%), its third pass
+low as laion 1003's first was. laion 1007 also read 100% everywhere but is
+unpublished (item 71). What is open is dbpedia, and whether Qdrant's spread is
+its own. Item 8 is what the row shows once it measures what it claims to.
 
 **70. The published W5 ratios are mostly parallelism.** Every current
 page's batched row ran at two requests in flight, where strawmANN used 7 cores
 and Qdrant 2 (`decisions.md`, 2026-10-06): 3.6x of sift1m's 5.68x, laion's
 2.83x and dbpedia's 2.69x, and per batched query Qdrant is the cheaper engine
 on laion and dbpedia. W5 now runs W4's client. It closes when each corpus has
-a pair measured with it.
+a pair measured with it. sift1m 1007 is: W5 reads 1.58x (27,641 against
+17,448), the 3.6 factor gone, with Qdrant on 7.89 cores and strawmANN 7.02.
+laion 1007 read 0.88x, Qdrant ahead as predicted, but is unpublished (item 71).
 
 **71. The published W12 ratios are partly harness configuration.** Every
 current page ran Qdrant's filtered search with a 10 KB full-scan threshold (5
@@ -69,6 +76,19 @@ strawmANN's plan takes on its own (`decisions.md`, 2026-10-06). sel1's
 2.3x to 4.0x at high `ef` and sel10's recall gap at low `ef` (0.94 to 0.99
 against 0.77 to 0.87 at `ef` 32) both carry it. W12 now runs Qdrant's shipped
 threshold and ACORN. It closes when each corpus has a pair measured with them.
+
+sift1m 1007 is: 10,000 KB at d=128 is 20,000 points, above both tiers'
+matches, so Qdrant scans both (recall 1.0000 at every `ef`, cycles per query
+at sel10 4.3x 1006's) and never takes ACORN. sel1 reads 1.95x, sel10 2.25x
+(1006: 0.61x). laion 1007 is not publishable: at d=512 the threshold is about
+5,000 points, so sel10 (about 10,000 matches) walks, and Qdrant's recall fell
+to 0.0901 at `ef` 32, 0.2652 at 128 and 0.4126 at 512 (1003: 0.8164, 0.9854,
+0.9993) while strawmANN's held (0.98 to 1.0). Two things changed at once: the
+default threshold leaves the 1% keywords without payload-block links, and
+ACORN is on for the first time. Which one costs the recall is unmeasured;
+laion's page stays at 1003 until a probe at the default threshold with
+`W12_ACORN=0` against `1` separates them. dbpedia (d=1536, about 1,700
+points) would walk sel10 too.
 
 **58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**
 W10-ef128 +10.4%, W10-ef256 +11.5%, W12-sel1 +10.2%, W11 +10%, with cycles
