@@ -665,6 +665,25 @@ class ReportHostTests(unittest.TestCase):
             html = report.build(runs, "t")
             self.assertIn("2026-09-03T02:00:31Z to 2026-09-03T02:52:50Z (2 passes)", html)
 
+    def test_a_text_licence_states_its_delta_against_the_oracle(self):
+        """`text-differ`'s row has no vector ε, and the page crashed formatting
+        one on every BM25 run; its delta is strawmANN against the oracle, which
+        the vector sentence ("the two engines' scores differ") does not say."""
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = {**CONF_T3, "metric": "BM25", "max_delta": 1.038e-6,
+                    "epsilon": 1e-5, "epsilon_relative": True, "epsilon_source": "text-t1"}
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)],
+                                          [_row("W3", 2000)], conf_a=conf, conf_b=conf)
+            html = report.build(runs, "t")
+            self.assertIn("1.038e-06", html)
+            self.assertIn("of the f64 oracle", html)
+            self.assertNotIn("two engines' scores differ", html)
+            # A row without ε renders rather than raising.
+            bare = {**conf, "epsilon": None}
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)],
+                                          [_row("W3", 2000)], conf_a=bare, conf_b=bare)
+            self.assertIn("tolerance of ?", report.build(runs, "t"))
+
     def test_licence_carries_the_delta_behind_the_tier(self):
         """§8.9 lists max|Δscore| and p99|Δscore| as row fields. They were
         measured and then rendered into T1's prose, so the page carried the

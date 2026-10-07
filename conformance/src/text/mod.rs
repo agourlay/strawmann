@@ -504,6 +504,9 @@ impl Bm25Truth {
 pub struct TierOutcome {
     pub tier: &'static str,
     pub engine: String,
+    /// `passed` in the JSON, as the vector differ's tiers spell it, which
+    /// `compare.py` and the report read.
+    #[serde(rename = "passed")]
     pub pass: bool,
     /// Not run; neither passes nor licenses anything.
     pub skipped: bool,

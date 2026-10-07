@@ -384,18 +384,23 @@
     {%- if licence.hash %} Conformance hash <code>{{ licence.hash }}</code>.{%- endif %}</p>
     {#- §8.9's `max|Δscore|` / `p99|Δscore|`: the number behind the tier, not
         just the tier. §8.1 calls this the load-bearing claim. -#}
-    {%- if licence.delta %}
+    {%- if licence.delta and licence.delta.source == 'text-t1' %}
+    <p>Every BM25 score strawmANN returned is within
+    <b>{{ '%.3e'|format(licence.delta.max) }}</b> (relative) of the f64 oracle's, against
+    T1's tolerance of {{ '%.0e'|format(licence.delta.eps) if licence.delta.eps is not none else '?' }}:
+    the same documents, the same statistics and the same ranking, in f32 (§8.1).</p>
+    {%- elif licence.delta %}
     <p>On exact search the two engines' scores differ by at most
     <b>{{ '%.3e'|format(licence.delta.max) }}</b>
     {%- if licence.delta.p99 is not none %} (p99 {{ '%.3e'|format(licence.delta.p99) }}){% endif %},
     {%- if licence.delta.source == 'floor' %}
     against the §8.4 <b>floor</b> {{ licence.delta.kind }} ε of
-    {{ '%.3e'|format(licence.delta.eps) }} &mdash; the expected summation error for this
+    {{ '%.3e'|format(licence.delta.eps) if licence.delta.eps is not none else '?' }} &mdash; the expected summation error for this
     metric and dimension, used because no calibrated cell exists for them; the
     conformance <code>calibrate</code> command derives one from measured cross-ISA spread.
     {%- else %}
     against a calibrated {{ licence.delta.kind }} ε of
-    {{ '%.3e'|format(licence.delta.eps) }}.
+    {{ '%.3e'|format(licence.delta.eps) if licence.delta.eps is not none else '?' }}.
     {%- endif %} §8.1: bit-exactness is
     unachievable between two different summation orders, so this &mdash; equal values
     within a measured tolerance &mdash; is the claim the speed rests on.</p>

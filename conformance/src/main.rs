@@ -1544,6 +1544,11 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
             "base_checksum": format!("{corpus_checksum:016x}"),
             "detail": t1.map(|t| t.detail.clone()).unwrap_or_default(),
             "max_delta": strawmann_max_rel,
+            // T1's tolerance, in the vector row's fields, so the report states
+            // the delta against it; `text-t1` tells it which sentence to use.
+            "epsilon": a.value_epsilon,
+            "epsilon_relative": true,
+            "epsilon_source": "text-t1",
             "oracle_revision": text::ORACLE_REVISION,
             "corpus_checksum": format!("{corpus_checksum:016x}"),
             "query_checksum": format!("{query_checksum:016x}"),

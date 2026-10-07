@@ -196,6 +196,32 @@ class CompareTests(unittest.TestCase):
         self.assertTrue(any("metric" in r for r in cmp.stale_reasons("a", "b")))
         self.assertTrue(any(b.startswith("STALE") for b in cmp.banners("a", "b")))
 
+    def test_a_text_rows_tiers_read_per_engine_and_notes_are_not_failures(self):
+        """`text-differ` lists T1 and T2 once per engine and marks Qdrant's
+        delete property report-only. The table printed that line **FAIL**, and
+        the tier map, keyed on the first word, never saw `passed`."""
+        tiers = [
+            {"tier": "T0 refusal statuses", "engine": "both", "passed": True, "skipped": False},
+            {"tier": "T1 score value", "engine": "strawmann", "passed": True, "skipped": False},
+            {"tier": "T2 tie-aware rank", "engine": "strawmann", "passed": True, "skipped": False},
+            {"tier": "T1 score value", "engine": "qdrant", "passed": True, "skipped": False},
+            # Written before the rename: `pass`, still read.
+            {"tier": "T2 tie-aware rank", "engine": "qdrant", "pass": True, "skipped": False},
+            {"tier": "M delete then compare", "engine": "qdrant", "passed": False,
+             "skipped": True, "detail": "reported only"},
+        ]
+        conf = {**CONF_T2, "tiers": tiers, "licenses_comparative": True}
+        _rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
+                                 good_stamp(), good_stamp(), conf, conf, [], [])
+        block = "\n".join(cmp.conformance_block("a", "b"))
+        self.assertIn("note (reported only) (qdrant)", block)
+        self.assertNotIn("**FAIL**", block)
+        self.assertTrue(cmp.licence("a", "b")["scores_agree"])
+        failed = {**conf, "tiers": [*tiers[:3], {**tiers[3], "passed": False}, tiers[4]]}
+        _rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
+                                 good_stamp(), good_stamp(), failed, failed, [], [])
+        self.assertFalse(cmp.licence("a", "b")["scores_agree"])
+
     def test_licence_banner_when_not_comparative(self):
         sw = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.98))]
         _rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],

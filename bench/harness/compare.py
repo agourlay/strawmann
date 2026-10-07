@@ -348,6 +348,12 @@ def conformance_recovery(a_label: str, b_label: str) -> str:
     return out
 
 
+def tier_passed(t: dict) -> bool:
+    """A tier line's verdict: `passed`, or `pass` in a text differ row written
+    before it was renamed to match the vector differ's."""
+    return bool(t.get("passed", t.get("pass")))
+
+
 def licence(a_label: str, b_label: str) -> dict:
     """What §8 says these numbers may be used for.
 
@@ -396,8 +402,14 @@ def licence(a_label: str, b_label: str) -> dict:
     # A conformance row with no `tiers` list predates the differ recording them
     # and cannot claim T1 and T2 passed, so it keeps the conservative refusal.
     mismatch = bool(ca and cb and ca.get("hash") != cb.get("hash"))
-    passed = {t.get("tier", "").split()[0]: bool(t.get("passed"))
-              for t in (conf.get("tiers") or []) if t.get("tier")}
+    # A text row lists T1 and T2 once per engine and marks report-only lines
+    # `skipped`: a tier has passed when every line that gates did.
+    passed: dict[str, bool] = {}
+    for t in conf.get("tiers") or []:
+        if not t.get("tier") or t.get("skipped"):
+            continue
+        k = t["tier"].split()[0]
+        passed[k] = passed.get(k, True) and tier_passed(t)
     out["scores_agree"] = (bool(conf) and not mismatch
                            and bool(passed.get("T1")) and bool(passed.get("T2")))
     if out["scores_agree"] and not out["comparative"]:
@@ -2163,7 +2175,10 @@ def conformance_block(a_label: str, b_label: str) -> list[str]:
     out = ["**§8 conformance.** The tiers that license the table above.", "",
            "| tier | result | detail |", "|---|---|---|"]
     for t in conf["tiers"]:
-        verdict = "pass" if t.get("passed") else "**FAIL**"
+        verdict = ("note (reported only)" if t.get("skipped")
+                   else "pass" if tier_passed(t) else "**FAIL**")
+        if t.get("engine"):
+            verdict += f" ({t['engine']})"
         # The differ's details carry `|` as a field separator ("... max=1.5e-5 |
         # ids agree up to ε-ties | ..."), which closes the cell early and shears
         # the rest of the row into columns that do not exist.
