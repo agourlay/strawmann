@@ -34,6 +34,7 @@ const quantized = @import("quantized.zig");
 const quant_mod = @import("../quant/quant.zig");
 const lock = @import("../lock.zig");
 const payload_mod = @import("payload.zig");
+const text_mod = @import("../text/text.zig");
 
 pub const Metric = dist.Metric;
 pub const ExternalId = ids.ExternalId;
@@ -955,6 +956,17 @@ pub const Collection = struct {
         };
     }
 
+    /// `CreateFieldIndex` for a BM25 text field (decisions.md, 2026-10-07).
+    pub fn createPayloadTextIndex(self: *Collection, name: []const u8, opts: text_mod.tokenizer.Options) Error!void {
+        self.write_lock.lock();
+        defer self.write_lock.unlock();
+        self.payload.createTextIndex(self.alloc, name, opts, self.id_space.count(), &self.deleted) catch |e| return switch (e) {
+            error.OutOfMemory => Error.OutOfMemory,
+            error.IndexKindMismatch => Error.IndexKindMismatch,
+            else => Error.PayloadRejected,
+        };
+    }
+
     pub fn delete(self: *Collection, id: ExternalId) bool {
         self.write_lock.lock();
         defer self.write_lock.unlock();
@@ -963,7 +975,51 @@ pub const Collection = struct {
         if (self.deleted.isSet(off)) return false;
         self.deleted.set(off);
         self.deleted_count += 1;
+        // BM25's statistics are exact: a deleted point leaves N and df now,
+        // not at a rebuild (decisions.md, the deletions gap).
+        self.payload.forgetPoint(off);
         return true;
+    }
+
+    pub const TextSearchError = error{ NoTextIndex, OutOfMemory, InvalidUtf8 };
+
+    /// BM25 over `field`'s text index: the best `out.len` live points that
+    /// `filter` admits, best first, into `out`. Returns how many it wrote.
+    ///
+    /// Allocates its scratch, which §6.3 forbids on the query path; the
+    /// text path is new and unmeasured, and a per-worker arena is the
+    /// follow-up once it is.
+    pub fn textSearch(
+        self: *const Collection,
+        alloc: std.mem.Allocator,
+        field: []const u8,
+        query: []const u8,
+        k1: f32,
+        b: f32,
+        filter: ?hnsw.Index.Filter,
+        out: []Candidate,
+    ) TextSearchError!usize {
+        self.payload.lockFields();
+        defer self.payload.unlockFields();
+        const f = self.payload.field(field) orelse return error.NoTextIndex;
+        const ti = f.text_index orelse return error.NoTextIndex;
+        const Allowed = struct {
+            coll: *const Collection,
+            filter: ?hnsw.Index.Filter,
+            bound: usize,
+            pub fn admits(a: @This(), point: u32) bool {
+                if (point >= a.bound or a.coll.deleted.isSet(point)) return false;
+                return if (a.filter) |fl| fl.admits(point) else true;
+            }
+        };
+        const allowed = Allowed{ .coll = self, .filter = filter, .bound = self.id_space.count() };
+        const hits = ti.search(alloc, query, k1, b, out.len, allowed) catch |e| return switch (e) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.InvalidUtf8,
+        };
+        defer alloc.free(hits);
+        for (hits, 0..) |h, i| out[i] = .{ .id = h.point, .score = h.score };
+        return hits.len;
     }
 
     pub fn isDeleted(self: *const Collection, offset: u32) bool {

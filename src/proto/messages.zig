@@ -853,17 +853,43 @@ pub const VectorInput = struct {
 ///
 /// §2: "We need `QueryPoints` with `query = Query{ nearest: VectorInput{ dense } }`
 /// ... Everything else in the `Query` oneof → `UNIMPLEMENTED`."
-pub const Query = struct {
+/// `TextQuery { string query = 1; optional float k = 2; optional float b = 3; }`
+/// (VERIFIED, points.proto at Qdrant 850859ec9): BM25 over the text index of
+/// the payload field the request's `using` names (decisions.md, 2026-10-07).
+pub const TextQuery = struct {
+    query: []const u8 = &.{},
+    k: ?f32 = null,
+    b: ?f32 = null,
+
+    pub fn decode(r: *Reader) DecodeError!TextQuery {
+        var out: TextQuery = .{};
+        while (!r.atEnd()) {
+            const t = try r.tag();
+            switch (t.field) {
+                1 => out.query = try r.bytes(),
+                2 => out.k = try r.float(),
+                3 => out.b = try r.float(),
+                else => try r.skip(t.wire_type),
+            }
+        }
+        return out;
+    }
+};
+
+pub const Query = union(enum) {
     nearest: VectorInput,
+    text: TextQuery,
 
     pub fn decode(r: *Reader) DecodeError!Query {
         var nearest: ?VectorInput = null;
+        var text: ?TextQuery = null;
         while (!r.atEnd()) {
             const t = try r.tag();
             switch (t.field) {
                 1 => {
                     var sub = try r.nested();
                     nearest = try VectorInput.decode(&sub);
+                    text = null;
                 },
                 2 => return unimplemented("recommend queries"),
                 3 => return unimplemented("discover queries"),
@@ -876,13 +902,17 @@ pub const Query = struct {
                 9 => return unimplemented("MMR queries"),
                 10 => return unimplemented("RRF fusion queries"),
                 11 => return unimplemented("relevance feedback queries"),
-                // Qdrant 1.19.3-dev's `TextQuery` (BM25 over a text index). In
-                // scope since 2026-10-07 (decisions.md) but not built yet;
-                // skipped as unknown, it answered "missing or invalid field".
-                12 => return unimplemented("text (BM25) queries"),
+                // Qdrant 1.19.3-dev's `TextQuery`, BM25 over a text index.
+                12 => {
+                    var sub = try r.nested();
+                    text = try TextQuery.decode(&sub);
+                    nearest = null;
+                },
                 else => try r.skip(t.wire_type),
             }
         }
+        // A oneof: the last variant on the wire wins, as protobuf has it.
+        if (text) |tq| return .{ .text = tq };
         return .{ .nearest = nearest orelse return DecodeError.InvalidArgument };
     }
 };
@@ -1075,6 +1105,8 @@ pub const CreateFieldIndexCollection = struct {
     field_name: []const u8 = &.{},
     /// `FieldType`: absent means keyword, which is what bfb sends for `-k`.
     field_type: u64 = 0,
+    /// `PayloadIndexParams.text_index_params` (field 1 of its oneof), when sent.
+    text_params: ?TextIndexParams = null,
 
     pub fn decode(r: *Reader) DecodeError!CreateFieldIndexCollection {
         var out: CreateFieldIndexCollection = .{};
@@ -1085,16 +1117,133 @@ pub const CreateFieldIndexCollection = struct {
                 2 => out.wait = try r.boolean(),
                 3 => out.field_name = try r.bytes(),
                 4 => out.field_type = try r.varint(),
-                // `KeywordIndexParams { is_tenant, on_disk, enable_hnsw,
-                // prefix, memory }` and the integer twin: tuning of an index
-                // whose only representation here is a posting list. Accepted
-                // and ignored, like `WriteOrdering`.
-                5, 6, 7 => try r.skip(t.wire_type),
+                // `PayloadIndexParams { oneof index_params { TextIndexParams
+                // text_index_params = 1; IntegerIndexParams = 2;
+                // KeywordIndexParams = 3; ... } }` (VERIFIED, collections.proto
+                // at Qdrant 850859ec9). The text index's parameters decide what
+                // it computes and are read; the keyword and integer ones
+                // (`is_tenant, on_disk, enable_hnsw, prefix, memory`) tune an
+                // index whose only representation here is a posting list, and
+                // are accepted and ignored, like `WriteOrdering`.
+                5 => {
+                    var sub = try r.nested();
+                    while (!sub.atEnd()) {
+                        const pt = try sub.tag();
+                        switch (pt.field) {
+                            1 => {
+                                var tp = try sub.nested();
+                                out.text_params = try TextIndexParams.decode(&tp);
+                            },
+                            else => try sub.skip(pt.wire_type),
+                        }
+                    }
+                },
+                6, 7 => try r.skip(t.wire_type),
                 else => try r.skip(t.wire_type),
             }
         }
         if (out.field_name.len == 0) return invalidArgument("field_name is required");
         return out;
+    }
+};
+
+/// `TextIndexParams { TokenizerType tokenizer = 1; optional bool lowercase = 2;
+/// optional uint64 min_token_len = 3; optional uint64 max_token_len = 4;
+/// optional bool on_disk = 5; optional StopwordsSet stopwords = 6;
+/// optional bool phrase_matching = 7; optional StemmingAlgorithm stemmer = 8;
+/// optional bool ascii_folding = 9; optional bool enable_hnsw = 10;
+/// optional Memory memory = 11; optional TextScoringParams scoring = 12; }`
+/// (VERIFIED, collections.proto at Qdrant 850859ec9). Everything a client
+/// sent is recorded, so the handler can refuse what is outside decisions.md's
+/// scope by name rather than build a different index.
+pub const TextIndexParams = struct {
+    /// `TokenizerType`: Unknown 0, Prefix 1, Whitespace 2, Word 3, Multilingual 4.
+    tokenizer: u64 = 0,
+    lowercase: ?bool = null,
+    token_len_bounds: bool = false,
+    /// `StopwordsSet.languages` (field 1), each a language name.
+    stopword_languages: [4][]const u8 = undefined,
+    stopword_language_count: usize = 0,
+    /// `StopwordsSet.custom` (field 2) was non-empty.
+    custom_stopwords: bool = false,
+    /// `StemmingAlgorithm { oneof { SnowballParams snowball = 1; DisabledStemmer disabled = 2; } }`.
+    snowball_language: ?[]const u8 = null,
+    ascii_folding: ?bool = null,
+    /// `TextScoringParams { TextScoringType type = 1; }`, `Bm25 = 0`; null
+    /// when the index does not score.
+    scoring: ?u64 = null,
+
+    pub fn decode(r: *Reader) DecodeError!TextIndexParams {
+        var out: TextIndexParams = .{};
+        while (!r.atEnd()) {
+            const t = try r.tag();
+            switch (t.field) {
+                1 => out.tokenizer = try r.varint(),
+                2 => out.lowercase = try r.boolean(),
+                3, 4 => {
+                    _ = try r.varint();
+                    out.token_len_bounds = true;
+                },
+                6 => {
+                    var sub = try r.nested();
+                    while (!sub.atEnd()) {
+                        const st = try sub.tag();
+                        switch (st.field) {
+                            1 => {
+                                const lang = try sub.bytes();
+                                if (out.stopword_language_count == out.stopword_languages.len) {
+                                    return unimplemented("more than four stopword languages");
+                                }
+                                out.stopword_languages[out.stopword_language_count] = lang;
+                                out.stopword_language_count += 1;
+                            },
+                            2 => {
+                                _ = try sub.bytes();
+                                out.custom_stopwords = true;
+                            },
+                            else => try sub.skip(st.wire_type),
+                        }
+                    }
+                },
+                8 => {
+                    var sub = try r.nested();
+                    while (!sub.atEnd()) {
+                        const st = try sub.tag();
+                        switch (st.field) {
+                            1 => {
+                                var sp = try sub.nested();
+                                var lang: []const u8 = &.{};
+                                while (!sp.atEnd()) {
+                                    const lt = try sp.tag();
+                                    if (lt.field == 1) lang = try sp.bytes() else try sp.skip(lt.wire_type);
+                                }
+                                out.snowball_language = lang;
+                            },
+                            else => try sub.skip(st.wire_type),
+                        }
+                    }
+                },
+                9 => out.ascii_folding = try r.boolean(),
+                12 => {
+                    var sub = try r.nested();
+                    var kind: u64 = 0;
+                    while (!sub.atEnd()) {
+                        const st = try sub.tag();
+                        if (st.field == 1) kind = try sub.varint() else try sub.skip(st.wire_type);
+                    }
+                    out.scoring = kind;
+                },
+                // `on_disk`, `phrase_matching`, `enable_hnsw`, `memory`:
+                // placement and the phrase index, neither of which changes a
+                // BM25 score; `scoring` forces phrase matching on in Qdrant.
+                else => try r.skip(t.wire_type),
+            }
+        }
+        return out;
+    }
+
+    pub fn stopwordLanguages(self: *const TextIndexParams) []const []const u8 {
+        return self.stopword_languages[0..self.stopword_language_count];
     }
 };
 
@@ -1497,7 +1646,6 @@ test "every rejected Query variant names itself" {
         .{ 9, "MMR queries" },
         .{ 10, "RRF fusion queries" },
         .{ 11, "relevance feedback queries" },
-        .{ 12, "text (BM25) queries" },
     };
     var buf: [64]u8 = undefined;
     for (cases) |c| {
@@ -1514,6 +1662,20 @@ test "every rejected Query variant names itself" {
         try testing.expectError(DecodeError.Unimplemented, Query.decode(&r));
         try testing.expectEqualStrings(c[1], unimplemented_detail);
     }
+}
+
+test "a text query decodes its query, k and b" {
+    var buf: [64]u8 = undefined;
+    var w = Writer.init(&buf);
+    const n = try w.beginNested(12, 2);
+    try w.writeStringField(1, "alpha gamma");
+    try w.writeFloatField(2, 1.5);
+    try w.endNested(n);
+    var r = Reader.init(w.written());
+    const q = try Query.decode(&r);
+    try testing.expectEqualStrings("alpha gamma", q.text.query);
+    try testing.expectEqual(@as(?f32, 1.5), q.text.k);
+    try testing.expectEqual(@as(?f32, null), q.text.b);
 }
 
 test "unknown fields are skipped for forward compatibility" {

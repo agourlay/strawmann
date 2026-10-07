@@ -26,6 +26,7 @@ const build_options = @import("build_options");
 const proto = @import("../proto/proto.zig");
 const net = @import("../net/net.zig");
 const core = @import("../core/core.zig");
+const text_mod = @import("../text/text.zig");
 const collections = @import("collections.zig");
 const index = @import("../index/index.zig");
 const dist = @import("../dist/dist.zig");
@@ -867,8 +868,15 @@ fn createFieldIndex(ctx: *Context, req: *const server.Request, body: []const u8,
     const coll = held.coll;
 
     const kind = core.payload.Kind.fromFieldType(cf.field_type) orelse
-        return err(req, .unimplemented, "field index types other than keyword and integer");
-    coll.createPayloadIndex(cf.field_name, kind) catch |e| return switch (e) {
+        return err(req, .unimplemented, "field index types other than keyword, integer and text");
+    const built = if (kind == .text) blk: {
+        const opts = textIndexOptions(cf.text_params) catch |e| return switch (e) {
+            error.UnknownTokenizer => err(req, .invalid_argument, "unknown tokenizer type"),
+            error.Unsupported => err(req, .unimplemented, text_refusal),
+        };
+        break :blk coll.createPayloadTextIndex(cf.field_name, opts);
+    } else coll.createPayloadIndex(cf.field_name, kind);
+    built catch |e| return switch (e) {
         core.collection.Error.IndexKindMismatch => err(req, .invalid_argument, "field is already indexed as another type"),
         core.collection.Error.OutOfMemory => err(req, .resource_exhausted, "out of memory building the payload index"),
         else => err(req, .internal, "payload index build failed"),
@@ -884,6 +892,71 @@ fn createFieldIndex(ctx: *Context, req: *const server.Request, body: []const u8,
     };
     resp.encode(&w) catch return err(req, .internal, "response buffer overflow");
     return ok(req, out.commit(w.pos));
+}
+
+/// Why the last `textIndexOptions` refused, for the UNIMPLEMENTED it becomes.
+threadlocal var text_refusal: []const u8 = "";
+
+/// The text index decisions.md (2026-10-07) puts in scope, from Qdrant's
+/// `TextIndexParams`: the `word` tokenizer, `lowercase`, English stopwords
+/// and the English Snowball stemmer, scored with BM25. Everything else that
+/// would change what the index computes is refused by name; placement
+/// (`on_disk`, `memory`, `enable_hnsw`) and `phrase_matching`, which
+/// `scoring` forces on, do not change a score and are accepted.
+fn textIndexOptions(params: ?msg.TextIndexParams) error{ UnknownTokenizer, Unsupported }!text_mod.tokenizer.Options {
+    const p = params orelse {
+        text_refusal = "a text index without `scoring` (full-text filters are a §1 non-goal)";
+        return error.Unsupported;
+    };
+    switch (p.tokenizer) {
+        3 => {},
+        0 => return error.UnknownTokenizer,
+        else => {
+            text_refusal = "text index tokenizers other than `word`";
+            return error.Unsupported;
+        },
+    }
+    if (p.scoring == null) {
+        text_refusal = "a text index without `scoring` (full-text filters are a §1 non-goal)";
+        return error.Unsupported;
+    }
+    if (p.scoring.? != 0) {
+        text_refusal = "text index scoring other than BM25";
+        return error.Unsupported;
+    }
+    if (p.token_len_bounds) {
+        text_refusal = "text index `min_token_len` and `max_token_len`";
+        return error.Unsupported;
+    }
+    if (p.ascii_folding orelse false) {
+        text_refusal = "text index `ascii_folding`";
+        return error.Unsupported;
+    }
+    if (p.custom_stopwords) {
+        text_refusal = "custom text index stopwords";
+        return error.Unsupported;
+    }
+    var english_stopwords = false;
+    for (p.stopwordLanguages()) |lang| {
+        if (!std.mem.eql(u8, lang, "english")) {
+            text_refusal = "text index stopwords other than `english`";
+            return error.Unsupported;
+        }
+        english_stopwords = true;
+    }
+    var english_stemmer = false;
+    if (p.snowball_language) |lang| {
+        if (!std.mem.eql(u8, lang, "english")) {
+            text_refusal = "text index stemmers other than Snowball `english`";
+            return error.Unsupported;
+        }
+        english_stemmer = true;
+    }
+    return .{
+        .lowercase = p.lowercase orelse true,
+        .english_stopwords = english_stopwords,
+        .english_stemmer = english_stemmer,
+    };
 }
 
 /// §2 phase 2: `/qdrant.Points/SetPayload`, `--set-payload`. Merges the
@@ -1183,7 +1256,10 @@ fn runGatheredExact(
         const want = pageWant(q.limit, q.offset) orelse return null;
         if (want == 0 or want > Workspace.max_limit) return null;
         const query = q.query orelse return null;
-        const dense = query.nearest.dense orelse return null;
+        const dense = switch (query) {
+            .nearest => |near| near.dense orelse return null,
+            .text => return null,
+        };
         if (dense.dim() != coll.config.dim) return null;
         n += 1;
     }
@@ -1272,13 +1348,17 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
     // name rather than silently degraded.
     if (q.params.indexed_only) return refuse(fail, .unimplemented, "params.indexed_only");
     if (q.with_vectors) return refuse(fail, .unimplemented, "vector retrieval in results (phase 2)");
+
+    const query = q.query orelse return refuse(fail, .invalid_argument, "query is required");
+    const nearest = switch (query) {
+        .nearest => |near| near,
+        .text => |tq| return textSearchOne(ctx, coll, q, tq, filter_opt, want, fail),
+    };
     if (q.using) |name| {
         if (name.len > 0) return refuse(fail, .unimplemented, "named vector spaces (phase 2)");
     }
-
-    const query = q.query orelse return refuse(fail, .invalid_argument, "query is required");
-    const dense = query.nearest.dense orelse {
-        if (query.nearest.id != null) return refuse(fail, .unimplemented, "query by point id (phase 2)");
+    const dense = nearest.dense orelse {
+        if (nearest.id != null) return refuse(fail, .unimplemented, "query by point id (phase 2)");
         return refuse(fail, .invalid_argument, "query.nearest.dense is required");
     };
     if (dense.dim() != coll.config.dim) {
@@ -1396,6 +1476,39 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
     return top.finish();
 }
 
+/// Qdrant dev's `text` query: BM25 over the text index of the payload field
+/// `using` names (decisions.md, 2026-10-07). The checks are Qdrant's
+/// (`collection_query.rs`, `check_text_query`), in its order and with its
+/// wording where the wording names no field.
+fn textSearchOne(
+    ctx: *Context,
+    coll: *core.Collection,
+    q: msg.QueryPoints,
+    tq: msg.TextQuery,
+    filter_opt: ?core.payload.Filter,
+    want: usize,
+    fail: *?QueryFailure,
+) ?[]index.Candidate {
+    const field = q.using orelse "";
+    if (field.len == 0) return refuse(fail, .invalid_argument, "A text query needs `using` to name the payload field to search");
+    const k1 = tq.k orelse text_mod.index.default_k1;
+    const b = tq.b orelse text_mod.index.default_b;
+    if (!std.math.isFinite(k1) or k1 < 0) return refuse(fail, .invalid_argument, "`k` must be non-negative");
+    if (!std.math.isFinite(b) or b < 0 or b > 1) return refuse(fail, .invalid_argument, "`b` must be within [0, 1]");
+
+    var pred_state: PredicateState = undefined;
+    var pred: ?index.hnsw.Index.Filter = null;
+    if (filter_opt) |*f| pred = preparePredicate(ctx, coll, f, &pred_state).filter;
+
+    const out = ctx.workspace.results[0..want];
+    const n = coll.textSearch(ctx.engine.alloc, field, tq.query, k1, b, pred, out) catch |e| return switch (e) {
+        error.NoTextIndex => refuse(fail, .invalid_argument, "A text query needs a scoring text index on the field `using` names, which has none"),
+        error.InvalidUtf8 => refuse(fail, .invalid_argument, "text query is not valid UTF-8"),
+        error.OutOfMemory => refuse(fail, .resource_exhausted, "out of memory scoring a text query"),
+    };
+    return out[0..n];
+}
+
 /// Where a query's predicate keeps its context: the two shapes outlive the
 /// call that builds them, so the caller owns the storage.
 const PredicateState = struct {
@@ -1432,6 +1545,16 @@ fn preparePredicate(ctx: *Context, coll: *core.Collection, f: *const core.payloa
         .selected = null,
         .bound = bound,
     };
+}
+
+fn isTextQuery(q: msg.QueryPoints) bool {
+    return if (q.query) |query| query == .text else false;
+}
+
+/// The score a client sees: a BM25 sum as computed, larger better, or the
+/// vector metric's postprocessed similarity.
+fn reportedScore(coll: *const core.Collection, q: msg.QueryPoints, internal: f32) f32 {
+    return if (isTextQuery(q)) internal else coll.config.metric.postprocess(internal);
 }
 
 pub fn refuse(fail: *?QueryFailure, status: Status, message: []const u8) ?[]index.Candidate {
@@ -1492,8 +1615,8 @@ fn encodeOne(
             // result count for the same request whenever a score landed
             // on the threshold, which for `score_threshold: 0` with
             // integer-valued uint8 dot products is not rare.
-            const returned = coll.config.metric.postprocess(c.score);
-            const passes = if (coll.config.metric.postprocessReversesOrder())
+            const returned = reportedScore(coll, q, c.score);
+            const passes = if (!isTextQuery(q) and coll.config.metric.postprocessReversesOrder())
                 returned < th
             else
                 returned > th;
@@ -1508,7 +1631,7 @@ fn encodeOne(
                     break :blk .{ .uuid = &uuid_buf };
                 },
             },
-            .score = coll.config.metric.postprocess(c.score),
+            .score = reportedScore(coll, q, c.score),
             .version = 0,
             .payload = if (q.with_payload) coll.payload.get(c.id) else &.{},
         }) catch {

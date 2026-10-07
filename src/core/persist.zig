@@ -28,6 +28,7 @@ const quantize = collection.quantize;
 const scroll_mod = @import("scroll.zig");
 const payload_mod = @import("payload.zig");
 const wire = @import("../proto/wire.zig");
+const text = @import("../text/text.zig");
 const scroll = scroll_mod.scroll;
 const search = collection.search;
 const invalidateIndex = collection.invalidateIndex;
@@ -260,11 +261,14 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
     //
     // The postings are rebuilt from the blobs on load (§6.4 calls the id map
     // "rebuildable" for the same reason), so only the schema is written:
-    // per field, `[u8 kind][u16 name_len][name]`.
+    // per field, `[u8 kind][u16 name_len][name]`, and for a text field one
+    // more byte of tokenizer options (bit 0 lowercase, 1 English stopwords,
+    // 2 English stemmer). A file from before text fields holds none, so it
+    // reads as it always did.
     if (coll.payload.fields.items.len > 0) {
         const p = try Persistence.path(&pbuf, dir, "payload.schema");
         var total: usize = 0;
-        for (coll.payload.fields.items) |f| total += 3 + f.name.len;
+        for (coll.payload.fields.items) |f| total += 3 + f.name.len + @intFromBool(f.kind == .text);
         const fd = try storage.openSized(p, storage.header_size + total, true);
         defer storage.closeFd(fd);
         var h = storage.Header{
@@ -290,6 +294,12 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
             std.mem.writeInt(u16, buf[w + 1 ..][0..2], @intCast(f.name.len), .little);
             @memcpy(buf[w + 3 ..][0..f.name.len], f.name);
             w += 3 + f.name.len;
+            if (f.text_index) |ti| {
+                buf[w] = @as(u8, @intFromBool(ti.opts.lowercase)) |
+                    @as(u8, @intFromBool(ti.opts.english_stopwords)) << 1 |
+                    @as(u8, @intFromBool(ti.opts.english_stemmer)) << 2;
+                w += 1;
+            }
         }
         try storage.writeData(fd, buf);
     }
@@ -558,8 +568,21 @@ pub fn load(alloc: std.mem.Allocator, name: []const u8, dir: []const u8, placeme
                 const name_len = std.mem.readInt(u16, buf[r + 1 ..][0..2], .little);
                 r += 3;
                 if (r + name_len > bytes) return error.ShortFile;
-                try coll.payload.createIndex(alloc, buf[r..][0..name_len], kind, n);
+                const field_name = buf[r..][0..name_len];
                 r += name_len;
+                if (kind == .text) {
+                    if (r + 1 > bytes) return error.ShortFile;
+                    const flags = buf[r];
+                    r += 1;
+                    if (flags & ~@as(u8, 0b111) != 0) return error.BadPayloadIndexKind;
+                    try coll.payload.createTextIndex(alloc, field_name, .{
+                        .lowercase = flags & 1 != 0,
+                        .english_stopwords = flags & 2 != 0,
+                        .english_stemmer = flags & 4 != 0,
+                    }, n, &coll.deleted);
+                } else {
+                    try coll.payload.createIndex(alloc, field_name, kind, n);
+                }
             }
         } else |_| {}
     }
@@ -757,6 +780,48 @@ test "§6.4: payloads and the field indexes survive the round-trip" {
     const sel = reloaded.payload.select(&f, &bits, 30).?;
     try testing.expectEqual(@as(usize, 10), sel.count);
     for (0..30) |i| try testing.expectEqual(i % 3 == 1, payload_mod.testBit(&bits, @intCast(i)));
+}
+
+test "a text index keeps exact BM25 statistics through delete and the round-trip" {
+    var c = try makeCollection(4, .dot, 64);
+    defer c.deinit();
+    var v = [_]f32{ 1, 0, 0, 0 };
+    var ebuf: [128]u8 = undefined;
+    const bodies = [_][]const u8{ "alpha beta", "gamma", "Running dogs" };
+    for (bodies, 0..) |body, i| {
+        var w = wire.Writer.init(&ebuf);
+        const entry = try w.beginNested(3, 2);
+        try w.writeStringField(1, "body");
+        const val = try w.beginNested(2, 2);
+        try w.writeStringField(payload_mod.value_string, body);
+        try w.endNested(val);
+        try w.endNested(entry);
+        _ = try c.upsertWithPayload(.{ .num = i }, &v, w.written(), 3);
+    }
+    const opts = text.tokenizer.Options{ .english_stopwords = true, .english_stemmer = true };
+    try c.createPayloadTextIndex("body", opts);
+    var out: [4]heap.Candidate = undefined;
+    // Three documents; deleting the third leaves N 2 and avgdl 1.5, where
+    // "alpha" scores qdrant/qdrant#11010's 0.609970.
+    try testing.expect(c.delete(.{ .num = 2 }));
+    const n = try c.textSearch(testing.allocator, "body", "alpha", 1.2, 0.75, null, &out);
+    try testing.expectEqual(@as(usize, 1), n);
+    try testing.expectApproxEqRel(@as(f32, 0.609970), out[0].score, 1e-5);
+    // A deleted point is never a hit, however its terms match.
+    try testing.expectEqual(@as(usize, 0), try c.textSearch(testing.allocator, "body", "run", 1.2, 0.75, null, &out));
+
+    const dir = "/tmp/strawmann-test-text-index";
+    try save(&c, dir);
+    var reloaded = try load(testing.allocator, "test", dir, .pinned);
+    defer reloaded.deinit();
+    const f = reloaded.payload.field("body").?;
+    try testing.expectEqual(payload_mod.Kind.text, f.kind);
+    try testing.expectEqual(opts, f.text_index.?.opts);
+    // Rebuilt from the blobs without the deleted point: the same score.
+    var again: [4]heap.Candidate = undefined;
+    const m = try reloaded.textSearch(testing.allocator, "body", "alpha", 1.2, 0.75, null, &again);
+    try testing.expectEqual(@as(usize, 1), m);
+    try testing.expectEqual(out[0].score, again[0].score);
 }
 
 test "§6.4: hnsw_m, ef_construct and both id kinds survive the round-trip" {

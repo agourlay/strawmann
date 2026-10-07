@@ -392,8 +392,9 @@ test "e2e: §1 non-goals return UNIMPLEMENTED naming the construct" {
         try testing.expectEqualStrings("fusion (RRF) queries", resp.message);
     }
 
-    // Qdrant dev's BM25 `text` query. Skipped as an unknown field it read
-    // "missing or invalid field", an INVALID_ARGUMENT that blames the client.
+    // Qdrant dev's BM25 `text` query reaches the text path (it was skipped as
+    // an unknown field, then refused by name while unbuilt): on a field with
+    // no scoring text index, Qdrant's INVALID_ARGUMENT.
     {
         var w = wire.Writer.init(&req_buf);
         try w.writeStringField(1, "u");
@@ -408,8 +409,8 @@ test "e2e: §1 non-goals return UNIMPLEMENTED naming the construct" {
         try w.endNested(qp);
 
         const resp = try c.call("/qdrant.Points/QueryBatch", w.written(), &out);
-        try testing.expectEqual(grpc.Status.unimplemented, resp.status);
-        try testing.expectEqualStrings("text (BM25) queries", resp.message);
+        try testing.expectEqual(grpc.Status.invalid_argument, resp.status);
+        try testing.expect(std.mem.indexOf(u8, resp.message, "scoring text index") != null);
     }
 
     // A collection declaring a sparse vector is refused at create; it was
@@ -3586,7 +3587,7 @@ test "e2e: filter constructs outside the keyword/integer match are refused by na
     // A geo field index.
     const geo = try c.call("/qdrant.Points/CreateFieldIndex", try buildCreateFieldIndex(&req_buf, "rf", "loc", 3), &out);
     try testing.expectEqual(grpc.Status.unimplemented, geo.status);
-    try testing.expect(std.mem.indexOf(u8, geo.message, "keyword and integer") != null);
+    try testing.expect(std.mem.indexOf(u8, geo.message, "keyword, integer and text") != null);
 
     // `UpsertPoints.update_mode = 8` (`update_only`): used to be skipped and
     // answered with an unconditional upsert, which inserts the points the
@@ -4931,5 +4932,178 @@ test "e2e: a gathered exact batch answers what the same queries answer one at a 
             try testing.expectEqual(solo.ids[k], gathered.ids[i * limit + k]);
             try testing.expectEqual(solo.scores[k], gathered.scores[i * limit + k]);
         }
+    }
+}
+
+/// `CreateFieldIndexCollection` for a text field (`field_type = 4`) with
+/// `TextIndexParams` (`field_index_params = 5`, `text_index_params = 1`).
+fn buildCreateTextIndex(buf: []u8, name: []const u8, field: []const u8, opts: struct {
+    tokenizer: u64 = 3,
+    scoring: bool = true,
+    stopwords: ?[]const u8 = "english",
+    stemmer: ?[]const u8 = "english",
+}) ![]const u8 {
+    var w = wire.Writer.init(buf);
+    try w.writeStringField(1, name);
+    try w.writeBoolField(2, true);
+    try w.writeStringField(3, field);
+    try w.writeVarintFieldAlways(4, 4);
+    const pip = try w.beginNested(5, 2);
+    const tip = try w.beginNested(1, 2);
+    try w.writeVarintFieldAlways(1, opts.tokenizer);
+    try w.writeBoolField(2, true);
+    if (opts.stopwords) |lang| {
+        const sw = try w.beginNested(6, 2);
+        try w.writeStringField(1, lang);
+        try w.endNested(sw);
+    }
+    if (opts.stemmer) |lang| {
+        const st = try w.beginNested(8, 2);
+        const sb = try w.beginNested(1, 2);
+        try w.writeStringField(1, lang);
+        try w.endNested(sb);
+        try w.endNested(st);
+    }
+    if (opts.scoring) {
+        const sc = try w.beginNested(12, 2);
+        try w.writeVarintFieldAlways(1, 0); // Bm25
+        try w.endNested(sc);
+    }
+    try w.endNested(tip);
+    try w.endNested(pip);
+    return w.written();
+}
+
+/// One point with a 4-d vector and `body` as a string, or as an array.
+fn buildUpsertText(buf: []u8, name: []const u8, id: u64, values: []const []const u8, as_array: bool) ![]const u8 {
+    var w = wire.Writer.init(buf);
+    try w.writeStringField(1, name);
+    try w.writeBoolField(2, true);
+    const pt = try w.beginNested(3, 3);
+    {
+        const idn = try w.beginNested(1, 2);
+        try w.writeVarintFieldAlways(1, id);
+        try w.endNested(idn);
+    }
+    {
+        const entry = try w.beginNested(3, 2);
+        try w.writeStringField(1, "body");
+        const val = try w.beginNested(2, 2);
+        if (as_array) {
+            const list = try w.beginNested(7, 2); // list_value
+            for (values) |v| {
+                const item = try w.beginNested(1, 2);
+                // A oneof member is on the wire even when empty, as a client
+                // encodes `""`; `writeStringField` would drop it.
+                try w.tag(4, .length_delimited);
+                try w.varint(v.len);
+                try w.raw(v);
+                try w.endNested(item);
+            }
+            try w.endNested(list);
+        } else {
+            try w.writeStringField(4, values[0]);
+        }
+        try w.endNested(val);
+        try w.endNested(entry);
+    }
+    {
+        const vs = try w.beginNested(4, 3);
+        const vec = try w.beginNested(1, 3);
+        const dv = try w.beginNested(101, 3);
+        try w.writePackedFloats(1, &[_]f32{ 1, 0, 0, 0 });
+        try w.endNested(dv);
+        try w.endNested(vec);
+        try w.endNested(vs);
+    }
+    try w.endNested(pt);
+    return w.written();
+}
+
+/// A `QueryBatch` of one `text` query on `using`.
+fn buildTextQuery(buf: []u8, name: []const u8, using: ?[]const u8, query: []const u8, threshold: ?f32) ![]const u8 {
+    var w = wire.Writer.init(buf);
+    try w.writeStringField(1, name);
+    const qp = try w.beginNested(2, 3);
+    try w.writeStringField(1, name);
+    const qv = try w.beginNested(3, 3);
+    const tq = try w.beginNested(12, 2);
+    try w.writeStringField(1, query);
+    try w.endNested(tq);
+    try w.endNested(qv);
+    if (using) |u| try w.writeStringField(4, u);
+    if (threshold) |th| try w.writeFloatFieldAlways(7, th);
+    try w.writeVarintFieldAlways(8, 10);
+    try w.endNested(qp);
+    return w.written();
+}
+
+test "e2e: BM25 over a text index, Qdrant's text query with its scores and refusals" {
+    var h = try Harness.start(testing.allocator);
+    defer h.stop();
+    var c = try Client.connect(h.port);
+    defer c.close();
+    var req_buf: [1 << 14]u8 = undefined;
+    var out: [1 << 14]u8 = undefined;
+
+    _ = try c.call("/qdrant.Collections/Create", try buildCreateCollection(&req_buf, "bm25", 4, 3), &out);
+
+    // Outside decisions.md's scope, refused by name; an unset tokenizer is
+    // Qdrant's own INVALID_ARGUMENT.
+    const Refusal = struct { status: grpc.Status, says: []const u8, req: []const u8 };
+    var rb2: [1 << 12]u8 = undefined;
+    var rb3: [1 << 12]u8 = undefined;
+    var rb4: [1 << 12]u8 = undefined;
+    for ([_]Refusal{
+        .{ .status = .unimplemented, .says = "other than `word`", .req = try buildCreateTextIndex(&req_buf, "bm25", "body", .{ .tokenizer = 2 }) },
+        .{ .status = .unimplemented, .says = "without `scoring`", .req = try buildCreateTextIndex(&rb2, "bm25", "body", .{ .scoring = false }) },
+        .{ .status = .invalid_argument, .says = "unknown tokenizer", .req = try buildCreateTextIndex(&rb3, "bm25", "body", .{ .tokenizer = 0 }) },
+        .{ .status = .unimplemented, .says = "stopwords other than", .req = try buildCreateTextIndex(&rb4, "bm25", "body", .{ .stopwords = "german" }) },
+    }) |r| {
+        const resp = try c.call("/qdrant.Points/CreateFieldIndex", r.req, &out);
+        try testing.expectEqual(r.status, resp.status);
+        try testing.expect(std.mem.indexOf(u8, resp.message, r.says) != null);
+    }
+    {
+        const resp = try c.call("/qdrant.Points/CreateFieldIndex", try buildCreateTextIndex(&req_buf, "bm25", "body", .{}), &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+    }
+
+    _ = try c.call("/qdrant.Points/Upsert", try buildUpsertText(&req_buf, "bm25", 1, &.{"alpha beta"}, false), &out);
+    _ = try c.call("/qdrant.Points/Upsert", try buildUpsertText(&req_buf, "bm25", 2, &.{"gamma"}, false), &out);
+
+    var pts: [4]PointPayload = undefined;
+    // qdrant/qdrant#11010's numbers: N 2, avgdl 1.5 scores point 1 at 0.609970.
+    {
+        const resp = try c.call("/qdrant.Points/QueryBatch", try buildTextQuery(&req_buf, "bm25", "body", "Alpha", null), &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+        const n = try readFirstBatchPayloads(resp.body, &pts);
+        try testing.expectEqual(@as(usize, 1), n);
+        try testing.expectEqual(@as(u64, 1), pts[0].id);
+        try testing.expectApproxEqRel(@as(f32, 0.609970), pts[0].score, 1e-5);
+    }
+    // An array whose values tokenize to nothing is a document, as in Qdrant:
+    // N 3, avgdl 1.0, and point 1 moves to 0.696072.
+    _ = try c.call("/qdrant.Points/Upsert", try buildUpsertText(&req_buf, "bm25", 3, &.{ "", "" }, true), &out);
+    {
+        const resp = try c.call("/qdrant.Points/QueryBatch", try buildTextQuery(&req_buf, "bm25", "body", "alpha", null), &out);
+        _ = try readFirstBatchPayloads(resp.body, &pts);
+        try testing.expectApproxEqRel(@as(f32, 0.696072), pts[0].score, 1e-5);
+    }
+    // The threshold is on the BM25 score, strictly above it.
+    {
+        const resp = try c.call("/qdrant.Points/QueryBatch", try buildTextQuery(&req_buf, "bm25", "body", "alpha", 0.7), &out);
+        try testing.expectEqual(@as(usize, 0), try readFirstBatchPayloads(resp.body, &pts));
+    }
+    // `using` names the field; one without a scoring text index is refused.
+    {
+        const resp = try c.call("/qdrant.Points/QueryBatch", try buildTextQuery(&req_buf, "bm25", null, "alpha", null), &out);
+        try testing.expectEqual(grpc.Status.invalid_argument, resp.status);
+        try testing.expect(std.mem.indexOf(u8, resp.message, "needs `using`") != null);
+    }
+    {
+        const resp = try c.call("/qdrant.Points/QueryBatch", try buildTextQuery(&req_buf, "bm25", "title", "alpha", null), &out);
+        try testing.expectEqual(grpc.Status.invalid_argument, resp.status);
+        try testing.expect(std.mem.indexOf(u8, resp.message, "scoring text index") != null);
     }
 }

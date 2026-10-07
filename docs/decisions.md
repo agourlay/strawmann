@@ -2258,6 +2258,29 @@ bfb), a BM25 oracle and differ tiers before any engine code, the engine, then
 the W15 rows. Qdrant is pinned to a `dev` commit at or after `850859ec9` and
 re-pinned deliberately, since the API is days old.
 
+Implemented the same day, in `src/text/`:
+
+- The English Snowball stemmer: the crate's runtime ported by hand and its
+  generated `english.rs` translated mechanically (`scripts/snowball_rs_to_zig.py`).
+  It agrees with `qdrant-rust-stemmers` 1.2.2 on Snowball's English vocabulary
+  (42,649 words, a test fixture) and on all 120,238 distinct scifact and fiqa
+  tokens.
+- The `word` tokenizer with Unicode tables generated from rustc 1.99's
+  standard library (`conformance unicode-tables`, Unicode 17.0.0), final sigma
+  included. It agrees with the oracle on all 125,642 corpus values.
+- The text index: exact statistics through overwrite, payload clear and
+  delete, rebuilt from the payloads on load with its tokenizer options;
+  `CreateFieldIndex` with `TextIndexParams` (other tokenizers, languages,
+  custom stopwords, token length bounds, ASCII folding and an unscored text
+  index refused by name); `Query.text` with `using`, its BM25 score returned
+  as computed and `score_threshold` strict.
+
+Against the oracle through the server (`text-relevance`), lowercase, English
+stopwords and stemmer: scifact recall@10 1.0, 300/300 queries in order; fiqa
+1.0, 648/648 in order (ties by point id, as the oracle orders them); relative
+score difference at most 1.9e-7 on both. The query path allocates its scratch,
+which §6.3 forbids, until it is measured.
+
 ## BM25 counts an array of empty values as a document, as Qdrant does, decided 2026-10-07
 
 The BM25 oracle (`conformance/src/text`) first counted a point as a document

@@ -48,6 +48,7 @@
 const std = @import("std");
 const wire = @import("../proto/wire.zig");
 const futex_lock = @import("../lock.zig");
+const text = @import("../text/text.zig");
 
 // `qdrant.Value { oneof kind { NullValue null_value = 1; double double_value = 2;
 //   int64 integer_value = 3; string string_value = 4; bool bool_value = 5;
@@ -369,11 +370,15 @@ pub fn frameInto(out: *std.ArrayList(u8), alloc: std.mem.Allocator, entry: []con
 pub const Kind = enum(u8) {
     keyword = 1,
     integer = 2,
+    /// A text index scored with BM25 (`FieldTypeText = 4`, `Text = 5`), the
+    /// only text index this engine builds (decisions.md, 2026-10-07).
+    text = 5,
 
     pub fn fromFieldType(v: u64) ?Kind {
         return switch (v) {
             0 => .keyword,
             1 => .integer,
+            4 => .text,
             else => null,
         };
     }
@@ -391,6 +396,9 @@ pub const Field = struct {
     kind: Kind,
     keywords: std.StringHashMapUnmanaged(Postings) = .empty,
     integers: std.AutoHashMapUnmanaged(i64, Postings) = .empty,
+    /// The BM25 index of a `.text` field. Unlike the postings above it is
+    /// exact: a rewrite replaces the point's document and a delete removes it.
+    text_index: ?*text.TextIndex = null,
     /// Postings written, which over-counts overwritten points the same way
     /// the postings do. Reported as `PayloadSchemaInfo.points`.
     points: usize = 0,
@@ -405,7 +413,44 @@ pub const Field = struct {
         var ii = self.integers.iterator();
         while (ii.next()) |e| e.value_ptr.deinit(alloc);
         self.integers.deinit(alloc);
+        if (self.text_index) |ti| {
+            ti.deinit();
+            alloc.destroy(ti);
+        }
         alloc.free(self.name);
+    }
+
+    /// The point's string values under this field (one string, or a list's
+    /// strings), as the text index's document.
+    fn setText(self: *Field, alloc: std.mem.Allocator, offset: u32, value: []const u8) !void {
+        var values: std.ArrayList([]const u8) = .empty;
+        defer values.deinit(alloc);
+        var r = wire.Reader.init(value);
+        while (!r.atEnd()) {
+            const t = try r.tag();
+            switch (t.field) {
+                value_string => try values.append(alloc, try r.bytes()),
+                value_list => {
+                    var list = try r.nested();
+                    while (!list.atEnd()) {
+                        const lt = try list.tag();
+                        if (lt.field != 1) {
+                            try list.skip(lt.wire_type);
+                            continue;
+                        }
+                        var inner = wire.Reader.init(try list.bytes());
+                        while (!inner.atEnd()) {
+                            const it = try inner.tag();
+                            if (it.field == value_string) {
+                                try values.append(alloc, try inner.bytes());
+                            } else try inner.skip(it.wire_type);
+                        }
+                    }
+                },
+                else => try r.skip(t.wire_type),
+            }
+        }
+        try self.text_index.?.set(offset, values.items);
     }
 
     /// Index one point's value(s) for this field.
@@ -453,13 +498,17 @@ pub const Field = struct {
         }
     }
 
-    /// Every value under this field's key in a framed blob.
+    /// Every value under this field's key in a framed blob. A text field's
+    /// document is replaced, or removed when the blob no longer holds the key.
     fn addBlob(self: *Field, alloc: std.mem.Allocator, offset: u32, blob: []const u8) !void {
         var it = BlobIterator.init(blob);
         while (it.next()) |entry| {
             const kv = splitEntry(entry) orelse continue;
-            if (std.mem.eql(u8, self.name, kv.key)) try self.add(alloc, offset, kv.value);
+            if (!std.mem.eql(u8, self.name, kv.key)) continue;
+            if (self.kind == .text) return self.setText(alloc, offset, kv.value);
+            try self.add(alloc, offset, kv.value);
         }
+        if (self.kind == .text) self.text_index.?.remove(offset);
     }
 
     fn addKeyword(self: *Field, alloc: std.mem.Allocator, offset: u32, s: []const u8) !void {
@@ -602,6 +651,7 @@ pub const Store = struct {
         var it = WireEntries.init(entries, map_field);
         while (try it.next()) |e| total += framedLen(e);
         if (total == 0) {
+            self.forgetPoint(offset);
             self.publish(offset, 0);
             return;
         }
@@ -651,6 +701,7 @@ pub const Store = struct {
     pub fn setFramed(self: *Store, alloc: std.mem.Allocator, offset: u32, framed: []const u8) !void {
         self.noteRewrite(offset);
         if (framed.len == 0) {
+            self.forgetPoint(offset);
             self.publish(offset, 0);
             return;
         }
@@ -708,6 +759,53 @@ pub const Store = struct {
         // published, and a later write to the offset will not remove them.
         errdefer self.exact_postings.store(false, .release);
         for (self.fields.items) |*f| try f.addBlob(alloc, offset, blob);
+    }
+
+    /// Drop `offset`'s documents from every text index: its payload was
+    /// cleared, or the point deleted. The keyword and integer postings are
+    /// hints and keep theirs (the module doc); BM25's statistics cannot.
+    pub fn forgetPoint(self: *Store, offset: u32) void {
+        if (self.fields.items.len == 0) return;
+        self.index_lock.lock();
+        defer self.index_lock.unlock();
+        for (self.fields.items) |*f| if (f.text_index) |ti| ti.remove(offset);
+    }
+
+    /// `CreateFieldIndex` for a BM25 text field: tokenized with `opts`, over
+    /// the `count` points stored so far that `deleted` does not hold, and
+    /// every point written from now on.
+    pub fn createTextIndex(
+        self: *Store,
+        alloc: std.mem.Allocator,
+        name: []const u8,
+        opts: text.tokenizer.Options,
+        count: usize,
+        deleted: *const std.DynamicBitSet,
+    ) !void {
+        for (self.fields.items) |f| {
+            if (std.mem.eql(u8, f.name, name)) {
+                if (f.kind != .text) return error.IndexKindMismatch;
+                if (!std.meta.eql(f.text_index.?.opts, opts)) return error.IndexKindMismatch;
+                return;
+            }
+        }
+        const owned = try alloc.dupe(u8, name);
+        var f = Field{ .name = owned, .kind = .text };
+        errdefer f.deinit(alloc);
+        const ti = try alloc.create(text.TextIndex);
+        ti.* = text.TextIndex.init(alloc, opts);
+        f.text_index = ti;
+        // Populated before it is published, as `createIndex` does.
+        var off: u32 = 0;
+        while (off < count) : (off += 1) {
+            if (deleted.isSet(off)) continue;
+            const blob = self.get(off);
+            if (blob.len == 0) continue;
+            try f.addBlob(alloc, off, blob);
+        }
+        self.index_lock.lock();
+        defer self.index_lock.unlock();
+        try self.fields.append(alloc, f);
     }
 
     /// Hold the shared lock while reading `fields.items` from outside:
