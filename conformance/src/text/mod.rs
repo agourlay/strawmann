@@ -111,6 +111,13 @@ impl Tokenizer {
     /// count them.
     pub fn tokens(&self, text: &str) -> Vec<String> {
         let mut out = Vec::new();
+        self.each_token(text, |t| out.push(t.to_string()));
+        out
+    }
+
+    /// `tokens`, handed to `f` one at a time instead of collected, so a large
+    /// corpus is not a `String` per token at once.
+    pub fn each_token(&self, text: &str, mut f: impl FnMut(&str)) {
         for piece in text.split(|c: char| !c.is_alphanumeric()) {
             if piece.is_empty() {
                 continue;
@@ -123,13 +130,11 @@ impl Tokenizer {
             if self.stopwords.contains(&token) {
                 continue;
             }
-            let token = match &self.stemmer {
-                Some(stemmer) => stemmer.stem(&token).into_owned(),
-                None => token,
-            };
-            out.push(token);
+            match &self.stemmer {
+                Some(stemmer) => f(&stemmer.stem(&token)),
+                None => f(&token),
+            }
         }
-        out
     }
 
     /// A query's distinct terms. Qdrant scores each once, with no query-term
@@ -144,12 +149,21 @@ impl Tokenizer {
 }
 
 /// Corpus statistics and per-document term counts over one collection.
+///
+/// Terms are interned to `u32` ids and a document holds its `(term, tf)`
+/// pairs sorted by term, with a posting list per term so a search visits the
+/// points that hold a query term rather than every point: the 1M-document
+/// synthetic corpus needs about a gigabyte this way where one map per document
+/// needed eighteen. The arithmetic is unchanged.
 pub struct Bm25Index {
     tokenizer: Tokenizer,
+    term_ids: HashMap<String, u32>,
+    df: Vec<u32>,
+    /// Points holding each term, ascending.
+    postings: Vec<Vec<u32>>,
     /// Indexed by point id; empty for a point with no tokens.
-    tf: Vec<HashMap<String, u32>>,
+    tf: Vec<Box<[(u32, u32)]>>,
     doc_len: Vec<u32>,
-    df: HashMap<String, u32>,
     documents: u32,
     total_tokens: u64,
 }
@@ -159,37 +173,55 @@ impl Bm25Index {
     /// array's elements, or none.
     pub fn build(params: TextParams, docs: &[Vec<String>]) -> Self {
         let tokenizer = Tokenizer::new(params);
+        let mut term_ids: HashMap<String, u32> = HashMap::new();
+        let mut df: Vec<u32> = Vec::new();
+        let mut postings: Vec<Vec<u32>> = Vec::new();
         let mut tf = Vec::with_capacity(docs.len());
         let mut doc_len = Vec::with_capacity(docs.len());
-        let mut df: HashMap<String, u32> = HashMap::new();
         let mut documents = 0u32;
         let mut total_tokens = 0u64;
-        for values in docs {
-            let mut counts: HashMap<String, u32> = HashMap::new();
+        for (point, values) in docs.iter().enumerate() {
+            let mut counts: HashMap<u32, u32> = HashMap::new();
             let mut len = 0u32;
             for value in values {
-                for token in tokenizer.tokens(value) {
-                    *counts.entry(token).or_default() += 1;
+                tokenizer.each_token(value, |token| {
+                    let id = match term_ids.get(token) {
+                        Some(&id) => id,
+                        None => {
+                            let id = u32::try_from(term_ids.len()).expect("fewer than 2^32 terms");
+                            term_ids.insert(token.to_string(), id);
+                            df.push(0);
+                            postings.push(Vec::new());
+                            id
+                        }
+                    };
+                    *counts.entry(id).or_default() += 1;
                     len += 1;
-                }
+                });
             }
+            let mut pairs: Vec<(u32, u32)> = counts.into_iter().collect();
+            pairs.sort_unstable();
             // Qdrant's boundary token makes an array of two or more values a
             // document however little of it survives tokenization.
             if len > 0 || values.len() > 1 {
                 documents += 1;
                 total_tokens += u64::from(len);
-                for term in counts.keys() {
-                    *df.entry(term.clone()).or_default() += 1;
+                let p = u32::try_from(point).expect("point ids are u32 row indices (§4.3)");
+                for &(term, _) in &pairs {
+                    df[term as usize] += 1;
+                    postings[term as usize].push(p);
                 }
             }
-            tf.push(counts);
+            tf.push(pairs.into_boxed_slice());
             doc_len.push(len);
         }
         Self {
             tokenizer,
+            term_ids,
+            df,
+            postings,
             tf,
             doc_len,
-            df,
             documents,
             total_tokens,
         }
@@ -205,8 +237,27 @@ impl Bm25Index {
 
     pub fn idf(&self, term: &str) -> f64 {
         let n = f64::from(self.documents);
-        let df = f64::from(self.df.get(term).copied().unwrap_or(0));
+        let df = f64::from(
+            self.term_ids
+                .get(term)
+                .map_or(0, |&id| self.df[id as usize]),
+        );
         ((n - df + 0.5) / (df + 0.5) + 1.0).ln().max(0.0)
+    }
+
+    /// `term`'s frequency in `point`, if it holds it.
+    fn tf_of(&self, point: usize, term: &str) -> Option<u32> {
+        let id = *self.term_ids.get(term)?;
+        let pairs = self.tf.get(point)?;
+        pairs
+            .binary_search_by_key(&id, |&(t, _)| t)
+            .ok()
+            .map(|i| pairs[i].1)
+    }
+
+    /// Whether `point` holds any of `terms`.
+    fn holds_any(&self, point: usize, terms: &[String]) -> bool {
+        terms.iter().any(|t| self.tf_of(point, t).is_some())
     }
 
     /// BM25 of `point` for already-deduplicated `terms`.
@@ -222,8 +273,8 @@ impl Bm25Index {
         };
         terms
             .iter()
-            .map(|term| match self.tf[point].get(term) {
-                Some(&tf) => {
+            .map(|term| match self.tf_of(point, term) {
+                Some(tf) => {
                     let tf = f64::from(tf);
                     self.idf(term) * tf * (k1 + 1.0) / (tf + norm)
                 }
@@ -244,16 +295,23 @@ impl Bm25Index {
         allowed: Option<&dyn Fn(usize) -> bool>,
     ) -> Vec<(u32, f64)> {
         let terms = self.tokenizer.query_terms(query);
-        let mut hits: Vec<(u32, f64)> = (0..self.tf.len())
-            .filter(|&p| terms.iter().any(|t| self.tf[p].contains_key(t)))
-            .filter(|&p| allowed.is_none_or(|f| f(p)))
-            .map(|p| {
-                let id = u32::try_from(p).expect("point ids are u32 row indices (§4.3)");
-                (id, self.score(p, &terms, k1, b))
-            })
+        let mut candidates: Vec<u32> = terms
+            .iter()
+            .filter_map(|t| self.term_ids.get(t))
+            .flat_map(|&id| self.postings[id as usize].iter().copied())
+            .collect();
+        candidates.sort_unstable();
+        candidates.dedup();
+        let mut hits: Vec<(u32, f64)> = candidates
+            .into_iter()
+            .filter(|&p| allowed.is_none_or(|f| f(p as usize)))
+            .map(|p| (p, self.score(p as usize, &terms, k1, b)))
             .collect();
         hits.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
         hits.truncate(limit);
+        // A common term holds most of the corpus, and `truncate` keeps the
+        // capacity: a thousand truths kept 16 GB of it on the 1M corpus.
+        hits.shrink_to_fit();
         hits
     }
 }
@@ -465,7 +523,7 @@ pub fn agreement(
         let mut hits = 0usize;
         for (&id, &score) in got.ids.iter().zip(&got.scores) {
             let point = id as usize;
-            if point >= index.tf.len() || !terms.iter().any(|t| index.tf[point].contains_key(t)) {
+            if point >= index.tf.len() || !index.holds_any(point, &terms) {
                 out.non_matching += 1;
                 continue;
             }
@@ -537,7 +595,7 @@ impl Bm25Index {
         }
         for (i, (&id, &score)) in got.ids.iter().zip(&got.scores).enumerate() {
             let point = id as usize;
-            if point >= self.tf.len() || !terms.iter().any(|t| self.tf[point].contains_key(t)) {
+            if point >= self.tf.len() || !self.holds_any(point, &terms) {
                 out.non_matching = true;
                 out.rank_mismatch = true;
                 continue;
