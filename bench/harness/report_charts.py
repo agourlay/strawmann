@@ -138,23 +138,13 @@ def matched_count(pt: dict) -> str | None:
     return f"{n:,}" if isinstance(n, int) else None
 
 
-#: `joined_verdicts`' last answer, with the two row lists it was computed from.
-#: Held by identity, so a hit is the same runs and not another pair that
-#: happens to share labels; one entry, because a page renders one pair.
-_VERDICTS: list = []
-
-
-def joined_verdicts(runs: list[Run]) -> dict[str, tuple[str, str | None]]:
-    """`{row id: (ratio cell, refusal or None)}` for every row `compare.joined`
-    pairs. The charts and the filtered note both read it, and each used to run
-    the whole join again for it."""
+def joined_verdicts(runs: list[Run]) -> dict[str, str | None]:
+    """`{row id: refusal, or None where compared}` for every row
+    `compare.joined` pairs. A row the join does not pair is absent, which is
+    neither: the filtered note says so rather than calling it compared."""
     if len(runs) != 2:
         return {}
-    keys = [getattr(r, "rows", None) for r in runs]
-    if _VERDICTS and keys[0] is not None and _VERDICTS[0] is keys[0] \
-            and _VERDICTS[1] is keys[1]:
-        return _VERDICTS[2]
-    out = {}
+    out: dict[str, str | None] = {}
     for jr in compare.joined(runs[0].label, runs[1].label,
                              runs[0].by_id(), runs[1].by_id()):
         # Parity is a comparison with a verdict, not a refusal: hatching it
@@ -163,9 +153,7 @@ def joined_verdicts(runs: list[Run]) -> dict[str, tuple[str, str | None]]:
         if ratio_value(jr.ratio) is None and jr.ratio != "parity":
             refusal = (jr.refusal or "; ".join(n.strip("[]") for n in jr.notes)
                        or "not comparable")
-        out[jr.id] = (jr.ratio, refusal)
-    if keys[0] is not None and keys[1] is not None:
-        _VERDICTS[:] = [keys[0], keys[1], out]
+        out[jr.id] = refusal
     return out
 
 
@@ -178,7 +166,7 @@ def refused_ids(runs: list[Run]) -> dict[str, str]:
     same experiment) beside the rows that *are* comparable hands a skimmer
     exactly the comparison every table on the page refuses to state.
     """
-    return {wid: why for wid, (_ratio, why) in joined_verdicts(runs).items() if why}
+    return {wid: why for wid, why in joined_verdicts(runs).items() if why}
 
 def chart_throughput(runs: list[Run], df: pd.DataFrame) -> dict:
     wanted = ["W0", "W3", "W4", "W5", "W6", "W7", "W8", "W9", "W11", "W13"]
@@ -1125,9 +1113,9 @@ def filtered_matched_recall_table(runs: list[Run]) -> str:
     # table above it printed 2.25x.
     # Absent from the join is neither: a run with the ladder and no plain row,
     # or a row the fold left out, has nothing in that table to describe.
-    verdict = joined_verdicts(runs).get("W12-sel10")
-    refusal = verdict[1] if verdict else None
-    if verdict is None:
+    verdicts = joined_verdicts(runs)
+    refusal = verdicts.get("W12-sel10")
+    if "W12-sel10" not in verdicts:
         row = ('. The per-row table has no <code>W12-sel10</code> row for this '
                'pair; held at equal recall, the comparison exists at every '
                'recall both engines reach.')

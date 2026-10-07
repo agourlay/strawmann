@@ -93,8 +93,11 @@ queries) read 0.090 / 0.202 / 0.332 without ACORN and 0.962 / 0.992 / 0.997
 with it. ACORN is not what costs the recall: it is what restores it on a graph
 the default threshold builds without payload-block links. `relevance` now
 takes `--acorn`, `recall.py` sends it on the filtered grades when the rows do,
-the sweep records it, and the join refuses a sweep whose ACORN differs from the
-label's `w12_acorn` stamp. Swept that way on a rebuilt bench12, Qdrant's sel10
+the sweep records it, and each W12 row records its own `acorn`. The join
+refuses a sweep whose ACORN differs from the row's (from the label's
+`w12_acorn` stamp for a row recorded before the field, and off for a label
+stamped before that), except on strawmANN, which ignores the flag; the fold
+applies the same rule (`recall.acorn_applies`). Swept that way on a rebuilt bench12, Qdrant's sel10
 reads 0.9649 / 0.9930 / 0.9982 against fp64 truth. bench12 is dropped after a
 run, so laion 1007's W12 rows cannot be re-swept. Its page is published with
 every W12 row refused (recall missing) and its other rows as measured; the
@@ -103,9 +106,10 @@ were deleted before re-ingesting. laion's W12 needs a pair measured with the
 fix. sift1m's W12 recall is unaffected:
 Qdrant scans both tiers there, so ACORN never applies, and strawmANN ignores
 the flag. Its published 1007 page (sel1 1.95x, sel10 2.25x) is kept, though it
-no longer regenerates: the join refuses sift 1007's sweeps for not recording
-`acorn`, so `compare.py --write-readme` for that pair would print W12 as
-recall missing. `readme-table-current` did not catch it, since it checks
+no longer regenerates: the join refuses sift 1007's Qdrant sweeps for not
+recording `acorn` (its rows predate the field, and the stamp says on), so
+`compare.py --write-readme` for that pair would print Qdrant's W12 recall as
+missing. `readme-table-current` did not catch it, since it checks
 placeholder labels rather than the published pairs. The next sift pair
 replaces the page. dbpedia (d=1536, about 1,700 points) walks
 sel10 too, so its next pair needs the fix.

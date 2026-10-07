@@ -293,13 +293,13 @@ class ReportHostTests(unittest.TestCase):
             # beside a table printing 2.25x for it.
             g = report.matched_recall_table.__globals__
             with mock.patch.dict(g, {"joined_verdicts": lambda runs: {
-                    "W12-sel10": ("2.25x", None)}}):
+                    "W12-sel10": None}}):
                 html = report.matched_recall_table(runs)
             self.assertIn("per-row table compares <code>W12-sel10</code>", html)
             self.assertNotIn("refuses <code>W12-sel10</code>", html)
             why = "recall unequal: 1.0000 vs 0.9854"
             with mock.patch.dict(g, {"joined_verdicts": lambda runs: {
-                    "W12-sel10": ("-", why)}}):
+                    "W12-sel10": why}}):
                 html = report.matched_recall_table(runs)
             self.assertIn("refuses <code>W12-sel10</code>", html)
             self.assertIn(why, html)
@@ -975,6 +975,9 @@ class ReportHostTests(unittest.TestCase):
             {"search_stop": "", "qps_basis": "write-window", "n_requested": 572_856}))
         # Recorded before the field: the clock mode's request is the tell.
         self.assertTrue(agg.ended_on_the_clock({"n_requested": agg.W11_SEARCH_N}))
+        # `""` is the row saying its `-n` ended it, not a row without the field.
+        self.assertFalse(agg.ended_on_the_clock(
+            {"search_stop": "", "n_requested": agg.W11_SEARCH_N}))
         self.assertFalse(agg.ended_on_the_clock(
             {"qps_basis": "write-window", "n_requested": 572_856}))
 
@@ -995,7 +998,8 @@ class ReportHostTests(unittest.TestCase):
         agg = importlib.import_module("aggregate")
         name = "recall.laion-small-clip.bench12.sel10.json"
         with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.object(agg, "ROOT", Path(tmp)):
+                mock.patch.object(agg, "ROOT", Path(tmp)), \
+                mock.patch.object(agg.recall_mod, "ROOT", Path(tmp)):
             res = Path(tmp) / "bench/results"
             for rep, acorn, rec in (("r1", None, 0.09), ("r2", True, 0.96), ("r3", True, 0.96)):
                 (res / rep).mkdir(parents=True)
@@ -1017,6 +1021,17 @@ class ReportHostTests(unittest.TestCase):
             notes = []
             agg.fold_recall(dest, ["r1", "r2", "r3"], notes)
             self.assertTrue(json.loads((dest / name).read_text())["acorn"])
+            # strawmANN ignores ACORN, so its passes measured one search either
+            # way and fold as the join would read them.
+            (res / "r1" / name).write_text(json.dumps(
+                {"collection": "bench12", "grade": "sel10",
+                 "points": [{"ef": 32, "recall_at_10": 0.97}]}))
+            for rep in ("r1", "r2", "r3"):
+                (res / rep / "run.json").write_text(json.dumps({"engine_comm": "strawmann"}))
+            notes = []
+            agg.fold_recall(dest, ["r1", "r2", "r3"], notes)
+            self.assertTrue((dest / name).exists())
+            self.assertFalse(any("ACORN" in n for n in notes), notes)
 
     def test_the_fold_medians_recall_too_and_keeps_the_build_spread(self):
         """`rows.json` carried the median qps of three passes while the recall

@@ -390,13 +390,19 @@ def run_search_until(cmd: list[str], stop_at, poll_s: float = 0.2) -> subprocess
     """Run a bfb search and SIGINT it once the monotonic clock passes
     `stop_at()`, asked again every `poll_s` because the answer moves when the
     writer ends. bfb stops issuing on SIGINT, prints its summary, writes its
-    JSON and `--jsonl-searches`, and exits 0."""
+    JSON and `--jsonl-searches`, and exits 0.
+
+    `clock_stopped` on the result says whether the SIGINT was sent: a search
+    that finished its `-n` first, or failed, did not end on the clock, and
+    the row's `search_stop` must not say it did."""
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    signalled = threading.Event()
 
     def watch() -> None:
         while p.poll() is None:
             if time.monotonic() >= stop_at():
                 p.send_signal(signal.SIGINT)
+                signalled.set()
                 return
             time.sleep(poll_s)
 
@@ -404,7 +410,9 @@ def run_search_until(cmd: list[str], stop_at, poll_s: float = 0.2) -> subprocess
     watcher.start()
     out, err = p.communicate()
     watcher.join()
-    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+    done = subprocess.CompletedProcess(cmd, p.returncode, out, err)
+    done.clock_stopped = signalled.is_set()
+    return done
 
 
 def w11_append_rate(points: int, span_s: float) -> int:
@@ -2865,7 +2873,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
         warmup_s=warmup_s,
         **quant_of(w),
         acorn="--acorn" in w.args,
-        search_stop="clock" if w.background else "",
+        search_stop="clock" if getattr(proc, "clock_stopped", False) else "",
         **bgd,
         **settled,
         **(build or {}),

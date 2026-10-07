@@ -48,6 +48,7 @@ import perfstat
 
 import bfb_output
 import procstat
+import recall as recall_mod
 from regression import MIXED_STAMP, stamp_hash_of
 from workloads import W11_SEARCH_N, Gate
 
@@ -124,7 +125,7 @@ def ended_on_the_clock(r: dict) -> bool:
     Not `qps_basis`: it read `write-window` on count-bounded rows from 10a274a
     on, and `""` on a clock-bounded pass whose writer never overlapped.
     """
-    if r.get("search_stop"):
+    if "search_stop" in r:
         return r["search_stop"] == "clock"
     return r.get("n_requested") == W11_SEARCH_N
 
@@ -448,6 +449,12 @@ RECALL_NUMERIC = ("recall_at_1", "recall_at_10", "recall_at_100",
                   "short_lists", "impossible_scores")
 
 
+def acorn_applies_to(reps: list[str]) -> bool:
+    """`recall.acorn_applies` for a fold's passes, which all measured one engine.
+    Any pass the rule holds is enough to hold the fold to it."""
+    return any(recall_mod.acorn_applies(r) for r in reps)
+
+
 def fold_recall(dest: Path, reps: list[str], notes: list[str]) -> None:
     """Median the recall sweeps too, and widen their intervals to the spread.
 
@@ -495,7 +502,7 @@ def fold_recall(dest: Path, reps: list[str], notes: list[str]) -> None:
         # to describe: one pass swept without ACORN (0.09 at `ef` 32 on laion)
         # and two with it (0.96) would fold to 0.96 under pass 1's "no ACORN".
         acorns = {bool(d.get("acorn")) for d in docs}
-        if len(acorns) > 1:
+        if len(acorns) > 1 and acorn_applies_to(from_reps):
             which = ", ".join(f"{r} {'on' if d.get('acorn') else 'off'}"
                               for r, d in zip(from_reps, docs, strict=True))
             notes.append(f"{name}: the passes swept with and without ACORN "

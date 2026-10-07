@@ -50,6 +50,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paths
+import regression
 
 ROOT = Path(os.environ.get("STRAWMANN_ROOT", Path(__file__).resolve().parents[2]))
 CONF = ROOT / "conformance"
@@ -372,15 +373,19 @@ def label_acorn(label: str) -> bool | None:
     return None if setting is None else str(setting).startswith("on")
 
 
-def honours_acorn(label: str) -> bool:
-    """Whether the engine behind `label` acts on `params.acorn`.
+def acorn_applies(label: str) -> bool:
+    """Whether ACORN decides what a filtered search of `label` measured, so
+    a sweep speaks for its rows only under the same setting. The one rule for
+    every reader of graded sweeps: the join (`acorn_matches`) and the fold
+    (`aggregate.fold_recall`).
 
-    strawmANN's decoder skips the field (`src/proto/messages.zig`) and takes
-    its own ACORN-1 walk, so a sweep of it with or without the flag measured
-    the search its rows ran, and checking the flag there refused laion and
+    strawmANN's decoder skips `params.acorn` (`src/proto/messages.zig`) and
+    takes its own ACORN-1 walk, so a sweep of it with or without the flag
+    measured the search its rows ran; holding it to the flag refused laion and
     sift 1007's strawmANN recall for nothing. Unknown engines are held to it.
     """
-    return not str(run_meta(label).get("engine_comm") or "").startswith("strawmann")
+    engine = regression.engine_of(ROOT / "bench/results" / label) or ""
+    return not str(engine).startswith("strawmann")
 
 
 def acorn_matches(label: str, sweep_json: dict, row_acorn: bool | None) -> bool:
@@ -390,7 +395,7 @@ def acorn_matches(label: str, sweep_json: dict, row_acorn: bool | None) -> bool:
     falls back to the label's stamp, and a label stamped before that ran
     without ACORN. A sweep that does not record `acorn` sent none.
     """
-    if not honours_acorn(label):
+    if not acorn_applies(label):
         return True
     want = row_acorn
     if want is None:

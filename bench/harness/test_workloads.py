@@ -568,9 +568,13 @@ class WorkloadTests(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 10)
         self.assertEqual(got.returncode, 0)
         self.assertIn("stopped", got.stdout)
-        # A search that ends first is left alone.
+        self.assertTrue(got.clock_stopped)
+        # A search that ends first is left alone, and the row is not told it
+        # ended on the clock: its `-n` did.
         got = w.run_search_until([sys.executable, "-c", "print('done')"], lambda: t0 + 60)
         self.assertEqual((got.returncode, got.stdout.strip()), (0, "done"))
+        self.assertFalse(got.clock_stopped)
+
     def test_start_requirements_are_strawmanns_and_only_for_rows_that_need_them(self):
         """0925 printed both lines on all 18 invocations, Qdrant's included,
         and "appends 198,000 on top of W2's 990,000 ... reaches 1,237,500",

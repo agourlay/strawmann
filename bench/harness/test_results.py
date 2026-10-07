@@ -192,7 +192,12 @@ class RecallTests(unittest.TestCase):
     def test_the_filtered_sweep_sends_what_the_label_ran(self):
         """From the label's stamp, not the shell it is re-swept from: a sweep
         sent from the current W12_ACORN against an older label was refused by
-        the join that reads the label."""
+        the join that reads the label.
+
+        This is also why ACORN is not in `recall_path`: a stamped label is only
+        ever swept one way, so a sweep with and one without cannot meet at its
+        file name. Only an unstamped label takes the harness setting, and it
+        has no rows a second setting could be swept for."""
         rc = self.m["recall"]
         seen = []
         run = lambda cmd, **k: seen.append(cmd) or mock.Mock(returncode=0)
