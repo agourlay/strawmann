@@ -733,12 +733,26 @@ W9_PARALLEL = int(os.environ.get("W9_PARALLEL", 8))
 #: and rows measured under this one carry different `bfb_pin` stamps, and
 #: `compare.py` reads that stamp — which is the mechanism working, not a
 #: problem to route around.
-BFB_PIN = ("dev @ 29240511 (qdrant/bfb#183; carries #172, findings 32's "
-           "--rps reaping fix)")
+#: Moved forward to `caaeeef` on 2026-10-07, one commit on: #185, the `kind:
+#: text` request (BM25 over a text index) and `scoring`/`lowercase`/`stopwords`/
+#: `stemmer` on text payload fields, which W15 needs. Read for what it changes
+#: in a request §4's other rows send:
+#:
+#:   * `search/from_config.rs` takes the query as one `MainQuery`, a vector or a
+#:     text query, where it took a vector; a dense request still builds
+#:     `Query::new_nearest` from the same `VectorInput`, with the same `using`.
+#:     `--search-quality` and `--prefetch` are refused only with a text request.
+#:   * `collection/from_config.rs` sends the new text index options only when a
+#:     field sets them; no field of §4's other rows does.
+#:   * `Cargo.lock` moves `qdrant-client` 1.16.1-dev from rust-client `18002ab`
+#:     to `71143d8` (qdrant/rust-client#299): the proto regenerated from Qdrant
+#:     dev, which adds fields and changes no field a dense request sets.
+BFB_PIN = ("dev @ caaeeef (qdrant/bfb#185, BM25 text requests; carries #183 and "
+           "#172, findings 32's --rps reaping fix)")
 
 #: The short hash inside `BFB_PIN`, which is what the checkout is checked
 #: against. Written once, parsed once, rather than repeated.
-BFB_COMMIT = "2924051"
+BFB_COMMIT = "caaeeef"
 BFB_CLIENT = "qdrant-client 1.16.1-dev (git dev branch)"
 HARNESS_CLIENT = "qdrant-client git 71143d8 (dev, qdrant/rust-client#299 merged, 1.16.1-dev line)"
 
