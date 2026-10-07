@@ -265,6 +265,9 @@ struct TextRelevanceRun {
     /// Query the collection as it is, without recreating it.
     #[arg(long)]
     skip_upload: bool,
+    /// `qrels.tsv` in row space: report nDCG@10 and MRR@10 beside recall.
+    #[arg(long)]
+    qrels: Option<PathBuf>,
     #[arg(long)]
     json: Option<PathBuf>,
 }
@@ -1157,7 +1160,33 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
         )
         .await?;
     let index = text::Bm25Index::build(params, &docs);
-    let agreement = text::agreement(&index, &truth, &queries, &returned, a.limit, a.tie_epsilon);
+    let mut agreement =
+        text::agreement(&index, &truth, &queries, &returned, a.limit, a.tie_epsilon);
+    if let Some(path) = &a.qrels {
+        let (qrels, _) = text::read_qrels(path)?;
+        anyhow::ensure!(
+            qrels.iter().all(|q| q.query < queries.len()),
+            "{}: judges a query past the {} in {}",
+            path.display(),
+            queries.len(),
+            a.queries.display()
+        );
+        let oracle: Vec<relevance::Returned> = truth
+            .hits
+            .iter()
+            .map(|h| relevance::Returned {
+                ids: h.iter().map(|x| x.0).collect(),
+                scores: h.iter().map(|x| x.1).collect(),
+            })
+            .collect();
+        agreement.semantic = Some(relevance::evaluate_semantic(
+            &qrels,
+            &returned,
+            queries.len(),
+        ));
+        agreement.oracle_semantic =
+            Some(relevance::evaluate_semantic(&qrels, &oracle, queries.len()));
+    }
     println!(
         "[{}] text recall@{} {:.4} | exact order {}/{} | short lists {} | non-matching {} | \
          |Δscore| max {:.3e} p99 {:.3e} (rel max {:.3e} p99 {:.3e}) over {} points",
@@ -1174,6 +1203,12 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
         agreement.p99_rel_delta,
         agreement.scored_points
     );
+    if let (Some(s), Some(o)) = (&agreement.semantic, &agreement.oracle_semantic) {
+        println!(
+            "[{}] nDCG@10 {:.4} MRR@10 {:.4} over {} judged queries (oracle BM25: nDCG@10 {:.4} MRR@10 {:.4})",
+            a.label, s.ndcg_at_10, s.mrr_at_10, s.queries, o.ndcg_at_10, o.mrr_at_10
+        );
+    }
     if let Some(path) = &a.json {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;

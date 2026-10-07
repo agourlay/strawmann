@@ -455,8 +455,6 @@ pub struct Qrel {
 /// rounding error, or may not. Measuring both on the BEIR slice turns 'binary
 /// quantization is 8× faster at 93% recall' into a statement someone can make
 /// a decision from."
-/// Reachable only through `evaluate_semantic`; see its note on qrels.
-#[allow(dead_code)]
 pub fn ndcg_at_k(qrels: &[Qrel], query: usize, returned: &[u32], k: usize) -> f64 {
     let grade_of = |doc: u32| -> f64 {
         qrels
@@ -494,8 +492,6 @@ pub fn ndcg_at_k(qrels: &[Qrel], query: usize, returned: &[u32], k: usize) -> f6
 }
 
 /// Mean reciprocal rank of the first relevant result.
-/// Reachable only through `evaluate_semantic`; see its note on qrels.
-#[allow(dead_code)]
 pub fn mrr(qrels: &[Qrel], query: usize, returned: &[u32], k: usize) -> f64 {
     for (i, &doc) in returned.iter().take(k).enumerate() {
         let relevant = qrels
@@ -515,14 +511,11 @@ pub struct Semantic {
     pub mrr_at_10: f64,
 }
 
-/// **Not reachable from any command yet**, and the reason is the data rather
-/// than the code: semantic relevance needs qrels — human judgements — and none
-/// of §4.2's dataset tiers ship them. §4.4's rule is "report both; never
-/// substitute one for the other", so this stays implemented and tested against
-/// the day a judged dataset is added, rather than being deleted and rebuilt
-/// wrongly later. Until then, no run emits nDCG or MRR and nothing should
-/// advertise that it does.
-#[allow(dead_code)]
+/// nDCG@10 and MRR@10 over a judged query set. Reached through
+/// `text-relevance --qrels`: the BEIR corpora (scifact, fiqa) are the first
+/// judged datasets here (decisions.md, 2026-10-07). §4.4's rule stands: report
+/// both, never substitute one for the other. BEIR's grades are binary, where
+/// this exponential gain and trec_eval's linear one agree.
 pub fn evaluate_semantic(qrels: &[Qrel], results: &[Returned], n_queries: usize) -> Semantic {
     if n_queries == 0 {
         return Semantic::default();

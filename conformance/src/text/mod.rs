@@ -305,6 +305,36 @@ pub fn read_queries(path: &Path) -> anyhow::Result<(Vec<String>, u64)> {
     ))
 }
 
+/// `qrels.tsv` (`query row, point row, grade` per line, `convert-beir`'s
+/// layout), and its checksum.
+pub fn read_qrels(path: &Path) -> anyhow::Result<(Vec<crate::relevance::Qrel>, u64)> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::str::from_utf8(&bytes).with_context(|| format!("{} is not UTF-8", path.display()))?;
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let cols: Vec<&str> = line.split('\t').collect();
+        anyhow::ensure!(
+            cols.len() == 3,
+            "{}: line {} is not query\tpoint\tgrade",
+            path.display(),
+            i + 1
+        );
+        let parse = || -> anyhow::Result<crate::relevance::Qrel> {
+            Ok(crate::relevance::Qrel {
+                query: cols[0].parse()?,
+                doc: cols[1].parse()?,
+                grade: cols[2].parse()?,
+            })
+        };
+        out.push(parse().with_context(|| format!("{}: line {}", path.display(), i + 1))?);
+    }
+    Ok((out, checksum_bytes(&bytes)))
+}
+
 /// What a BM25 truth was computed under: the tokenizer, `k1`, `b` and depth.
 #[derive(Clone, Copy, Debug)]
 pub struct Bm25Settings {
@@ -393,6 +423,11 @@ pub struct TextAgreement {
     pub max_rel_delta: f64,
     pub p99_rel_delta: f64,
     pub scored_points: usize,
+    /// nDCG@10 and MRR@10 of the engine's results against the qrels, and of
+    /// the oracle's own ranking: BM25's semantic relevance on this corpus,
+    /// which the engine should reproduce. Absent without qrels.
+    pub semantic: Option<crate::relevance::Semantic>,
+    pub oracle_semantic: Option<crate::relevance::Semantic>,
 }
 
 /// Compare `returned[q]` with the truth for each query. `index` recomputes the
@@ -642,6 +677,25 @@ mod tests {
             agreement(&index, &truth, &qs, &[short], 2, 1e-6).short_lists,
             1
         );
+    }
+
+    #[test]
+    fn qrels_read_in_row_space_and_a_bad_line_is_named() {
+        let dir = std::env::temp_dir().join(format!("bm25-qrels-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("qrels.tsv");
+        std::fs::write(&path, "0\t7\t1\n1\t2\t2\n").unwrap();
+        let (q, _) = read_qrels(&path).unwrap();
+        assert_eq!(
+            q.iter()
+                .map(|x| (x.query, x.doc, x.grade))
+                .collect::<Vec<_>>(),
+            [(0, 7, 1), (1, 2, 2)]
+        );
+        std::fs::write(&path, "0\t7\t1\n0\tseven\t1\n").unwrap();
+        let err = read_qrels(&path).err().unwrap();
+        assert!(format!("{err:#}").contains("line 2"), "{err:#}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
