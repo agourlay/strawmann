@@ -13,8 +13,14 @@ edition = "2024"
 # produces numbers that cannot be reasoned about." The same argument applies to
 # the client — a client upgrade can change defaults, wire encodings, and which
 # RPC a high-level call maps to.
+#
+# Pinned to a commit since 2026-10-07: qdrant/rust-client#299, the `dev` line
+# regenerated from Qdrant dev's proto (identical to Qdrant 850859ec9's), which
+# carries BM25's `TextQuery` and `TextIndexParams.scoring`. No release has
+# them. It replaced crates.io's `=1.19.0`; the crate still calls itself
+# `1.16.1-dev`, the version string of the line bfb builds.
 [dependencies]
-qdrant-client = "=1.19.0"
+qdrant-client = { git = "https://github.com/qdrant/rust-client", rev = "d960517dfefbe658e85bdb2b6f447df30fa455db" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow = "1"
 # The fp64 oracle is exhaustive by definition (§8.2 tier 1), so it is the one

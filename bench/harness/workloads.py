@@ -740,7 +740,7 @@ BFB_PIN = ("dev @ 29240511 (qdrant/bfb#183; carries #172, findings 32's "
 #: against. Written once, parsed once, rather than repeated.
 BFB_COMMIT = "2924051"
 BFB_CLIENT = "qdrant-client 1.16.1-dev (git dev branch)"
-HARNESS_CLIENT = "qdrant-client =1.19.0"
+HARNESS_CLIENT = "qdrant-client git d960517 (qdrant/rust-client#299, 1.16.1-dev line)"
 
 #: bfb's per-request `--timeout`, in seconds. docs/workloads.md §2 quotes it.
 BFB_TIMEOUT_S = int(os.environ.get("BFB_TIMEOUT_S", 60))
