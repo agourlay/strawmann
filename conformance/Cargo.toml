@@ -29,6 +29,10 @@ anyhow = "1"
 # *queries* only — never inside a distance — so the fp64 summation order, and
 # therefore the ground truth, is unchanged by thread count.
 rayon = "1"
+# The BM25 oracle's stemmer: the fork Qdrant links (`lib/segment/Cargo.toml` at
+# 850859ec9, same crates.io checksum), pinned exactly so the oracle's tokens are
+# Qdrant's by construction rather than by a port that could drift.
+rust-stemmers = { package = "qdrant-rust-stemmers", version = "=1.2.2" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

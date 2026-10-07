@@ -1474,6 +1474,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "qdrant-rust-stemmers"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e61bd348ee10767d59d65d47ced0861921e8bb3ef0823aab63cc16c6c0f6d756"
+dependencies = [
+ "serde",
+ "serde_derive",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1941,6 +1951,7 @@ dependencies = [
  "clap",
  "parquet",
  "qdrant-client",
+ "qdrant-rust-stemmers",
  "rand",
  "rand_chacha",
  "rayon",

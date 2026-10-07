@@ -23,6 +23,7 @@ mod engine;
 mod metamorphic;
 mod oracle;
 mod relevance;
+mod text;
 
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -200,6 +201,32 @@ struct FilteredTruthRun {
 // either; a truth is over the query file, and how many of it a sweep reads is
 // the sweep's business.
 
+/// `bm25-truth`'s arguments.
+#[derive(clap::Args)]
+struct Bm25TruthRun {
+    #[arg(long)]
+    corpus: PathBuf,
+    #[arg(long)]
+    queries: PathBuf,
+    /// Lowercase tokens: the text index's `lowercase`, on by default in Qdrant.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    lowercase: bool,
+    /// Drop English stopwords: the index's `stopwords: english`.
+    #[arg(long)]
+    english_stopwords: bool,
+    /// Stem with the English Snowball stemmer: the index's `stemmer: english`.
+    #[arg(long)]
+    english_stemmer: bool,
+    #[arg(long, default_value_t = text::DEFAULT_K1)]
+    k1: f64,
+    #[arg(long, default_value_t = text::DEFAULT_B)]
+    b: f64,
+    #[arg(long, default_value_t = 100)]
+    limit: usize,
+    #[arg(long)]
+    out: PathBuf,
+}
+
 /// `convert-vecs`'s arguments.
 #[derive(clap::Args)]
 struct ConvertVecsRun {
@@ -277,6 +304,15 @@ enum Command {
     /// points the filter keeps, and the k-th distance recall is measured
     /// against moves with the condition.
     FilteredTruth(FilteredTruthRun),
+
+    /// BM25 ground truth for the `text` query (decisions.md, 2026-10-07): exact
+    /// top-k over a text corpus, in `f64`, from `text::Bm25Index`.
+    ///
+    /// `corpus.jsonl` holds one point per line in row order (`{"id", "values"}`)
+    /// and `queries.txt` one query per line. The truth records both files'
+    /// checksums and every parameter it was computed under, so a sweep can refuse
+    /// one computed for another corpus, tokenizer or `k1`/`b`.
+    Bm25Truth(Bm25TruthRun),
 
     /// §8.6 / W10: measure recall against our fp64 ground truth on **one**
     /// engine, over an `ef` sweep.
@@ -451,6 +487,8 @@ fn main() -> anyhow::Result<()> {
         Command::Calibrate(a) => run_calibrate(a),
 
         Command::FilteredTruth(a) => run_filtered_truth(a),
+
+        Command::Bm25Truth(a) => run_bm25_truth(a),
 
         Command::Differ(a) => run_differ(a),
     }
@@ -702,6 +740,49 @@ fn payload_matches(
         }),
         _ => false,
     }
+}
+
+fn run_bm25_truth(a: Bm25TruthRun) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        a.k1.is_finite() && a.k1 >= 0.0,
+        "--k1 must be >= 0, got {}",
+        a.k1
+    );
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&a.b),
+        "--b must be within [0, 1], got {}",
+        a.b
+    );
+    let settings = text::Bm25Settings {
+        params: text::TextParams {
+            lowercase: a.lowercase,
+            english_stopwords: a.english_stopwords,
+            english_stemmer: a.english_stemmer,
+        },
+        k1: a.k1,
+        b: a.b,
+        limit: a.limit,
+    };
+    let (docs, corpus_checksum) = text::read_corpus(&a.corpus)?;
+    let (queries, query_checksum) = text::read_queries(&a.queries)?;
+    let truth =
+        text::Bm25Truth::compute(settings, &docs, corpus_checksum, &queries, query_checksum);
+    if let Some(dir) = a.out.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&a.out, serde_json::to_string(&truth)?)?;
+    eprintln!(
+        "wrote {}: {} queries over {} documents (avgdl {}), k1 {} b {}",
+        a.out.display(),
+        queries.len(),
+        truth.documents,
+        truth
+            .avgdl
+            .map_or_else(|| "n/a".to_string(), |v| format!("{v:.2}")),
+        a.k1,
+        a.b
+    );
+    Ok(())
 }
 
 /// W12 point 3, as a command: which ids the condition keeps, then the fp64
