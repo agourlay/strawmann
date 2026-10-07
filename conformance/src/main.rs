@@ -1336,7 +1336,7 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
     let doubled: Vec<String> = mq.iter().map(|q| format!("{q} {q}")).collect();
     let even = qdrant_client::qdrant::Filter::must([qdrant_client::qdrant::Condition::matches(
         engine::TEXT_PARITY_KEY,
-        "even".to_string(),
+        "keyword_0".to_string(),
     )]);
     let even_only = |p: usize| p.is_multiple_of(2);
     let oracle =

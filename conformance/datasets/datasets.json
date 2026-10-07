@@ -426,6 +426,10 @@
   },
   {
     "name": "scifact",
+    "text_index": {
+      "stopwords": "english",
+      "stemmer": "english"
+    },
     "role": "BM25 over a text index: the small BEIR set, a development fixture for the oracle and the differ (decisions.md, 2026-10-07)",
     "format": "beir",
     "n": 5183,
@@ -466,6 +470,10 @@
   },
   {
     "name": "fiqa",
+    "text_index": {
+      "stopwords": "english",
+      "stemmer": "english"
+    },
     "role": "BM25 over a text index with qrels: the exact-score tier and nDCG@10 (decisions.md, 2026-10-07)",
     "format": "beir",
     "n": 57638,

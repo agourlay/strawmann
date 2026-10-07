@@ -200,14 +200,39 @@ def _entry(name: str) -> dict:
     raise SystemExit(f"{name}: not in {_DESCRIPTOR}")
 
 
+#: The descriptor formats that are text corpora for W15, BM25 over a text index
+#: (decisions.md, 2026-10-07), rather than vector corpora: BEIR sets and the
+#: synthetic Zipf corpora. Their files are `datasets.py`'s `text/` and `bfb/`.
+TEXT_FORMATS = frozenset({"beir", "zipf"})
+
+#: A text point's vector: both engines need one and the text query never reads
+#: it (`datasets.TEXT_PLACEHOLDER`, conformance's `engine.rs`).
+TEXT_PLACEHOLDER_DIM = 4
+TEXT_PLACEHOLDER_METRIC = "dot"
+
+
+def text_names() -> list[str]:
+    try:
+        doc = json.loads(_DESCRIPTOR.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        raise SystemExit(f"cannot read {_DESCRIPTOR}: {e}") from e
+    return sorted(d["name"] for d in doc if d.get("format") in TEXT_FORMATS)
+
+
+def is_text(name: str) -> bool:
+    """Whether `name` is a text corpus, measured by W15 alone."""
+    return name in text_names()
+
+
 def runnable() -> list[str]:
     """Datasets a benchmark row can read, whether or not they are on this disk.
 
     The choice list for `--dataset`. Presence is a separate question and a
     separate error: "not a dataset this harness can run" and "that dataset is
-    not converted yet" send the reader to different places.
+    not converted yet" send the reader to different places. Text corpora run
+    W15's rows and no others.
     """
-    return sorted(_CORPUS)
+    return sorted([*_CORPUS, *text_names()])
 
 
 def metric(name: str) -> str:
@@ -216,13 +241,19 @@ def metric(name: str) -> str:
     The descriptor's, always. A collection created under one metric and scored
     against ground truth computed under another is the exact failure the
     `METRIC` note in `workloads.py` records, and it survived review once
-    because the recall it produced still looked plausible.
+    because the recall it produced still looked plausible. A text corpus has
+    none: its placeholder vectors are compared by dot product, which no row
+    reads.
     """
+    if is_text(name):
+        return TEXT_PLACEHOLDER_METRIC
     return _entry(name)["distance"]
 
 
 def dim(name: str) -> int:
     """`name`'s vector width, for the `-d` every upload row sends."""
+    if is_text(name):
+        return TEXT_PLACEHOLDER_DIM
     return _entry(name)["vector_size"]
 
 
@@ -269,6 +300,37 @@ def dataset(name: str) -> Corpus:
     d = DATA / name
     return Corpus(base=d / base, queries=d / queries,
                   ground_truth=d / "gt" / f"{name}.{metric(name)}.k100.gt.json")
+
+
+class TextCorpus(NamedTuple):
+    """A text corpus's files: `corpus.jsonl`, `queries.txt` and, when judged,
+    `qrels.tsv` (the oracle's side), and the `bfb/` directory bfb uploads."""
+
+    corpus: Path
+    queries: Path
+    qrels: Path | None
+    bfb: Path
+
+
+def text_dataset(name: str) -> TextCorpus:
+    """`name`'s text files, resolved on call so `use_data_dir` reaches them."""
+    if not is_text(name):
+        raise SystemExit(f"{name}: not a text corpus; text corpora are {', '.join(text_names())}")
+    d = DATA / name
+    qrels = d / "text" / "qrels.tsv"
+    return TextCorpus(d / "text" / "corpus.jsonl", d / "text" / "queries.txt",
+                      qrels if qrels.exists() else None, d / "bfb")
+
+
+def text_n(name: str) -> int:
+    """How many documents `name` holds: its descriptor `n`, one point each."""
+    return int(_entry(name)["n"])
+
+
+def text_index(name: str) -> dict:
+    """The tokenizer options `name`'s text index takes: lowercase always, and
+    the descriptor's `text_index` (`stopwords`, `stemmer`) when it names them."""
+    return {"lowercase": True, **(_entry(name).get("text_index") or {})}
 
 
 def source(key: str) -> str:

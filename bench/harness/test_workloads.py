@@ -3923,3 +3923,76 @@ class NativeQdrantLaunchTests(unittest.TestCase):
                 for p in procs:
                     p.kill()
                     p.wait()
+
+
+class TextTableTests(unittest.TestCase):
+    """W15: a text corpus runs BM25 over a text index and nothing else."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = _reload(Path(self.tmp.name))
+        self.w = self.m["workloads"]
+        saved = os.environ.get("STRAWMANN_DATASET")
+        self.addCleanup(lambda: os.environ.__setitem__("STRAWMANN_DATASET", saved)
+                        if saved is not None else os.environ.pop("STRAWMANN_DATASET", None))
+        self.addCleanup(self.tmp.cleanup)
+        self.w.use_dataset("scifact")
+
+    def test_a_text_corpus_runs_the_w15_rows_only(self):
+        ids = [r.id for r in self.w.table()]
+        self.assertEqual(ids, ["W15-upload", "W15", "W15-sat", "W15-filtered",
+                               "W15-k0.9-b0.4", "W15-b0"])
+        t = {r.id: r for r in self.w.table()}
+        self.assertTrue(t["W15-upload"].upload_only)
+        self.assertEqual(t["W15-filtered"].needs_payload_index, True)
+        self.assertIn("-p 1", " ".join(map(str, t["W15"].args)))
+        self.assertEqual(self.w.corpus_rows(), 5183)
+
+    def test_the_upload_config_indexes_the_corpus_tokenizer_with_bm25(self):
+        cfg = self.w.text_upload_config("bench15")
+        self.assertIn("type: text, tokenizer: word, lowercase: true, stopwords: english, "
+                      "stemmer: english, scoring: bm25", cfg)
+        self.assertIn("name: parity, type: keyword", cfg)
+        self.assertIn("size: 4", cfg)
+        self.assertIn("format: tar", cfg)
+
+    def test_a_zipf_corpus_indexes_lowercase_only(self):
+        self.w.use_dataset("bm25-zipf-200k")
+        cfg = self.w.text_upload_config("bench15")
+        self.assertIn("lowercase: true, scoring: bm25", cfg)
+        self.assertNotIn("stemmer", cfg)
+
+    def test_the_search_configs_carry_the_ladder_and_the_parity_filter(self):
+        t = {r.id: r for r in self.w.table()}
+        base = self.w.text_search_config("bench15", t["W15"].text)
+        self.assertIn("kind: text", base)
+        self.assertIn("strategy: from-start", base)
+        self.assertNotIn("k:", base)
+        self.assertNotIn("filters", base)
+        b0 = self.w.text_search_config("bench15", t["W15-b0"].text)
+        self.assertIn("k: 1.2\n", b0)
+        self.assertIn("b: 0.0\n", b0)
+        f = self.w.text_search_config("bench15", t["W15-filtered"].text)
+        self.assertIn("name: parity", f)
+        self.assertIn("cardinality: 2", f)
+
+    def test_the_command_names_bfbs_text_subcommand_and_writes_its_config(self):
+        t = {r.id: r for r in self.w.table()}
+        out = Path(self.tmp.name)
+        cmd = [str(a) for a in self.w.command_for(t["W15-sat"], "http://localhost:6334", out, [])]
+        i = cmd.index("search")
+        self.assertEqual(cmd[i + 1:i + 3], ["--file", str(out / "W15-sat.search.yaml")])
+        self.assertTrue((out / "W15-sat.search.yaml").exists())
+        cmd = [str(a) for a in self.w.command_for(t["W15-upload"], "http://localhost:6334", out, [])]
+        self.assertIn("upload", cmd)
+
+    def test_text_settings_enter_the_stamp_only_for_a_text_corpus(self):
+        s = self.w.collection_settings()
+        self.assertEqual(s["text_index"], {"lowercase": True, "stopwords": "english",
+                                           "stemmer": "english"})
+        self.assertEqual(s["w15_ladder"], [["k0.9-b0.4", 0.9, 0.4], ["b0", 1.2, 0.0]])
+        self.w.use_dataset("sift1m")
+        s = self.w.collection_settings()
+        self.assertNotIn("text_index", s)
+        self.assertNotIn("w15_ladder", s)
+        self.assertNotIn("W15", [r.id for r in self.w.table()])

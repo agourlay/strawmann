@@ -783,15 +783,16 @@ def npy_f32(rows: int, row: tuple[float, ...]) -> bytes:
 
 def write_bfb_text(out: Path, corpus: list[str]) -> None:
     """`out`/vectors.npy and `out`/payloads.jsonl for `corpus.jsonl`'s lines: the
-    payload is `{"body": values, "parity": even|odd}`, the one the differ uploads
-    (`TEXT_PARITY_KEY`), so a benchmark collection and a differ collection hold
-    the same documents."""
+    payload is `{"body": values, "parity": keyword_0|keyword_1}` by even and odd
+    row, the one the differ uploads (`TEXT_PARITY_KEY`), so a benchmark
+    collection and a differ collection hold the same documents; the values are
+    the ones bfb's keyword filter draws at cardinality 2."""
     out.mkdir(parents=True, exist_ok=True)
     (out / "vectors.npy").write_bytes(npy_f32(len(corpus), TEXT_PLACEHOLDER))
     with (out / "payloads.jsonl").open("w", encoding="utf-8") as f:
         for i, line in enumerate(corpus):
             values = json.loads(line)["values"]
-            f.write(json.dumps({"body": values, "parity": "even" if i % 2 == 0 else "odd"},
+            f.write(json.dumps({"body": values, "parity": f"keyword_{i % 2}"},
                                ensure_ascii=False) + "\n")
 
 

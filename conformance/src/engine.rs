@@ -25,8 +25,8 @@ use qdrant_client::qdrant::{
 const TEXT_PLACEHOLDER_DIM: usize = 4;
 const TEXT_PLACEHOLDER: [f32; TEXT_PLACEHOLDER_DIM] = [1.0, 0.0, 0.0, 0.0];
 
-/// The keyword every text-collection point carries beside its text: `"even"`
-/// or `"odd"` by row.
+/// The keyword every text-collection point carries beside its text:
+/// `keyword_0` on even rows, `keyword_1` on odd.
 pub const TEXT_PARITY_KEY: &str = "parity";
 
 /// The `max_segment_size` (in KB) that lets Qdrant's optimizer merge a corpus
@@ -258,9 +258,11 @@ impl Engine {
 
     /// Point `i` carries `docs[i]` under `field`, as an array: its values'
     /// tokens concatenate into one document in both engines. Ids are row
-    /// indices (§4.3). Each point also carries `TEXT_PARITY_KEY`, `"even"` or
-    /// `"odd"` by its row, so a filter can narrow the candidates without
-    /// touching the text field (the differ's filter property).
+    /// indices (§4.3). Each point also carries `TEXT_PARITY_KEY`, `keyword_0`
+    /// on even rows and `keyword_1` on odd, so a filter can narrow the
+    /// candidates without touching the text field (the differ's filter
+    /// property); the values are the ones bfb's keyword filter draws at
+    /// cardinality 2, so a benchmark collection holds the same payloads.
     pub async fn upsert_text(
         &self,
         name: &str,
@@ -271,7 +273,11 @@ impl Engine {
         let mut batch: Vec<PointStruct> = Vec::new();
         let mut bytes = 0usize;
         for (i, values) in docs.iter().enumerate() {
-            let parity = if i.is_multiple_of(2) { "even" } else { "odd" };
+            let parity = if i.is_multiple_of(2) {
+                "keyword_0"
+            } else {
+                "keyword_1"
+            };
             let payload = qdrant_client::Payload::try_from(
                 serde_json::json!({ field: values, TEXT_PARITY_KEY: parity }),
             )

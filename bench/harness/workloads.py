@@ -276,6 +276,11 @@ def corpus_rows() -> int | None:
     dataset on disk must still work, and a missing file is the preflight's
     error to report, not this function's.
     """
+    if paths.is_text(DATASET):
+        # A text corpus is uploaded whole from its `bfb/` layout, one point per
+        # document; the descriptor's `n` is that count (`convert-beir` and
+        # `synthesize-text` check it).
+        return paths.text_n(DATASET)
     try:
         with open(corpus(), "rb") as f:
             head = f.read(8)
@@ -1135,6 +1140,20 @@ class Direction(StrEnum):
 
 
 @dataclass(frozen=True)
+class TextSpec:
+    """What a W15 row does on bfb's config path (decisions.md, 2026-10-07)."""
+
+    #: `upload` (the corpus, and its text index built) or `search`.
+    kind: str
+    #: BM25's `k1` and `b` the query sends, `None` for the server's 1.2 / 0.75.
+    k1: float | None = None
+    b: float | None = None
+    #: Filter every query to one of the two parity values (`TEXT_PARITY_KEY`):
+    #: half the points, the other half's statistics still counted.
+    parity_filter: bool = False
+
+
+@dataclass(frozen=True)
 class Workload:
     """One row of §4's table."""
 
@@ -1198,6 +1217,9 @@ class Workload:
     #: with a fraction and no `--rps` is unrunnable on purpose: no default rate
     #: means anything.
     rps_fraction: float | None = None
+    #: W15: a row on bfb's config path for a text corpus, uploaded from its
+    #: `bfb/` layout or searched with `kind: text` (`TextSpec`).
+    text: TextSpec | None = None
 
 
 def flags(*parts: object) -> list[str]:
@@ -1373,6 +1395,9 @@ def collection_settings() -> dict:
         "hnsw_m": "engine default", "hnsw_ef_construct": "engine default",
         "datatype": "float32 (bfb default)",
         "hnsw_inline_storage": False,
+        # Only for a text corpus, so no vector pair's stamp moves.
+        **({"text_index": paths.text_index(DATASET),
+            "w15_ladder": [list(x) for x in W15_LADDER]} if paths.is_text(DATASET) else {}),
     }
 
 
@@ -1511,8 +1536,110 @@ def isolated_collections() -> set[str]:
     return {coll for _, coll in isolated_groups()}
 
 
+# =========================================================================
+# W15: BM25 over a text index (decisions.md, 2026-10-07)
+# =========================================================================
+
+#: The payload field a text corpus's documents are stored under, and the
+#: keyword beside it that halves the corpus for W15-filtered: `keyword_0` on
+#: even rows, `keyword_1` on odd, the values bfb's keyword filter draws from
+#: at cardinality 2 (`datasets.write_bfb_text`, conformance's `engine.rs`).
+TEXT_FIELD = "body"
+TEXT_PARITY_KEY = "parity"
+W15_COLLECTION = "bench15"
+
+#: The `k1`/`b` ladder beside the defaults: Anserini's BEIR setting, and no
+#: length normalization.
+W15_LADDER = (("k0.9-b0.4", 0.9, 0.4), ("b0", 1.2, 0.0))
+
+
+def text_upload_config(collection: str) -> str:
+    """bfb's upload config for a text corpus: the placeholder vectors and the
+    payloads from its `bfb/` layout, the text field indexed with the corpus's
+    tokenizer (`paths.text_index`) and BM25 scoring, the parity keyword indexed."""
+    tc = paths.text_dataset(DATASET)
+    opts = paths.text_index(DATASET)
+    src = f"{{ name: {DATASET}, format: tar, path: {tc.bfb} }}"
+    text_opts = "".join(f", {k}: {v}" for k, v in (("stopwords", opts.get("stopwords")),
+                                                    ("stemmer", opts.get("stemmer"))) if v)
+    seg = segments()
+    out = (
+        "collection:\n"
+        f"  name: {collection}\n"
+    )
+    if seg is not None:
+        out += f"  optimizers:\n    default_segment_number: {seg}\n"
+    out += (
+        "  vectors:\n"
+        f"    - size: {paths.TEXT_PLACEHOLDER_DIM}\n"
+        f"      distance: {paths.TEXT_PLACEHOLDER_METRIC}\n"
+        f"      source: {{ type: dataset, name: {DATASET}, format: tar, path: {tc.bfb} }}\n"
+        "  payload:\n"
+        f"    source: {{ type: dataset, dataset: {src} }}\n"
+        "  fields:\n"
+        f"    - {{ name: {TEXT_FIELD}, type: text, tokenizer: word, "
+        f"lowercase: {str(opts['lowercase']).lower()}{text_opts}, scoring: bm25 }}\n"
+        f"    - {{ name: {TEXT_PARITY_KEY}, type: keyword }}\n"
+    )
+    return out
+
+
+def text_search_config(collection: str, spec: TextSpec) -> str:
+    """bfb's `kind: text` search over `TEXT_FIELD`, the corpus's queries walked
+    from the start so both engines see the same sequence (`search_config`)."""
+    tc = paths.text_dataset(DATASET)
+    out = (
+        "collection:\n"
+        f"  name: {collection}\n"
+        "requests:\n"
+        "  - kind: text\n"
+        f"    using: {TEXT_FIELD}\n"
+        f"    source: {{ type: file, path: {tc.queries}, strategy: from-start }}\n"
+    )
+    if spec.k1 is not None:
+        out += f"    k: {spec.k1}\n"
+    if spec.b is not None:
+        out += f"    b: {spec.b}\n"
+    if spec.parity_filter:
+        out += (
+            "    filters:\n"
+            f"      - name: {TEXT_PARITY_KEY}\n"
+            "        type: keyword\n"
+            "        source: { type: random, cardinality: 2 }\n"
+        )
+    return out
+
+
+def text_table() -> list[Workload]:
+    """W15, the table a text corpus runs: BM25 over a text index."""
+    coll = W15_COLLECTION
+    rows = [
+        Workload("W15-upload", "text: load the corpus and build its BM25 index",
+                 flags("-n", upload_n(), "-b", 100, "-t", 8, "-p", 8), upload_only=True,
+                 text=TextSpec("upload")),
+        Workload("W15", "text: BM25 query, single client",
+                 flags("-n", QUERIES, "--search-limit", 10, "-p", 1),
+                 query_collection=coll, text=TextSpec("search")),
+        Workload("W15-sat", "text: BM25 query, saturating (closed loop)",
+                 flags("-n", QUERIES, "--search-limit", 10, *SATURATING_CLIENT),
+                 query_collection=coll, text=TextSpec("search")),
+        Workload("W15-filtered", "text: BM25 query filtered to half the points",
+                 flags("-n", QUERIES, "--search-limit", 10, *SATURATING_CLIENT),
+                 query_collection=coll, text=TextSpec("search", parity_filter=True),
+                 needs_payload_index=True),
+    ]
+    for suffix, k1, b in W15_LADDER:
+        rows.append(Workload(
+            f"W15-{suffix}", f"text: BM25 query at k1 {k1}, b {b}, saturating",
+            flags("-n", QUERIES, "--search-limit", 10, *SATURATING_CLIENT),
+            query_collection=coll, text=TextSpec("search", k1=k1, b=b)))
+    return rows
+
+
 def table() -> list[Workload]:
     """§4's table. `docs/workloads.md` carries the per-flag reasoning."""
+    if paths.is_text(DATASET):
+        return text_table()
     rows: list[Workload] = [
         # W0, transport floor. d=4 makes the vector irrelevant; -p 1 makes the
         # number a per-request latency. The index must exist, or this measures
@@ -2236,6 +2363,11 @@ def command_for(w: Workload, uri: str, results: Path, common: list[str]) -> list
     `--json` are all read from `Args` by the config processor.
     """
     base = [str(BFB), *common, "--uri", uri, "--json", str(results / f"{w.id}.json")]
+    if w.text is not None:
+        cfg = results / f"{w.id}.{w.text.kind}.yaml"
+        cfg.write_text(text_upload_config(W15_COLLECTION) if w.text.kind == "upload"
+                       else text_search_config(W15_COLLECTION, w.text))
+        return [*base, w.text.kind, "--file", str(cfg), *w.args]
     if w.query_collection is None:
         return base + w.args
     cfg = results / f"{w.id}.search.yaml"
