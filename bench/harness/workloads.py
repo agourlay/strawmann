@@ -3661,7 +3661,10 @@ def main(argv: list[str]) -> int:
         # per row rather than at the end, so a run that dies mid-table still
         # pins what it finished.
         final_factor = base_factor * (2 ** tries)
-        if n_pin_path is not None and pinning and not w.upload_only:
+        # Only a row that measured: a failed one has no verdict, and pinning its
+        # 1x stopped the next pass into the label from ever escalating it (the
+        # scifact smoke run, rerun after every W15 row failed on usage).
+        if n_pin_path is not None and pinning and not w.upload_only and r.status == Status.ok:
             n_pins[w.id] = final_factor
             try:
                 n_pin_path.parent.mkdir(parents=True, exist_ok=True)

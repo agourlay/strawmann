@@ -1545,7 +1545,7 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
             "detail": t1.map(|t| t.detail.clone()).unwrap_or_default(),
             "max_delta": strawmann_max_rel,
             "oracle_revision": text::ORACLE_REVISION,
-            "corpus_checksum": format!("{corpus_checksum:x}"),
+            "corpus_checksum": format!("{corpus_checksum:016x}"),
             "query_checksum": format!("{query_checksum:016x}"),
             "lowercase": params.lowercase,
             "english_stopwords": params.english_stopwords,

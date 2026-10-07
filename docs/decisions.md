@@ -2364,7 +2364,9 @@ serves the text query. The vector pairs keep dbeb0f73.
 The first end-to-end pass, scifact at `--reps 1` (a smoke run, so nothing
 published): every W15 row measured on both engines, every variant's recall@10
 1.0 on both, nDCG@10 equal to the oracle's per variant (0.6886 at the
-defaults, 0.3542 filtered, 0.6796 at 0.9/0.4, 0.6643 at `b = 0`), and the text
-differ's row licensing both arms. Saturating rows on scifact last under a
+defaults, 0.6796 at 0.9/0.4, 0.6643 at `b = 0`; 0.3542 filtered, which is
+scored against every judgment while the filter removes half the judged
+documents, so it checks agreement and says nothing of BM25's relevance), and
+the text differ's row licensing both arms. Saturating rows on scifact last under a
 second for strawmANN, so its saturating numbers there are dominated by the
 client; fiqa and the Zipf corpora are the measured ones.

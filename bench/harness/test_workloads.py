@@ -1427,6 +1427,26 @@ class WorkloadTests(unittest.TestCase):
             return {r["id"]: r for r in rows}["W3"]["n_requested"]
         self.assertEqual(n_req("p1"), n_req("p2"))
 
+    def test_a_failed_row_does_not_write_a_pin(self):
+        """A row that failed measured nothing, so it has no verdict to pin: a
+        pinned 1x would stop the next pass into the label from re-running it
+        when it comes in short."""
+        w = self.w
+        fake = Path(self.tmp.name) / "bfb"
+        fake.write_text("#!/bin/sh\necho 'Usage: bfb search' >&2\nexit 2\n")
+        fake.chmod(0o755)
+        w.BFB = fake
+        os.environ.pop("RESULTS_DIR", None)
+        pin = Path(self.tmp.name) / "pins/failed.json"
+        (Path(self.tmp.name) / "bench/results/fl").mkdir(parents=True)
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.object(w, "settle_for_retry", lambda: None):
+            w.main(["workloads.py", "run", "http://localhost:1", "fl", "W3",
+                    "--min-duration", "--n-pin", str(pin)])
+        pins = json.loads(pin.read_text()) if pin.exists() else {}
+        self.assertNotIn("W3", pins)
+
     def test_a_run_without_min_duration_does_not_write_a_pin(self):
         """The pin records `--min-duration`'s verdict, so a run that has no
         verdict must not write one.
