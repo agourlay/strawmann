@@ -272,6 +272,54 @@ struct TextRelevanceRun {
     json: Option<PathBuf>,
 }
 
+/// `text-differ`'s arguments.
+#[derive(clap::Args)]
+struct TextDifferRun {
+    #[arg(long, default_value = "http://localhost:6344")]
+    strawmann: String,
+    #[arg(long, default_value = "http://localhost:6334")]
+    qdrant: String,
+    #[arg(long, default_value = "text_differ")]
+    collection: String,
+    #[arg(long, default_value = "body")]
+    field: String,
+    #[arg(long)]
+    corpus: PathBuf,
+    #[arg(long)]
+    queries: PathBuf,
+    #[arg(long)]
+    truth: PathBuf,
+    #[arg(long)]
+    qrels: Option<PathBuf>,
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    lowercase: bool,
+    #[arg(long)]
+    english_stopwords: bool,
+    #[arg(long)]
+    english_stemmer: bool,
+    #[arg(long, default_value_t = text::DEFAULT_K1)]
+    k1: f64,
+    #[arg(long, default_value_t = text::DEFAULT_B)]
+    b: f64,
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+    /// T1: the largest relative difference from the oracle a score may show.
+    /// `f32` summation over a few terms sits near 1e-7.
+    #[arg(long, default_value_t = 1e-5)]
+    value_epsilon: f64,
+    /// T2: scores this close (relative) are a tie, free to come back in
+    /// either order.
+    #[arg(long, default_value_t = 1e-5)]
+    tie_epsilon: f64,
+    /// Queries the metamorphic properties run over, from the start.
+    #[arg(long, default_value_t = 100)]
+    metamorphic_queries: usize,
+    #[arg(long)]
+    skip_upload: bool,
+    #[arg(long)]
+    json: Option<PathBuf>,
+}
+
 /// `stem-vocabulary`'s arguments.
 #[derive(clap::Args)]
 struct StemVocabularyRun {
@@ -415,6 +463,12 @@ enum Command {
     /// reports recall, exact-order agreement and score deltas against the
     /// oracle. What `relevance` is for vectors.
     TextRelevance(TextRelevanceRun),
+
+    /// §8.5 for the `text` query: both engines against the BM25 oracle and
+    /// each other. T0 refusal statuses, T1 score values, T2 tie-aware ranks,
+    /// the metamorphic properties, and nDCG@10 with qrels. Writes the text
+    /// conformance row a W15 comparison is licensed by.
+    TextDiffer(TextDifferRun),
 
     /// Every distinct word of the given corpora and word lists, with its
     /// English stem from `qdrant-rust-stemmers` 1.2.2, one `word\tstem` per
@@ -608,6 +662,8 @@ fn main() -> anyhow::Result<()> {
         Command::Bm25Truth(a) => run_bm25_truth(a),
 
         Command::TextRelevance(a) => run_text_relevance(a),
+
+        Command::TextDiffer(a) => run_text_differ(a),
 
         Command::StemVocabulary(a) => run_stem_vocabulary(a),
 
@@ -1088,22 +1144,23 @@ fn run_stem_vocabulary(a: StemVocabularyRun) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
-    let params = text::TextParams {
-        lowercase: a.lowercase,
-        english_stopwords: a.english_stopwords,
-        english_stemmer: a.english_stemmer,
-    };
-    let (docs, corpus_checksum) = text::read_corpus(&a.corpus)?;
-    let (queries, query_checksum) = text::read_queries(&a.queries)?;
+/// A `bm25-truth` file, refused when it was computed for anything other than
+/// this run's corpus, queries, tokenizer, `k1`/`b` and at least its depth
+/// (§4.3: a truth speaks for what it was computed from and nothing else).
+#[allow(clippy::too_many_arguments)]
+fn load_bm25_truth(
+    path: &std::path::Path,
+    params: text::TextParams,
+    k1: f64,
+    b: f64,
+    limit: usize,
+    corpus_checksum: u64,
+    query_checksum: u64,
+) -> anyhow::Result<text::Bm25Truth> {
     let truth: text::Bm25Truth = serde_json::from_slice(
-        &std::fs::read(&a.truth)
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", a.truth.display()))?,
+        &std::fs::read(path).map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?,
     )
-    .map_err(|e| anyhow::anyhow!("{} is not a bm25-truth file: {e}", a.truth.display()))?;
-    // §4.3: a truth speaks for the corpus, queries and settings it was computed
-    // from, and for nothing else.
+    .map_err(|e| anyhow::anyhow!("{} is not a bm25-truth file: {e}", path.display()))?;
     let mismatch = [
         (truth.revision != text::ORACLE_REVISION, "oracle revision"),
         (
@@ -1126,15 +1183,316 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
             ),
             "tokenizer",
         ),
-        (truth.k1 != a.k1 || truth.b != a.b, "k1/b"),
-        (truth.limit < a.limit, "depth"),
+        (truth.k1 != k1 || truth.b != b, "k1/b"),
+        (truth.limit < limit, "depth"),
     ];
     if let Some((_, what)) = mismatch.iter().find(|m| m.0) {
         anyhow::bail!(
             "{}: computed for another {what} than this run's (§4.3)",
-            a.truth.display()
+            path.display()
         );
     }
+    Ok(truth)
+}
+
+/// One line of the text conformance row.
+#[derive(serde::Serialize)]
+struct TextTier {
+    tier: &'static str,
+    engine: String,
+    pass: bool,
+    /// Not run; neither passes nor licenses anything.
+    skipped: bool,
+    detail: String,
+}
+
+/// T1 and T2 of one engine's rankings over `queries` against `want`.
+fn text_tiers(
+    index: &text::Bm25Index,
+    queries: &[String],
+    want: &[Vec<(u32, f64)>],
+    got: &[relevance::Returned],
+    k1: f64,
+    b: f64,
+    a: &TextDifferRun,
+) -> (f64, usize, usize) {
+    let mut max_rel = 0.0f64;
+    let mut rank_mismatches = 0;
+    let mut non_matching = 0;
+    for (q, query) in queries.iter().enumerate() {
+        let w = &want[q][..want[q].len().min(a.limit)];
+        let c = index.check_ranking(query, w, &got[q], k1, b, a.tie_epsilon);
+        max_rel = max_rel.max(c.max_rel_delta);
+        rank_mismatches += usize::from(c.rank_mismatch);
+        non_matching += usize::from(c.non_matching);
+    }
+    (max_rel, rank_mismatches, non_matching)
+}
+
+#[tokio::main(flavor = "multi_thread")]
+async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
+    let params = text::TextParams {
+        lowercase: a.lowercase,
+        english_stopwords: a.english_stopwords,
+        english_stemmer: a.english_stemmer,
+    };
+    let (docs, corpus_checksum) = text::read_corpus(&a.corpus)?;
+    let (queries, query_checksum) = text::read_queries(&a.queries)?;
+    let truth = load_bm25_truth(
+        &a.truth,
+        params,
+        a.k1,
+        a.b,
+        a.limit,
+        corpus_checksum,
+        query_checksum,
+    )?;
+    let index = text::Bm25Index::build(params, &docs);
+    let engines = [
+        engine::Engine::connect("strawmann", &a.strawmann)?,
+        engine::Engine::connect("qdrant", &a.qdrant)?,
+    ];
+    if !a.skip_upload {
+        for eng in &engines {
+            eprintln!(
+                "[{}] loading {} documents into {}",
+                eng.label,
+                docs.len(),
+                a.collection
+            );
+            eng.recreate_text_collection(&a.collection, &a.field, params, docs.len() as u64)
+                .await?;
+            eng.upsert_text(&a.collection, &a.field, &docs).await?;
+            eng.wait_green(&a.collection, 900).await?;
+        }
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let (k1, b) = (a.k1 as f32, a.b as f32);
+    let mut tiers: Vec<TextTier> = Vec::new();
+
+    // T0: the two refusals a text query has, answered with the same status.
+    let probe = queries.first().map_or("alpha", String::as_str);
+    let mut statuses = Vec::new();
+    for eng in &engines {
+        statuses.push((
+            eng.text_query_status(&a.collection, None, probe).await,
+            eng.text_query_status(&a.collection, Some("no_such_field"), probe)
+                .await,
+        ));
+    }
+    tiers.push(TextTier {
+        skipped: false,
+        tier: "T0 refusal statuses",
+        engine: "both".into(),
+        pass: statuses[0] == statuses[1] && statuses[0].0 != 0 && statuses[0].1 != 0,
+        detail: format!(
+            "no `using`: strawmann {} qdrant {}; field without a text index: strawmann {} qdrant {}",
+            statuses[0].0, statuses[1].0, statuses[0].1, statuses[1].1
+        ),
+    });
+
+    // T1 and T2 over the whole query set.
+    let mut results = Vec::new();
+    for eng in &engines {
+        let got = eng
+            .query_text(&a.collection, &a.field, &queries, a.limit as u64, k1, b)
+            .await?;
+        let (max_rel, rank, nm) = text_tiers(&index, &queries, &truth.hits, &got, a.k1, a.b, &a);
+        tiers.push(TextTier {
+            skipped: false,
+            tier: "T1 score value",
+            engine: eng.label.clone(),
+            pass: max_rel <= a.value_epsilon && nm == 0,
+            detail: format!(
+                "max relative |Δscore| {max_rel:.3e} (ε {:.0e}); {nm} points hold no query term",
+                a.value_epsilon
+            ),
+        });
+        tiers.push(TextTier {
+            skipped: false,
+            tier: "T2 tie-aware rank",
+            engine: eng.label.clone(),
+            pass: rank == 0,
+            detail: format!(
+                "{rank} of {} queries outside the truth's score sequence",
+                queries.len()
+            ),
+        });
+        results.push(got);
+    }
+    let same_order = results[0]
+        .iter()
+        .zip(&results[1])
+        .filter(|(x, y)| x.ids == y.ids)
+        .count();
+
+    // Metamorphic, over the first queries: each against the oracle under the
+    // same change.
+    let mq: Vec<String> = queries
+        .iter()
+        .take(a.metamorphic_queries)
+        .cloned()
+        .collect();
+    let doubled: Vec<String> = mq.iter().map(|q| format!("{q} {q}")).collect();
+    let even = qdrant_client::qdrant::Filter::must([qdrant_client::qdrant::Condition::matches(
+        engine::TEXT_PARITY_KEY,
+        "even".to_string(),
+    )]);
+    let even_only = |p: usize| p.is_multiple_of(2);
+    let oracle =
+        |k: f64, bb: f64, allowed: Option<&dyn Fn(usize) -> bool>| -> Vec<Vec<(u32, f64)>> {
+            mq.iter()
+                .map(|q| index.search(q, k, bb, a.limit, allowed))
+                .collect()
+        };
+    let unfiltered = oracle(a.k1, a.b, None);
+    let filtered = oracle(a.k1, a.b, Some(&even_only));
+    let b0 = oracle(2.0, 0.0, None);
+    let k0 = oracle(0.0, a.b, None);
+    for eng in &engines {
+        let lim = a.limit as u64;
+        let runs = [
+            (
+                "M duplicate query terms",
+                eng.query_text(&a.collection, &a.field, &doubled, lim, k1, b)
+                    .await?,
+                &unfiltered,
+                a.k1,
+                a.b,
+            ),
+            (
+                "M filter narrows, statistics stay",
+                eng.query_text_filtered(&a.collection, &a.field, &mq, lim, k1, b, Some(&even))
+                    .await?,
+                &filtered,
+                a.k1,
+                a.b,
+            ),
+            (
+                "M b = 0 ignores length",
+                eng.query_text(&a.collection, &a.field, &mq, lim, 2.0, 0.0)
+                    .await?,
+                &b0,
+                2.0,
+                0.0,
+            ),
+            (
+                "M k1 = 0 is idf alone",
+                eng.query_text(&a.collection, &a.field, &mq, lim, 0.0, b)
+                    .await?,
+                &k0,
+                0.0,
+                a.b,
+            ),
+        ];
+        for (name, got, want, kk, bb) in runs {
+            let (max_rel, rank, nm) = text_tiers(&index, &mq, want, &got, kk, bb, &a);
+            tiers.push(TextTier {
+                skipped: false,
+                tier: name,
+                engine: eng.label.clone(),
+                pass: max_rel <= a.value_epsilon && rank == 0 && nm == 0,
+                detail: format!(
+                    "{rank} of {} queries off, max relative |Δscore| {max_rel:.3e}",
+                    mq.len()
+                ),
+            });
+        }
+    }
+    tiers.push(TextTier {
+        skipped: true,
+        tier: "M delete then compare",
+        engine: "both".into(),
+        pass: false,
+        detail: "skipped: strawmANN serves no Points/Delete yet; deletes are covered in-process \
+                 (persist.zig) and Qdrant's df over-counts by design (decisions.md)"
+            .into(),
+    });
+
+    // Semantic relevance, reported, not gated: two tied points may differ in
+    // judgement, so a legitimate tie swap can move nDCG.
+    let mut semantic = Vec::new();
+    if let Some(path) = &a.qrels {
+        let (qrels, _) = text::read_qrels(path)?;
+        for (eng, got) in engines.iter().zip(&results) {
+            let s = relevance::evaluate_semantic(&qrels, got, queries.len());
+            semantic.push(serde_json::json!({ "engine": eng.label, "ndcg_at_10": s.ndcg_at_10, "mrr_at_10": s.mrr_at_10 }));
+        }
+    }
+
+    let licenses = tiers.iter().all(|t| t.pass || t.skipped);
+    for t in &tiers {
+        println!(
+            "{} {:<36} {:<9} {}",
+            if t.skipped {
+                "SKIP"
+            } else if t.pass {
+                "PASS"
+            } else {
+                "FAIL"
+            },
+            t.tier,
+            t.engine,
+            t.detail
+        );
+    }
+    println!(
+        "engines agree on the exact order of {same_order}/{} queries (ties may differ)",
+        queries.len()
+    );
+    for s in &semantic {
+        println!("semantic: {s}");
+    }
+    println!(
+        "§7.4: {} a strawmann-vs-Qdrant comparison of the text query",
+        if licenses {
+            "LICENSES"
+        } else {
+            "does NOT license"
+        }
+    );
+    if let Some(path) = &a.json {
+        let row = serde_json::json!({
+            "oracle_revision": text::ORACLE_REVISION,
+            "corpus_checksum": format!("{corpus_checksum:x}"),
+            "query_checksum": format!("{query_checksum:x}"),
+            "lowercase": params.lowercase,
+            "english_stopwords": params.english_stopwords,
+            "english_stemmer": params.english_stemmer,
+            "k1": a.k1, "b": a.b, "limit": a.limit,
+            "value_epsilon": a.value_epsilon, "tie_epsilon": a.tie_epsilon,
+            "tiers": tiers,
+            "same_order": same_order, "queries": queries.len(),
+            "semantic": semantic,
+            "licenses_comparative": licenses,
+        });
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, serde_json::to_string_pretty(&row)?)?;
+    }
+    anyhow::ensure!(licenses, "text conformance failed");
+    Ok(())
+}
+
+#[tokio::main(flavor = "multi_thread")]
+async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
+    let params = text::TextParams {
+        lowercase: a.lowercase,
+        english_stopwords: a.english_stopwords,
+        english_stemmer: a.english_stemmer,
+    };
+    let (docs, corpus_checksum) = text::read_corpus(&a.corpus)?;
+    let (queries, query_checksum) = text::read_queries(&a.queries)?;
+    let truth = load_bm25_truth(
+        &a.truth,
+        params,
+        a.k1,
+        a.b,
+        a.limit,
+        corpus_checksum,
+        query_checksum,
+    )?;
     let eng = engine::Engine::connect(&a.label, &a.engine)?;
     if !a.skip_upload {
         eprintln!(

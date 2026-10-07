@@ -501,6 +501,64 @@ pub fn agreement(
     out
 }
 
+/// One engine's ranking for one query against the oracle's.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RankCheck {
+    /// Largest `|engine score - oracle score| / oracle score` over the points
+    /// it returned (T1).
+    pub max_rel_delta: f64,
+    /// The returned points, read through the oracle's scores, are not the
+    /// truth's score sequence within `tie_epsilon`: a point missing, an extra
+    /// one, or an order that is not a tie reshuffled (T2).
+    pub rank_mismatch: bool,
+    /// A returned point holding none of the query's terms.
+    pub non_matching: bool,
+}
+
+impl Bm25Index {
+    /// Check `got` against `want`, the oracle's top list for `query` under the
+    /// same `k1`, `b` and candidate set. Equal scores may come back in any
+    /// order and either of two tied points may take the last place: what must
+    /// hold is that the oracle's score of the i-th returned point is the i-th
+    /// truth score.
+    pub fn check_ranking(
+        &self,
+        query: &str,
+        want: &[(u32, f64)],
+        got: &crate::relevance::Returned,
+        k1: f64,
+        b: f64,
+        tie_epsilon: f64,
+    ) -> RankCheck {
+        let terms = self.tokenizer.query_terms(query);
+        let mut out = RankCheck::default();
+        if got.ids.len() != want.len() {
+            out.rank_mismatch = true;
+        }
+        for (i, (&id, &score)) in got.ids.iter().zip(&got.scores).enumerate() {
+            let point = id as usize;
+            if point >= self.tf.len() || !terms.iter().any(|t| self.tf[point].contains_key(t)) {
+                out.non_matching = true;
+                out.rank_mismatch = true;
+                continue;
+            }
+            let oracle = self.score(point, &terms, k1, b);
+            let rel = if oracle > 0.0 {
+                (score - oracle).abs() / oracle
+            } else {
+                (score - oracle).abs()
+            };
+            out.max_rel_delta = out.max_rel_delta.max(rel);
+            match want.get(i) {
+                Some(&(_, w))
+                    if (oracle - w).abs() <= tie_epsilon * w.abs().max(f64::MIN_POSITIVE) => {}
+                _ => out.rank_mismatch = true,
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,6 +735,40 @@ mod tests {
             agreement(&index, &truth, &qs, &[short], 2, 1e-6).short_lists,
             1
         );
+    }
+
+    #[test]
+    fn a_ranking_check_accepts_ties_reordered_and_nothing_else() {
+        use crate::relevance::Returned;
+        // Points 0 and 1 tie, point 2 scores lower.
+        let docs: Vec<Vec<String>> = ["a b", "a c", "a d d d"]
+            .iter()
+            .map(|s| vec![(*s).to_string()])
+            .collect();
+        let idx = Bm25Index::build(TextParams::default(), &docs);
+        let want = idx.search("a", DEFAULT_K1, DEFAULT_B, 3, None);
+        let as_ret = |ids: &[u32]| Returned {
+            ids: ids.to_vec(),
+            scores: ids
+                .iter()
+                .map(|&i| idx.score(i as usize, &["a".to_string()], DEFAULT_K1, DEFAULT_B))
+                .collect(),
+        };
+        let check =
+            |ids: &[u32]| idx.check_ranking("a", &want, &as_ret(ids), DEFAULT_K1, DEFAULT_B, 1e-9);
+        assert!(!check(&[0, 1, 2]).rank_mismatch);
+        assert!(
+            !check(&[1, 0, 2]).rank_mismatch,
+            "a tie may come back either way"
+        );
+        assert!(check(&[2, 0, 1]).rank_mismatch, "not a tie");
+        assert!(check(&[0, 1]).rank_mismatch, "a point missing");
+        let off = Returned {
+            ids: vec![0, 1, 2],
+            scores: as_ret(&[0, 1, 2]).scores.iter().map(|s| s * 1.01).collect(),
+        };
+        let c = idx.check_ranking("a", &want, &off, DEFAULT_K1, DEFAULT_B, 1e-9);
+        assert!(!c.rank_mismatch && (c.max_rel_delta - 0.01).abs() < 1e-9);
     }
 
     #[test]

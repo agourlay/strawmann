@@ -2281,6 +2281,17 @@ stopwords and stemmer: scifact recall@10 1.0, 300/300 queries in order; fiqa
 score difference at most 1.9e-7 on both. The query path allocates its scratch,
 which §6.3 forbids, until it is measured.
 
+`conformance text-differ` is §8.5 for the text query, both engines against the
+oracle: T0 (the two refusals answered with one status), T1 (every score within
+1e-5 relative of the oracle), T2 (tie-aware: each returned point's oracle score
+is the truth's at that rank), the metamorphic properties (a duplicated query
+term changes nothing; a filter narrows without moving the statistics; `b = 0`;
+`k1 = 0`) and nDCG@10 with qrels, reported rather than gated since a tie swap
+can move it. Delete-then-compare is skipped while strawmANN serves no
+`Points/Delete`. On scifact and fiqa every tier passes for both engines (T1 at
+2.0e-7 at most), nDCG@10 is equal (0.6886, 0.2500), and the row licenses a
+comparison.
+
 ## BM25 counts an array of empty values as a document, as Qdrant does, decided 2026-10-07
 
 The BM25 oracle (`conformance/src/text`) first counted a point as a document

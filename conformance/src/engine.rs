@@ -25,6 +25,10 @@ use qdrant_client::qdrant::{
 const TEXT_PLACEHOLDER_DIM: usize = 4;
 const TEXT_PLACEHOLDER: [f32; TEXT_PLACEHOLDER_DIM] = [1.0, 0.0, 0.0, 0.0];
 
+/// The keyword every text-collection point carries beside its text: `"even"`
+/// or `"odd"` by row.
+pub const TEXT_PARITY_KEY: &str = "parity";
+
 /// The `max_segment_size` (in KB) that lets Qdrant's optimizer merge a corpus
 /// of `points` x `dim` into one graph.
 ///
@@ -254,7 +258,9 @@ impl Engine {
 
     /// Point `i` carries `docs[i]` under `field`, as an array: its values'
     /// tokens concatenate into one document in both engines. Ids are row
-    /// indices (§4.3).
+    /// indices (§4.3). Each point also carries `TEXT_PARITY_KEY`, `"even"` or
+    /// `"odd"` by its row, so a filter can narrow the candidates without
+    /// touching the text field (the differ's filter property).
     pub async fn upsert_text(
         &self,
         name: &str,
@@ -265,8 +271,11 @@ impl Engine {
         let mut batch: Vec<PointStruct> = Vec::new();
         let mut bytes = 0usize;
         for (i, values) in docs.iter().enumerate() {
-            let payload = qdrant_client::Payload::try_from(serde_json::json!({ field: values }))
-                .expect("an object of one string array is a payload");
+            let parity = if i.is_multiple_of(2) { "even" } else { "odd" };
+            let payload = qdrant_client::Payload::try_from(
+                serde_json::json!({ field: values, TEXT_PARITY_KEY: parity }),
+            )
+            .expect("an object of a string array and a string is a payload");
             bytes += values.iter().map(String::len).sum::<usize>() + 64;
             let id = u64::try_from(i).expect("row index fits u64");
             batch.push(PointStruct::new(id, TEXT_PLACEHOLDER.to_vec(), payload));
@@ -293,6 +302,22 @@ impl Engine {
         k1: f32,
         b: f32,
     ) -> anyhow::Result<Vec<Returned>> {
+        self.query_text_filtered(name, field, queries, limit, k1, b, None)
+            .await
+    }
+
+    /// `query_text` under `filter`, which narrows the candidates.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn query_text_filtered(
+        &self,
+        name: &str,
+        field: &str,
+        queries: &[String],
+        limit: u64,
+        k1: f32,
+        b: f32,
+        filter: Option<&Filter>,
+    ) -> anyhow::Result<Vec<Returned>> {
         use qdrant_client::qdrant::{Query, TextQueryBuilder};
         const BATCH: usize = 32;
         let mut out = Vec::with_capacity(queries.len());
@@ -300,11 +325,14 @@ impl Engine {
             let batch: Vec<_> = chunk
                 .iter()
                 .map(|q| {
-                    QueryPointsBuilder::new(name)
+                    let mut qb = QueryPointsBuilder::new(name)
                         .query(Query::new_text(TextQueryBuilder::new(q.clone()).k(k1).b(b)))
                         .using(field)
-                        .limit(limit)
-                        .build()
+                        .limit(limit);
+                    if let Some(f) = filter {
+                        qb = qb.filter(f.clone());
+                    }
+                    qb.build()
                 })
                 .collect();
             let resp = self
@@ -329,6 +357,27 @@ impl Engine {
             }
         }
         Ok(out)
+    }
+
+    /// The gRPC status code of one `text` query (0 when it is answered), for
+    /// T0's refusal agreement: `using` absent, or naming a field with no
+    /// scoring text index.
+    pub async fn text_query_status(&self, name: &str, using: Option<&str>, query: &str) -> i32 {
+        use qdrant_client::qdrant::{Query, TextQueryBuilder};
+        let mut qb = QueryPointsBuilder::new(name)
+            .query(Query::new_text(TextQueryBuilder::new(query)))
+            .limit(10);
+        if let Some(u) = using {
+            qb = qb.using(u);
+        }
+        match self
+            .client
+            .query_batch(QueryBatchPointsBuilder::new(name, vec![qb.build()]))
+            .await
+        {
+            Ok(_) => 0,
+            Err(e) => grpc_status_code(&e).unwrap_or(-1),
+        }
     }
 
     /// Drop a scratch collection; a failure to drop is not a finding.
