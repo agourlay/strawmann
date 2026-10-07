@@ -353,6 +353,102 @@ impl Bm25Truth {
     }
 }
 
+/// How one engine's `text` results agree with the oracle, over a query set.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct TextAgreement {
+    pub queries: usize,
+    pub limit: usize,
+    /// Mean recall@`limit` against the oracle's top `limit`, tie-aware: a
+    /// returned point outside the truth counts when the oracle scores it within
+    /// `tie_epsilon` (relative) of the truth's last score.
+    pub recall: f64,
+    pub tie_epsilon: f64,
+    /// Queries whose ids came back in exactly the oracle's order.
+    pub exact_order: usize,
+    /// Queries answered with fewer points than the truth holds.
+    pub short_lists: usize,
+    /// Returned points holding none of the query's terms: impossible for a
+    /// correct engine, whatever its statistics.
+    pub non_matching: usize,
+    /// `|engine score - oracle score|` over every returned point.
+    pub max_abs_delta: f64,
+    pub p99_abs_delta: f64,
+    pub max_rel_delta: f64,
+    pub p99_rel_delta: f64,
+    pub scored_points: usize,
+}
+
+/// Compare `returned[q]` with the truth for each query. `index` recomputes the
+/// oracle's score of any point an engine returns, inside the truth or not.
+pub fn agreement(
+    index: &Bm25Index,
+    truth: &Bm25Truth,
+    queries: &[String],
+    returned: &[crate::relevance::Returned],
+    limit: usize,
+    tie_epsilon: f64,
+) -> TextAgreement {
+    let mut out = TextAgreement {
+        queries: queries.len(),
+        limit,
+        tie_epsilon,
+        ..TextAgreement::default()
+    };
+    let mut abs = Vec::new();
+    let mut rel = Vec::new();
+    let mut recall_sum = 0.0;
+    let mut counted = 0usize;
+    for (q, query) in queries.iter().enumerate() {
+        let terms = index.tokenizer.query_terms(query);
+        let want: &[(u32, f64)] = &truth.hits[q][..truth.hits[q].len().min(limit)];
+        let got = &returned[q];
+        if got.ids.len() < want.len() {
+            out.short_lists += 1;
+        }
+        if got.ids.iter().copied().eq(want.iter().map(|h| h.0)) {
+            out.exact_order += 1;
+        }
+        let floor = want.last().map(|h| h.1 * (1.0 - tie_epsilon));
+        let in_truth: HashSet<u32> = want.iter().map(|h| h.0).collect();
+        let mut hits = 0usize;
+        for (&id, &score) in got.ids.iter().zip(&got.scores) {
+            let point = id as usize;
+            if point >= index.tf.len() || !terms.iter().any(|t| index.tf[point].contains_key(t)) {
+                out.non_matching += 1;
+                continue;
+            }
+            let oracle = index.score(point, &terms, truth.k1, truth.b);
+            let d = (score - oracle).abs();
+            abs.push(d);
+            rel.push(if oracle > 0.0 { d / oracle } else { d });
+            if in_truth.contains(&id) || floor.is_some_and(|f| want.len() == limit && oracle >= f) {
+                hits += 1;
+            }
+        }
+        if !want.is_empty() {
+            recall_sum += hits.min(want.len()) as f64 / want.len() as f64;
+            counted += 1;
+        }
+    }
+    out.recall = if counted > 0 {
+        recall_sum / counted as f64
+    } else {
+        1.0
+    };
+    out.scored_points = abs.len();
+    let p99 = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v.get(((v.len() as f64 * 0.99).ceil() as usize).saturating_sub(1))
+            .copied()
+            .unwrap_or(0.0)
+    };
+    out.max_abs_delta = abs.iter().copied().fold(0.0, f64::max);
+    out.max_rel_delta = rel.iter().copied().fold(0.0, f64::max);
+    out.p99_abs_delta = p99(&mut abs);
+    out.p99_rel_delta = p99(&mut rel);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +565,50 @@ mod tests {
         assert!(
             idx.search("the of", DEFAULT_K1, DEFAULT_B, 10, None)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn agreement_scores_every_returned_point_against_the_oracle() {
+        use crate::relevance::Returned;
+        let docs: Vec<Vec<String>> = ["a b", "a a c", "b c", "c", "d"]
+            .iter()
+            .map(|s| vec![(*s).to_string()])
+            .collect();
+        let settings = Bm25Settings {
+            params: TextParams::default(),
+            k1: DEFAULT_K1,
+            b: DEFAULT_B,
+            limit: 2,
+        };
+        let qs = vec!["a c".to_string()];
+        let truth = Bm25Truth::compute(settings, &docs, 0, &qs, 0);
+        let index = Bm25Index::build(TextParams::default(), &docs);
+        let want = &truth.hits[0];
+        // An engine that returns the truth, in f32: exact order, deltas at f32.
+        let exact = Returned {
+            ids: want.iter().map(|h| h.0).collect(),
+            scores: want.iter().map(|h| f64::from(h.1 as f32)).collect(),
+        };
+        let a = agreement(&index, &truth, &qs, &[exact], 2, 1e-6);
+        assert_eq!((a.exact_order, a.short_lists, a.non_matching), (1, 0, 0));
+        assert!((a.recall - 1.0).abs() < 1e-12);
+        assert!(a.max_rel_delta < 1e-6 && a.max_rel_delta > 0.0);
+        // One wrong point, one that holds no query term, and a short list.
+        let wrong = Returned {
+            ids: vec![want[0].0, 4],
+            scores: vec![want[0].1, 1.0],
+        };
+        let a = agreement(&index, &truth, &qs, &[wrong], 2, 1e-6);
+        assert_eq!((a.exact_order, a.non_matching), (0, 1));
+        assert!((a.recall - 0.5).abs() < 1e-12);
+        let short = Returned {
+            ids: vec![want[0].0],
+            scores: vec![want[0].1],
+        };
+        assert_eq!(
+            agreement(&index, &truth, &qs, &[short], 2, 1e-6).short_lists,
+            1
         );
     }
 

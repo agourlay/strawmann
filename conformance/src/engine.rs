@@ -20,6 +20,11 @@ use qdrant_client::qdrant::{
     SearchParamsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
 };
 
+/// The vector every text-collection point carries: both engines need one, and
+/// the `text` query never reads it.
+const TEXT_PLACEHOLDER_DIM: usize = 4;
+const TEXT_PLACEHOLDER: [f32; TEXT_PLACEHOLDER_DIM] = [1.0, 0.0, 0.0, 0.0];
+
 /// The `max_segment_size` (in KB) that lets Qdrant's optimizer merge a corpus
 /// of `points` x `dim` into one graph.
 ///
@@ -210,6 +215,120 @@ impl Engine {
         }
         self.client.create_collection(b).await?;
         Ok(())
+    }
+
+    /// A collection for the `text` query: a 4-dimension placeholder vector the
+    /// query never reads (both engines need one), and `field` indexed as text
+    /// with BM25 scoring and the tokenizer options in `params`
+    /// (decisions.md, 2026-10-07).
+    pub async fn recreate_text_collection(
+        &self,
+        name: &str,
+        field: &str,
+        params: crate::text::TextParams,
+        points: u64,
+    ) -> anyhow::Result<()> {
+        use qdrant_client::qdrant::{
+            CreateFieldIndexCollectionBuilder, FieldType, TextIndexParamsBuilder, TokenizerType,
+        };
+        self.recreate_collection(name, TEXT_PLACEHOLDER_DIM as u64, Metric::Dot, points)
+            .await?;
+        let mut index = TextIndexParamsBuilder::new(TokenizerType::Word)
+            .lowercase(params.lowercase)
+            .bm25_scoring();
+        if params.english_stopwords {
+            index = index.stopwords_language("english".to_string());
+        }
+        if params.english_stemmer {
+            index = index.snowball_stemmer("english".to_string());
+        }
+        self.client
+            .create_field_index(
+                CreateFieldIndexCollectionBuilder::new(name, field, FieldType::Text)
+                    .field_index_params(index)
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Point `i` carries `docs[i]` under `field`, as an array: its values'
+    /// tokens concatenate into one document in both engines. Ids are row
+    /// indices (§4.3).
+    pub async fn upsert_text(
+        &self,
+        name: &str,
+        field: &str,
+        docs: &[Vec<String>],
+    ) -> anyhow::Result<()> {
+        const TARGET_BYTES: usize = 256 * 1024;
+        let mut batch: Vec<PointStruct> = Vec::new();
+        let mut bytes = 0usize;
+        for (i, values) in docs.iter().enumerate() {
+            let payload = qdrant_client::Payload::try_from(serde_json::json!({ field: values }))
+                .expect("an object of one string array is a payload");
+            bytes += values.iter().map(String::len).sum::<usize>() + 64;
+            let id = u64::try_from(i).expect("row index fits u64");
+            batch.push(PointStruct::new(id, TEXT_PLACEHOLDER.to_vec(), payload));
+            if bytes >= TARGET_BYTES || i + 1 == docs.len() {
+                self.client
+                    .upsert_points(
+                        UpsertPointsBuilder::new(name, std::mem::take(&mut batch)).wait(true),
+                    )
+                    .await?;
+                bytes = 0;
+            }
+        }
+        Ok(())
+    }
+
+    /// BM25 over `field`'s text index for each query, in order: Qdrant dev's
+    /// `Query.text` with `k1` and `b` sent explicitly.
+    pub async fn query_text(
+        &self,
+        name: &str,
+        field: &str,
+        queries: &[String],
+        limit: u64,
+        k1: f32,
+        b: f32,
+    ) -> anyhow::Result<Vec<Returned>> {
+        use qdrant_client::qdrant::{Query, TextQueryBuilder};
+        const BATCH: usize = 32;
+        let mut out = Vec::with_capacity(queries.len());
+        for chunk in queries.chunks(BATCH) {
+            let batch: Vec<_> = chunk
+                .iter()
+                .map(|q| {
+                    QueryPointsBuilder::new(name)
+                        .query(Query::new_text(TextQueryBuilder::new(q.clone()).k(k1).b(b)))
+                        .using(field)
+                        .limit(limit)
+                        .build()
+                })
+                .collect();
+            let resp = self
+                .client
+                .query_batch(QueryBatchPointsBuilder::new(name, batch))
+                .await?;
+            for r in resp.result {
+                let mut ids = Vec::with_capacity(r.result.len());
+                let mut scores = Vec::with_capacity(r.result.len());
+                for p in r.result {
+                    let Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(n)) =
+                        p.id.and_then(|i| i.point_id_options)
+                    else {
+                        anyhow::bail!("{}: a text hit without a numeric id (§4.3)", self.label);
+                    };
+                    ids.push(u32::try_from(n).map_err(|_| {
+                        anyhow::anyhow!("{}: point id {n} does not fit u32", self.label)
+                    })?);
+                    scores.push(f64::from(p.score));
+                }
+                out.push(Returned { ids, scores });
+            }
+        }
+        Ok(out)
     }
 
     /// Drop a scratch collection; a failure to drop is not a finding.

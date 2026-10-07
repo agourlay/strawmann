@@ -227,6 +227,48 @@ struct Bm25TruthRun {
     out: PathBuf,
 }
 
+/// `text-relevance`'s arguments.
+#[derive(clap::Args)]
+struct TextRelevanceRun {
+    #[arg(long, default_value = "http://localhost:6334")]
+    engine: String,
+    #[arg(long, default_value = "engine")]
+    label: String,
+    #[arg(long, default_value = "text_relevance")]
+    collection: String,
+    /// The payload field the corpus is stored under and the text index is on.
+    #[arg(long, default_value = "body")]
+    field: String,
+    #[arg(long)]
+    corpus: PathBuf,
+    #[arg(long)]
+    queries: PathBuf,
+    /// `bm25-truth`'s output for the same corpus, queries and settings.
+    #[arg(long)]
+    truth: PathBuf,
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    lowercase: bool,
+    #[arg(long)]
+    english_stopwords: bool,
+    #[arg(long)]
+    english_stemmer: bool,
+    #[arg(long, default_value_t = text::DEFAULT_K1)]
+    k1: f64,
+    #[arg(long, default_value_t = text::DEFAULT_B)]
+    b: f64,
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+    /// Relative score difference within which a point outside the truth
+    /// still counts as a hit: a tie at the cut, in `f32`.
+    #[arg(long, default_value_t = 1e-5)]
+    tie_epsilon: f64,
+    /// Query the collection as it is, without recreating it.
+    #[arg(long)]
+    skip_upload: bool,
+    #[arg(long)]
+    json: Option<PathBuf>,
+}
+
 /// `convert-vecs`'s arguments.
 #[derive(clap::Args)]
 struct ConvertVecsRun {
@@ -313,6 +355,12 @@ enum Command {
     /// checksums and every parameter it was computed under, so a sweep can refuse
     /// one computed for another corpus, tokenizer or `k1`/`b`.
     Bm25Truth(Bm25TruthRun),
+
+    /// The `text` query on one engine against `bm25-truth`: loads the corpus
+    /// into a collection with a scoring text index, sends every query, and
+    /// reports recall, exact-order agreement and score deltas against the
+    /// oracle. What `relevance` is for vectors.
+    TextRelevance(TextRelevanceRun),
 
     /// §8.6 / W10: measure recall against our fp64 ground truth on **one**
     /// engine, over an `ef` sweep.
@@ -489,6 +537,8 @@ fn main() -> anyhow::Result<()> {
         Command::FilteredTruth(a) => run_filtered_truth(a),
 
         Command::Bm25Truth(a) => run_bm25_truth(a),
+
+        Command::TextRelevance(a) => run_text_relevance(a),
 
         Command::Differ(a) => run_differ(a),
     }
@@ -782,6 +832,103 @@ fn run_bm25_truth(a: Bm25TruthRun) -> anyhow::Result<()> {
         a.k1,
         a.b
     );
+    Ok(())
+}
+
+#[tokio::main(flavor = "multi_thread")]
+async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
+    let params = text::TextParams {
+        lowercase: a.lowercase,
+        english_stopwords: a.english_stopwords,
+        english_stemmer: a.english_stemmer,
+    };
+    let (docs, corpus_checksum) = text::read_corpus(&a.corpus)?;
+    let (queries, query_checksum) = text::read_queries(&a.queries)?;
+    let truth: text::Bm25Truth = serde_json::from_slice(
+        &std::fs::read(&a.truth)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", a.truth.display()))?,
+    )
+    .map_err(|e| anyhow::anyhow!("{} is not a bm25-truth file: {e}", a.truth.display()))?;
+    // §4.3: a truth speaks for the corpus, queries and settings it was computed
+    // from, and for nothing else.
+    let mismatch = [
+        (
+            truth.corpus_checksum != format!("{corpus_checksum:x}"),
+            "corpus",
+        ),
+        (
+            truth.query_checksum != format!("{query_checksum:x}"),
+            "queries",
+        ),
+        (
+            (
+                truth.lowercase,
+                truth.english_stopwords,
+                truth.english_stemmer,
+            ) != (
+                params.lowercase,
+                params.english_stopwords,
+                params.english_stemmer,
+            ),
+            "tokenizer",
+        ),
+        (truth.k1 != a.k1 || truth.b != a.b, "k1/b"),
+        (truth.limit < a.limit, "depth"),
+    ];
+    if let Some((_, what)) = mismatch.iter().find(|m| m.0) {
+        anyhow::bail!(
+            "{}: computed for another {what} than this run's (§4.3)",
+            a.truth.display()
+        );
+    }
+    let eng = engine::Engine::connect(&a.label, &a.engine)?;
+    if !a.skip_upload {
+        eprintln!(
+            "[{}] loading {} documents into {}",
+            a.label,
+            docs.len(),
+            a.collection
+        );
+        eng.recreate_text_collection(&a.collection, &a.field, params, docs.len() as u64)
+            .await?;
+        eng.upsert_text(&a.collection, &a.field, &docs).await?;
+        eng.wait_green(&a.collection, 600).await?;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let returned = eng
+        .query_text(
+            &a.collection,
+            &a.field,
+            &queries,
+            a.limit as u64,
+            a.k1 as f32,
+            a.b as f32,
+        )
+        .await?;
+    let index = text::Bm25Index::build(params, &docs);
+    let agreement = text::agreement(&index, &truth, &queries, &returned, a.limit, a.tie_epsilon);
+    println!(
+        "[{}] text recall@{} {:.4} | exact order {}/{} | short lists {} | non-matching {} | \
+         |Δscore| max {:.3e} p99 {:.3e} (rel max {:.3e} p99 {:.3e}) over {} points",
+        a.label,
+        a.limit,
+        agreement.recall,
+        agreement.exact_order,
+        agreement.queries,
+        agreement.short_lists,
+        agreement.non_matching,
+        agreement.max_abs_delta,
+        agreement.p99_abs_delta,
+        agreement.max_rel_delta,
+        agreement.p99_rel_delta,
+        agreement.scored_points
+    );
+    if let Some(path) = &a.json {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, serde_json::to_string_pretty(&agreement)?)?;
+    }
     Ok(())
 }
 
