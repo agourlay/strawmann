@@ -8,6 +8,7 @@
     datasets.py extract [name ...]      unpack archives named in the descriptor
     datasets.py bfb-config <name>       emit a bfb-compatible dataset entry
     datasets.py convert-beir [name ...] BEIR corpora to the BM25 oracle's text layout
+    datasets.py synthesize-text [name ...] generate the synthetic text corpora
     datasets.py add                     scaffold a new entry, with digests fetched
 
 Destination, highest source first: `--data-dir`, then `$STRAWMANN_DATA`,
@@ -199,7 +200,7 @@ class File:
 
 #: §4.2's dataset states, mirrored by `datasets::Status` in the Rust
 #: descriptor. Two readers, one closed set.
-STATUSES = frozenset({"available", "declared"})
+STATUSES = frozenset({"available", "declared", "generated"})
 
 
 class Dataset:
@@ -383,7 +384,10 @@ def inventory(ds: list[Dataset], root: Path, check_digest: bool = True) -> list[
                "declared_bytes": 0, "on_disk_bytes": on_disk(d, root),
                "files_present": 0, "files_total": 0, "state": "declared",
                "stale_links": len(stale_links(d, root))}
-        if d.status != "declared":
+        if d.status == "generated":
+            done = (root / d.name / TEXT_DIR / "corpus.jsonl").exists()
+            row["state"] = "generated" if done else "not generated"
+        elif d.status != "declared":
             st = survey(d, root, check_digest=check_digest)
             bad = sum(1 for x in st if x.wrong_digest)
             row["files_present"] = sum(1 for x in st if x.present)
@@ -414,6 +418,8 @@ def cmd_list(args) -> int:
     print(f"  {'-' * w} {'-' * 10} {'-' * 8} {'-' * 5} {'-' * 7} {'-' * 8} {'-' * 8}  "
           f"{'-' * 22}")
     paint = {"declared": f"{DIM}§4.2 names it, no files pinned{OFF}",
+             "generated": f"{GREEN}generated{OFF}",
+             "not generated": f"{DIM}not generated (synthesize-text){OFF}",
              "complete": f"{GREEN}complete{OFF}",
              "partial": f"{YELLOW}partial{OFF}",
              "not fetched": f"{DIM}not fetched{OFF}"}
@@ -812,6 +818,56 @@ def beir_to_text(corpus: list[str], queries: list[str],
     return corpus_out, texts, ids, qrels_out
 
 
+def zipf_text_corpus(spec: dict, docs: int, queries: int) -> tuple[list[str], list[str]]:
+    """A synthetic corpus shaped as Qdrant's own BM25 benchmark corpus
+    (`lib/segment/src/fixtures/bm25_corpus.rs` at 850859ec9): `vocab` terms
+    `w<rank>`, drawn with weight `1/(rank+1)^exponent`; documents of a uniform
+    `doc_len` terms and queries of a uniform `query_len`. Deterministic in
+    `seed`, so a corpus is regenerated rather than stored.
+
+    Returns `(corpus.jsonl lines, queries.txt lines)`: one point per document,
+    its text as a single value.
+    """
+    import bisect
+    import random
+    rng = random.Random(spec["seed"])
+    cum, total = [], 0.0
+    for rank in range(spec["vocab"]):
+        total += 1.0 / (rank + 1) ** spec["exponent"]
+        cum.append(total)
+
+    def words(lo: int, hi: int) -> str:
+        n = rng.randint(lo, hi)
+        return " ".join(f"w{bisect.bisect_left(cum, rng.random() * total)}" for _ in range(n))
+
+    corpus = [json.dumps({"id": i, "values": [words(*spec["doc_len"])]}) for i in range(docs)]
+    texts = [words(*spec["query_len"]) for _ in range(queries)]
+    return corpus, texts
+
+
+def cmd_synthesize_text(args) -> int:
+    n = 0
+    for d in load(args.datasets or None):
+        spec = d.raw.get("generator")
+        if d.status != "generated" or not spec or spec.get("kind") != "zipf-text":
+            if args.datasets:
+                print(f"  {d.name}: not a generated text corpus", file=sys.stderr)
+                return 1
+            continue
+        out = DATA_ROOT / d.name / TEXT_DIR
+        if (out / "corpus.jsonl").exists() and (out / "queries.txt").exists():
+            print(f"  {d.name}: already generated in {out}")
+            continue
+        print(f"  {d.name}: generating {d.n:,} documents and {d.n_queries:,} queries")
+        corpus, texts = zipf_text_corpus(spec, d.n, d.n_queries)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "corpus.jsonl").write_text("".join(f"{x}\n" for x in corpus), encoding="utf-8")
+        (out / "queries.txt").write_text("".join(f"{x}\n" for x in texts), encoding="utf-8")
+        n += 1
+    print(f"generated {n} corpus(es)" if n else "nothing to generate")
+    return 0
+
+
 def cmd_convert_beir(args) -> int:
     n = 0
     for d in load(args.datasets or None):
@@ -965,6 +1021,14 @@ def cmd_self_test(args) -> int:
             pass
         else:
             raise AssertionError(f"{why} in the qrels must fail")
+    spec = {"seed": 7, "vocab": 50, "exponent": 0.9, "doc_len": [3, 6], "query_len": [2, 2]}
+    c1, q1 = zipf_text_corpus(spec, 40, 5)
+    c2, q2 = zipf_text_corpus(spec, 40, 5)
+    assert (c1, q1) == (c2, q2), "a generated corpus is a function of its seed"
+    lens = [len(json.loads(x)["values"][0].split()) for x in c1]
+    assert all(3 <= n <= 6 for n in lens) and all(len(q.split()) == 2 for q in q1)
+    assert all(0 <= int(w[1:]) < 50 for x in c1 for w in json.loads(x)["values"][0].split())
+    assert [json.loads(x)["id"] for x in c1] == list(range(40)), "ids are rows"
     print("datasets.py self-test: ok")
     return 0
 
@@ -1051,6 +1115,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--dim", type=int)
     p.add_argument("--metric", default="cosine")
     p.add_argument("--role", default="")
+    with_names(sub.add_parser("synthesize-text", parents=[common],
+                              help="generate the synthetic text corpora"))
     with_names(sub.add_parser("convert-beir", parents=[common],
                               help="BEIR corpora to the BM25 oracle's text layout"))
     sub.add_parser("self-test", help="unit checks for the pure helpers", parents=[common])
@@ -1072,7 +1138,7 @@ def main(argv: list[str]) -> int:
     return {"list": cmd_list, "info": cmd_info, "verify": cmd_verify,
             "fetch": cmd_fetch, "extract": cmd_extract,
             "bfb-config": cmd_bfb_config, "add": cmd_add,
-            "convert-beir": cmd_convert_beir,
+            "convert-beir": cmd_convert_beir, "synthesize-text": cmd_synthesize_text,
             "self-test": cmd_self_test}[args.cmd](args)
 
 

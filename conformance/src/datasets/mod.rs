@@ -291,6 +291,9 @@ pub enum Status {
     /// matching `datasets.py`: a dataset says nothing until someone pins it.
     #[default]
     Declared,
+    /// Generated from the descriptor's own parameters (`datasets.py
+    /// synthesize-text`), so there is nothing to fetch.
+    Generated,
 }
 
 impl std::fmt::Display for Status {
@@ -300,6 +303,7 @@ impl std::fmt::Display for Status {
         f.write_str(match self {
             Status::Available => "available",
             Status::Declared => "declared",
+            Status::Generated => "generated",
         })
     }
 }
