@@ -273,11 +273,7 @@ impl Engine {
         let mut batch: Vec<PointStruct> = Vec::new();
         let mut bytes = 0usize;
         for (i, values) in docs.iter().enumerate() {
-            let parity = if i.is_multiple_of(2) {
-                "keyword_0"
-            } else {
-                "keyword_1"
-            };
+            let parity = crate::text::parity_of(i);
             let payload = qdrant_client::Payload::try_from(
                 serde_json::json!({ field: values, TEXT_PARITY_KEY: parity }),
             )

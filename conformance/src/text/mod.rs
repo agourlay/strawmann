@@ -316,6 +316,18 @@ impl Bm25Index {
     }
 }
 
+/// The `parity` keyword point `point` carries: `keyword_0` on even rows and
+/// `keyword_1` on odd, the values bfb's keyword filter draws at cardinality 2.
+/// The text collections the differ loads and the benchmark's `bfb/` layouts
+/// (`datasets.py`'s `write_bfb_text`) hold the same rule.
+pub fn parity_of(point: usize) -> &'static str {
+    if point.is_multiple_of(2) {
+        "keyword_0"
+    } else {
+        "keyword_1"
+    }
+}
+
 /// FNV-1a 64 over a file's bytes, the hash `oracle::checksum_f32` uses: a
 /// truth names the exact corpus and query files it was computed from (§4.3).
 pub fn checksum_bytes(data: &[u8]) -> u64 {
@@ -430,16 +442,45 @@ impl Bm25Truth {
         queries: &[String],
         query_checksum: u64,
     ) -> Self {
+        let index = Bm25Index::build(settings.params, docs);
+        Self::from_index(
+            &index,
+            settings,
+            corpus_checksum,
+            queries,
+            query_checksum,
+            None,
+        )
+    }
+
+    /// The truth over an index already built, restricted to the points
+    /// `allowed` keeps: a filter narrows the candidates and leaves the
+    /// statistics whole, as the engines' filters do.
+    pub fn from_index(
+        index: &Bm25Index,
+        settings: Bm25Settings,
+        corpus_checksum: u64,
+        queries: &[String],
+        query_checksum: u64,
+        allowed: Option<&(dyn Fn(usize) -> bool + Sync)>,
+    ) -> Self {
         let Bm25Settings {
             params,
             k1,
             b,
             limit,
         } = settings;
-        let index = Bm25Index::build(params, docs);
         let hits = queries
             .par_iter()
-            .map(|q| index.search(q, k1, b, limit, None))
+            .map(|q| {
+                index.search(
+                    q,
+                    k1,
+                    b,
+                    limit,
+                    allowed.map(|f| f as &dyn Fn(usize) -> bool),
+                )
+            })
             .collect();
         Self {
             revision: ORACLE_REVISION,
@@ -455,6 +496,113 @@ impl Bm25Truth {
             avgdl: index.avgdl(),
             hits,
         }
+    }
+}
+
+/// One tier's outcome in a text conformance run, as `text-differ` reports it.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct TierOutcome {
+    pub tier: &'static str,
+    pub engine: String,
+    pub pass: bool,
+    /// Not run; neither passes nor licenses anything.
+    pub skipped: bool,
+    pub detail: String,
+}
+
+/// The tiers that license strawmANN's text rows, in order: T1 is the one §8.5
+/// names, exact value equality against the oracle, and T0 comes before it.
+pub const LICENSING_TIERS: [&str; 3] =
+    ["T0 refusal statuses", "T1 score value", "T2 tie-aware rank"];
+
+/// What a text conformance run was, for `results.py`'s conformance table:
+/// the vector differ's `ConformanceRow` for the `text` query.
+pub struct TextConformanceRow<'a> {
+    pub dataset: &'a str,
+    pub params: TextParams,
+    pub k1: f64,
+    pub b: f64,
+    pub limit: usize,
+    pub value_epsilon: f64,
+    pub tie_epsilon: f64,
+    pub qdrant_version: &'a str,
+    pub strawmann_commit: &'a str,
+    pub isa_build: &'a str,
+    pub corpus_checksum: u64,
+    pub query_checksum: u64,
+    pub tiers: &'a [TierOutcome],
+}
+
+impl TextConformanceRow<'_> {
+    /// The last of `LICENSING_TIERS` strawmANN passed with every one before it
+    /// passed too. A tier run for both engines at once counts for strawmANN.
+    pub fn tier_reached(&self) -> Option<&'static str> {
+        let mut reached = None;
+        for name in LICENSING_TIERS {
+            let mut ran = self
+                .tiers
+                .iter()
+                .filter(|t| {
+                    t.tier == name && !t.skipped && (t.engine == "strawmann" || t.engine == "both")
+                })
+                .peekable();
+            if ran.peek().is_none() || !ran.all(|t| t.pass) {
+                break;
+            }
+            reached = Some(name);
+        }
+        reached
+    }
+
+    /// Whether the row licenses a performance claim: T1 reached, and builds
+    /// that are named (`differ::identity_known`).
+    pub fn licenses_perf(&self) -> bool {
+        let t1 = LICENSING_TIERS
+            .iter()
+            .position(|t| Some(*t) == self.tier_reached());
+        t1.is_some_and(|i| i >= 1)
+            && crate::differ::identity_known(
+                self.strawmann_commit,
+                self.qdrant_version,
+                self.isa_build,
+            )
+    }
+
+    /// FNV-1a 64 over everything the row is, as `ConformanceRow::hash` is for
+    /// vectors: the corpus, the tokenizer and query settings, both builds, the
+    /// checksums, and every tier's name, engine and outcome.
+    pub fn hash(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |bytes: &[u8]| {
+            for &x in bytes {
+                h ^= u64::from(x);
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        mix(b"text");
+        mix(self.dataset.as_bytes());
+        mix(&ORACLE_REVISION.to_le_bytes());
+        mix(&[
+            u8::from(self.params.lowercase),
+            u8::from(self.params.english_stopwords),
+            u8::from(self.params.english_stemmer),
+        ]);
+        for x in [self.k1, self.b, self.value_epsilon, self.tie_epsilon] {
+            mix(&x.to_le_bytes());
+        }
+        mix(&(self.limit as u64).to_le_bytes());
+        mix(self.qdrant_version.as_bytes());
+        mix(self.strawmann_commit.as_bytes());
+        mix(self.isa_build.as_bytes());
+        mix(&self.corpus_checksum.to_le_bytes());
+        mix(&self.query_checksum.to_le_bytes());
+        mix(&(self.tiers.len() as u64).to_le_bytes());
+        for t in self.tiers {
+            mix(t.tier.as_bytes());
+            mix(t.engine.as_bytes());
+            mix(&[u8::from(t.pass), u8::from(t.skipped)]);
+        }
+        h
     }
 }
 
@@ -620,6 +768,116 @@ impl Bm25Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn outcome(tier: &'static str, engine: &str, pass: bool) -> TierOutcome {
+        TierOutcome {
+            tier,
+            engine: engine.into(),
+            pass,
+            skipped: false,
+            detail: String::new(),
+        }
+    }
+
+    fn row(tiers: &[TierOutcome]) -> TextConformanceRow<'_> {
+        TextConformanceRow {
+            dataset: "scifact",
+            params: all_on(),
+            k1: DEFAULT_K1,
+            b: DEFAULT_B,
+            limit: 10,
+            value_epsilon: 1e-5,
+            tie_epsilon: 1e-5,
+            qdrant_version: "1.19.3-dev",
+            strawmann_commit: "99e284a",
+            isa_build: "native",
+            corpus_checksum: 1,
+            query_checksum: 2,
+            tiers,
+        }
+    }
+
+    #[test]
+    fn a_text_row_licenses_perf_from_strawmanns_t1_and_named_builds() {
+        let full = [
+            outcome("T0 refusal statuses", "both", true),
+            outcome("T1 score value", "strawmann", true),
+            outcome("T2 tie-aware rank", "strawmann", true),
+            outcome("T1 score value", "qdrant", false),
+        ];
+        let r = row(&full);
+        assert_eq!(r.tier_reached(), Some("T2 tie-aware rank"));
+        assert!(
+            r.licenses_perf(),
+            "Qdrant's own tiers license nothing about strawmANN"
+        );
+
+        let t2_failed = [
+            outcome("T0 refusal statuses", "both", true),
+            outcome("T1 score value", "strawmann", true),
+            outcome("T2 tie-aware rank", "strawmann", false),
+        ];
+        assert_eq!(row(&t2_failed).tier_reached(), Some("T1 score value"));
+        assert!(row(&t2_failed).licenses_perf());
+
+        let t1_failed = [
+            outcome("T0 refusal statuses", "both", true),
+            outcome("T1 score value", "strawmann", false),
+            outcome("T2 tie-aware rank", "strawmann", true),
+        ];
+        assert_eq!(row(&t1_failed).tier_reached(), Some("T0 refusal statuses"));
+        assert!(!row(&t1_failed).licenses_perf());
+
+        let mut anonymous = row(&full);
+        anonymous.strawmann_commit = crate::differ::COMMIT_UNSET;
+        assert!(!anonymous.licenses_perf());
+    }
+
+    #[test]
+    fn a_text_rows_hash_moves_with_every_outcome_and_build() {
+        let pass = [outcome("T1 score value", "strawmann", true)];
+        let fail = [outcome("T1 score value", "strawmann", false)];
+        let base = row(&pass).hash();
+        assert_eq!(base, row(&pass).hash());
+        assert_ne!(base, row(&fail).hash());
+        let mut other = row(&pass);
+        other.qdrant_version = "1.19.4";
+        assert_ne!(base, other.hash());
+        let mut other = row(&pass);
+        other.b = 0.0;
+        assert_ne!(base, other.hash());
+    }
+
+    #[test]
+    fn parity_alternates_from_keyword_0() {
+        assert_eq!(
+            (parity_of(0), parity_of(1), parity_of(2)),
+            ("keyword_0", "keyword_1", "keyword_0")
+        );
+    }
+
+    #[test]
+    fn a_filtered_truth_keeps_the_whole_corpus_statistics() {
+        let docs: Vec<Vec<String>> = ["apple pie", "apple", "apple tart", "banana"]
+            .iter()
+            .map(|s| vec![(*s).to_string()])
+            .collect();
+        let settings = Bm25Settings {
+            params: TextParams::default(),
+            k1: DEFAULT_K1,
+            b: DEFAULT_B,
+            limit: 10,
+        };
+        let index = Bm25Index::build(settings.params, &docs);
+        let queries = vec!["apple".to_string()];
+        let even = |p: usize| parity_of(p) == "keyword_0";
+        let t = Bm25Truth::from_index(&index, settings, 0, &queries, 0, Some(&even));
+        let ids: Vec<u32> = t.hits[0].iter().map(|h| h.0).collect();
+        assert_eq!(ids, [0, 2]);
+        let whole = Bm25Truth::from_index(&index, settings, 0, &queries, 0, None);
+        let score_of = |id| whole.hits[0].iter().find(|h| h.0 == id).unwrap().1;
+        assert_eq!(t.hits[0][0].1, score_of(0));
+    }
 
     fn all_on() -> TextParams {
         TextParams {

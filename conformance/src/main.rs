@@ -244,8 +244,14 @@ struct TextRelevanceRun {
     #[arg(long)]
     queries: PathBuf,
     /// `bm25-truth`'s output for the same corpus, queries and settings.
-    #[arg(long)]
-    truth: PathBuf,
+    /// Absent, the truth is computed here, from the index this command builds
+    /// anyway to score what the engine returns.
+    #[arg(long, conflicts_with = "parity")]
+    truth: Option<PathBuf>,
+    /// Query with the filter `parity == <value>` (`keyword_0` keeps the even
+    /// rows, `keyword_1` the odd), against a truth over those rows alone.
+    #[arg(long, value_parser = ["keyword_0", "keyword_1"])]
+    parity: Option<String>,
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     lowercase: bool,
     #[arg(long)]
@@ -316,6 +322,9 @@ struct TextDifferRun {
     metamorphic_queries: usize,
     #[arg(long)]
     skip_upload: bool,
+    /// The corpus's name, which the row the sink records is bound to.
+    #[arg(long, default_value = "unknown")]
+    dataset: String,
     #[arg(long)]
     json: Option<PathBuf>,
 }
@@ -1196,15 +1205,7 @@ fn load_bm25_truth(
 }
 
 /// One line of the text conformance row.
-#[derive(serde::Serialize)]
-struct TextTier {
-    tier: &'static str,
-    engine: String,
-    pass: bool,
-    /// Not run; neither passes nor licenses anything.
-    skipped: bool,
-    detail: String,
-}
+use text::TierOutcome as TextTier;
 
 /// T1 and T2 of one engine's rankings over `queries` against `want`.
 fn text_tiers(
@@ -1293,11 +1294,15 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
 
     // T1 and T2 over the whole query set.
     let mut results = Vec::new();
+    let mut strawmann_max_rel = 0.0f64;
     for eng in &engines {
         let got = eng
             .query_text(&a.collection, &a.field, &queries, a.limit as u64, k1, b)
             .await?;
         let (max_rel, rank, nm) = text_tiers(&index, &queries, &truth.hits, &got, a.k1, a.b, &a);
+        if eng.label == "strawmann" {
+            strawmann_max_rel = max_rel;
+        }
         tiers.push(TextTier {
             skipped: false,
             tier: "T1 score value",
@@ -1484,10 +1489,48 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
         }
     );
     if let Some(path) = &a.json {
+        // The build identity, as the vector differ reads it (`fullrun.py`
+        // sets all three).
+        let env = |k: &str, unset: &str| std::env::var(k).unwrap_or_else(|_| unset.into());
+        let qdrant_version = env("QDRANT_VERSION", differ::QDRANT_UNSET);
+        let strawmann_commit = env("STRAWMANN_COMMIT", differ::COMMIT_UNSET);
+        let isa_build = env("STRAWMANN_ISA_BUILD", differ::ISA_UNSET);
+        let conf = text::TextConformanceRow {
+            dataset: &a.dataset,
+            params,
+            k1: a.k1,
+            b: a.b,
+            limit: a.limit,
+            value_epsilon: a.value_epsilon,
+            tie_epsilon: a.tie_epsilon,
+            qdrant_version: &qdrant_version,
+            strawmann_commit: &strawmann_commit,
+            isa_build: &isa_build,
+            corpus_checksum,
+            query_checksum,
+            tiers: &tiers,
+        };
+        let t1 = tiers
+            .iter()
+            .find(|t| t.tier == "T1 score value" && t.engine == "strawmann");
         let row = serde_json::json!({
+            // The fields `results.py` records, as the vector differ writes
+            // them: the sink licenses a text row from its strawmANN T1.
+            "hash": format!("{:016x}", conf.hash()),
+            "dataset": a.dataset,
+            "metric": "BM25",
+            "dim": 0,
+            "qdrant_version": qdrant_version,
+            "strawmann_commit": strawmann_commit,
+            "isa_build": isa_build,
+            "tier_reached": conf.tier_reached(),
+            "licenses_perf": conf.licenses_perf(),
+            "base_checksum": format!("{corpus_checksum:016x}"),
+            "detail": t1.map(|t| t.detail.clone()).unwrap_or_default(),
+            "max_delta": strawmann_max_rel,
             "oracle_revision": text::ORACLE_REVISION,
             "corpus_checksum": format!("{corpus_checksum:x}"),
-            "query_checksum": format!("{query_checksum:x}"),
+            "query_checksum": format!("{query_checksum:016x}"),
             "lowercase": params.lowercase,
             "english_stopwords": params.english_stopwords,
             "english_stemmer": params.english_stemmer,
@@ -1516,15 +1559,43 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
     };
     let (docs, corpus_checksum) = text::read_corpus(&a.corpus)?;
     let (queries, query_checksum) = text::read_queries(&a.queries)?;
-    let truth = load_bm25_truth(
-        &a.truth,
-        params,
-        a.k1,
-        a.b,
-        a.limit,
-        corpus_checksum,
-        query_checksum,
-    )?;
+    let index = text::Bm25Index::build(params, &docs);
+    let truth = if let Some(path) = &a.truth {
+        load_bm25_truth(
+            path,
+            params,
+            a.k1,
+            a.b,
+            a.limit,
+            corpus_checksum,
+            query_checksum,
+        )?
+    } else {
+        let settings = text::Bm25Settings {
+            params,
+            k1: a.k1,
+            b: a.b,
+            limit: a.limit,
+        };
+        let parity = a.parity.clone();
+        let allowed = move |p: usize| parity.as_deref() == Some(text::parity_of(p));
+        let allowed: Option<&(dyn Fn(usize) -> bool + Sync)> =
+            a.parity.as_ref().map(|_| &allowed as _);
+        text::Bm25Truth::from_index(
+            &index,
+            settings,
+            corpus_checksum,
+            &queries,
+            query_checksum,
+            allowed,
+        )
+    };
+    let filter = a.parity.as_ref().map(|v| {
+        qdrant_client::qdrant::Filter::must([qdrant_client::qdrant::Condition::matches(
+            engine::TEXT_PARITY_KEY,
+            v.clone(),
+        )])
+    });
     let eng = engine::Engine::connect(&a.label, &a.engine)?;
     if !a.skip_upload {
         eprintln!(
@@ -1540,16 +1611,16 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
     }
     #[allow(clippy::cast_possible_truncation)]
     let returned = eng
-        .query_text(
+        .query_text_filtered(
             &a.collection,
             &a.field,
             &queries,
             a.limit as u64,
             a.k1 as f32,
             a.b as f32,
+            filter.as_ref(),
         )
         .await?;
-    let index = text::Bm25Index::build(params, &docs);
     let mut agreement =
         text::agreement(&index, &truth, &queries, &returned, a.limit, a.tie_epsilon);
     if let Some(path) = &a.qrels {
@@ -1603,7 +1674,16 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, serde_json::to_string_pretty(&agreement)?)?;
+        // What was searched beside how it agreed, so a reader joins a row
+        // only to the variant it ran.
+        let mut row = serde_json::to_value(&agreement)?;
+        row["collection"] = a.collection.clone().into();
+        row["k1"] = a.k1.into();
+        row["b"] = a.b.into();
+        row["parity"] = a.parity.clone().into();
+        row["corpus_checksum"] = format!("{corpus_checksum:016x}").into();
+        row["query_checksum"] = format!("{query_checksum:016x}").into();
+        std::fs::write(path, serde_json::to_string_pretty(&row)?)?;
     }
     Ok(())
 }
