@@ -659,7 +659,7 @@ fn run_datasets() {
             d.n,
             d.dim,
             d.n_queries,
-            d.metric.as_str(),
+            d.metric.map_or("-", |m| m.as_str()),
             if d.gt_shipped { "shipped" } else { "recompute" },
             d.role
         );

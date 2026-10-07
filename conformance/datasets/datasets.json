@@ -423,5 +423,85 @@
         }
       ]
     }
+  },
+  {
+    "name": "scifact",
+    "role": "BM25 over a text index: the small BEIR set, a development fixture for the oracle and the differ (decisions.md, 2026-10-07)",
+    "format": "beir",
+    "n": 5183,
+    "n_queries": 300,
+    "gt_shipped": false,
+    "status": "available",
+    "notes": "BEIR scifact, test split. No vectors: `convert-beir` writes the text layout `conformance bm25-truth` reads (text/corpus.jsonl, queries.txt, qrels.tsv). md5 is BEIR's published digest.",
+    "files": [
+      {
+        "path": "scifact.zip",
+        "link": "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip",
+        "bytes": 2816079,
+        "sha256": "536e14446a0ba56ed1398ab1055f39fe852686ecad24a6306c80c490fa8e0165",
+        "md5": "5f7d1de60b170fc8027bb7898e2efca1",
+        "role": "archive"
+      }
+    ],
+    "extract": {
+      "kind": "zip",
+      "members": [
+        {
+          "path": "scifact/corpus.jsonl",
+          "bytes": 8106566,
+          "role": "base"
+        },
+        {
+          "path": "scifact/queries.jsonl",
+          "bytes": 209731,
+          "role": "queries"
+        },
+        {
+          "path": "scifact/qrels/test.tsv",
+          "bytes": 5389,
+          "role": "qrels"
+        }
+      ]
+    }
+  },
+  {
+    "name": "fiqa",
+    "role": "BM25 over a text index with qrels: the exact-score tier and nDCG@10 (decisions.md, 2026-10-07)",
+    "format": "beir",
+    "n": 57638,
+    "n_queries": 648,
+    "gt_shipped": false,
+    "status": "available",
+    "notes": "BEIR FiQA-2018, test split. No vectors: `convert-beir` writes the text layout `conformance bm25-truth` reads. md5 is BEIR's published digest.",
+    "files": [
+      {
+        "path": "fiqa.zip",
+        "link": "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/fiqa.zip",
+        "bytes": 17948027,
+        "sha256": "32c7df99ed21252fdfb2cf3f5673502a8d245ee0c44c4a133570d92ce2b3ad02",
+        "md5": "17918ed23cd04fb15047f73e6c3bd9d9",
+        "role": "archive"
+      }
+    ],
+    "extract": {
+      "kind": "zip",
+      "members": [
+        {
+          "path": "fiqa/corpus.jsonl",
+          "bytes": 47949497,
+          "role": "base"
+        },
+        {
+          "path": "fiqa/queries.jsonl",
+          "bytes": 706247,
+          "role": "queries"
+        },
+        {
+          "path": "fiqa/qrels/test.tsv",
+          "bytes": 25256,
+          "role": "qrels"
+        }
+      ]
+    }
   }
 ]

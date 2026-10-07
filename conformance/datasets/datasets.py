@@ -7,6 +7,7 @@
     datasets.py verify [name ...]       re-checksum what is on disk, fetch nothing
     datasets.py extract [name ...]      unpack archives named in the descriptor
     datasets.py bfb-config <name>       emit a bfb-compatible dataset entry
+    datasets.py convert-beir [name ...] BEIR corpora to the BM25 oracle's text layout
     datasets.py add                     scaffold a new entry, with digests fetched
 
 Destination, highest source first: `--data-dir`, then `$STRAWMANN_DATA`,
@@ -98,6 +99,7 @@ import sys
 import tarfile
 import textwrap
 import tomllib
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -601,11 +603,14 @@ def cmd_extract(args) -> int:
         src = archive.local(DATA_ROOT)
         print(f"  extracting {d.name}/{archive.path} -> {root}")
         root.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(src) as tf:
-            # `filter="data"` refuses absolute paths, `..` escapes, symlinks and
-            # device nodes. Python 3.14 makes it the default; setting it keeps
-            # 3.11 and 3.12 from silently using the permissive behaviour.
-            tf.extractall(root, filter="data")
+        if ex.get("kind") == "zip":
+            extract_zip(src, root)
+        else:
+            with tarfile.open(src) as tf:
+                # `filter="data"` refuses absolute paths, `..` escapes, symlinks and
+                # device nodes. Python 3.14 makes it the default; setting it keeps
+                # 3.11 and 3.12 from silently using the permissive behaviour.
+                tf.extractall(root, filter="data")
         for m in members:
             p = root / m["path"]
             if not p.exists():
@@ -733,6 +738,116 @@ def digest_from_head(head_output: str) -> str:
     return ""
 
 
+def extract_zip(src: Path, root: Path) -> None:
+    """Unpack a zip into `root`, refusing a member that would land outside it:
+    `zipfile` has no `filter="data"`, so the check `tarfile` makes is made here."""
+    base = root.resolve()
+    with zipfile.ZipFile(src) as zf:
+        for name in zf.namelist():
+            dest = (root / name).resolve()
+            if dest != base and base not in dest.parents:
+                raise SystemExit(f"{src}: member {name!r} would extract outside {root}")
+        zf.extractall(root)
+
+
+#: Where `convert-beir` writes a corpus in the layout `conformance bm25-truth`
+#: reads, under the dataset's directory.
+TEXT_DIR = "text"
+
+
+def beir_to_text(corpus: list[str], queries: list[str],
+                 qrels: list[str]) -> tuple[list[str], list[str], list[str], list[str]]:
+    """A BEIR split as `(corpus.jsonl, queries.txt, queries.ids, qrels.tsv)` lines.
+
+    - Corpus: one point per BEIR document, in file order, so the row index is
+      the point id (§4.3); `values` is `[title, text]`, the field a text index
+      holds as an array (its tokens concatenate into one document).
+    - Queries: the split's judged queries only, in `queries.jsonl` order, one
+      per line with any line break folded to a space; `queries.ids` holds their
+      BEIR ids beside them.
+    - Qrels: `query row, point row, grade`, both ids mapped to rows, the BEIR
+      header dropped. A judgement naming a document or query the files do not
+      hold is an error, not a skipped line.
+    """
+    corpus_out, doc_row = [], {}
+    for line in corpus:
+        if not line.strip():
+            continue
+        doc = json.loads(line)
+        doc_id = str(doc["_id"])
+        if doc_id in doc_row:
+            raise ValueError(f"corpus: document {doc_id!r} appears twice")
+        doc_row[doc_id] = len(corpus_out)
+        corpus_out.append(json.dumps({"id": doc_id,
+                                      "values": [doc.get("title") or "", doc.get("text") or ""]},
+                                     ensure_ascii=False))
+    judged: dict[str, list[tuple[str, int]]] = {}
+    for i, line in enumerate(qrels):
+        cols = line.rstrip("\n").split("\t")
+        if i == 0 and cols[:2] == ["query-id", "corpus-id"]:
+            continue
+        if not line.strip():
+            continue
+        qid, did, grade = cols[0], cols[1], int(cols[2])
+        if did not in doc_row:
+            raise ValueError(f"qrels line {i + 1}: document {did!r} is not in the corpus")
+        judged.setdefault(qid, []).append((did, grade))
+    texts, ids, qrels_out, seen = [], [], [], set()
+    for line in queries:
+        if not line.strip():
+            continue
+        q = json.loads(line)
+        qid = str(q["_id"])
+        if qid not in judged or qid in seen:
+            continue
+        seen.add(qid)
+        row = len(texts)
+        texts.append(" ".join(str(q["text"]).split()))
+        ids.append(qid)
+        qrels_out += [f"{row}\t{doc_row[did]}\t{grade}" for did, grade in judged[qid]]
+    missing = sorted(set(judged) - seen)
+    if missing:
+        raise ValueError(f"qrels judge {len(missing)} queries queries.jsonl does not hold, "
+                         f"e.g. {missing[0]!r}")
+    return corpus_out, texts, ids, qrels_out
+
+
+def cmd_convert_beir(args) -> int:
+    n = 0
+    for d in load(args.datasets or None):
+        if d.format != "beir":
+            if args.datasets:
+                print(f"  {d.name}: format {d.format!r}, not beir", file=sys.stderr)
+                return 1
+            continue
+        src = d.extract_dir(DATA_ROOT)
+        by_role = {m["role"]: src / m["path"] for m in d.extract_members}
+        need = ("base", "queries", "qrels")
+        if any(r not in by_role or not by_role[r].exists() for r in need):
+            print(f"  {d.name}: not extracted yet (datasets.py fetch {d.name})", file=sys.stderr)
+            continue
+        corpus, texts, ids, qrels = beir_to_text(
+            *(by_role[r].read_text(encoding="utf-8").splitlines() for r in need))
+        out = DATA_ROOT / d.name / TEXT_DIR
+        out.mkdir(parents=True, exist_ok=True)
+        for name, lines in (("corpus.jsonl", corpus), ("queries.txt", texts),
+                            ("queries.ids", ids), ("qrels.tsv", qrels)):
+            (out / name).write_text("".join(f"{x}\n" for x in lines), encoding="utf-8")
+        if d.n and len(corpus) != d.n:
+            print(f"  {RED}!!{OFF} {d.name}: {len(corpus)} documents, descriptor says {d.n}",
+                  file=sys.stderr)
+            return 1
+        if d.n_queries and len(texts) != d.n_queries:
+            print(f"  {RED}!!{OFF} {d.name}: {len(texts)} judged queries, descriptor says "
+                  f"{d.n_queries}", file=sys.stderr)
+            return 1
+        print(f"  {d.name}: {len(corpus):,} documents, {len(texts):,} queries, "
+              f"{len(qrels):,} judgements -> {out}")
+        n += 1
+    print(f"converted {n} corpus(es)" if n else "nothing to convert")
+    return 0
+
+
 def cmd_self_test(args) -> int:
     """Unit checks for the pure helpers; `scripts/check.py`-shaped."""
     hop = "HTTP/2 302\netag: \"abc123\"\nlocation: https://cdn/x\n\n"
@@ -830,6 +945,26 @@ def cmd_self_test(args) -> int:
                 f"{d.name}: extract members but nothing to extract them from"
             assert any(m["role"] == "base" for m in d.extract_members), \
                 f"{d.name}: no base member, so `bfb-config` cannot name a path"
+    corpus = ['{"_id": "d1", "title": "Alpha", "text": "beta"}',
+              '{"_id": "d2", "title": "", "text": "gamma"}', "",
+              '{"_id": 3, "text": "delta"}']
+    queries = ['{"_id": "q9", "text": "unjudged"}', '{"_id": "q2", "text": "two\\nlines"}',
+               '{"_id": "q1", "text": "one"}']
+    qrels = ["query-id\tcorpus-id\tscore", "q1\td2\t1", "q2\t3\t2", "q2\td1\t1"]
+    c, texts, ids, qr = beir_to_text(corpus, queries, qrels)
+    assert [json.loads(x)["values"] for x in c] == [["Alpha", "beta"], ["", "gamma"], ["", "delta"]], \
+        "a document is [title, text], in file order, blank lines skipped"
+    assert (texts, ids) == (["two lines", "one"], ["q2", "q1"]), \
+        "judged queries only, in queries.jsonl order, line breaks folded"
+    assert qr == ["0\t2\t2", "0\t0\t1", "1\t1\t1"], "qrels in row space"
+    for bad, why in ((["q1\tnope\t1"], "an unknown document"),
+                     (["q7\td1\t1"], "an unknown query")):
+        try:
+            beir_to_text(corpus, queries, bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{why} in the qrels must fail")
     print("datasets.py self-test: ok")
     return 0
 
@@ -916,6 +1051,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--dim", type=int)
     p.add_argument("--metric", default="cosine")
     p.add_argument("--role", default="")
+    with_names(sub.add_parser("convert-beir", parents=[common],
+                              help="BEIR corpora to the BM25 oracle's text layout"))
     sub.add_parser("self-test", help="unit checks for the pure helpers", parents=[common])
 
     args = ap.parse_args(argv[1:])
@@ -935,6 +1072,7 @@ def main(argv: list[str]) -> int:
     return {"list": cmd_list, "info": cmd_info, "verify": cmd_verify,
             "fetch": cmd_fetch, "extract": cmd_extract,
             "bfb-config": cmd_bfb_config, "add": cmd_add,
+            "convert-beir": cmd_convert_beir,
             "self-test": cmd_self_test}[args.cmd](args)
 
 

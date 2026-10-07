@@ -258,8 +258,10 @@ pub struct DatasetSpec {
     pub n: usize,
     #[serde(rename = "vector_size", default)]
     pub dim: usize,
-    #[serde(rename = "distance", deserialize_with = "de_metric")]
-    pub metric: crate::oracle::Metric,
+    /// `None` for a text corpus, which BM25 ranks and no vector metric does
+    /// (decisions.md, 2026-10-07).
+    #[serde(rename = "distance", default, deserialize_with = "de_metric")]
+    pub metric: Option<crate::oracle::Metric>,
     #[serde(default)]
     pub n_queries: usize,
     /// §4.2: whether ground truth ships with the dataset or must be recomputed.
@@ -302,7 +304,7 @@ impl std::fmt::Display for Status {
     }
 }
 
-fn de_metric<'de, D>(d: D) -> Result<crate::oracle::Metric, D::Error>
+fn de_metric<'de, D>(d: D) -> Result<Option<crate::oracle::Metric>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -310,6 +312,7 @@ where
     use serde::de::Error;
     let s = String::deserialize(d)?;
     crate::oracle::Metric::parse(&s)
+        .map(Some)
         .ok_or_else(|| D::Error::custom(format!("unknown metric {s:?}")))
 }
 
@@ -493,12 +496,12 @@ mod tests {
     fn dataset_table_matches_section_4_2() {
         let sift = find("sift1m").unwrap();
         assert_eq!(sift.dim, 128);
-        assert_eq!(sift.metric, crate::oracle::Metric::Euclid);
+        assert_eq!(sift.metric, Some(crate::oracle::Metric::Euclid));
         assert!(sift.gt_shipped);
 
         let headline = find("dbpedia-openai-1m").unwrap();
         assert_eq!(headline.dim, 1536);
-        assert_eq!(headline.metric, crate::oracle::Metric::Cosine);
+        assert_eq!(headline.metric, Some(crate::oracle::Metric::Cosine));
         // §4.2 marks the headline tier's GT as "recompute".
         assert!(!headline.gt_shipped);
 
