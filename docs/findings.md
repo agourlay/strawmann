@@ -101,7 +101,13 @@ every W12 row refused (recall missing) and its other rows as measured; the
 night's mismatched sweeps no longer join, and the sink's W12 rows for the pair
 were deleted before re-ingesting. laion's W12 needs a pair measured with the
 fix. sift1m's W12 recall is unaffected:
-Qdrant scans both tiers there. dbpedia (d=1536, about 1,700 points) walks
+Qdrant scans both tiers there, so ACORN never applies, and strawmANN ignores
+the flag. Its published 1007 page (sel1 1.95x, sel10 2.25x) is kept, though it
+no longer regenerates: the join refuses sift 1007's sweeps for not recording
+`acorn`, so `compare.py --write-readme` for that pair would print W12 as
+recall missing. `readme-table-current` did not catch it, since it checks
+placeholder labels rather than the published pairs. The next sift pair
+replaces the page. dbpedia (d=1536, about 1,700 points) walks
 sel10 too, so its next pair needs the fix.
 
 **58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**
