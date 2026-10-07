@@ -684,6 +684,19 @@ class ReportHostTests(unittest.TestCase):
                                           [_row("W3", 2000)], conf_a=bare, conf_b=bare)
             self.assertIn("tolerance of ?", report.build(runs, "t"))
 
+    def test_the_throughput_chart_draws_a_text_pairs_rows(self):
+        """A text corpus runs W15 alone, and the chart's fixed list of vector
+        rows drew an empty frame for every BM25 report."""
+        with tempfile.TemporaryDirectory() as tmp:
+            report, runs, df = self._pair(
+                Path(tmp), [_row("W15", 105), _row("W15-sat", 775)],
+                [_row("W15", 80), _row("W15-sat", 537)])
+            c = report.chart_throughput(runs, df)
+            self.assertIn("W15-sat", c["html"])
+            self.assertIn("775", c["html"])
+            report, runs, df = self._pair(Path(tmp), [_row("W2", 1)], [_row("W2", 1)])
+            self.assertIsNone(report.chart_throughput(runs, df))
+
     def test_licence_carries_the_delta_behind_the_tier(self):
         """§8.9 lists max|Δscore| and p99|Δscore| as row fields. They were
         measured and then rendered into T1's prose, so the page carried the

@@ -168,9 +168,15 @@ def refused_ids(runs: list[Run]) -> dict[str, str]:
     """
     return {wid: why for wid, why in joined_verdicts(runs).items() if why}
 
-def chart_throughput(runs: list[Run], df: pd.DataFrame) -> dict:
-    wanted = ["W0", "W3", "W4", "W5", "W6", "W7", "W8", "W9", "W11", "W13"]
+def chart_throughput(runs: list[Run], df: pd.DataFrame) -> dict | None:
+    import workloads
+    # A text corpus runs W15 alone (`workloads.text_table`), whose search rows
+    # are none of the vector ones: the chart drew an empty frame for them.
+    wanted = ["W0", "W3", "W4", "W5", "W6", "W7", "W8", "W9", "W11", "W13",
+              *(w.id for w in workloads.text_table() if not w.upload_only)]
     present = [w for w in wanted if w in set(df["id"])]
+    if not present:
+        return None
     refused = refused_ids(runs)
     # Named in the label rather than dropped: the bar is still that engine's
     # own measured rate, which is licensed on its own (§8 T1). What is not
