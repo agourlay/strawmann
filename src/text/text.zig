@@ -6,6 +6,8 @@ const std = @import("std");
 pub const snowball = @import("snowball.zig");
 pub const stem_english = @import("stem_english.zig");
 pub const tokenizer = @import("tokenizer.zig");
+pub const index = @import("index.zig");
+pub const TextIndex = index.TextIndex;
 pub const unicode_tables = @import("unicode_tables.zig");
 pub const stopwords_english = @import("stopwords_english.zig");
 
