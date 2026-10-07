@@ -876,6 +876,10 @@ pub const Query = struct {
                 9 => return unimplemented("MMR queries"),
                 10 => return unimplemented("RRF fusion queries"),
                 11 => return unimplemented("relevance feedback queries"),
+                // Qdrant 1.19.3-dev's `TextQuery` (BM25 over a text index). In
+                // scope since 2026-10-07 (decisions.md) but not built yet;
+                // skipped as unknown, it answered "missing or invalid field".
+                12 => return unimplemented("text (BM25) queries"),
                 else => try r.skip(t.wire_type),
             }
         }
@@ -1491,6 +1495,9 @@ test "every rejected Query variant names itself" {
         .{ 7, "sample queries" },
         .{ 8, "formula queries" },
         .{ 9, "MMR queries" },
+        .{ 10, "RRF fusion queries" },
+        .{ 11, "relevance feedback queries" },
+        .{ 12, "text (BM25) queries" },
     };
     var buf: [64]u8 = undefined;
     for (cases) |c| {

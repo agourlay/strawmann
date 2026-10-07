@@ -392,6 +392,55 @@ test "e2e: §1 non-goals return UNIMPLEMENTED naming the construct" {
         try testing.expectEqualStrings("fusion (RRF) queries", resp.message);
     }
 
+    // Qdrant dev's BM25 `text` query. Skipped as an unknown field it read
+    // "missing or invalid field", an INVALID_ARGUMENT that blames the client.
+    {
+        var w = wire.Writer.init(&req_buf);
+        try w.writeStringField(1, "u");
+        const qp = try w.beginNested(2, 3);
+        try w.writeStringField(1, "u");
+        const query = try w.beginNested(3, 3);
+        const text = try w.beginNested(12, 2); // Query.text
+        try w.writeStringField(1, "alpha gamma"); // TextQuery.query
+        try w.endNested(text);
+        try w.endNested(query);
+        try w.writeStringField(4, "body"); // using: the payload field
+        try w.endNested(qp);
+
+        const resp = try c.call("/qdrant.Points/QueryBatch", w.written(), &out);
+        try testing.expectEqual(grpc.Status.unimplemented, resp.status);
+        try testing.expectEqualStrings("text (BM25) queries", resp.message);
+    }
+
+    // A collection declaring a sparse vector is refused at create; it was
+    // created, and only the first sparse upsert or query failed. An empty
+    // `sparse_vectors_config` declares nothing and is accepted.
+    for ([_]bool{ true, false }) |declares| {
+        var w = wire.Writer.init(&req_buf);
+        try w.writeStringField(1, if (declares) "sparse" else "sparse_empty");
+        const vc = try w.beginNested(10, 2);
+        const vp = try w.beginNested(1, 2);
+        try w.writeVarintField(1, 4);
+        try w.writeVarintField(2, 3);
+        try w.endNested(vp);
+        try w.endNested(vc);
+        const svc = try w.beginNested(16, 2); // sparse_vectors_config
+        if (declares) {
+            const entry = try w.beginNested(1, 2); // map entry
+            try w.writeStringField(1, "bm25");
+            try w.endNested(entry);
+        }
+        try w.endNested(svc);
+
+        const resp = try c.call("/qdrant.Collections/Create", w.written(), &out);
+        if (declares) {
+            try testing.expectEqual(grpc.Status.unimplemented, resp.status);
+            try testing.expect(std.mem.indexOf(u8, resp.message, "sparse vectors") != null);
+        } else {
+            try testing.expectEqual(grpc.Status.ok, resp.status);
+        }
+    }
+
     // Filtering is phase 3 and must not be silently ignored, ignoring it would
     // return more results than asked for and quietly invalidate W12. An
     // *empty* `Filter{}` carries no condition, though, and Qdrant answers it

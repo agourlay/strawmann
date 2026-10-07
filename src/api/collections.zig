@@ -104,6 +104,19 @@ pub fn createCollection(ctx: *Context, req: *const server.Request, body: []const
             // `optional QuantizationConfig quantization_config = 14`
             // (VERIFIED, collections.proto).
             14 => top_quant_raw = r.bytes() catch |e| return decodeErr(req, e),
+            // `optional SparseVectorConfig sparse_vectors_config = 16`
+            // (VERIFIED, qdrant-client 1.19.0 `qdrant.rs`), whose only field
+            // is `map<string, SparseVectorParams> map = 1`. Skipped as
+            // unknown, the create succeeded and only the first sparse upsert
+            // or query failed. An empty one declares nothing and passes.
+            16 => {
+                var sub = r.nested() catch |e| return decodeErr(req, e);
+                while (!sub.atEnd()) {
+                    const st = sub.tag() catch |e| return decodeErr(req, e);
+                    if (st.field == 1) return err(req, .unimplemented, "sparse vectors (§1 non-goal)");
+                    sub.skip(st.wire_type) catch |e| return decodeErr(req, e);
+                }
+            },
             else => r.skip(t.wire_type) catch |e| return decodeErr(req, e),
         }
     }
