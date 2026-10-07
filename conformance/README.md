@@ -23,9 +23,9 @@ REJECTED, and this is the gate working: perf row carries no conformance hash.
 ## Why Rust, and why a separate binary
 
 It links the **same `qdrant-client` crate that `bfb` links** (this crate pins
-rust-client commit `d960517`, qdrant/rust-client#299: the `dev` branch
-regenerated from Qdrant dev's proto, for BM25's `TextQuery`; bfb's pinned
-commit builds an older commit of the same `1.16.1-dev` line), and talks to both
+rust-client commit `71143d8` on `dev`, the merge of qdrant/rust-client#299,
+which regenerated the client from Qdrant dev's proto for BM25's `TextQuery`;
+bfb's pinned commit builds an older commit of the same `1.16.1-dev` line), and talks to both
 engines through it. §8.5:
 
 > "`conformance/` is a Rust binary using the same `qdrant-client` crate that
