@@ -269,6 +269,20 @@ struct TextRelevanceRun {
     json: Option<PathBuf>,
 }
 
+/// `stem-vocabulary`'s arguments.
+#[derive(clap::Args)]
+struct StemVocabularyRun {
+    /// A `corpus.jsonl`, tokenized as the text index does before stemming
+    /// (word split, lowercase). Repeatable.
+    #[arg(long)]
+    corpus: Vec<PathBuf>,
+    /// A file of one word per line, taken as written. Repeatable.
+    #[arg(long)]
+    words: Vec<PathBuf>,
+    #[arg(long)]
+    out: PathBuf,
+}
+
 /// `convert-vecs`'s arguments.
 #[derive(clap::Args)]
 struct ConvertVecsRun {
@@ -361,6 +375,11 @@ enum Command {
     /// reports recall, exact-order agreement and score deltas against the
     /// oracle. What `relevance` is for vectors.
     TextRelevance(TextRelevanceRun),
+
+    /// Every distinct word of the given corpora and word lists, with its
+    /// English stem from `qdrant-rust-stemmers` 1.2.2, one `word\tstem` per
+    /// line: what strawmANN's port of the stemmer is checked against.
+    StemVocabulary(StemVocabularyRun),
 
     /// §8.6 / W10: measure recall against our fp64 ground truth on **one**
     /// engine, over an `ef` sweep.
@@ -539,6 +558,8 @@ fn main() -> anyhow::Result<()> {
         Command::Bm25Truth(a) => run_bm25_truth(a),
 
         Command::TextRelevance(a) => run_text_relevance(a),
+
+        Command::StemVocabulary(a) => run_stem_vocabulary(a),
 
         Command::Differ(a) => run_differ(a),
     }
@@ -832,6 +853,40 @@ fn run_bm25_truth(a: Bm25TruthRun) -> anyhow::Result<()> {
         a.k1,
         a.b
     );
+    Ok(())
+}
+
+fn run_stem_vocabulary(a: StemVocabularyRun) -> anyhow::Result<()> {
+    let tokenizer = text::Tokenizer::new(text::TextParams::default());
+    let mut words = std::collections::BTreeSet::new();
+    for path in &a.corpus {
+        let (docs, _) = text::read_corpus(path)?;
+        for value in docs.iter().flatten() {
+            words.extend(tokenizer.tokens(value));
+        }
+    }
+    for path in &a.words {
+        let list = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+        words.extend(list.lines().map(str::to_string));
+    }
+    let stemmer = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English);
+    let mut out = String::new();
+    for word in &words {
+        anyhow::ensure!(
+            !word.contains(['\t', '\n']),
+            "a word holds a tab or a newline: {word:?}"
+        );
+        out.push_str(word);
+        out.push('\t');
+        out.push_str(&stemmer.stem(word));
+        out.push('\n');
+    }
+    if let Some(dir) = a.out.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&a.out, out)?;
+    eprintln!("wrote {}: {} words", a.out.display(), words.len());
     Ok(())
 }
 
