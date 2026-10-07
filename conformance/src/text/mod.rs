@@ -16,8 +16,13 @@
 //!   token length bounds and every other tokenizer are outside decisions.md's
 //!   scope and have no constructor here.
 //! - **Documents.** A point is a document when its field yields at least one
-//!   token; the tokens of an array's values are concatenated (Qdrant counts
-//!   points, not array elements, since 0a0fd8790).
+//!   token, or holds an array of two or more values; the tokens of an array's
+//!   values are concatenated (Qdrant counts points, not array elements, since
+//!   0a0fd8790). The second clause is Qdrant's, not BM25's: a scoring index
+//!   matches phrases, so `tokenize_document` puts a boundary token between an
+//!   array's values, and `["", ""]` is a non-empty token stream of length 0.
+//!   It is mirrored so the exact tier holds on real corpora (decisions.md,
+//!   2026-10-07); fiqa has 40 such points.
 //! - **Statistics.** `N` documents, `df` per term, `avgdl` = total tokens / `N`,
 //!   over the whole collection. Qdrant gathers them per shard; the comparison
 //!   runs it on one, where the two are the same.
@@ -38,6 +43,12 @@ use std::path::Path;
 
 use anyhow::Context;
 use rayon::prelude::*;
+
+/// Which rules a truth was computed under. A truth from another revision is
+/// refused rather than compared: the ids would look right and the statistics
+/// would not be. 2: an array of two or more values is a document (Qdrant's
+/// boundary token).
+pub const ORACLE_REVISION: u32 = 2;
 
 /// Qdrant's BM25 defaults (`Bm25Params`, `bm25/mod.rs`).
 pub const DEFAULT_K1: f64 = 1.2;
@@ -162,7 +173,9 @@ impl Bm25Index {
                     len += 1;
                 }
             }
-            if len > 0 {
+            // Qdrant's boundary token makes an array of two or more values a
+            // document however little of it survives tokenization.
+            if len > 0 || values.len() > 1 {
                 documents += 1;
                 total_tokens += u64::from(len);
                 for term in counts.keys() {
@@ -304,6 +317,9 @@ pub struct Bm25Settings {
 /// Exact BM25 top-k for every query, and everything it was computed from.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Bm25Truth {
+    /// `ORACLE_REVISION` when computed; absent in a file from before it existed.
+    #[serde(default)]
+    pub revision: u32,
     pub corpus_checksum: String,
     pub query_checksum: String,
     pub lowercase: bool,
@@ -338,6 +354,7 @@ impl Bm25Truth {
             .map(|q| index.search(q, k1, b, limit, None))
             .collect();
         Self {
+            revision: ORACLE_REVISION,
             corpus_checksum: format!("{corpus_checksum:x}"),
             query_checksum: format!("{query_checksum:x}"),
             lowercase: params.lowercase,
@@ -509,6 +526,21 @@ mod tests {
             vec!["the and of".to_string()],
         ];
         Bm25Index::build(all_on(), &docs)
+    }
+
+    #[test]
+    fn an_array_of_two_values_is_a_document_even_without_tokens() {
+        let docs = vec![
+            vec!["alpha".to_string()],
+            vec![String::new(), "the".to_string()],
+            vec!["the".to_string()],
+            vec![String::new()],
+        ];
+        let idx = Bm25Index::build(all_on(), &docs);
+        // Point 1 is a document of length 0, through Qdrant's array boundary;
+        // a single value that tokenizes to nothing (points 2, 3) is not.
+        assert_eq!(idx.documents(), 2);
+        assert_eq!(idx.avgdl(), Some(0.5));
     }
 
     #[test]

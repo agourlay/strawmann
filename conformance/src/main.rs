@@ -852,6 +852,7 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
     // §4.3: a truth speaks for the corpus, queries and settings it was computed
     // from, and for nothing else.
     let mismatch = [
+        (truth.revision != text::ORACLE_REVISION, "oracle revision"),
         (
             truth.corpus_checksum != format!("{corpus_checksum:x}"),
             "corpus",

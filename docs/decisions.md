@@ -2257,3 +2257,29 @@ it, so one generated from the pinned proto, for the conformance binary and
 bfb), a BM25 oracle and differ tiers before any engine code, the engine, then
 the W15 rows. Qdrant is pinned to a `dev` commit at or after `850859ec9` and
 re-pinned deliberately, since the API is days old.
+
+## BM25 counts an array of empty values as a document, as Qdrant does, decided 2026-10-07
+
+The BM25 oracle (`conformance/src/text`) first counted a point as a document
+when its field yielded at least one token. Against Qdrant 850859ec9 that held
+exactly on scifact (recall 1.0, 300/300 queries in order, relative score
+difference 2.0e-7, f32) and not on fiqa (recall 0.9998, 627/648 in order,
+relative difference up to 3.6e-4). fiqa stores each document as
+`[title, text]`, and 40 of its 57,638 points tokenize to nothing.
+
+The cause is Qdrant's: a scoring text index matches phrases, so
+`tokenize_document` (`full_text_index/lifecycle.rs`) puts a boundary token
+between an array's values, and `["", ""]` is a non-empty token stream of
+length 0. Qdrant counts it in `N` and in `avgdl`'s denominator; a single
+empty string it does not. So `N` depends on the payload's shape rather than
+its text. Three points reproduce it: `"alpha beta"`, `"gamma"` and a third
+point. The `alpha` query scores the first 0.609970 when the third is `""`
+(N 2, avgdl 1.5) and 0.696072 when it is `["", ""]` (N 3, avgdl 1.0).
+
+The user chose to mirror it: the oracle counts an array of two or more values
+as a document whatever survives tokenization, strawmANN will too, and it is
+reported upstream. With the rule fiqa holds exactly (recall 1.0, 639/648 in
+order with the rest ties, relative difference 1.9e-7). Truth files carry
+`ORACLE_REVISION` (2 since this change), and `text-relevance` refuses one
+from another revision.
+
