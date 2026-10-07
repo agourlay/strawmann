@@ -2278,7 +2278,7 @@ point. The `alpha` query scores the first 0.609970 when the third is `""`
 
 The user chose to mirror it: the oracle counts an array of two or more values
 as a document whatever survives tokenization, strawmANN will too, and it is
-reported upstream. With the rule fiqa holds exactly (recall 1.0, 639/648 in
+reported upstream as qdrant/qdrant#11010. With the rule fiqa holds exactly (recall 1.0, 639/648 in
 order with the rest ties, relative difference 1.9e-7). Truth files carry
 `ORACLE_REVISION` (2 since this change), and `text-relevance` refuses one
 from another revision.
