@@ -116,6 +116,20 @@ CONFIG_NUMERIC = frozenset((
 ))
 
 
+def config_numeric(got: list[dict]) -> frozenset[str]:
+    """`CONFIG_NUMERIC` for one row's passes.
+
+    A search that ends on the clock (W11 since 973ade1, `qps_basis`
+    `write-window`) completes as many queries as the engine manages, so its
+    `n_queries` is an outcome like its qps: sift1m 1007's W11 read 1,418,137 /
+    1,420,378 / 1,453,827 and the fold warned and kept pass 1's. `n_requested`
+    stays a setting, so a real change to it still warns.
+    """
+    if all(r.get("qps_basis") == "write-window" for r in got):
+        return CONFIG_NUMERIC - {"n_queries"}
+    return CONFIG_NUMERIC
+
+
 def _median(vals: list) -> float | None:
     vals = [v for v in vals if isinstance(v, (int, float))]
     return statistics.median(vals) if vals else None
@@ -317,7 +331,8 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
         # is not a flag, so they stay with the rest of pass 1's description.
         numeric = {k for r in got for k, v in r.items()
                    if isinstance(v, (int, float)) and not isinstance(v, bool)}
-        for key in sorted(numeric - CONFIG_NUMERIC):
+        config = config_numeric(got)
+        for key in sorted(numeric - config):
             vals = [r.get(key) for r in got]
             have = [v for v in vals if isinstance(v, (int, float))
                     and not isinstance(v, bool)]
@@ -340,7 +355,7 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
         if "time_to_green_floored" in merged:
             wait = merged.get("index_wait_s")
             merged["time_to_green_floored"] = bfb_output.time_to_green_floored(wait)
-        for key in sorted(numeric & CONFIG_NUMERIC):
+        for key in sorted(numeric & config):
             seen = {v for v in (r.get(key) for r in got) if v is not None}
             if len(seen) > 1:
                 notes.append(f"{wid}: {key} differs between passes "

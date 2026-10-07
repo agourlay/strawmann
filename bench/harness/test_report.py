@@ -288,6 +288,19 @@ class ReportHostTests(unittest.TestCase):
                                           sw_a=sw, sw_b=sw_b, colls=colls)
             html = report.matched_recall_table(runs)
             self.assertIn("19,936 in a and 19,796 in b", html)
+            # The prose states the per-row table's verdict rather than assuming
+            # one: sift1m 1007's page said `W12-sel10` was refused a ratio
+            # beside a table printing 2.25x for it.
+            g = report.matched_recall_table.__globals__
+            with mock.patch.dict(g, {"refused_ids": lambda runs: {}}):
+                html = report.matched_recall_table(runs)
+            self.assertIn("per-row table compares <code>W12-sel10</code>", html)
+            self.assertNotIn("refuses <code>W12-sel10</code>", html)
+            why = "recall unequal: 1.0000 vs 0.9854"
+            with mock.patch.dict(g, {"refused_ids": lambda runs: {"W12-sel10": why}}):
+                html = report.matched_recall_table(runs)
+            self.assertIn("refuses <code>W12-sel10</code>", html)
+            self.assertIn(why, html)
             # One engine's graded sweep missing: no filtered table at all,
             # rather than that engine's unfiltered bench2 recall under it.
             report, runs, _df = self._pair(Path(tmp), rows_a, rows_b,
@@ -920,6 +933,28 @@ class ReportHostTests(unittest.TestCase):
         b["ef"] = 256
         _rows, _r, notes = agg.fold([[a], [b], [row(1)]])
         self.assertTrue(any("ef differs between passes" in n for n in notes), notes)
+
+    def test_a_search_that_ends_on_the_clock_medians_its_query_count(self):
+        """W11's search stops a quarter of the append past its end (973ade1),
+        so how many queries it completed is measured, like its qps: sift1m
+        1007's fold warned on 1,418,137 / 1,420,378 / 1,453,827 and kept pass 1's."""
+        import importlib
+        agg = importlib.import_module("aggregate")
+
+        def row(n, basis="write-window", requested=100_000_000):
+            return {"id": "W11", "status": "ok", "latency": {}, "qps": 1.0,
+                    "qps_basis": basis, "n_requested": requested, "n_queries": n}
+
+        rows, _rsd, notes = agg.fold([[row(670_395)], [row(679_233)], [row(679_463)]])
+        self.assertEqual(rows[0]["n_queries"], 679_233)
+        self.assertFalse(any("n_queries differs" in n for n in notes), notes)
+        # The request is still a setting.
+        _rows, _r, notes = agg.fold([[row(1)], [row(1, requested=5)], [row(1)]])
+        self.assertTrue(any("n_requested differs" in n for n in notes), notes)
+        # And a row sized by count keeps its count as configuration.
+        _rows, _r, notes = agg.fold([[row(50_000, "")], [row(100_000, "")],
+                                     [row(50_000, "")]])
+        self.assertTrue(any("n_queries differs" in n for n in notes), notes)
 
     def test_the_fold_medians_recall_too_and_keeps_the_build_spread(self):
         """`rows.json` carried the median qps of three passes while the recall

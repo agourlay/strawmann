@@ -1095,13 +1095,22 @@ def filtered_matched_recall_table(runs: list[Run]) -> str:
                    f"unseeded at each upload)")
     else:
         matched = f" over the {na or nb} points the condition matched" if na or nb else ""
+    # What the per-row table did with `W12-sel10`, read from it rather than
+    # assumed: sift1m 1007's page said the row was refused a ratio while the
+    # table above it printed 2.25x.
+    refusal = refused_ids(runs).get("W12-sel10")
+    if refusal:
+        row = ('. The per-row table refuses <code>W12-sel10</code> a ratio at the '
+               'one <code>ef</code> it measures (' + html.escape(refusal) + '); '
+               'held at equal recall instead, the comparison exists at every '
+               'recall both engines reach.')
+    else:
+        row = ('. The per-row table compares <code>W12-sel10</code> at the one '
+               '<code>ef</code> it measures; held at equal recall, the comparison '
+               'extends to every recall both engines reach.')
     return ('<h3 style="margin-top:28px">At matched recall, filtered to 10%</h3>'
             '<p class="note">The same reading under a keyword filter'
-            + html.escape(matched) +
-            '. The per-row table refuses <code>W12-sel10</code> a ratio because '
-            'the two engines land just outside the recall band at the one '
-            '<code>ef</code> it measures; held at equal recall instead, the '
-            'comparison exists at every recall both engines reach. Note the '
+            + html.escape(matched) + row + ' Note the '
             'shape rather than any single number: one engine\'s curve is flat '
             'in <code>ef</code> and the other\'s is steep, so where you match '
             'decides the ratio.</p>' + inner)
