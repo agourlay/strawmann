@@ -1241,11 +1241,12 @@ _RECALL_CACHE: dict[tuple, dict[int, dict]] = {}
 def recall_sweep(label: str, dataset: str, collection: str,
                  oversampling: float | None = None,
                  rescore: bool | None = None,
-                 grade: str | None = None) -> dict[int, dict]:
-    key = (label, dataset, collection, oversampling, rescore, grade)
+                 grade: str | None = None,
+                 acorn: bool | None = None) -> dict[int, dict]:
+    key = (label, dataset, collection, oversampling, rescore, grade, acorn)
     if key not in _RECALL_CACHE:
         _RECALL_CACHE[key] = recall_mod.load_recall(label, dataset, collection,
-                                                    oversampling, rescore, grade)
+                                                    oversampling, rescore, grade, acorn)
     return _RECALL_CACHE[key]
 
 
@@ -1257,7 +1258,7 @@ def recall_at(label: str, dataset: str, row: dict, wid: str) -> float | None:
     # sweep of its own condition (W12 point 3), and an unfiltered row only to
     # an unfiltered sweep.
     pt = recall_sweep(label, dataset, coll, *quant_key_of(row),
-                      grade=recall_mod.grade_of(wid)).get(int(ef))
+                      grade=recall_mod.grade_of(wid), acorn=row.get("acorn")).get(int(ef))
     return None if pt is None else pt.get("recall_at_10")
 
 

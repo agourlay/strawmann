@@ -292,15 +292,22 @@ class ReportHostTests(unittest.TestCase):
             # one: sift1m 1007's page said `W12-sel10` was refused a ratio
             # beside a table printing 2.25x for it.
             g = report.matched_recall_table.__globals__
-            with mock.patch.dict(g, {"refused_ids": lambda runs: {}}):
+            with mock.patch.dict(g, {"joined_verdicts": lambda runs: {
+                    "W12-sel10": ("2.25x", None)}}):
                 html = report.matched_recall_table(runs)
             self.assertIn("per-row table compares <code>W12-sel10</code>", html)
             self.assertNotIn("refuses <code>W12-sel10</code>", html)
             why = "recall unequal: 1.0000 vs 0.9854"
-            with mock.patch.dict(g, {"refused_ids": lambda runs: {"W12-sel10": why}}):
+            with mock.patch.dict(g, {"joined_verdicts": lambda runs: {
+                    "W12-sel10": ("-", why)}}):
                 html = report.matched_recall_table(runs)
             self.assertIn("refuses <code>W12-sel10</code>", html)
             self.assertIn(why, html)
+            # No plain row in the join (this fixture has only the ladder): the
+            # note says so rather than claiming the table compared it.
+            html = report.matched_recall_table(runs)
+            self.assertIn("has no <code>W12-sel10</code> row", html)
+            self.assertNotIn("compares <code>W12-sel10</code>", html)
             # One engine's graded sweep missing: no filtered table at all,
             # rather than that engine's unfiltered bench2 recall under it.
             report, runs, _df = self._pair(Path(tmp), rows_a, rows_b,
@@ -952,9 +959,64 @@ class ReportHostTests(unittest.TestCase):
         _rows, _r, notes = agg.fold([[row(1)], [row(1, requested=5)], [row(1)]])
         self.assertTrue(any("n_requested differs" in n for n in notes), notes)
         # And a row sized by count keeps its count as configuration.
-        _rows, _r, notes = agg.fold([[row(50_000, "")], [row(100_000, "")],
-                                     [row(50_000, "")]])
+        _rows, _r, notes = agg.fold([[row(50_000, "", 50_000)], [row(100_000, "", 50_000)],
+                                     [row(50_000, "", 50_000)]])
         self.assertTrue(any("n_queries differs" in n for n in notes), notes)
+
+    def test_the_clock_stop_is_read_from_the_row_not_its_qps_basis(self):
+        """`qps_basis` read `write-window` on count-bounded W11 rows from
+        10a274a on, and `""` on a clock-bounded pass whose writer never
+        overlapped; neither says how the search ended."""
+        import importlib
+        agg = importlib.import_module("aggregate")
+        clock = {"search_stop": "clock"}
+        self.assertTrue(agg.ended_on_the_clock({**clock, "qps_basis": ""}))
+        self.assertFalse(agg.ended_on_the_clock(
+            {"search_stop": "", "qps_basis": "write-window", "n_requested": 572_856}))
+        # Recorded before the field: the clock mode's request is the tell.
+        self.assertTrue(agg.ended_on_the_clock({"n_requested": agg.W11_SEARCH_N}))
+        self.assertFalse(agg.ended_on_the_clock(
+            {"qps_basis": "write-window", "n_requested": 572_856}))
+
+        def row(n, **k):
+            return {"id": "W11", "status": "ok", "latency": {}, "qps": 1.0,
+                    "n_requested": agg.W11_SEARCH_N, "n_queries": n, **k}
+        # A pass whose writer never overlapped no longer turns the count back
+        # into configuration.
+        rows, _r, notes = agg.fold([[row(5, **clock)], [row(7, qps_basis="", **clock)],
+                                    [row(9, **clock)]])
+        self.assertEqual(rows[0]["n_queries"], 7)
+        self.assertFalse(any("n_queries differs" in n for n in notes), notes)
+
+    def test_a_sweep_folded_across_acorn_settings_is_not_written(self):
+        """One pass without ACORN (0.09) and two with it (0.96) medianed to
+        0.96 under pass 1's `acorn`, so the join checked the wrong flag."""
+        import importlib
+        agg = importlib.import_module("aggregate")
+        name = "recall.laion-small-clip.bench12.sel10.json"
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(agg, "ROOT", Path(tmp)):
+            res = Path(tmp) / "bench/results"
+            for rep, acorn, rec in (("r1", None, 0.09), ("r2", True, 0.96), ("r3", True, 0.96)):
+                (res / rep).mkdir(parents=True)
+                doc = {"collection": "bench12", "grade": "sel10",
+                       "points": [{"ef": 32, "recall_at_10": rec}]}
+                if acorn is not None:
+                    doc["acorn"] = acorn
+                (res / rep / name).write_text(json.dumps(doc))
+            dest = res / "folded"
+            dest.mkdir()
+            (dest / name).write_text("{}")  # an earlier fold's
+            notes: list[str] = []
+            agg.fold_recall(dest, ["r1", "r2", "r3"], notes)
+            self.assertFalse((dest / name).exists())
+            self.assertTrue(any("with and without ACORN" in n and "r1 off" in n
+                                for n in notes), notes)
+            # Passes that agree still fold.
+            (res / "r1" / name).write_text((res / "r2" / name).read_text())
+            notes = []
+            agg.fold_recall(dest, ["r1", "r2", "r3"], notes)
+            self.assertTrue(json.loads((dest / name).read_text())["acorn"])
 
     def test_the_fold_medians_recall_too_and_keeps_the_build_spread(self):
         """`rows.json` carried the median qps of three passes while the recall

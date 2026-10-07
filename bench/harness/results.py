@@ -470,10 +470,10 @@ def ingest_run(db, label: str, root: Path) -> int:
         # one feeds the §8 sink and one the report, but a row must not be
         # joined differently by them.
         key = (coll, r.get("quantization_oversampling"), r.get("quantization_rescore"),
-               recall_mod.grade_of(r["id"]))
+               recall_mod.grade_of(r["id"]), r.get("acorn"))
         if key not in sweeps:
             sweeps[key] = recall_mod.load_recall(label, dataset, coll, key[1], key[2],
-                                                 key[3])
+                                                 key[3], key[4])
         return sweeps[key].get(int(ef))
 
     accepted = rejected = 0

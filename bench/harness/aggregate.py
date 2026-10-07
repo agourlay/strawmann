@@ -49,7 +49,7 @@ import perfstat
 import bfb_output
 import procstat
 from regression import MIXED_STAMP, stamp_hash_of
-from workloads import Gate
+from workloads import W11_SEARCH_N, Gate
 
 ROOT = Path(os.environ.get("STRAWMANN_ROOT", Path(__file__).resolve().parents[2]))
 
@@ -116,16 +116,28 @@ CONFIG_NUMERIC = frozenset((
 ))
 
 
+def ended_on_the_clock(r: dict) -> bool:
+    """Whether the harness stopped this row's search on the clock (W11 since
+    973ade1). `search_stop` says so on rows recorded after it existed; before
+    that, the clock mode is the one that asks bfb for `W11_SEARCH_N` queries.
+
+    Not `qps_basis`: it read `write-window` on count-bounded rows from 10a274a
+    on, and `""` on a clock-bounded pass whose writer never overlapped.
+    """
+    if r.get("search_stop"):
+        return r["search_stop"] == "clock"
+    return r.get("n_requested") == W11_SEARCH_N
+
+
 def config_numeric(got: list[dict]) -> frozenset[str]:
     """`CONFIG_NUMERIC` for one row's passes.
 
-    A search that ends on the clock (W11 since 973ade1, `qps_basis`
-    `write-window`) completes as many queries as the engine manages, so its
-    `n_queries` is an outcome like its qps: sift1m 1007's W11 read 1,418,137 /
-    1,420,378 / 1,453,827 and the fold warned and kept pass 1's. `n_requested`
-    stays a setting, so a real change to it still warns.
+    A search that ends on the clock completes as many queries as the engine
+    manages, so its `n_queries` is an outcome like its qps: sift1m 1007's W11
+    read 1,418,137 / 1,420,378 / 1,453,827 and the fold warned and kept pass
+    1's. `n_requested` stays a setting, so a real change to it still warns.
     """
-    if all(r.get("qps_basis") == "write-window" for r in got):
+    if all(ended_on_the_clock(r) for r in got):
         return CONFIG_NUMERIC - {"n_queries"}
     return CONFIG_NUMERIC
 
@@ -479,6 +491,18 @@ def fold_recall(dest: Path, reps: list[str], notes: list[str]) -> None:
         if len(docs) < len(reps):
             notes.append(f"{name}: present in {len(docs)} of {len(reps)} passes, "
                          f"medianed over those ({', '.join(from_reps)})")
+        # A join key the passes did not share leaves no search for the median
+        # to describe: one pass swept without ACORN (0.09 at `ef` 32 on laion)
+        # and two with it (0.96) would fold to 0.96 under pass 1's "no ACORN".
+        acorns = {bool(d.get("acorn")) for d in docs}
+        if len(acorns) > 1:
+            which = ", ".join(f"{r} {'on' if d.get('acorn') else 'off'}"
+                              for r, d in zip(from_reps, docs, strict=True))
+            notes.append(f"{name}: the passes swept with and without ACORN "
+                         f"({which}), so no folded sweep is written")
+            # Nor left from an earlier fold, where it would still join.
+            (dest / name).unlink(missing_ok=True)
+            continue
         merged = dict(docs[0])
         by_ef: dict[object, list[dict]] = {}
         for d in docs:

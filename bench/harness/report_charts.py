@@ -138,6 +138,37 @@ def matched_count(pt: dict) -> str | None:
     return f"{n:,}" if isinstance(n, int) else None
 
 
+#: `joined_verdicts`' last answer, with the two row lists it was computed from.
+#: Held by identity, so a hit is the same runs and not another pair that
+#: happens to share labels; one entry, because a page renders one pair.
+_VERDICTS: list = []
+
+
+def joined_verdicts(runs: list[Run]) -> dict[str, tuple[str, str | None]]:
+    """`{row id: (ratio cell, refusal or None)}` for every row `compare.joined`
+    pairs. The charts and the filtered note both read it, and each used to run
+    the whole join again for it."""
+    if len(runs) != 2:
+        return {}
+    keys = [getattr(r, "rows", None) for r in runs]
+    if _VERDICTS and keys[0] is not None and _VERDICTS[0] is keys[0] \
+            and _VERDICTS[1] is keys[1]:
+        return _VERDICTS[2]
+    out = {}
+    for jr in compare.joined(runs[0].label, runs[1].label,
+                             runs[0].by_id(), runs[1].by_id()):
+        # Parity is a comparison with a verdict, not a refusal: hatching it
+        # drew rows the table compares as rows it declines to.
+        refusal = None
+        if ratio_value(jr.ratio) is None and jr.ratio != "parity":
+            refusal = (jr.refusal or "; ".join(n.strip("[]") for n in jr.notes)
+                       or "not comparable")
+        out[jr.id] = (jr.ratio, refusal)
+    if keys[0] is not None and keys[1] is not None:
+        _VERDICTS[:] = [keys[0], keys[1], out]
+    return out
+
+
 def refused_ids(runs: list[Run]) -> dict[str, str]:
     """The rows `compare.py` declines to compare, and why, keyed by row id.
 
@@ -147,17 +178,7 @@ def refused_ids(runs: list[Run]) -> dict[str, str]:
     same experiment) beside the rows that *are* comparable hands a skimmer
     exactly the comparison every table on the page refuses to state.
     """
-    if len(runs) != 2:
-        return {}
-    out = {}
-    for jr in compare.joined(runs[0].label, runs[1].label,
-                             runs[0].by_id(), runs[1].by_id()):
-        # Parity is a comparison with a verdict, not a refusal: hatching it
-        # drew rows the table compares as rows it declines to.
-        if ratio_value(jr.ratio) is None and jr.ratio != "parity":
-            reason = jr.refusal or "; ".join(n.strip("[]") for n in jr.notes) or "not comparable"
-            out[jr.id] = reason
-    return out
+    return {wid: why for wid, (_ratio, why) in joined_verdicts(runs).items() if why}
 
 def chart_throughput(runs: list[Run], df: pd.DataFrame) -> dict:
     wanted = ["W0", "W3", "W4", "W5", "W6", "W7", "W8", "W9", "W11", "W13"]
@@ -1061,13 +1082,19 @@ def filtered_matched_recall_table(runs: list[Run]) -> str:
         return ""
     a, b = have
     grade = "sel10"
-    pts = []
+    pts, docs = [], []
     for run in (a, b):
         ds = (run.meta.get("dataset") or {}).get("name") or "sift1m"
+        # The ladder's own ACORN, which every rung sends alike; None on rows
+        # recorded before they carried it, and the join falls back to the stamp.
+        acorns = {r.get("acorn") for r in run.rows
+                  if str(r.get("id", "")).startswith(f"W12-{grade}-ef")}
+        acorn = acorns.pop() if len(acorns) == 1 else None
         # The graded sweep, by grade: an unfiltered sweep of `bench12` is not
         # written and would answer a different question if it were.
         doc = recall_mod.load_recall_json(run.label, ds, "bench12",
-                                          grade=grade) or {}
+                                          grade=grade, acorn=acorn) or {}
+        docs.append(doc)
         # No graded sweep, no table: an empty document made `frontier_points`
         # fall back to the run's unfiltered bench2 recall and pair it with the
         # filtered throughput, with nothing on the page to say so.
@@ -1082,13 +1109,11 @@ def filtered_matched_recall_table(runs: list[Run]) -> str:
     # Each engine's own count: bfb draws the keyword payloads unseeded at
     # every upload, so the two matching sets differ, and one number was one
     # engine's first pass.
-    def n_of(run: Run, p: list) -> str | None:
+    def n_of(doc: dict, p: list) -> str | None:
         pt = (p[0] or {}) if (p[0] or {}).get("n_matching") else (
-            (recall_mod.load_recall_json(run.label,
-             (run.meta.get("dataset") or {}).get("name") or "sift1m",
-             "bench12", grade=grade).get("points") or [{}])[0])
+            (doc.get("points") or [{}])[0])
         return matched_count(pt)
-    na, nb = n_of(a, pts[0]), n_of(b, pts[1])
+    na, nb = n_of(docs[0], pts[0]), n_of(docs[1], pts[1])
     if na and nb and na != nb:
         matched = (f" over the points the condition matched, {na} in {a.label} "
                    f"and {nb} in {b.label} (bfb draws the keyword payloads "
@@ -1098,8 +1123,15 @@ def filtered_matched_recall_table(runs: list[Run]) -> str:
     # What the per-row table did with `W12-sel10`, read from it rather than
     # assumed: sift1m 1007's page said the row was refused a ratio while the
     # table above it printed 2.25x.
-    refusal = refused_ids(runs).get("W12-sel10")
-    if refusal:
+    # Absent from the join is neither: a run with the ladder and no plain row,
+    # or a row the fold left out, has nothing in that table to describe.
+    verdict = joined_verdicts(runs).get("W12-sel10")
+    refusal = verdict[1] if verdict else None
+    if verdict is None:
+        row = ('. The per-row table has no <code>W12-sel10</code> row for this '
+               'pair; held at equal recall, the comparison exists at every '
+               'recall both engines reach.')
+    elif refusal:
         row = ('. The per-row table refuses <code>W12-sel10</code> a ratio at the '
                'one <code>ef</code> it measures (' + html.escape(refusal) + '); '
                'held at equal recall instead, the comparison exists at every '

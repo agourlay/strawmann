@@ -169,6 +169,14 @@ class SearchFields:
     #: sent neither measured a different search.
     quantization_oversampling: float | None = None
     quantization_rescore: bool | None = None
+    #: Whether the row asked Qdrant for ACORN (`--acorn`), part of the same
+    #: join for a filtered row: laion 1007's W12 rows searched with it and the
+    #: sweep joined to them without. `None` on a row recorded before the field.
+    acorn: bool | None = None
+    #: `"clock"` when the harness ended the row's search on the clock
+    #: (`run_search_until`), so its query count is an outcome; `""` when bfb
+    #: ran its `-n` to the end.
+    search_stop: str = ""
     #: `Workload.ratio_policy`, written into the row.
     ratio_policy: str = ""
     #: `Workload.needs_payload_index`, written into the row.

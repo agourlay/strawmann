@@ -39,6 +39,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -271,7 +272,8 @@ def stamp(path: Path, dataset: str, collection: str, metric: str,
 def load_recall_json(label: str, dataset: str, collection: str,
                      oversampling: float | None = None,
                      rescore: bool | None = None,
-                     grade: str | None = None) -> dict:
+                     grade: str | None = None,
+                     acorn: bool | None = None) -> dict:
     """The sweep file for (`dataset`, `collection`), whole, or `{}`.
 
     Only a file whose own `dataset` and `collection` fields say what the
@@ -320,7 +322,7 @@ def load_recall_json(label: str, dataset: str, collection: str,
         # and the sweep without, and the page published the recall of the
         # search the rows did not run (Qdrant 0.09 at `ef` 32 against 0.96).
         # A file from before the binary recorded it sent none.
-        if grade is not None and bool(sweep_json.get("acorn")) != label_acorn(label):
+        if grade is not None and not acorn_matches(label, sweep_json, acorn):
             continue
         # A sweep that sent other quantization parameters than the row did
         # (or none, where the row sent some) measured a different search.
@@ -336,28 +338,75 @@ def load_recall_json(label: str, dataset: str, collection: str,
     return {}
 
 
-def label_acorn(label: str) -> bool:
-    """Whether `label`'s W12 rows sent `--acorn`, from its `run.json` stamp.
-
-    The rows do not record it themselves; the stamp's `w12_acorn` does
-    (`workloads.collection_settings`), and a label stamped before it existed
-    ran without ACORN.
-    """
+@functools.lru_cache(maxsize=256)
+def _run_meta(path: str, mtime_ns: int) -> dict:
+    """A label's `run.json`, parsed once per version of the file: the join
+    asks for it once per graded lookup, and a report makes dozens."""
     try:
-        run = json.loads((ROOT / "bench/results" / label / "run.json").read_text())
+        run = json.loads(Path(path).read_text())
     except (OSError, json.JSONDecodeError):
-        return False
-    setting = ((run.get("harness") or {}).get("collection") or {}).get("w12_acorn", "off")
-    return str(setting).startswith("on")
+        return {}
+    return run if isinstance(run, dict) else {}
 
 
-def w12_acorn() -> bool:
-    """Whether the W12 rows this harness runs send `--acorn`, which a sweep
-    of their grades has to send too."""
+def run_meta(label: str) -> dict:
+    path = ROOT / "bench/results" / label / "run.json"
     try:
-        import workloads
-    except ImportError:  # pragma: no cover
-        return False
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        return {}
+    return _run_meta(str(path), mtime)
+
+
+def label_acorn(label: str) -> bool | None:
+    """Whether `label`'s W12 rows sent `--acorn`, from its `run.json` stamp,
+    or None when the label has no stamp to say.
+
+    The stamp's `w12_acorn` (`workloads.collection_settings`) is the fallback
+    for rows recorded before they carried `acorn` themselves.
+    """
+    run = run_meta(label)
+    if not run:
+        return None
+    setting = ((run.get("harness") or {}).get("collection") or {}).get("w12_acorn")
+    return None if setting is None else str(setting).startswith("on")
+
+
+def honours_acorn(label: str) -> bool:
+    """Whether the engine behind `label` acts on `params.acorn`.
+
+    strawmANN's decoder skips the field (`src/proto/messages.zig`) and takes
+    its own ACORN-1 walk, so a sweep of it with or without the flag measured
+    the search its rows ran, and checking the flag there refused laion and
+    sift 1007's strawmANN recall for nothing. Unknown engines are held to it.
+    """
+    return not str(run_meta(label).get("engine_comm") or "").startswith("strawmann")
+
+
+def acorn_matches(label: str, sweep_json: dict, row_acorn: bool | None) -> bool:
+    """Whether a filtered sweep searched with the ACORN setting the row did.
+
+    The row's own `acorn` first; a row recorded before the field existed
+    falls back to the label's stamp, and a label stamped before that ran
+    without ACORN. A sweep that does not record `acorn` sent none.
+    """
+    if not honours_acorn(label):
+        return True
+    want = row_acorn
+    if want is None:
+        want = bool(label_acorn(label))
+    return bool(sweep_json.get("acorn")) == want
+
+
+def sweep_acorn(label: str) -> bool:
+    """Whether a filtered sweep of `label` should send `--acorn`: what its
+    rows ran with, from its stamp, and the harness's own setting for a label
+    not stamped yet. Fails rather than guessing: a sweep sent the wrong way
+    is one the join then refuses, with nothing on the page to say why."""
+    stamped = label_acorn(label)
+    if stamped is not None:
+        return stamped
+    import workloads
     return workloads.W12_ACORN
 
 
@@ -399,12 +448,13 @@ def sweep_quant_params(sweep_json: dict) -> QuantParams | None:
 def load_recall(label: str, dataset: str, collection: str,
                 oversampling: float | None = None,
                 rescore: bool | None = None,
-                grade: str | None = None) -> dict[int, dict]:
-    """The sweep for (`dataset`, `collection`, quantization params, `grade`),
-    keyed by `ef`, or `{}`."""
+                grade: str | None = None,
+                acorn: bool | None = None) -> dict[int, dict]:
+    """The sweep for (`dataset`, `collection`, quantization params, `grade`,
+    the row's ACORN), keyed by `ef`, or `{}`."""
     out = {}
     for pt in load_recall_json(label, dataset, collection, oversampling,
-                               rescore, grade).get("points", []):
+                               rescore, grade, acorn).get("points", []):
         if pt.get("ef") is not None and not pt.get("exact"):
             out[int(pt["ef"])] = pt
     return out
@@ -676,7 +726,7 @@ def sweep(engine: str, label: str, collection: str, queries: int,
         if base_n:
             cmd += ["--limit-base", str(base_n)]
         # The rows' ACORN, so the sweep searches the way they did.
-        if w12_acorn():
+        if sweep_acorn(label):
             cmd += ["--acorn"]
     if oversampling is not None:
         cmd += ["--quantization-oversampling", str(oversampling)]
