@@ -469,6 +469,49 @@ def acorn_applies_to(reps: list[str]) -> bool:
     return any(recall_mod.acorn_applies(r) for r in reps)
 
 
+def fold_text_recall(dest: Path, reps: list[str], notes: list[str]) -> None:
+    """W15's recall for the folded label: each variant's recall@10, nDCG@10
+    and MRR@10 medianed over the passes, as `fold_recall` does for the sweeps.
+
+    Exact BM25 should not move between passes; a spread is said in `notes`
+    rather than hidden by the median. A variant some pass did not measure is
+    left out, so its rows carry no recall rather than one pass's, and passes
+    that disagree on the corpus fold to nothing."""
+    docs = []
+    for r in reps:
+        try:
+            docs.append(json.loads(recall_mod.text_recall_path(r).read_text()))
+        except (OSError, json.JSONDecodeError):
+            docs.append(None)
+    if not any(docs):
+        return
+    if any(d is None for d in docs) or len({d.get("dataset") for d in docs}) != 1:
+        notes.append(f"text recall: present in {sum(d is not None for d in docs)} of "
+                     f"{len(reps)} passes or on different corpora, not folded")
+        return
+    keys = [set(d.get("variants") or {}) for d in docs]
+    variants = {}
+    for key in sorted(set.union(*keys)):
+        if not all(key in k for k in keys):
+            notes.append(f"text recall {key}: measured in {sum(key in k for k in keys)} of "
+                         f"{len(reps)} passes, not folded")
+            continue
+        got = [d["variants"][key] for d in docs]
+        pt = dict(got[0])
+        recalls = [g.get("recall") for g in got]
+        pt["recall"] = _median(recalls)
+        pt["rep_recall"] = recalls
+        if len(set(recalls)) > 1:
+            notes.append(f"text recall {key}: recall@10 differs across passes ({recalls})")
+        sems = [g.get("semantic") for g in got]
+        if all(sems):
+            pt["semantic"] = {**sems[0], **{m: _median([x.get(m) for x in sems])
+                                            for m in ("ndcg_at_10", "mrr_at_10")}}
+        variants[key] = pt
+    out = dest / recall_mod.TEXT_RECALL_FILE
+    out.write_text(json.dumps({**docs[0], "variants": variants}, indent=2) + "\n")
+
+
 def fold_recall(dest: Path, reps: list[str], notes: list[str]) -> None:
     """Median the recall sweeps too, and widen their intervals to the spread.
 
@@ -616,6 +659,7 @@ def main(argv: list[str]) -> int:
         else:
             (dest / name).write_text(f.read_text())
     fold_recall(dest, reps, notes)
+    fold_text_recall(dest, reps, notes)
 
     # The spread measured here, in the shape `regression.py` and `report.py`
     # already read, so a run that repeats itself stops borrowing a floor from

@@ -595,6 +595,39 @@ class NoiseTests(unittest.TestCase):
             pt = json.loads((dest / "recall.sift1m.bench12.sel10.json").read_text())["points"][0]
             self.assertEqual(pt["n_matching_range"], [19941, 20193])
 
+    def test_a_folded_label_carries_w15s_recall(self):
+        """`--reps 3` publishes the fold, and the sink refuses a row with a qps
+        and no recall: W15's recall has to reach the folded label."""
+        import importlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _reload(root)
+            agg = importlib.reload(importlib.import_module("aggregate"))
+            import recall
+            reps = []
+            for i, (r, ndcg) in enumerate(((1.0, 0.68), (1.0, 0.70), (0.99, 0.69)), start=1):
+                lbl = f"lbl-rep{i}"
+                variants = {"k1.2-b0.75": {"k1": 1.2, "b": 0.75, "parity": None, "limit": 10,
+                                           "recall": r, "semantic": {"ndcg_at_10": ndcg,
+                                                                     "mrr_at_10": 0.6}}}
+                if i < 3:
+                    variants["k1.2-b0"] = {"k1": 1.2, "b": 0.0, "parity": None, "limit": 10,
+                                           "recall": 1.0}
+                p = recall.text_recall_path(lbl)
+                p.parent.mkdir(parents=True)
+                p.write_text(json.dumps({"dataset": "scifact", "variants": variants}))
+                reps.append(lbl)
+            dest = root / "bench/results/lbl"
+            dest.mkdir(parents=True)
+            notes = []
+            agg.fold_text_recall(dest, reps, notes)
+            got = recall.load_text_recall("lbl", "scifact", "W15-sat")
+            self.assertEqual(got, {"recall_at_10": 1.0, "ndcg_at_10": 0.69, "mrr_at_10": 0.6})
+            # Measured in two passes of three: no recall rather than two passes'.
+            self.assertIsNone(recall.load_text_recall("lbl", "scifact", "W15-b0"))
+            self.assertTrue(any("k1.2-b0: measured in 2 of 3" in n for n in notes), notes)
+            self.assertTrue(any("differs across passes" in n for n in notes), notes)
+
     def test_a_drift_that_moved_with_major_faults_names_paging(self):
         """dbpedia 0929's W11-steady drifted +24% beside major faults 182,555,
         90,262 and 0, and the note named no cause."""
