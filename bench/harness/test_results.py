@@ -138,6 +138,54 @@ class RecallTests(unittest.TestCase):
         # `bench12` is a different question from either grade.
         self.assertEqual(rc.load_recall("lbl", "sift1m", "bench12"), {})
 
+    def test_a_filtered_sweep_joins_only_rows_with_its_acorn(self):
+        """laion 1007's W12 rows searched with ACORN and the sweep without, and
+        the page published Qdrant's sel10 recall of the search the rows did not
+        run: 0.09 at `ef` 32, where the rows' own search reads 0.96."""
+        rc = self.m["recall"]
+        q = rc.recall_path("lbl", "laion-small-clip", "bench12", grade="sel10")
+        q.parent.mkdir(parents=True)
+        run = q.parent / "run.json"
+
+        def sweep_with(acorn):
+            body = {"collection": "bench12", "points": [{"ef": 32, "recall_at_10": 0.5}]}
+            if acorn is not None:
+                body["acorn"] = acorn
+            q.write_text(json.dumps(body))
+            self.assertTrue(rc.stamp(q, "laion-small-clip", "bench12", "cosine",
+                                     grade="sel10"))
+            return rc.load_recall("lbl", "laion-small-clip", "bench12", grade="sel10")
+
+        run.write_text(json.dumps({"harness": {"collection": {
+            "w12_acorn": "on, Qdrant's default max_selectivity"}}}))
+        self.assertEqual(sweep_with(False), {})
+        self.assertEqual(sweep_with(None), {})
+        self.assertIn(32, sweep_with(True))
+        # A label stamped without ACORN, or before the stamp had the key, joins
+        # only a sweep that sent none.
+        for stamp in ({"w12_acorn": "off"}, {}):
+            run.write_text(json.dumps({"harness": {"collection": stamp}}))
+            self.assertEqual(sweep_with(True), {})
+            self.assertIn(32, sweep_with(None))
+
+    def test_the_filtered_sweep_sends_the_rows_acorn(self):
+        rc = self.m["recall"]
+        seen = []
+        run = lambda cmd, **k: seen.append(cmd) or mock.Mock(returncode=0)
+        with mock.patch.object(rc.subprocess, "run", run), \
+                mock.patch.object(rc, "build_filtered_truth", lambda *a: Path("gt")), \
+                mock.patch.object(rc, "stamp", lambda *a, **k: True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            for acorn in (True, False):
+                with mock.patch.object(rc, "w12_acorn", lambda a=acorn: a):
+                    rc.sweep("http://x", "lbl", "bench12", 10, grade="sel10", base_n=100)
+                    rc.sweep("http://x", "lbl", "bench2", 10)
+        filtered_on, plain_on, filtered_off, plain_off = seen
+        self.assertIn("--acorn", filtered_on)
+        # ACORN is a filtered path, and `relevance` refuses it without a filter.
+        for cmd in (plain_on, filtered_off, plain_off):
+            self.assertNotIn("--acorn", cmd)
+
     def test_the_grade_a_row_joins_comes_off_its_id(self):
         rc = self.m["recall"]
         self.assertEqual(rc.grade_of("W12-sel1"), "sel1")

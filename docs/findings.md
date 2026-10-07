@@ -80,15 +80,26 @@ threshold and ACORN. It closes when each corpus has a pair measured with them.
 sift1m 1007 is: 10,000 KB at d=128 is 20,000 points, above both tiers'
 matches, so Qdrant scans both (recall 1.0000 at every `ef`, cycles per query
 at sel10 4.3x 1006's) and never takes ACORN. sel1 reads 1.95x, sel10 2.25x
-(1006: 0.61x). laion 1007 is not publishable: at d=512 the threshold is about
-5,000 points, so sel10 (about 10,000 matches) walks, and Qdrant's recall fell
-to 0.0901 at `ef` 32, 0.2652 at 128 and 0.4126 at 512 (1003: 0.8164, 0.9854,
-0.9993) while strawmANN's held (0.98 to 1.0). Two things changed at once: the
-default threshold leaves the 1% keywords without payload-block links, and
-ACORN is on for the first time. Which one costs the recall is unmeasured;
-laion's page stays at 1003 until a probe at the default threshold with
-`W12_ACORN=0` against `1` separates them. dbpedia (d=1536, about 1,700
-points) would walk sel10 too.
+(1006: 0.61x). laion 1007 is not publishable, because its W12 recall is not
+the recall of the search its rows ran. At d=512 the threshold is about 5,000
+points, so sel10 (about 10,000 matches) walks the graph. The rows walked it
+with ACORN (bfb `--acorn`), but the sweep they join (`recall.py`, the
+conformance `relevance` binary) had no way to send ACORN, so it scored a walk
+without it: Qdrant 0.0901 at `ef` 32, 0.2652 at 128 and 0.4126 at 512 (1003,
+at the 10 KB threshold: 0.8164, 0.9854, 0.9993). A probe on a rebuilt laion
+bench12 at the default threshold (`bench/results/acorn-probe-laion/`, bfb
+`--search-quality` against Qdrant's exact search under the same filter, 1,000
+queries) read 0.090 / 0.202 / 0.332 without ACORN and 0.962 / 0.992 / 0.997
+with it. ACORN is not what costs the recall: it is what restores it on a graph
+the default threshold builds without payload-block links. `relevance` now
+takes `--acorn`, `recall.py` sends it on the filtered grades when the rows do,
+the sweep records it, and the join refuses a sweep whose ACORN differs from the
+label's `w12_acorn` stamp. Swept that way on a rebuilt bench12, Qdrant's sel10
+reads 0.9649 / 0.9930 / 0.9982 against fp64 truth. bench12 is dropped after a
+run, so laion 1007's W12 rows cannot be re-swept, and laion's page stays at
+1003 until a pair measured with the fix. sift1m's W12 recall is unaffected:
+Qdrant scans both tiers there. dbpedia (d=1536, about 1,700 points) walks
+sel10 too, so its next pair needs the fix.
 
 **58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**
 W10-ef128 +10.4%, W10-ef256 +11.5%, W12-sel1 +10.2%, W11 +10%, with cycles

@@ -316,6 +316,12 @@ def load_recall_json(label: str, dataset: str, collection: str,
         # sweep does not speak for an unfiltered one.
         if sweep_json.get("grade") != grade:
             continue
+        # ACORN as well, for a filtered row: laion 1007's rows searched with it
+        # and the sweep without, and the page published the recall of the
+        # search the rows did not run (Qdrant 0.09 at `ef` 32 against 0.96).
+        # A file from before the binary recorded it sent none.
+        if grade is not None and bool(sweep_json.get("acorn")) != label_acorn(label):
+            continue
         # A sweep that sent other quantization parameters than the row did
         # (or none, where the row sent some) measured a different search.
         got = sweep_quant_params(sweep_json)
@@ -328,6 +334,31 @@ def load_recall_json(label: str, dataset: str, collection: str,
             continue
         return sweep_json
     return {}
+
+
+def label_acorn(label: str) -> bool:
+    """Whether `label`'s W12 rows sent `--acorn`, from its `run.json` stamp.
+
+    The rows do not record it themselves; the stamp's `w12_acorn` does
+    (`workloads.collection_settings`), and a label stamped before it existed
+    ran without ACORN.
+    """
+    try:
+        run = json.loads((ROOT / "bench/results" / label / "run.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    setting = ((run.get("harness") or {}).get("collection") or {}).get("w12_acorn", "off")
+    return str(setting).startswith("on")
+
+
+def w12_acorn() -> bool:
+    """Whether the W12 rows this harness runs send `--acorn`, which a sweep
+    of their grades has to send too."""
+    try:
+        import workloads
+    except ImportError:  # pragma: no cover
+        return False
+    return workloads.W12_ACORN
 
 
 class QuantParams(NamedTuple):
@@ -644,6 +675,9 @@ def sweep(engine: str, label: str, collection: str, queries: int,
         # guard inside the binary refuses the pair.
         if base_n:
             cmd += ["--limit-base", str(base_n)]
+        # The rows' ACORN, so the sweep searches the way they did.
+        if w12_acorn():
+            cmd += ["--acorn"]
     if oversampling is not None:
         cmd += ["--quantization-oversampling", str(oversampling)]
     if rescore is not None:

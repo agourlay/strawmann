@@ -590,6 +590,7 @@ impl Engine {
         exact: bool,
         hnsw_ef: Option<u64>,
         filter: &Filter,
+        acorn: bool,
     ) -> anyhow::Result<Vec<Returned>> {
         self.query_full(
             name,
@@ -602,7 +603,7 @@ impl Engine {
             hnsw_ef,
             None,
             None,
-            Some(filter),
+            Some((filter, acorn)),
         )
         .await
     }
@@ -622,7 +623,7 @@ impl Engine {
         hnsw_ef: Option<u64>,
         quant: Option<(bool, bool)>,
         oversampling: Option<f64>,
-        filter: Option<&Filter>,
+        filter: Option<(&Filter, bool)>,
     ) -> anyhow::Result<Vec<Returned>> {
         let mut out = Vec::with_capacity(n_queries);
 
@@ -648,6 +649,12 @@ impl Engine {
                     }
                     params = params.quantization(qp);
                 }
+                // ACORN as bfb's `--acorn` asks for it: enabled, at Qdrant's
+                // default `max_selectivity`. Only a filtered search carries it.
+                if let Some((_, true)) = filter {
+                    params = params
+                        .acorn(qdrant_client::qdrant::AcornSearchParamsBuilder::new(true).build());
+                }
                 let mut qb = QueryPointsBuilder::new(name)
                     .query(v)
                     .limit(limit)
@@ -658,7 +665,7 @@ impl Engine {
                 // W12: the same condition the ground truth was restricted to.
                 // A search that does not carry it is answering a different
                 // question from the one it is about to be scored against.
-                if let Some(f) = filter {
+                if let Some((f, _)) = filter {
                     qb = qb.filter(f.clone());
                 }
                 batch.push(qb.build());

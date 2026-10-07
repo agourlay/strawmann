@@ -1113,6 +1113,15 @@ struct RelevanceRun {
     /// without values.
     #[arg(long, num_args = 1.., value_delimiter = ',')]
     filter_values: Vec<String>,
+    /// W12: `params.acorn.enable` on every filtered query, as bfb's `--acorn`
+    /// sends it with Qdrant's default `max_selectivity`.
+    ///
+    /// The W12 rows search with ACORN and the sweep searched without it, so
+    /// laion 1007 published the recall of one search (Qdrant 0.09 at `ef` 32)
+    /// beside the throughput of another (0.96 with ACORN). ACORN is a filtered
+    /// path, so it needs `--filter-values`.
+    #[arg(long, default_value_t = false, requires = "filter_values")]
+    acorn: bool,
 }
 
 impl RelevanceRun {
@@ -1206,6 +1215,10 @@ struct RecallSweep {
     /// join key beside collection and dataset: `null` means none sent.
     quantization_oversampling: Option<f64>,
     quantization_rescore: Option<bool>,
+    /// Whether every query asked for ACORN, part of the join key beside the
+    /// condition: a W12 row run with `--acorn` is a different search from
+    /// one without it, at the same `ef` and filter.
+    acorn: bool,
     points: Vec<RecallPoint>,
 }
 
@@ -1402,6 +1415,7 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
                     r.exact,
                     hnsw_ef,
                     filter.as_ref().expect("this arm is guarded on it"),
+                    r.acorn,
                 )
                 .await?
             }
@@ -1514,6 +1528,7 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
             base_checksum: format!("{:x}", gt.base_checksum),
             quantization_oversampling: r.quantization_oversampling,
             quantization_rescore: r.quantization_rescore,
+            acorn: r.acorn,
             points,
         };
         if let Some(dir) = path.parent() {
@@ -2413,6 +2428,36 @@ mod tests {
         assert!(parse_max_tier("T9").is_err());
         assert!(parse_max_tier("t1").is_err());
         assert!(parse_max_tier("").is_err());
+    }
+
+    #[test]
+    fn relevance_acorn_needs_a_filter() {
+        // W12's join: the rows send ACORN, so the sweep has to be able to.
+        let base = [
+            "conformance",
+            "relevance",
+            "--base",
+            "b",
+            "--queries",
+            "q",
+            "--ground-truth",
+            "g",
+        ];
+        let parse = |extra: &[&str]| Cli::try_parse_from(base.iter().chain(extra));
+        let Command::Relevance(r) = parse(&["--filter-values", "1,2", "--acorn"])
+            .unwrap()
+            .command
+        else {
+            panic!("parsed as another command")
+        };
+        assert!(r.acorn);
+        let Command::Relevance(r) = parse(&["--filter-values", "1"]).unwrap().command else {
+            panic!("parsed as another command")
+        };
+        assert!(!r.acorn);
+        // An unfiltered search never takes ACORN, so asking for it there would
+        // record a search the engine did not run.
+        assert!(parse(&["--acorn"]).is_err());
     }
 
     #[test]
