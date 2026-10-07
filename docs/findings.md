@@ -11,7 +11,7 @@ Ranked by what a wrong or missing number costs.
 ### P1. What costs a number on the headline page
 
 The current pages are the 1007 pair for sift1m, the 0930 pair for
-dbpedia-openai-1m, the 1003 pair for laion-small-clip and the 0929 pair for h-and-m, all T4 with T3
+dbpedia-openai-1m, the 1007 pair for laion-small-clip and the 0929 pair for h-and-m, all T4 with T3
 passing and production-mode Qdrant. What they publish wrongly, or still refuse and could
 not:
 
@@ -56,8 +56,8 @@ first pair measured with it: `write overlap` 100% on both rows, both engines,
 every pass, the search ending at the append's span times 1.25 (W11: 60.6 s
 append, 75.8 s search). strawmANN's W11-steady is flat (20,727 / 21,082 /
 21,074); Qdrant's is not (4,416 / 4,431 / 3,554, rsd 12.1%), its third pass
-low as laion 1003's first was. laion 1007 also read 100% everywhere but is
-unpublished (item 71). What is open is dbpedia, and whether Qdrant's spread is
+low as laion 1003's first was. laion 1007 reads 100% on both rows, both
+engines, every pass, too. What is open is dbpedia, and whether Qdrant's spread is
 its own. Item 8 is what the row shows once it measures what it claims to.
 
 **70. The published W5 ratios are mostly parallelism.** Every current
@@ -67,7 +67,7 @@ and Qdrant 2 (`decisions.md`, 2026-10-06): 3.6x of sift1m's 5.68x, laion's
 on laion and dbpedia. W5 now runs W4's client. It closes when each corpus has
 a pair measured with it. sift1m 1007 is: W5 reads 1.58x (27,641 against
 17,448), the 3.6 factor gone, with Qdrant on 7.89 cores and strawmANN 7.02.
-laion 1007 read 0.88x, Qdrant ahead as predicted, but is unpublished (item 71).
+laion 1007 is too: 0.88x (11,218 against 12,706), Qdrant ahead as predicted.
 
 **71. The published W12 ratios are partly harness configuration.** Every
 current page ran Qdrant's filtered search with a 10 KB full-scan threshold (5
@@ -80,8 +80,8 @@ threshold and ACORN. It closes when each corpus has a pair measured with them.
 sift1m 1007 is: 10,000 KB at d=128 is 20,000 points, above both tiers'
 matches, so Qdrant scans both (recall 1.0000 at every `ef`, cycles per query
 at sel10 4.3x 1006's) and never takes ACORN. sel1 reads 1.95x, sel10 2.25x
-(1006: 0.61x). laion 1007 is not publishable, because its W12 recall is not
-the recall of the search its rows ran. At d=512 the threshold is about 5,000
+(1006: 0.61x). laion 1007's W12 rows are not publishable, because their recall is not
+the recall of the search they ran. At d=512 the threshold is about 5,000
 points, so sel10 (about 10,000 matches) walks the graph. The rows walked it
 with ACORN (bfb `--acorn`), but the sweep they join (`recall.py`, the
 conformance `relevance` binary) had no way to send ACORN, so it scored a walk
@@ -96,8 +96,11 @@ takes `--acorn`, `recall.py` sends it on the filtered grades when the rows do,
 the sweep records it, and the join refuses a sweep whose ACORN differs from the
 label's `w12_acorn` stamp. Swept that way on a rebuilt bench12, Qdrant's sel10
 reads 0.9649 / 0.9930 / 0.9982 against fp64 truth. bench12 is dropped after a
-run, so laion 1007's W12 rows cannot be re-swept, and laion's page stays at
-1003 until a pair measured with the fix. sift1m's W12 recall is unaffected:
+run, so laion 1007's W12 rows cannot be re-swept. Its page is published with
+every W12 row refused (recall missing) and its other rows as measured; the
+night's mismatched sweeps no longer join, and the sink's W12 rows for the pair
+were deleted before re-ingesting. laion's W12 needs a pair measured with the
+fix. sift1m's W12 recall is unaffected:
 Qdrant scans both tiers there. dbpedia (d=1536, about 1,700 points) walks
 sel10 too, so its next pair needs the fix.
 
