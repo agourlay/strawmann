@@ -761,6 +761,40 @@ def extract_zip(src: Path, root: Path) -> None:
 TEXT_DIR = "text"
 
 
+#: Where a text corpus is laid out for bfb's `tar` dataset reader, beside
+#: `TEXT_DIR`: a placeholder `vectors.npy` and the payloads the text index reads.
+BFB_DIR = "bfb"
+
+#: The vector every text point carries, as `conformance`'s `engine.rs` gives it:
+#: both engines need one and the text query never reads it.
+TEXT_PLACEHOLDER = (1.0, 0.0, 0.0, 0.0)
+
+
+def npy_f32(rows: int, row: tuple[float, ...]) -> bytes:
+    """A version 1.0 `.npy` of `rows` copies of `row`, little-endian float32,
+    written by hand because this script is stdlib only."""
+    import struct
+    header = f"{{'descr': '<f4', 'fortran_order': False, 'shape': ({rows}, {len(row)}), }}"
+    pad = 64 - (10 + len(header) + 1) % 64
+    header = header + " " * (pad % 64) + "\n"
+    head = b"\x93NUMPY\x01\x00" + struct.pack("<H", len(header)) + header.encode("latin1")
+    return head + struct.pack(f"<{len(row)}f", *row) * rows
+
+
+def write_bfb_text(out: Path, corpus: list[str]) -> None:
+    """`out`/vectors.npy and `out`/payloads.jsonl for `corpus.jsonl`'s lines: the
+    payload is `{"body": values, "parity": even|odd}`, the one the differ uploads
+    (`TEXT_PARITY_KEY`), so a benchmark collection and a differ collection hold
+    the same documents."""
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "vectors.npy").write_bytes(npy_f32(len(corpus), TEXT_PLACEHOLDER))
+    with (out / "payloads.jsonl").open("w", encoding="utf-8") as f:
+        for i, line in enumerate(corpus):
+            values = json.loads(line)["values"]
+            f.write(json.dumps({"body": values, "parity": "even" if i % 2 == 0 else "odd"},
+                               ensure_ascii=False) + "\n")
+
+
 def beir_to_text(corpus: list[str], queries: list[str],
                  qrels: list[str]) -> tuple[list[str], list[str], list[str], list[str]]:
     """A BEIR split as `(corpus.jsonl, queries.txt, queries.ids, qrels.tsv)` lines.
@@ -855,14 +889,21 @@ def cmd_synthesize_text(args) -> int:
                 return 1
             continue
         out = DATA_ROOT / d.name / TEXT_DIR
+        bfb_out = DATA_ROOT / d.name / BFB_DIR
         if (out / "corpus.jsonl").exists() and (out / "queries.txt").exists():
-            print(f"  {d.name}: already generated in {out}")
+            if not (bfb_out / "payloads.jsonl").exists():
+                lines = (out / "corpus.jsonl").read_text(encoding="utf-8").splitlines()
+                write_bfb_text(bfb_out, lines)
+                print(f"  {d.name}: wrote its bfb layout in {bfb_out}")
+            else:
+                print(f"  {d.name}: already generated in {out}")
             continue
         print(f"  {d.name}: generating {d.n:,} documents and {d.n_queries:,} queries")
         corpus, texts = zipf_text_corpus(spec, d.n, d.n_queries)
         out.mkdir(parents=True, exist_ok=True)
         (out / "corpus.jsonl").write_text("".join(f"{x}\n" for x in corpus), encoding="utf-8")
         (out / "queries.txt").write_text("".join(f"{x}\n" for x in texts), encoding="utf-8")
+        write_bfb_text(bfb_out, corpus)
         n += 1
     print(f"generated {n} corpus(es)" if n else "nothing to generate")
     return 0
@@ -889,6 +930,7 @@ def cmd_convert_beir(args) -> int:
         for name, lines in (("corpus.jsonl", corpus), ("queries.txt", texts),
                             ("queries.ids", ids), ("qrels.tsv", qrels)):
             (out / name).write_text("".join(f"{x}\n" for x in lines), encoding="utf-8")
+        write_bfb_text(DATA_ROOT / d.name / BFB_DIR, corpus)
         if d.n and len(corpus) != d.n:
             print(f"  {RED}!!{OFF} {d.name}: {len(corpus)} documents, descriptor says {d.n}",
                   file=sys.stderr)
@@ -1029,6 +1071,11 @@ def cmd_self_test(args) -> int:
     assert all(3 <= n <= 6 for n in lens) and all(len(q.split()) == 2 for q in q1)
     assert all(0 <= int(w[1:]) < 50 for x in c1 for w in json.loads(x)["values"][0].split())
     assert [json.loads(x)["id"] for x in c1] == list(range(40)), "ids are rows"
+    blob = npy_f32(3, (1.0, 0.0, 0.0, 0.0))
+    assert blob[:6] == b"\x93NUMPY" and (10 + int.from_bytes(blob[8:10], "little")) % 64 == 0, \
+        "an npy header pads to 64 bytes"
+    assert len(blob) == 10 + int.from_bytes(blob[8:10], "little") + 3 * 4 * 4
+    assert b"'shape': (3, 4)" in blob
     print("datasets.py self-test: ok")
     return 0
 
