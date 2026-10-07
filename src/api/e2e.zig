@@ -353,9 +353,9 @@ test "e2e: §1 non-goals return UNIMPLEMENTED naming the construct" {
     // paths and a generic string sends the reader back to the client's source
     // to work out which call failed.
     {
-        const resp = try c.call("/qdrant.Points/Delete", &.{}, &out);
+        const resp = try c.call("/qdrant.Points/Get", &.{}, &out);
         try testing.expectEqual(grpc.Status.unimplemented, resp.status);
-        try testing.expect(std.mem.indexOf(u8, resp.message, "qdrant.Points/Delete") != null);
+        try testing.expect(std.mem.indexOf(u8, resp.message, "qdrant.Points/Get") != null);
         // Deferred, not refused. Sending a client to "§1 non-goals" for a
         // scheduled RPC is a wrong answer that reads like a right one.
         try testing.expect(std.mem.indexOf(u8, resp.message, "§2") != null);
@@ -4794,7 +4794,6 @@ test "e2e: every deferred RPC answers UNIMPLEMENTED, names itself, and cites §2
     const deferred = [_][]const u8{
         "/qdrant.Collections/List",
         "/qdrant.Collections/Update",
-        "/qdrant.Points/Delete",
         "/qdrant.Points/Get",
     };
 
@@ -5090,9 +5089,28 @@ test "e2e: BM25 over a text index, Qdrant's text query with its scores and refus
         _ = try readFirstBatchPayloads(resp.body, &pts);
         try testing.expectApproxEqRel(@as(f32, 0.696072), pts[0].score, 1e-5);
     }
+    // Deleting the empty array over the wire takes it out of N and avgdl at
+    // once: back to 0.609970.
+    {
+        var w = wire.Writer.init(&req_buf);
+        try w.writeStringField(1, "bm25");
+        try w.writeBoolField(2, true);
+        const sel = try w.beginNested(3, 2); // points
+        const ids = try w.beginNested(1, 2); // PointsIdsList
+        const pid = try w.beginNested(1, 2);
+        try w.writeVarintFieldAlways(1, 3);
+        try w.endNested(pid);
+        try w.endNested(ids);
+        try w.endNested(sel);
+        const del = try c.call("/qdrant.Points/Delete", w.written(), &out);
+        try testing.expectEqual(grpc.Status.ok, del.status);
+        const resp = try c.call("/qdrant.Points/QueryBatch", try buildTextQuery(&req_buf, "bm25", "body", "alpha", null), &out);
+        _ = try readFirstBatchPayloads(resp.body, &pts);
+        try testing.expectApproxEqRel(@as(f32, 0.609970), pts[0].score, 1e-5);
+    }
     // The threshold is on the BM25 score, strictly above it.
     {
-        const resp = try c.call("/qdrant.Points/QueryBatch", try buildTextQuery(&req_buf, "bm25", "body", "alpha", 0.7), &out);
+        const resp = try c.call("/qdrant.Points/QueryBatch", try buildTextQuery(&req_buf, "bm25", "body", "alpha", 0.61), &out);
         try testing.expectEqual(@as(usize, 0), try readFirstBatchPayloads(resp.body, &pts));
     }
     // `using` names the field; one without a scoring text index is refused.

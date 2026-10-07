@@ -2287,10 +2287,18 @@ oracle: T0 (the two refusals answered with one status), T1 (every score within
 is the truth's at that rank), the metamorphic properties (a duplicated query
 term changes nothing; a filter narrows without moving the statistics; `b = 0`;
 `k1 = 0`) and nDCG@10 with qrels, reported rather than gated since a tie swap
-can move it. Delete-then-compare is skipped while strawmANN serves no
-`Points/Delete`. On scifact and fiqa every tier passes for both engines (T1 at
+can move it. On scifact and fiqa every tier passes for both engines (T1 at
 2.0e-7 at most), nDCG@10 is equal (0.6886, 0.2500), and the row licenses a
 comparison.
+
+Then, the same day: the text query scores into per-worker scratch (no
+allocation once it has grown, §6.3), and strawmANN serves `Points/Delete` by
+id list (a filter selector refused by name), which made the last property
+measurable. Delete-then-compare removes every tenth point from both engines
+and rebuilds the oracle without them: strawmANN is held to it and passes
+(519 of scifact's points, 5,764 of fiqa's, |Δscore| at most 1.8e-7). Qdrant's
+line is reported and gates nothing; on these collections it agreed as well,
+since the over-count lives in immutable segments these never reached.
 
 ## BM25 counts an array of empty values as a document, as Qdrant does, decided 2026-10-07
 

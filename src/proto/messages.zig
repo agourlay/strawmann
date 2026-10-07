@@ -1319,6 +1319,46 @@ pub const SetPayloadPoints = struct {
 // Responses
 // =========================================================================
 
+/// `DeletePoints { collection_name = 1; wait = 2; PointsSelector points = 3;
+/// ordering = 4; shard_key_selector = 5; timeout = 6; }`, `PointsSelector {
+/// oneof { PointsIdsList points = 1; Filter filter = 2; } }` (VERIFIED,
+/// points.proto at Qdrant 850859ec9).
+pub const DeletePoints = struct {
+    collection_name: []const u8 = &.{},
+    wait: bool = false,
+    ids_raw: ?[]const u8 = null,
+    filter_raw: ?[]const u8 = null,
+
+    pub fn decode(r: *Reader) DecodeError!DeletePoints {
+        var out: DeletePoints = .{};
+        while (!r.atEnd()) {
+            const t = try r.tag();
+            switch (t.field) {
+                1 => out.collection_name = try r.bytes(),
+                2 => out.wait = try r.boolean(),
+                3 => {
+                    var sel = try r.nested();
+                    while (!sel.atEnd()) {
+                        const st = try sel.tag();
+                        switch (st.field) {
+                            1 => out.ids_raw = try sel.bytes(),
+                            2 => out.filter_raw = try sel.bytes(),
+                            else => try sel.skip(st.wire_type),
+                        }
+                    }
+                },
+                5 => return unimplemented("sharding (§1 non-goal)"),
+                else => try r.skip(t.wire_type),
+            }
+        }
+        return out;
+    }
+
+    pub fn idIterator(self: DeletePoints) SetPayloadPoints.IdIterator {
+        return .{ .inner = RepeatedField.init(self.ids_raw orelse &.{}, 1) };
+    }
+};
+
 /// `ScoredPoint { PointId id = 1; map<string,Value> payload = 2; float score = 3;
 ///                uint64 version = 5; Vectors vectors = 6; ... }`
 pub const ScoredPoint = struct {

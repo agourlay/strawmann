@@ -534,11 +534,11 @@ pub fn handle(ctx_ptr: *anyopaque, req: *const server.Request, out: *server.Resp
         .points_query_batch => queryBatch(ctx, req, body, out),
         .points_scroll => scroll(ctx, req, body, out),
         .points_set_payload => setPayload(ctx, req, body, out),
+        .points_delete => deletePoints(ctx, req, body, out),
         .points_create_field_index => createFieldIndex(ctx, req, body, out),
 
         .collections_list,
         .collections_update,
-        .points_delete,
         .points_get,
         .points_search,
         .points_search_batch,
@@ -644,12 +644,12 @@ pub const Rpc = enum {
             .points_query_batch,
             .points_scroll,
             .points_set_payload,
+            .points_delete,
             .points_create_field_index,
             => .implemented,
 
             .collections_list,
             .collections_update,
-            .points_delete,
             .points_get,
             => .deferred,
 
@@ -968,6 +968,37 @@ fn textIndexOptions(params: ?msg.TextIndexParams) error{ UnknownTokenizer, Unsup
         .english_stopwords = english_stopwords,
         .english_stemmer = english_stemmer,
     };
+}
+
+/// `/qdrant.Points/Delete` by a list of ids. A deleted point leaves search at
+/// once, and a text index's BM25 statistics with it (`Collection.delete`).
+/// An id the collection does not hold is not an error, as in Qdrant.
+fn deletePoints(ctx: *Context, req: *const server.Request, body: []const u8, out: *server.ResponseBuf) server.Completion {
+    var r = wire.Reader.init(body);
+    const dp = msg.DeletePoints.decode(&r) catch |e| return decodeErr(req, e);
+    const held = ctx.engine.acquire(dp.collection_name) orelse
+        return err(req, .not_found, "collection not found");
+    defer held.release();
+    const coll = held.coll;
+
+    if (dp.filter_raw != null) return err(req, .unimplemented, "Delete selected by filter (only by id list)");
+    if (dp.ids_raw == null) return err(req, .invalid_argument, "points selector is required");
+
+    var it = dp.idIterator();
+    while (it.next() catch |e| return decodeErr(req, e)) |pid| {
+        const external = toExternalId(pid) orelse
+            return err(req, .invalid_argument, "malformed point id");
+        _ = coll.delete(external);
+    }
+
+    var w = wire.Writer.init(out.available());
+    const resp = msg.PointsOperationResponse{
+        .operation_id = coll.nextOperationId(),
+        .status = .completed,
+        .time = 0,
+    };
+    resp.encode(&w) catch return err(req, .internal, "response buffer overflow");
+    return ok(req, out.commit(w.pos));
 }
 
 /// §2 phase 2: `/qdrant.Points/SetPayload`, `--set-payload`. Merges the

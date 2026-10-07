@@ -1399,15 +1399,47 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
             });
         }
     }
-    tiers.push(TextTier {
-        skipped: true,
-        tier: "M delete then compare",
-        engine: "both".into(),
-        pass: false,
-        detail: "skipped: strawmANN serves no Points/Delete yet; deletes are covered in-process \
-                 (persist.zig) and Qdrant's df over-counts by design (decisions.md)"
-            .into(),
-    });
+    // Delete then compare, last: it changes both collections. Every tenth
+    // point goes; the oracle is rebuilt without them, rows unchanged.
+    // strawmANN keeps exact statistics and is held to it; Qdrant's immutable
+    // index keeps a deleted point's df until a rebuild (decisions.md), so its
+    // line is reported and gates nothing.
+    let gone: Vec<u64> = (0..docs.len() as u64).step_by(10).collect();
+    let mut kept_docs = docs.clone();
+    for &g in &gone {
+        kept_docs[g as usize].clear();
+    }
+    let after = text::Bm25Index::build(params, &kept_docs);
+    let after_truth: Vec<Vec<(u32, f64)>> = mq
+        .iter()
+        .map(|q| after.search(q, a.k1, a.b, a.limit, None))
+        .collect();
+    for eng in &engines {
+        eng.delete_points(&a.collection, &gone).await?;
+        let got = eng
+            .query_text(&a.collection, &a.field, &mq, a.limit as u64, k1, b)
+            .await?;
+        let (max_rel, rank, nm) = text_tiers(&after, &mq, &after_truth, &got, a.k1, a.b, &a);
+        let pass = max_rel <= a.value_epsilon && rank == 0 && nm == 0;
+        let reported = eng.label == "qdrant";
+        tiers.push(TextTier {
+            skipped: reported,
+            tier: "M delete then compare",
+            engine: eng.label.clone(),
+            pass: pass && !reported,
+            detail: format!(
+                "{} of {} points deleted; {rank} of {} queries off, max relative |Δscore| {max_rel:.3e}{}",
+                gone.len(),
+                docs.len(),
+                mq.len(),
+                match (reported, pass) {
+                    (true, true) => "; agreed, reported only: Qdrant's immutable segments keep a deleted point's df until a rebuild",
+                    (true, false) => "; reported only: Qdrant's immutable segments keep a deleted point's df until a rebuild",
+                    _ => "",
+                }
+            ),
+        });
+    }
 
     // Semantic relevance, reported, not gated: two tied points may differ in
     // judgement, so a legitimate tie swap can move nDCG.
@@ -1425,7 +1457,7 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
         println!(
             "{} {:<36} {:<9} {}",
             if t.skipped {
-                "SKIP"
+                "NOTE"
             } else if t.pass {
                 "PASS"
             } else {

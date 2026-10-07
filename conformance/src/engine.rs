@@ -380,6 +380,18 @@ impl Engine {
         }
     }
 
+    /// Delete the points `ids` (row indices) and wait for it.
+    pub async fn delete_points(&self, name: &str, ids: &[u64]) -> anyhow::Result<()> {
+        use qdrant_client::qdrant::{DeletePointsBuilder, PointsIdsList};
+        let list = PointsIdsList {
+            ids: ids.iter().map(|&i| i.into()).collect(),
+        };
+        self.client
+            .delete_points(DeletePointsBuilder::new(name).points(list).wait(true))
+            .await?;
+        Ok(())
+    }
+
     /// Drop a scratch collection; a failure to drop is not a finding.
     pub async fn delete_collection(&self, name: &str) {
         let _ = self
