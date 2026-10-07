@@ -30,7 +30,7 @@ The output of the project is not the binary. The output is **a set of validated 
 
 ### Non-goals (explicit)
 
-Distribution, sharding, replication, consensus, snapshots, aliases, REST API, TLS, authentication, multi-tenancy, disk-resident (larger-than-RAM) operation, crash-durability guarantees, deletes with space reclamation, sparse vectors (phase 2 at best), multivectors, ColBERT, inference/`Document`/`Image` query variants, RRF/fusion/MMR/formula queries, geo/text/full-text indices.
+Distribution, sharding, replication, consensus, snapshots, aliases, REST API, TLS, authentication, multi-tenancy, disk-resident (larger-than-RAM) operation, crash-durability guarantees, deletes with space reclamation, sparse vectors (phase 2 at best), multivectors, ColBERT, inference/`Document`/`Image` query variants, RRF/fusion/MMR/formula queries, geo indices, full-text filters (`Match.text`/`phrase`/`text_any`). A text index scored with BM25 and queried by the `text` query variant is in scope since 2026-10-07 (`decisions.md`); every other text-index use stays here.
 
 Anything in this list that `bfb` can be told to emit is handled by returning a clean `UNIMPLEMENTED`, never by silently degrading.
 

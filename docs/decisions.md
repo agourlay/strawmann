@@ -2213,3 +2213,47 @@ Both are in `collection_settings()`, which is hashed, so the change is
 STALE against earlier pairs by design. The published W12 ratios are findings
 71 until each corpus has a pair measured with it.
 
+## BM25 over a text index is in scope, decided 2026-10-07
+
+Spec §1 listed text and full-text indexes as non-goals. Qdrant `dev` (1.19.3-dev,
+`3833ed975` and the series before it, 2026-09-11 to 2026-10-05) added BM25
+ranking over a full-text payload index: `Query.text = 12` carries
+`TextQuery { query, k, b }`, `using` names the payload field, and the field's
+text index needs `TextIndexParams.scoring = 12` (`{type: Bm25}`). The user asked
+for it to be supported and benchmarked. Not in any release or client yet.
+
+What is in scope is that query, to Qdrant's semantics at the pinned commit:
+
+- Lucene BM25 in f32, IDF `ln(1 + (N - df + 0.5) / (df + 0.5))` clamped at 0,
+  `k` 1.2 and `b` 0.75 by default and per request; OR over the query's distinct
+  terms; a point with at least one token is a document and its array values
+  concatenate; exact top-k; a filter restricts candidates and not statistics.
+- Statistics over the collection, which is Qdrant's shard: strawmANN has one,
+  and Qdrant is benchmarked on one, so the two scopes coincide.
+- The `word` tokenizer with lowercasing, English stopwords and the English
+  Snowball stemmer. The stemmer must reproduce `qdrant-rust-stemmers 1.2.2`
+  token for token, and the stopword list is Qdrant's `stop_words/english.rs`.
+  Every other tokenizer, language and option (ASCII folding, `prefix`,
+  `whitespace`, `multilingual`) is refused by name.
+
+Out of scope still: full-text filters (`Match.text`, `phrase`, `text_any`),
+prefetch and fusion (so no hybrid), and sparse vectors.
+
+One semantic gap is chosen rather than inherited. Qdrant's immutable and
+on-disk text indexes keep deleted points in their postings until a rebuild,
+so `df` is over-counted (its own model tester treats the statistics as
+approximate for that reason). strawmANN keeps `df` and `N` exact. The
+exact-score tier runs on collections without deletions, where the two agree
+by definition, and a delete-then-compare property holds strawmANN to the
+oracle rebuilt without the deleted points while reporting Qdrant's drift.
+
+Corpora: a BEIR set with qrels (fiqa, 57k documents, 648 test queries; scifact
+as a development fixture) for the exact-score tier and nDCG@10, the first use
+of §4.4's semantic relevance; and a synthetic Zipf corpus shaped like Qdrant's
+own `bm25_corpus.rs` at 200k and 1M documents for scale.
+
+The order of work: clients carrying `TextQuery` (no qdrant-client release has
+it, so one generated from the pinned proto, for the conformance binary and
+bfb), a BM25 oracle and differ tiers before any engine code, the engine, then
+the W15 rows. Qdrant is pinned to a `dev` commit at or after `850859ec9` and
+re-pinned deliberately, since the API is days old.
