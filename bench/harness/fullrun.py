@@ -1701,9 +1701,74 @@ def invocations_per_arm() -> int:
             + any(r in mutators for r in rows))
 
 
+def text_tokenizer_flags(name: str) -> list[str]:
+    """`name`'s text index options as the conformance binary's flags."""
+    o = paths.text_index(name)
+    for k in ("stopwords", "stemmer"):
+        if o.get(k) not in (None, "english"):
+            raise SystemExit(f"{name}: {k} {o[k]!r}; the oracle has English only (decisions.md)")
+    return ["--lowercase", str(o["lowercase"]).lower(),
+            *(["--english-stopwords"] if o.get("stopwords") else []),
+            *(["--english-stemmer"] if o.get("stemmer") else [])]
+
+
+def text_files(name: str) -> list[Path]:
+    """What a text arm reads: the oracle's corpus and queries, bfb's layout."""
+    tc = paths.text_dataset(name)
+    return [tc.corpus, tc.queries, tc.bfb / "vectors.npy", tc.bfb / "payloads.jsonl"]
+
+
+def text_relevance_argv(uri: str, label: str, v: workloads.TextVariant, out: Path) -> list[str]:
+    """One W15 variant's recall against `bench15` as the rows left it."""
+    tc = paths.text_dataset(DATASET)
+    return ["cargo", "run", "--release", "--quiet", "--", "text-relevance",
+            "--engine", uri, "--label", label,
+            "--collection", workloads.W15_COLLECTION, "--field", workloads.TEXT_FIELD,
+            "--corpus", str(tc.corpus), "--queries", str(tc.queries),
+            *text_tokenizer_flags(DATASET),
+            "--k1", str(v.k1), "--b", str(v.b),
+            *(["--parity", v.parity] if v.parity else []),
+            *(["--qrels", str(tc.qrels)] if tc.qrels else []),
+            "--skip-upload", "--json", str(out)]
+
+
+def run_text_recall(uri: str, label: str, client_cpus: str) -> int:
+    """W15's recall: `text-relevance` once per variant the table searches,
+    gathered into `recall.TEXT_RECALL_FILE` for the sink and the report."""
+    import recall
+    rc, variants = 0, {}
+    for v in workloads.text_variants():
+        out = RESULTS / label / f"text_recall.{v.key}.json"
+        argv = ["taskset", "-c", client_cpus, *text_relevance_argv(uri, label, v, out)]
+        print(f"  {' '.join(argv)}", flush=True)
+        r = subprocess.run(argv, cwd=CONF)
+        rc |= r.returncode
+        if r.returncode == 0:
+            variants[v.key] = json.loads(out.read_text())
+    path = recall.text_recall_path(label)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"dataset": DATASET, "collection": workloads.W15_COLLECTION,
+                                "variants": variants}, indent=2) + "\n")
+    return rc
+
+
+def measure_text(uri: str, label: str, client_cpus: str, storage: str | None,
+                 placement: str | None = None) -> int:
+    """A text corpus's arm: W15's rows, then each variant's recall over the
+    collection they searched. Nothing in W15 writes after its upload."""
+    say(f"{label}: W15, BM25 over a text index")
+    rc = run_workloads(uri, label, client_cpus, storage, placement=placement)
+    capture_collections(uri, label, client_cpus, names=[workloads.W15_COLLECTION])
+    say(f"{label}: W15's recall, one run per k1/b/filter variant")
+    rc |= run_text_recall(uri, label, client_cpus)
+    return rc
+
+
 def measure(uri: str, label: str, client_cpus: str, storage: str | None,
             placement: str | None = None) -> int:
     """Every row, the recall sweeps, then the rows that would invalidate them."""
+    if paths.is_text(DATASET):
+        return measure_text(uri, label, client_cpus, storage, placement)
     rows = [w.id for w in workloads.table()]
     mutators = mutating_rows()
     groups = workloads.isolated_groups()
@@ -1778,20 +1843,10 @@ def measure(uri: str, label: str, client_cpus: str, storage: str | None,
     return rc
 
 
-def run_conformance(strawmann_uri: str, qdrant_uri: str, labels: list[str],
-                    client_cpus: str, env: dict) -> int:
-    """§8's green row, without which the sink refuses every perf row.
-
-    Both engines run at once here. That would be wrong for a throughput
-    measurement and is fine for a correctness one: the differ compares answers,
-    not speeds, and it is the only phase where the two are up together.
-    """
-    out = RESULTS / labels[0] / "conformance.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
+def vector_differ_argv(strawmann_uri: str, qdrant_uri: str, out: Path) -> list[str]:
     # Read here rather than at import, so `--data-dir` reaches the differ too.
     base, queries, gt = paths.dataset(DATASET)
-    argv = [
-        "taskset", "-c", client_cpus,
+    return [
         "cargo", "run", "--release", "--quiet", "--",
         "differ",
         "--strawmann", strawmann_uri,
@@ -1805,6 +1860,33 @@ def run_conformance(strawmann_uri: str, qdrant_uri: str, labels: list[str],
         "--dataset", DATASET,
         "--json", str(out),
     ]
+
+
+def text_differ_argv(strawmann_uri: str, qdrant_uri: str, out: Path) -> list[str]:
+    """The text differ over the corpus W15 measured, under its tokenizer and
+    BM25's defaults; its T1 for strawmANN licenses the W15 rows."""
+    tc = paths.text_dataset(DATASET)
+    return ["cargo", "run", "--release", "--quiet", "--", "text-differ",
+            "--strawmann", strawmann_uri, "--qdrant", qdrant_uri,
+            "--corpus", str(tc.corpus), "--queries", str(tc.queries),
+            *text_tokenizer_flags(DATASET),
+            *(["--qrels", str(tc.qrels)] if tc.qrels else []),
+            "--dataset", DATASET, "--json", str(out)]
+
+
+def run_conformance(strawmann_uri: str, qdrant_uri: str, labels: list[str],
+                    client_cpus: str, env: dict) -> int:
+    """§8's green row, without which the sink refuses every perf row.
+
+    Both engines run at once here. That would be wrong for a throughput
+    measurement and is fine for a correctness one: the differ compares answers,
+    not speeds, and it is the only phase where the two are up together.
+    """
+    out = RESULTS / labels[0] / "conformance.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    argv = ["taskset", "-c", client_cpus,
+            *(text_differ_argv(strawmann_uri, qdrant_uri, out) if paths.is_text(DATASET)
+              else vector_differ_argv(strawmann_uri, qdrant_uri, out))]
     print(f"  {' '.join(argv)}", flush=True)
     print(f"  build identity: strawmann={env.get('STRAWMANN_COMMIT')} "
           f"isa={env.get('STRAWMANN_ISA_BUILD')} qdrant={env.get('QDRANT_VERSION')}",
@@ -2408,7 +2490,7 @@ def main(argv: list[str]) -> int:
               "the report will refuse to read their latency percentiles across the "
               "two columns")
 
-    for f in paths.dataset(DATASET):
+    for f in (text_files(DATASET) if paths.is_text(DATASET) else paths.dataset(DATASET)):
         if not f.exists():
             # Named separately from the fetch: for every dataset but SIFT1M the
             # missing file is the converted corpus or the fp64 ground truth,

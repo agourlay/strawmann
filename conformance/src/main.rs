@@ -293,8 +293,9 @@ struct TextDifferRun {
     corpus: PathBuf,
     #[arg(long)]
     queries: PathBuf,
+    /// `bm25-truth`'s output; absent, computed here from the oracle's index.
     #[arg(long)]
-    truth: PathBuf,
+    truth: Option<PathBuf>,
     #[arg(long)]
     qrels: Option<PathBuf>,
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
@@ -1239,16 +1240,31 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
     };
     let (docs, corpus_checksum) = text::read_corpus(&a.corpus)?;
     let (queries, query_checksum) = text::read_queries(&a.queries)?;
-    let truth = load_bm25_truth(
-        &a.truth,
-        params,
-        a.k1,
-        a.b,
-        a.limit,
-        corpus_checksum,
-        query_checksum,
-    )?;
     let index = text::Bm25Index::build(params, &docs);
+    let truth = match &a.truth {
+        Some(path) => load_bm25_truth(
+            path,
+            params,
+            a.k1,
+            a.b,
+            a.limit,
+            corpus_checksum,
+            query_checksum,
+        )?,
+        None => text::Bm25Truth::from_index(
+            &index,
+            text::Bm25Settings {
+                params,
+                k1: a.k1,
+                b: a.b,
+                limit: a.limit,
+            },
+            corpus_checksum,
+            &queries,
+            query_checksum,
+            None,
+        ),
+    };
     let engines = [
         engine::Engine::connect("strawmann", &a.strawmann)?,
         engine::Engine::connect("qdrant", &a.qdrant)?,

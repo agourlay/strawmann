@@ -467,6 +467,43 @@ def load_recall(label: str, dataset: str, collection: str,
     return out
 
 
+#: W15's recall, one `text-relevance` run per variant the text table searches
+#: (`workloads.text_variants`), written by `fullrun.run_text_recall`.
+TEXT_RECALL_FILE = "text_recall.json"
+
+
+def text_recall_path(label: str) -> Path:
+    return ROOT / "bench/results" / label / TEXT_RECALL_FILE
+
+
+def load_text_recall(label: str, dataset: str, row_id: str) -> dict | None:
+    """A W15 search row's recall@10 (and nDCG@10, MRR@10 on a judged corpus),
+    from the run of the variant it searched, or None.
+
+    Only from a file that names `dataset`, and only from a run whose own `k1`,
+    `b` and filter are the row's: the file name is where to look, the fields
+    are the join key, as for the vector sweeps."""
+    import workloads
+    w = {x.id: x for x in workloads.text_table()}.get(row_id)
+    v = workloads.text_variant(w) if w is not None else None
+    if v is None:
+        return None
+    try:
+        doc = json.loads(text_recall_path(label).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if doc.get("dataset") != dataset:
+        return None
+    pt = (doc.get("variants") or {}).get(v.key)
+    if not pt or (pt.get("k1"), pt.get("b"), pt.get("parity")) != (v.k1, v.b, v.parity):
+        return None
+    if pt.get("limit") != 10:
+        return None
+    sem = pt.get("semantic") or {}
+    return {"recall_at_10": pt.get("recall"), "ndcg_at_10": sem.get("ndcg_at_10"),
+            "mrr_at_10": sem.get("mrr_at_10")}
+
+
 def quant_params_of(collection: str) -> QuantParams:
     """The quantization parameters §4's search row for `collection` sends."""
     try:

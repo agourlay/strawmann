@@ -455,6 +455,10 @@ def ingest_run(db, label: str, root: Path) -> int:
         # has none of) and §7.4's qps-without-recall rule refuses it forever.
         if r.get("exact"):
             return {"recall_at_1": 1.0, "recall_at_10": 1.0}
+        # W15 searches a text index and has no `ef`: its recall is the
+        # text-relevance run of the row's own k1/b/filter variant.
+        if str(r.get("id", "")).startswith("W15"):
+            return recall_mod.load_text_recall(label, dataset, r["id"])
         if not coll or ef is None or not r.get("recall_joinable", True):
             return None
         # W7 searches at oversampling 4; a sweep recorded at 1 is a different

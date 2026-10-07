@@ -1251,6 +1251,10 @@ def recall_sweep(label: str, dataset: str, collection: str,
 
 
 def recall_at(label: str, dataset: str, row: dict, wid: str) -> float | None:
+    # W15 has no `ef`: its recall is the text-relevance run of the row's own
+    # k1/b/filter variant (`recall.load_text_recall`, the sink's join too).
+    if wid.startswith("W15"):
+        return (recall_mod.load_text_recall(label, dataset, wid) or {}).get("recall_at_10")
     coll, ef, joinable = recall_key_of(row, wid)
     if not coll or ef is None or not joinable:
         return None

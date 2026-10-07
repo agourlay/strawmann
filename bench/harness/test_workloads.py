@@ -3996,3 +3996,69 @@ class TextTableTests(unittest.TestCase):
         self.assertNotIn("text_index", s)
         self.assertNotIn("w15_ladder", s)
         self.assertNotIn("W15", [r.id for r in self.w.table()])
+
+
+class TextArmTests(unittest.TestCase):
+    """What a text arm runs beside W15's rows: one recall per variant, the
+    text differ, and the joins that bring both back to the rows."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        saved = os.environ.get("STRAWMANN_DATASET")
+        self.addCleanup(lambda: os.environ.__setitem__("STRAWMANN_DATASET", saved)
+                        if saved is not None else os.environ.pop("STRAWMANN_DATASET", None))
+        self.m = _reload(Path(self.tmp.name))
+        self.w = self.m["workloads"]
+        self.f = importlib.reload(sys.modules["fullrun"]) \
+            if "fullrun" in sys.modules else importlib.import_module("fullrun")
+        self.f.DATASET = self.w.use_dataset("scifact")
+
+    def test_each_variant_is_measured_once(self):
+        keys = [v.key for v in self.w.text_variants()]
+        self.assertEqual(keys, ["k1.2-b0.75", "k1.2-b0.75-keyword_0", "k0.9-b0.4", "k1.2-b0"])
+        t = {r.id: r for r in self.w.text_table()}
+        self.assertEqual(self.w.text_variant(t["W15"]), self.w.text_variant(t["W15-sat"]))
+        self.assertIsNone(self.w.text_variant(t["W15-upload"]))
+        self.assertEqual(self.w.required_capacity(), 5183)
+
+    def test_the_recall_and_differ_argv_carry_the_tokenizer_and_the_variant(self):
+        v = next(x for x in self.w.text_variants() if x.parity)
+        argv = self.f.text_relevance_argv("http://localhost:6334", "lab", v, Path("/x.json"))
+        self.assertIn("text-relevance", argv)
+        self.assertIn("--skip-upload", argv)
+        for flag in ("--english-stopwords", "--english-stemmer"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--parity") + 1], "keyword_0")
+        self.assertEqual(argv[argv.index("--collection") + 1], "bench15")
+        d = self.f.text_differ_argv("http://a", "http://b", Path("/c.json"))
+        self.assertIn("text-differ", d)
+        self.assertEqual(d[d.index("--dataset") + 1], "scifact")
+        self.w.use_dataset("bm25-zipf-200k")
+        self.f.DATASET = "bm25-zipf-200k"
+        d = self.f.text_differ_argv("http://a", "http://b", Path("/c.json"))
+        self.assertNotIn("--english-stemmer", d)
+        self.assertNotIn("--qrels", d)
+
+    def _write(self, label, dataset, variants):
+        import recall
+        p = recall.text_recall_path(label)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"dataset": dataset, "variants": variants}))
+        return recall
+
+    def test_a_w15_row_joins_only_its_own_variant_on_its_own_corpus(self):
+        pt = {"k1": 1.2, "b": 0.75, "parity": None, "limit": 10, "recall": 0.98,
+              "semantic": {"ndcg_at_10": 0.69, "mrr_at_10": 0.65}}
+        recall = self._write("lab", "scifact", {"k1.2-b0.75": pt})
+        got = recall.load_text_recall("lab", "scifact", "W15-sat")
+        self.assertEqual(got, {"recall_at_10": 0.98, "ndcg_at_10": 0.69, "mrr_at_10": 0.65})
+        self.assertIsNone(recall.load_text_recall("lab", "fiqa", "W15-sat"))
+        self.assertIsNone(recall.load_text_recall("lab", "scifact", "W15-b0"))
+        self.assertIsNone(recall.load_text_recall("lab", "scifact", "W15-upload"))
+        # A variant file whose own fields disagree with its key is not joined.
+        recall = self._write("lab", "scifact", {"k1.2-b0.75": {**pt, "b": 0.4}})
+        self.assertIsNone(recall.load_text_recall("lab", "scifact", "W15"))
+        import compare
+        recall = self._write("lab", "scifact", {"k1.2-b0.75": pt})
+        self.assertEqual(compare.recall_at("lab", "scifact", {}, "W15"), 0.98)

@@ -55,6 +55,7 @@ import time
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # `bench/`, for `setup.py`: the gate's own constants and process lists, so the
@@ -600,6 +601,8 @@ def required_capacity() -> int:
     leaving W11-steady out here left `bench2` 50,000 points short of what the
     last row needs, and the server refuses the row rather than growing.
     """
+    if paths.is_text(DATASET):
+        return paths.text_n(DATASET)
     return max(upload_n() + w11_n() + w11_steady_n(), w12_n())
 
 def _cmdline_int(cmdline: str | None, flag: str) -> int | None:
@@ -1551,6 +1554,46 @@ W15_COLLECTION = "bench15"
 #: The `k1`/`b` ladder beside the defaults: Anserini's BEIR setting, and no
 #: length normalization.
 W15_LADDER = (("k0.9-b0.4", 0.9, 0.4), ("b0", 1.2, 0.0))
+
+
+#: The parity value W15-filtered's recall is measured at. bfb draws either
+#: value per query; each keeps half the corpus, so one stands for both.
+W15_RECALL_PARITY = "keyword_0"
+
+#: BM25's defaults, as both engines and the oracle take them (`text::DEFAULT_K1`).
+BM25_K1, BM25_B = 1.2, 0.75
+
+
+class TextVariant(NamedTuple):
+    """What a W15 search row asks of the index: its `k1`, `b` and filter."""
+
+    k1: float
+    b: float
+    parity: str | None
+
+    @property
+    def key(self) -> str:
+        """The variant's name in `text_recall.json`."""
+        return f"k{self.k1:g}-b{self.b:g}" + (f"-{self.parity}" if self.parity else "")
+
+
+def text_variant(w: Workload) -> TextVariant | None:
+    """The variant a W15 search row runs, which its recall is measured under:
+    W15 and W15-sat share one, each ladder rung and the filter have their own."""
+    if w.text is None or w.text.kind != "search":
+        return None
+    return TextVariant(BM25_K1 if w.text.k1 is None else w.text.k1,
+                       BM25_B if w.text.b is None else w.text.b,
+                       W15_RECALL_PARITY if w.text.parity_filter else None)
+
+
+def text_variants() -> list[TextVariant]:
+    """Every variant the text table searches, once each, in table order."""
+    seen: dict[str, TextVariant] = {}
+    for w in text_table():
+        if (v := text_variant(w)) is not None:
+            seen.setdefault(v.key, v)
+    return list(seen.values())
 
 
 def text_upload_config(collection: str) -> str:
