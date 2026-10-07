@@ -26,6 +26,7 @@
 
 const std = @import("std");
 const tokenizer = @import("tokenizer.zig");
+const heap = @import("../index/heap.zig");
 
 pub const default_k1: f32 = 1.2;
 pub const default_b: f32 = 0.75;
@@ -43,7 +44,39 @@ const Doc = struct {
     terms: []TermCount = &.{},
 };
 
-pub const Hit = struct { point: u32, score: f32 };
+/// A query worker's reusable state for `TextIndex.search`, so that a search
+/// allocates nothing once its buffers have grown to the collection (§6.3).
+pub const SearchScratch = struct {
+    gpa: std.mem.Allocator,
+    /// Per point, the score accumulated so far. A point holding a query term
+    /// scores above zero (exact statistics keep `df <= N`, so `idf > 0`), so
+    /// zero means untouched, and every touched entry is zeroed again after.
+    acc: []f32 = &.{},
+    touched: std.ArrayList(u32) = .empty,
+    terms: std.ArrayList(u32) = .empty,
+    lowered: std.ArrayList(u8) = .empty,
+    stemmed: std.ArrayList(u8) = .empty,
+
+    pub fn init(gpa: std.mem.Allocator) SearchScratch {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(self: *SearchScratch) void {
+        self.gpa.free(self.acc);
+        self.touched.deinit(self.gpa);
+        self.terms.deinit(self.gpa);
+        self.lowered.deinit(self.gpa);
+        self.stemmed.deinit(self.gpa);
+    }
+
+    fn cover(self: *SearchScratch, points: usize) !void {
+        if (self.acc.len >= points) return;
+        const grown = try self.gpa.alloc(f32, @max(points, self.acc.len * 2));
+        @memset(grown, 0);
+        self.gpa.free(self.acc);
+        self.acc = grown;
+    }
+};
 
 pub const TextIndex = struct {
     gpa: std.mem.Allocator,
@@ -144,32 +177,39 @@ pub const TextIndex = struct {
         return @max(@log((n - df + 0.5) / (df + 0.5) + 1.0), 0.0);
     }
 
-    /// The top `limit` points for `query`, best first, ties by point. A point
-    /// counts only if `allowed` admits it (when given); the statistics stay
-    /// the whole index's.
+    /// The best points for `query` into `top`, which orders them by score and
+    /// then by point. A point counts only if `allowed` admits it (when given);
+    /// the statistics stay the whole index's.
     pub fn search(
         self: *const TextIndex,
-        gpa: std.mem.Allocator,
+        scratch: *SearchScratch,
         query: []const u8,
         k1: f32,
         b: f32,
-        limit: usize,
+        top: *heap.TopK,
         allowed: anytype,
-    ) ![]Hit {
+    ) !void {
         // The query's distinct terms the index holds; the others score nothing.
-        var terms: std.AutoArrayHashMapUnmanaged(u32, void) = .empty;
-        defer terms.deinit(gpa);
+        scratch.terms.clearRetainingCapacity();
         {
-            var it = tokenizer.TokenIterator.init(gpa, self.opts, query);
-            defer it.deinit();
+            var it = tokenizer.TokenIterator.init(scratch.gpa, self.opts, query);
+            it.lowered = scratch.lowered;
+            it.stemmed = scratch.stemmed;
+            defer {
+                scratch.lowered = it.lowered;
+                scratch.stemmed = it.stemmed;
+            }
             while (try it.next()) |token| {
-                if (self.term_ids.get(token)) |id| try terms.put(gpa, id, {});
+                const id = self.term_ids.get(token) orelse continue;
+                if (std.mem.indexOfScalar(u32, scratch.terms.items, id) == null) {
+                    try scratch.terms.append(scratch.gpa, id);
+                }
             }
         }
-        const avg = self.avgdl() orelse return &.{};
-        var scores: std.AutoHashMapUnmanaged(u32, f32) = .empty;
-        defer scores.deinit(gpa);
-        for (terms.keys()) |term| {
+        const avg = self.avgdl() orelse return;
+        try scratch.cover(self.docs.items.len);
+        scratch.touched.clearRetainingCapacity();
+        for (scratch.terms.items) |term| {
             const term_idf = self.idf(term);
             for (self.postings.items[term].items) |p| {
                 const d = self.docs.items[p.point];
@@ -178,25 +218,15 @@ pub const TextIndex = struct {
                 const tf: f32 = @floatFromInt(p.tf);
                 const len: f32 = @floatFromInt(d.len);
                 const norm = if (b > 0) k1 * (1 - b + b * len / avg) else k1;
-                const gop = try scores.getOrPut(gpa, p.point);
                 const s = term_idf * tf * (k1 + 1) / (tf + norm);
-                gop.value_ptr.* = if (gop.found_existing) gop.value_ptr.* + s else s;
+                if (scratch.acc[p.point] == 0) try scratch.touched.append(scratch.gpa, p.point);
+                scratch.acc[p.point] += s;
             }
         }
-        var hits = try gpa.alloc(Hit, scores.count());
-        var i: usize = 0;
-        var sit = scores.iterator();
-        while (sit.next()) |e| : (i += 1) hits[i] = .{ .point = e.key_ptr.*, .score = e.value_ptr.* };
-        std.mem.sort(Hit, hits, {}, struct {
-            fn lessThan(_: void, x: Hit, y: Hit) bool {
-                if (x.score != y.score) return x.score > y.score;
-                return x.point < y.point;
-            }
-        }.lessThan);
-        if (hits.len > limit) {
-            hits = try gpa.realloc(hits, limit);
+        for (scratch.touched.items) |point| {
+            top.push(.{ .id = point, .score = scratch.acc[point] });
+            scratch.acc[point] = 0;
         }
-        return hits;
     }
 };
 
@@ -204,6 +234,17 @@ const testing = std.testing;
 
 fn texts(comptime xs: []const []const u8) []const []const u8 {
     return xs;
+}
+
+var test_results: [16]heap.Candidate = undefined;
+
+/// `search` at the defaults into a fresh heap of ten.
+fn testSearch(idx: *const TextIndex, query: []const u8, allowed: anytype) ![]heap.Candidate {
+    var scratch = SearchScratch.init(testing.allocator);
+    defer scratch.deinit();
+    var top = heap.TopK.init(&test_results, 10);
+    try idx.search(&scratch, query, default_k1, default_b, &top, allowed);
+    return top.finish();
 }
 
 test "statistics are exact through overwrite and delete" {
@@ -224,9 +265,7 @@ test "statistics are exact through overwrite and delete" {
     try testing.expectEqual(@as(u32, 2), idx.documents);
     try testing.expectEqual(@as(u32, 0), idx.df.items[idx.term_ids.get("alpha").?]);
     // Its stale postings never come back.
-    const hits = try idx.search(testing.allocator, "alpha", default_k1, default_b, 10, null);
-    defer testing.allocator.free(hits);
-    try testing.expectEqual(@as(usize, 0), hits.len);
+    try testing.expectEqual(@as(usize, 0), (try testSearch(&idx, "alpha", null)).len);
 }
 
 test "an array of two values is a document even without tokens, as in Qdrant" {
@@ -246,20 +285,17 @@ test "scores are Lucene BM25, and a filter narrows without moving statistics" {
     try idx.set(0, texts(&.{"alpha beta"}));
     try idx.set(1, texts(&.{"gamma"}));
     // Qdrant scores "alpha" on this corpus at 0.609970 (qdrant/qdrant#11010).
-    const hits = try idx.search(testing.allocator, "alpha alpha", default_k1, default_b, 10, null);
-    defer testing.allocator.free(hits);
+    const hits = try testSearch(&idx, "alpha alpha", null);
     try testing.expectEqual(@as(usize, 1), hits.len);
     try testing.expectApproxEqRel(@as(f32, 0.609970), hits[0].score, 1e-5);
+    const score = hits[0].score;
     const Only = struct {
         p: u32,
         fn admits(self: @This(), point: u32) bool {
             return point == self.p;
         }
     };
-    const none = try idx.search(testing.allocator, "alpha", default_k1, default_b, 10, Only{ .p = 1 });
-    defer testing.allocator.free(none);
-    try testing.expectEqual(@as(usize, 0), none.len);
-    const kept = try idx.search(testing.allocator, "alpha", default_k1, default_b, 10, Only{ .p = 0 });
-    defer testing.allocator.free(kept);
-    try testing.expectEqual(hits[0].score, kept[0].score);
+    try testing.expectEqual(@as(usize, 0), (try testSearch(&idx, "alpha", Only{ .p = 1 })).len);
+    const kept = try testSearch(&idx, "alpha", Only{ .p = 0 });
+    try testing.expectEqual(score, kept[0].score);
 }

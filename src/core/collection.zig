@@ -983,22 +983,19 @@ pub const Collection = struct {
 
     pub const TextSearchError = error{ NoTextIndex, OutOfMemory, InvalidUtf8 };
 
-    /// BM25 over `field`'s text index: the best `out.len` live points that
-    /// `filter` admits, best first, into `out`. Returns how many it wrote.
-    ///
-    /// Allocates its scratch, which §6.3 forbids on the query path; the
-    /// text path is new and unmeasured, and a per-worker arena is the
-    /// follow-up once it is.
+    /// BM25 over `field`'s text index: the live points `filter` admits, into
+    /// `top`. `scratch` is the worker's own; once its buffers have grown to
+    /// the collection a search allocates nothing (§6.3).
     pub fn textSearch(
         self: *const Collection,
-        alloc: std.mem.Allocator,
+        scratch: *text_mod.index.SearchScratch,
         field: []const u8,
         query: []const u8,
         k1: f32,
         b: f32,
         filter: ?hnsw.Index.Filter,
-        out: []Candidate,
-    ) TextSearchError!usize {
+        top: *heap.TopK,
+    ) TextSearchError!void {
         self.payload.lockFields();
         defer self.payload.unlockFields();
         const f = self.payload.field(field) orelse return error.NoTextIndex;
@@ -1013,13 +1010,10 @@ pub const Collection = struct {
             }
         };
         const allowed = Allowed{ .coll = self, .filter = filter, .bound = self.id_space.count() };
-        const hits = ti.search(alloc, query, k1, b, out.len, allowed) catch |e| return switch (e) {
+        ti.search(scratch, query, k1, b, top, allowed) catch |e| return switch (e) {
             error.OutOfMemory => error.OutOfMemory,
             else => error.InvalidUtf8,
         };
-        defer alloc.free(hits);
-        for (hits, 0..) |h, i| out[i] = .{ .id = h.point, .score = h.score };
-        return hits.len;
     }
 
     pub fn isDeleted(self: *const Collection, offset: u32) bool {

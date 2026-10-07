@@ -800,15 +800,22 @@ test "a text index keeps exact BM25 statistics through delete and the round-trip
     }
     const opts = text.tokenizer.Options{ .english_stopwords = true, .english_stemmer = true };
     try c.createPayloadTextIndex("body", opts);
-    var out: [4]heap.Candidate = undefined;
+    var scratch = text.index.SearchScratch.init(testing.allocator);
+    defer scratch.deinit();
+    var storage_a: [4]heap.Candidate = undefined;
+    var top = heap.TopK.init(&storage_a, 4);
     // Three documents; deleting the third leaves N 2 and avgdl 1.5, where
     // "alpha" scores qdrant/qdrant#11010's 0.609970.
     try testing.expect(c.delete(.{ .num = 2 }));
-    const n = try c.textSearch(testing.allocator, "body", "alpha", 1.2, 0.75, null, &out);
-    try testing.expectEqual(@as(usize, 1), n);
+    try c.textSearch(&scratch, "body", "alpha", 1.2, 0.75, null, &top);
+    const out = top.finish();
+    try testing.expectEqual(@as(usize, 1), out.len);
     try testing.expectApproxEqRel(@as(f32, 0.609970), out[0].score, 1e-5);
     // A deleted point is never a hit, however its terms match.
-    try testing.expectEqual(@as(usize, 0), try c.textSearch(testing.allocator, "body", "run", 1.2, 0.75, null, &out));
+    var storage_b: [4]heap.Candidate = undefined;
+    var none = heap.TopK.init(&storage_b, 4);
+    try c.textSearch(&scratch, "body", "run", 1.2, 0.75, null, &none);
+    try testing.expectEqual(@as(usize, 0), none.finish().len);
 
     const dir = "/tmp/strawmann-test-text-index";
     try save(&c, dir);
@@ -818,10 +825,12 @@ test "a text index keeps exact BM25 statistics through delete and the round-trip
     try testing.expectEqual(payload_mod.Kind.text, f.kind);
     try testing.expectEqual(opts, f.text_index.?.opts);
     // Rebuilt from the blobs without the deleted point: the same score.
-    var again: [4]heap.Candidate = undefined;
-    const m = try reloaded.textSearch(testing.allocator, "body", "alpha", 1.2, 0.75, null, &again);
-    try testing.expectEqual(@as(usize, 1), m);
-    try testing.expectEqual(out[0].score, again[0].score);
+    var storage_c: [4]heap.Candidate = undefined;
+    var again = heap.TopK.init(&storage_c, 4);
+    try reloaded.textSearch(&scratch, "body", "alpha", 1.2, 0.75, null, &again);
+    const back = again.finish();
+    try testing.expectEqual(@as(usize, 1), back.len);
+    try testing.expectEqual(out[0].score, back[0].score);
 }
 
 test "§6.4: hnsw_m, ef_construct and both id kinds survive the round-trip" {

@@ -381,6 +381,9 @@ pub const Workspace = struct {
     gather_probe: []u8 = &.{},
     gather_dim: usize = 0,
     gather_stride: usize = 0,
+    /// The text query's scoring scratch, created on a worker's first text
+    /// query and grown with the collections it serves (`ensureText`).
+    text_scratch: ?text_mod.index.SearchScratch = null,
 
     pub const max_limit = 4096;
     pub const max_ef = 4096;
@@ -449,6 +452,13 @@ pub const Workspace = struct {
         self.gather_stride = stride;
     }
 
+    /// The text query's scratch. Its buffers grow on first use and with
+    /// larger collections, so the steady state allocates nothing (§6.3).
+    pub fn ensureText(self: *Workspace, alloc: std.mem.Allocator) !*text_mod.index.SearchScratch {
+        if (self.text_scratch == null) self.text_scratch = text_mod.index.SearchScratch.init(alloc);
+        return &self.text_scratch.?;
+    }
+
     pub fn ensureQuant(self: *Workspace, alloc: std.mem.Allocator, dim: usize) !void {
         if (self.quant_dim >= dim and self.qscratch != null) return;
         const want = @max(dim, self.quant_dim);
@@ -480,6 +490,7 @@ pub const Workspace = struct {
         if (self.gather_queries.len > 0) alloc.free(self.gather_queries);
         if (self.gather_results.len > 0) alloc.free(self.gather_results);
         if (self.gather_probe.len > 0) alloc.free(self.gather_probe);
+        if (self.text_scratch) |*s| s.deinit();
     }
 };
 
@@ -1500,13 +1511,15 @@ fn textSearchOne(
     var pred: ?index.hnsw.Index.Filter = null;
     if (filter_opt) |*f| pred = preparePredicate(ctx, coll, f, &pred_state).filter;
 
-    const out = ctx.workspace.results[0..want];
-    const n = coll.textSearch(ctx.engine.alloc, field, tq.query, k1, b, pred, out) catch |e| return switch (e) {
+    const scratch = ctx.workspace.ensureText(ctx.engine.alloc) catch
+        return refuse(fail, .internal, "workspace allocation failed");
+    var top = index.TopK.init(ctx.workspace.results, want);
+    coll.textSearch(scratch, field, tq.query, k1, b, pred, &top) catch |e| return switch (e) {
         error.NoTextIndex => refuse(fail, .invalid_argument, "A text query needs a scoring text index on the field `using` names, which has none"),
         error.InvalidUtf8 => refuse(fail, .invalid_argument, "text query is not valid UTF-8"),
         error.OutOfMemory => refuse(fail, .resource_exhausted, "out of memory scoring a text query"),
     };
-    return out[0..n];
+    return top.finish();
 }
 
 /// Where a query's predicate keeps its context: the two shapes outlive the
