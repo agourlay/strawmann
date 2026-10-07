@@ -1075,9 +1075,14 @@ def filtered_matched_recall_table(runs: list[Run]) -> str:
         ds = (run.meta.get("dataset") or {}).get("name") or "sift1m"
         # The ladder's own ACORN, which every rung sends alike; None on rows
         # recorded before they carried it, and the join falls back to the stamp.
+        # Rungs that disagree describe two searches, and no one sweep speaks
+        # for both, so there is no table rather than one setting's recall
+        # under the other's throughput.
         acorns = {r.get("acorn") for r in run.rows
                   if str(r.get("id", "")).startswith(f"W12-{grade}-ef")}
-        acorn = acorns.pop() if len(acorns) == 1 else None
+        if len(acorns) > 1:
+            return ""
+        acorn = acorns.pop() if acorns else None
         # The graded sweep, by grade: an unfiltered sweep of `bench12` is not
         # written and would answer a different question if it were.
         doc = recall_mod.load_recall_json(run.label, ds, "bench12",
@@ -1113,7 +1118,7 @@ def filtered_matched_recall_table(runs: list[Run]) -> str:
     # table above it printed 2.25x.
     # Absent from the join is neither: a run with the ladder and no plain row,
     # or a row the fold left out, has nothing in that table to describe.
-    verdicts = joined_verdicts(runs)
+    verdicts = joined_verdicts([a, b])
     refusal = verdicts.get("W12-sel10")
     if "W12-sel10" not in verdicts:
         row = ('. The per-row table has no <code>W12-sel10</code> row for this '

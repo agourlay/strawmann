@@ -405,9 +405,11 @@ def acorn_matches(label: str, sweep_json: dict, row_acorn: bool | None) -> bool:
 
 def sweep_acorn(label: str) -> bool:
     """Whether a filtered sweep of `label` should send `--acorn`: what its
-    rows ran with, from its stamp, and the harness's own setting for a label
-    not stamped yet. Fails rather than guessing: a sweep sent the wrong way
-    is one the join then refuses, with nothing on the page to say why."""
+    rows ran with, from its stamp, and the harness's own `W12_ACORN` for a
+    label not stamped yet, which during a run is the setting its rows are
+    measured under. A failed `import workloads` raises rather than sending
+    none: a sweep sent the wrong way is one the join then refuses, with
+    nothing on the page to say why."""
     stamped = label_acorn(label)
     if stamped is not None:
         return stamped

@@ -401,8 +401,12 @@ def run_search_until(cmd: list[str], stop_at, poll_s: float = 0.2) -> subprocess
     def watch() -> None:
         while p.poll() is None:
             if time.monotonic() >= stop_at():
-                p.send_signal(signal.SIGINT)
-                signalled.set()
+                # Asked again at the last moment: `send_signal` does nothing to
+                # a process `poll` has already reaped, and a search that ended
+                # in between ended on its own `-n`, not on the clock.
+                if p.poll() is None:
+                    p.send_signal(signal.SIGINT)
+                    signalled.set()
                 return
             time.sleep(poll_s)
 

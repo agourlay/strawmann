@@ -575,6 +575,36 @@ class WorkloadTests(unittest.TestCase):
         self.assertEqual((got.returncode, got.stdout.strip()), (0, "done"))
         self.assertFalse(got.clock_stopped)
 
+    def test_a_search_that_exits_as_its_stop_arrives_did_not_end_on_the_clock(self):
+        """`send_signal` does nothing to a process `poll` has reaped, so the
+        flag was set for a search its own `-n` ended."""
+        w = self.w
+        sent = []
+
+        class Exits:
+            returncode = None
+            polls = iter([None, 0])
+
+            def poll(self):
+                self.returncode = next(self.polls, 0)
+                return self.returncode
+
+            def send_signal(self, sig):
+                sent.append(sig)
+
+            def communicate(self):
+                # Bounded, so a watcher that stops polling fails the test
+                # instead of hanging it.
+                deadline = time.monotonic() + 5
+                while self.returncode is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                return "done", ""
+
+        with mock.patch.object(w.subprocess, "Popen", lambda *a, **k: Exits()):
+            got = w.run_search_until(["bfb"], lambda: 0.0, poll_s=0.01)
+        self.assertEqual(sent, [])
+        self.assertFalse(got.clock_stopped)
+
     def test_start_requirements_are_strawmanns_and_only_for_rows_that_need_them(self):
         """0925 printed both lines on all 18 invocations, Qdrant's included,
         and "appends 198,000 on top of W2's 990,000 ... reaches 1,237,500",

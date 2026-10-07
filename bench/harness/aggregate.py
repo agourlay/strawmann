@@ -117,6 +117,11 @@ CONFIG_NUMERIC = frozenset((
 ))
 
 
+#: Row settings that are flags or words rather than numbers, checked for
+#: agreement across passes as `CONFIG_NUMERIC` is.
+CONFIG_FLAGS = ("acorn", "search_stop")
+
+
 def ended_on_the_clock(r: dict) -> bool:
     """Whether the harness stopped this row's search on the clock (W11 since
     973ade1). `search_stop` says so on rows recorded after it existed; before
@@ -373,6 +378,15 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
             if len(seen) > 1:
                 notes.append(f"{wid}: {key} differs between passes "
                              f"({sorted(seen)}); pass 1's kept, but a "
+                             f"configuration the passes did not share is not one")
+        # The same for the settings that are not numbers. `acorn` is the W12
+        # rows' recall join key, so a fold of passes with and without ACORN
+        # would join one setting's sweep to the median of both searches.
+        for key in CONFIG_FLAGS:
+            seen_flags = {repr(r.get(key, "absent")) for r in got}
+            if len(seen_flags) > 1:
+                notes.append(f"{wid}: {key} differs between passes "
+                             f"({', '.join(sorted(seen_flags))}); pass 1's kept, but a "
                              f"configuration the passes did not share is not one")
         lat = [r.get("latency") or {} for r in got]
         keys = {k for d in lat for k in d}

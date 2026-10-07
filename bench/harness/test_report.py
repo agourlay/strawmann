@@ -308,6 +308,12 @@ class ReportHostTests(unittest.TestCase):
             html = report.matched_recall_table(runs)
             self.assertIn("has no <code>W12-sel10</code> row", html)
             self.assertNotIn("compares <code>W12-sel10</code>", html)
+            # Rungs that ran with and without ACORN: no one sweep speaks for
+            # both, so no table rather than one setting's recall under both.
+            mixed = [dict(r, acorn=r["id"].endswith("128")) for r in rows_a]
+            report, runs, _df = self._pair(Path(tmp), mixed, rows_b,
+                                          sw_a=sw, sw_b=sw, colls=colls)
+            self.assertNotIn("filtered to 10%", report.matched_recall_table(runs))
             # One engine's graded sweep missing: no filtered table at all,
             # rather than that engine's unfiltered bench2 recall under it.
             report, runs, _df = self._pair(Path(tmp), rows_a, rows_b,
@@ -990,6 +996,20 @@ class ReportHostTests(unittest.TestCase):
                                     [row(9, **clock)]])
         self.assertEqual(rows[0]["n_queries"], 7)
         self.assertFalse(any("n_queries differs" in n for n in notes), notes)
+
+    def test_passes_that_disagree_on_acorn_are_said_to(self):
+        """`acorn` is the W12 rows' recall join key, and a bool escaped the
+        numeric configuration check, so pass 1's was kept without a word."""
+        import importlib
+        agg = importlib.import_module("aggregate")
+
+        def row(**k):
+            return {"id": "W12-sel10", "status": "ok", "latency": {}, "qps": 1.0, **k}
+        _rows, _r, notes = agg.fold([[row(acorn=True)], [row(acorn=False)],
+                                     [row(acorn=True)]])
+        self.assertTrue(any("acorn differs between passes" in n for n in notes), notes)
+        _rows, _r, notes = agg.fold([[row(acorn=True, search_stop="")]] * 3)
+        self.assertEqual(notes, [])
 
     def test_a_sweep_folded_across_acorn_settings_is_not_written(self):
         """One pass without ACORN (0.09) and two with it (0.96) medianed to
