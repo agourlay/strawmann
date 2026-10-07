@@ -3985,6 +3985,13 @@ class TextTableTests(unittest.TestCase):
         self.assertTrue((out / "W15-sat.search.yaml").exists())
         cmd = [str(a) for a in self.w.command_for(t["W15-upload"], "http://localhost:6334", out, [])]
         self.assertIn("upload", cmd)
+        # The run's placement reaches the upload config, never bfb's flags.
+        for rid in ("W15-upload", "W15-sat"):
+            row = self.w.with_placement(t[rid], "cached")
+            cmd = [str(a) for a in self.w.command_for(row, "http://localhost:6334", out, [])]
+            self.assertNotIn("--memory-vectors", cmd)
+        self.assertIn("      memory: cached\n", (out / "W15-upload.upload.yaml").read_text())
+        self.assertNotIn("memory", (out / "W15-sat.search.yaml").read_text())
 
     def test_text_settings_enter_the_stamp_only_for_a_text_corpus(self):
         s = self.w.collection_settings()

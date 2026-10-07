@@ -1596,10 +1596,12 @@ def text_variants() -> list[TextVariant]:
     return list(seen.values())
 
 
-def text_upload_config(collection: str) -> str:
+def text_upload_config(collection: str, memory: str | None = None) -> str:
     """bfb's upload config for a text corpus: the placeholder vectors and the
     payloads from its `bfb/` layout, the text field indexed with the corpus's
-    tokenizer (`paths.text_index`) and BM25 scoring, the parity keyword indexed."""
+    tokenizer (`paths.text_index`) and BM25 scoring, the parity keyword indexed.
+    `memory` is the run's placement (`with_placement`), which the config path
+    takes on the vector entry rather than as `--memory-vectors`."""
     tc = paths.text_dataset(DATASET)
     opts = paths.text_index(DATASET)
     src = f"{{ name: {DATASET}, format: tar, path: {tc.bfb} }}"
@@ -1616,6 +1618,7 @@ def text_upload_config(collection: str) -> str:
         "  vectors:\n"
         f"    - size: {paths.TEXT_PLACEHOLDER_DIM}\n"
         f"      distance: {paths.TEXT_PLACEHOLDER_METRIC}\n"
+        + (f"      memory: {memory}\n" if memory else "") +
         f"      source: {{ type: dataset, name: {DATASET}, format: tar, path: {tc.bfb} }}\n"
         "  payload:\n"
         f"    source: {{ type: dataset, dataset: {src} }}\n"
@@ -2407,10 +2410,17 @@ def command_for(w: Workload, uri: str, results: Path, common: list[str]) -> list
     """
     base = [str(BFB), *common, "--uri", uri, "--json", str(results / f"{w.id}.json")]
     if w.text is not None:
+        # bfb's config subcommands take no `--memory-vectors`: the placement
+        # moves into the upload config, and a search creates nothing.
+        args = [str(a) for a in w.args]
+        memory = None
+        if "--memory-vectors" in args:
+            i = args.index("--memory-vectors")
+            memory, args = args[i + 1], args[:i] + args[i + 2:]
         cfg = results / f"{w.id}.{w.text.kind}.yaml"
-        cfg.write_text(text_upload_config(W15_COLLECTION) if w.text.kind == "upload"
+        cfg.write_text(text_upload_config(W15_COLLECTION, memory) if w.text.kind == "upload"
                        else text_search_config(W15_COLLECTION, w.text))
-        return [*base, w.text.kind, "--file", str(cfg), *w.args]
+        return [*base, w.text.kind, "--file", str(cfg), *args]
     if w.query_collection is None:
         return base + w.args
     cfg = results / f"{w.id}.search.yaml"
