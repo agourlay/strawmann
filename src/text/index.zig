@@ -17,9 +17,9 @@
 //!
 //! ## Qdrant's semantics, mirrored
 //!
-//! - A point is a document when its values yield a token, or when it holds an
-//!   array of two or more values (Qdrant's phrase boundary token,
-//!   qdrant/qdrant#11010); its values' tokens concatenate.
+//! - A point is a document when its values yield a token; its values' tokens
+//!   concatenate. An array of values that yields none is not one, as in
+//!   Qdrant since 8cec8ad (qdrant/qdrant#11016, fixing #11010).
 //! - The score is Lucene's BM25 over the query's distinct terms, in `f32` in
 //!   the order Qdrant computes it (`bm25/mod.rs`), with `idf` clamped at 0.
 //! - A point is a candidate when it holds any query term (OR).
@@ -150,9 +150,7 @@ pub const TextIndex = struct {
                 len += 1;
             }
         }
-        // Qdrant's rule: a boundary token between an array's values makes it a
-        // (possibly empty) document.
-        if (len == 0 and values.len < 2) return;
+        if (len == 0) return;
         const terms = try self.gpa.alloc(TermCount, counts.count());
         errdefer self.gpa.free(terms);
         const d = &self.docs.items[point];
@@ -268,15 +266,15 @@ test "statistics are exact through overwrite and delete" {
     try testing.expectEqual(@as(usize, 0), (try testSearch(&idx, "alpha", null)).len);
 }
 
-test "an array of two values is a document even without tokens, as in Qdrant" {
+test "an array of values without tokens is not a document, as in Qdrant since 8cec8ad" {
     var idx = TextIndex.init(testing.allocator, .{ .english_stopwords = true });
     defer idx.deinit();
     try idx.set(0, texts(&.{"alpha"}));
     try idx.set(1, texts(&.{ "", "the" }));
     try idx.set(2, texts(&.{"the"}));
     try idx.set(3, texts(&.{""}));
-    try testing.expectEqual(@as(u32, 2), idx.documents);
-    try testing.expectEqual(@as(?f32, 0.5), idx.avgdl());
+    try testing.expectEqual(@as(u32, 1), idx.documents);
+    try testing.expectEqual(@as(?f32, 1.0), idx.avgdl());
 }
 
 test "scores are Lucene BM25, and a filter narrows without moving statistics" {

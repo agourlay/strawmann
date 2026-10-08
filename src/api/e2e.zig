@@ -5081,16 +5081,17 @@ test "e2e: BM25 over a text index, Qdrant's text query with its scores and refus
         try testing.expectEqual(@as(u64, 1), pts[0].id);
         try testing.expectApproxEqRel(@as(f32, 0.609970), pts[0].score, 1e-5);
     }
-    // An array whose values tokenize to nothing is a document, as in Qdrant:
-    // N 3, avgdl 1.0, and point 1 moves to 0.696072.
+    // An array whose values tokenize to nothing is not a document, as in
+    // Qdrant since 8cec8ad (qdrant/qdrant#11016): N stays 2, avgdl 1.5, and
+    // point 1 stays at 0.609970 (it read 0.696072 when the array counted).
     _ = try c.call("/qdrant.Points/Upsert", try buildUpsertText(&req_buf, "bm25", 3, &.{ "", "" }, true), &out);
     {
         const resp = try c.call("/qdrant.Points/QueryBatch", try buildTextQuery(&req_buf, "bm25", "body", "alpha", null), &out);
         _ = try readFirstBatchPayloads(resp.body, &pts);
-        try testing.expectApproxEqRel(@as(f32, 0.696072), pts[0].score, 1e-5);
+        try testing.expectApproxEqRel(@as(f32, 0.609970), pts[0].score, 1e-5);
     }
-    // Deleting the empty array over the wire takes it out of N and avgdl at
-    // once: back to 0.609970.
+    // Deleting the empty array over the wire leaves the statistics as they
+    // were: still 0.609970.
     {
         var w = wire.Writer.init(&req_buf);
         try w.writeStringField(1, "bm25");

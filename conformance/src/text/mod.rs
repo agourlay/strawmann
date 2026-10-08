@@ -16,13 +16,11 @@
 //!   token length bounds and every other tokenizer are outside decisions.md's
 //!   scope and have no constructor here.
 //! - **Documents.** A point is a document when its field yields at least one
-//!   token, or holds an array of two or more values; the tokens of an array's
-//!   values are concatenated (Qdrant counts points, not array elements, since
-//!   0a0fd8790). The second clause is Qdrant's, not BM25's: a scoring index
-//!   matches phrases, so `tokenize_document` puts a boundary token between an
-//!   array's values, and `["", ""]` is a non-empty token stream of length 0.
-//!   It is mirrored so the exact tier holds on real corpora (decisions.md,
-//!   2026-10-07); fiqa has 40 such points.
+//!   token; the tokens of an array's values are concatenated (Qdrant counts
+//!   points, not array elements, since 0a0fd8790). Qdrant counted an array of
+//!   two or more values as a document even with no tokens, through its phrase
+//!   boundary token, until 8cec8ad (qdrant/qdrant#11016, fixing #11010); the
+//!   oracle mirrored that under revision 2 (decisions.md, 2026-10-07).
 //! - **Statistics.** `N` documents, `df` per term, `avgdl` = total tokens / `N`,
 //!   over the whole collection. Qdrant gathers them per shard; the comparison
 //!   runs it on one, where the two are the same.
@@ -46,9 +44,10 @@ use rayon::prelude::*;
 
 /// Which rules a truth was computed under. A truth from another revision is
 /// refused rather than compared: the ids would look right and the statistics
-/// would not be. 2: an array of two or more values is a document (Qdrant's
-/// boundary token).
-pub const ORACLE_REVISION: u32 = 2;
+/// would not be. 2: an array of two or more values was a document (Qdrant's
+/// boundary token). 3: only a point with a token is, as in Qdrant since
+/// 8cec8ad (qdrant/qdrant#11016).
+pub const ORACLE_REVISION: u32 = 3;
 
 /// Qdrant's BM25 defaults (`Bm25Params`, `bm25/mod.rs`).
 pub const DEFAULT_K1: f64 = 1.2;
@@ -201,9 +200,7 @@ impl Bm25Index {
             }
             let mut pairs: Vec<(u32, u32)> = counts.into_iter().collect();
             pairs.sort_unstable();
-            // Qdrant's boundary token makes an array of two or more values a
-            // document however little of it survives tokenization.
-            if len > 0 || values.len() > 1 {
+            if len > 0 {
                 documents += 1;
                 total_tokens += u64::from(len);
                 let p = u32::try_from(point).expect("point ids are u32 row indices (§4.3)");
@@ -941,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn an_array_of_two_values_is_a_document_even_without_tokens() {
+    fn an_array_of_values_without_tokens_is_not_a_document() {
         let docs = vec![
             vec!["alpha".to_string()],
             vec![String::new(), "the".to_string()],
@@ -949,10 +946,10 @@ mod tests {
             vec![String::new()],
         ];
         let idx = Bm25Index::build(all_on(), &docs);
-        // Point 1 is a document of length 0, through Qdrant's array boundary;
-        // a single value that tokenizes to nothing (points 2, 3) is not.
-        assert_eq!(idx.documents(), 2);
-        assert_eq!(idx.avgdl(), Some(0.5));
+        // Points 1 to 3 tokenize to nothing, an array of two values (point 1)
+        // included, as in Qdrant since 8cec8ad (qdrant/qdrant#11016).
+        assert_eq!(idx.documents(), 1);
+        assert_eq!(idx.avgdl(), Some(1.0));
     }
 
     #[test]

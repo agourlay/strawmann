@@ -2325,6 +2325,17 @@ order with the rest ties, relative difference 1.9e-7). Truth files carry
 `ORACLE_REVISION` (2 since this change), and `text-relevance` refuses one
 from another revision.
 
+Closed 2026-10-08: Qdrant fixed it in 8cec8ad (qdrant/qdrant#11016), so
+`tokenize_document` returns an empty stream for a document with no tokens and
+`["", ""]` is no longer a document, in every backend. The BM25 Qdrant is
+re-pinned to 8cec8ad, and the mirror comes out: the oracle and strawmANN
+count a point only when it yields a token (`ORACLE_REVISION` 3), and the
+end-to-end test now holds `alpha` at 0.609970 after the empty array is
+upserted. Between 850859ec9 and 8cec8ad nothing else the comparison copies
+changed: the protos, the stopword list, the tokenizer, the stemmer crate and
+the BM25 scorer are identical, and the one other commit in the text index,
+#10967, only removes a hardware-accounting parameter.
+
 
 ## W15 measures BM25 over a text index, decided 2026-10-07
 
@@ -2358,8 +2369,8 @@ judged corpus. The conformance step is `text-differ`, whose row licenses the
 W15 rows from strawmANN's T1 with both builds named.
 
 Text pairs run as their own `fullrun` on a text dataset with
-`--qdrant-binary` set to the BM25 build (Qdrant `dev` 850859ec9): no release
-serves the text query. The vector pairs keep dbeb0f73.
+`--qdrant-binary` set to the BM25 build (Qdrant `dev` 850859ec9, re-pinned
+to 8cec8ad on 2026-10-08 for #11016): no release serves the text query. The vector pairs keep dbeb0f73.
 
 The first end-to-end pass, scifact at `--reps 1` (a smoke run, so nothing
 published): every W15 row measured on both engines, every variant's recall@10
