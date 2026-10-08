@@ -10,7 +10,7 @@ Ranked by what a wrong or missing number costs.
 
 ### P1. What costs a number on the headline page
 
-The current pages are the 1007 pair for sift1m, the 0930 pair for
+The current pages are the 1007 pair for sift1m, the 1008 pair for
 dbpedia-openai-1m, the 1007 pair for laion-small-clip and the 0929 pair for h-and-m, all T4 with T3
 passing and production-mode Qdrant. What they publish wrongly, or still refuse and could
 not:
@@ -57,8 +57,15 @@ every pass, the search ending at the append's span times 1.25 (W11: 60.6 s
 append, 75.8 s search). strawmANN's W11-steady is flat (20,727 / 21,082 /
 21,074); Qdrant's is not (4,416 / 4,431 / 3,554, rsd 12.1%), its third pass
 low as laion 1003's first was. laion 1007 reads 100% on both rows, both
-engines, every pass, too. What is open is dbpedia, and whether Qdrant's spread is
-its own. Item 8 is what the row shows once it measures what it claims to.
+engines, every pass, too. dbpedia 1008 reads 100% on both rows, both engines,
+every pass, each search ending about 25% of the append's span past it, so the
+coverage half holds on three corpora of four;
+h-and-m has no pair measured with the clock yet. The flat half does not hold
+on dbpedia: strawmANN's W11-steady reads 618 / 541 / 534 (pass 1 +15%, the pass
+with 90,509 major faults, though it is the fastest, so paging does not explain
+it) and Qdrant's 504 / 494 / 460. What is open is h-and-m, and whether the
+W11-steady spreads are the engines' own. Item 8 is what the row shows once it
+measures what it claims to.
 
 **70. The published W5 ratios are mostly parallelism.** Every current
 page's batched row ran at two requests in flight, where strawmANN used 7 cores
@@ -68,6 +75,11 @@ on laion and dbpedia. W5 now runs W4's client. It closes when each corpus has
 a pair measured with it. sift1m 1007 is: W5 reads 1.58x (27,641 against
 17,448), the 3.6 factor gone, with Qdrant on 7.89 cores and strawmANN 7.02.
 laion 1007 is too: 0.88x (11,218 against 12,706), Qdrant ahead as predicted.
+dbpedia 1008 is too, and the prediction missed there: W5 reads parity (3,542
+against 3,441, band ±5.9%), and per batched query Qdrant is now the dearer
+engine (4.63M cycles against strawmANN's 4.00M at `-p 64`; 2.99M against 4.01M
+at 1006's two in flight). Its per-batch saving was a low-concurrency property.
+What is open is h-and-m.
 
 **71. The published W12 ratios are partly harness configuration.** Every
 current page ran Qdrant's filtered search with a 10 KB full-scan threshold (5
@@ -112,7 +124,26 @@ recording `acorn` (its rows predate the field, and the stamp says on), so
 missing. `readme-table-current` did not catch it, since it checks
 placeholder labels rather than the published pairs. The next sift pair
 replaces the page. dbpedia (d=1536, about 1,700 points) walks
-sel10 too, so its next pair needs the fix.
+sel10 too, so its next pair needs the fix. dbpedia 1008 is that pair: rows and
+sweep both with ACORN, joined without refusal, Qdrant's sel10 recall 0.9699 /
+0.9972 / 0.9998 at `ef` 32 / 128 / 512 (0930: 0.7668 at 32), sel1 2.84x and
+sel10 3.04x. sel1 matched 1,977 points against Qdrant's threshold of 1,666 at
+d=1536, so it walks by a 19% margin, and bfb draws the keywords unseeded. At
+sel10-ef512 strawmANN falls 3.3x from `ef` 256 (1,468 to 443 q/s, IPC 0.25):
+`filteredPlan` scans by a 3% margin (35.7M against 36.9M modelled) where the
+walk is faster under 64 clients, both per-row costs running 2.6x to 4.4x the
+model's. What is open is h-and-m, laion's W12 (a pair measured with the fix),
+and whether the plan's constants hold at saturation.
+
+**72. h-and-m's quantized and W12 ratios ran at two requests in flight.**
+2f4a3fd moved W6, W7, W8, W14 and every W12 row to W4's client; its message
+called the old ratios like for like, since both engines serve one request per
+thread. dbpedia 1008 says they were not: against 1006, W6 went 1.46x to 1.13x,
+W7 1.16x to 1.72x, W7-2bit 1.21x to 1.66x, W8 1.26x to 1.21x and W14 at 1, 2
+and 4 bits 0.87x / 1.01x / 1.05x to 1.12x / 1.37x / 1.29x (bfb's pin and the
+W12 configuration changed in the same pair, so the move is not this commit's
+alone). sift1m, laion and dbpedia now publish pairs measured with the new
+client; h-and-m's 0929 page does not. It closes with an h-and-m pair.
 
 **58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**
 W10-ef128 +10.4%, W10-ef256 +11.5%, W12-sel1 +10.2%, W11 +10%, with cycles
