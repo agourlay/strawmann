@@ -2370,7 +2370,13 @@ W15 rows from strawmANN's T1 with both builds named.
 
 Text pairs run as their own `fullrun` on a text dataset with
 `--qdrant-binary` set to the BM25 build (Qdrant `dev` 850859ec9, re-pinned
-to 8cec8ad on 2026-10-08 for #11016): no release serves the text query. The vector pairs keep dbeb0f73.
+to 8cec8ad on 2026-10-08 for #11016, then the same day to a `release` build of
+`dev` 24f67eb18, sha256 225af7d4): no release serves the text query. Between
+8cec8ad and 24f67eb18 the protos gain only `Datatype.Turbo16`, and the text
+index only stores immutable token counts as u32 in RAM (#11030); text-differ
+on fiqa, Quora, scifact and ArguAna passes every tier on both engines against
+it (T1 at most 6.5e-7, ArguAna's now included since its empty array no
+longer counts). The vector pairs keep dbeb0f73.
 
 The first end-to-end pass, scifact at `--reps 1` (a smoke run, so nothing
 published): every W15 row measured on both engines, every variant's recall@10
