@@ -796,8 +796,9 @@ def write_bfb_text(out: Path, corpus: list[str]) -> None:
                                ensure_ascii=False) + "\n")
 
 
-def beir_to_text(corpus: list[str], queries: list[str],
-                 qrels: list[str]) -> tuple[list[str], list[str], list[str], list[str]]:
+def beir_to_text(corpus: list[str], queries: list[str], qrels: list[str],
+                 dangling: frozenset[str] = frozenset(),
+                 ) -> tuple[list[str], list[str], list[str], list[str]]:
     """A BEIR split as `(corpus.jsonl, queries.txt, queries.ids, qrels.tsv)` lines.
 
     - Corpus: one point per BEIR document, in file order, so the row index is
@@ -808,7 +809,10 @@ def beir_to_text(corpus: list[str], queries: list[str],
       BEIR ids beside them.
     - Qrels: `query row, point row, grade`, both ids mapped to rows, the BEIR
       header dropped. A judgement naming a document or query the files do not
-      hold is an error, not a skipped line.
+      hold is an error, not a skipped line, unless the descriptor lists the
+      document in `qrels_dangling`: BEIR's ArguAna judges five documents its
+      corpus does not hold. That judgement is dropped and its query kept, as a
+      query with nothing judged relevant.
     """
     corpus_out, doc_row = [], {}
     for line in corpus:
@@ -831,6 +835,9 @@ def beir_to_text(corpus: list[str], queries: list[str],
             continue
         qid, did, grade = cols[0], cols[1], int(cols[2])
         if did not in doc_row:
+            if did in dangling:
+                judged.setdefault(qid, [])
+                continue
             raise ValueError(f"qrels line {i + 1}: document {did!r} is not in the corpus")
         judged.setdefault(qid, []).append((did, grade))
     texts, ids, qrels_out, seen = [], [], [], set()
@@ -846,6 +853,10 @@ def beir_to_text(corpus: list[str], queries: list[str],
         texts.append(" ".join(str(q["text"]).split()))
         ids.append(qid)
         qrels_out += [f"{row}\t{doc_row[did]}\t{grade}" for did, grade in judged[qid]]
+    unused = sorted(dangling - {d for line in qrels for d in line.split("\t")[1:2]})
+    if unused:
+        raise ValueError(f"qrels_dangling lists {len(unused)} document(s) no judgement names, "
+                         f"e.g. {unused[0]!r}")
     missing = sorted(set(judged) - seen)
     if missing:
         raise ValueError(f"qrels judge {len(missing)} queries queries.jsonl does not hold, "
@@ -925,7 +936,8 @@ def cmd_convert_beir(args) -> int:
             print(f"  {d.name}: not extracted yet (datasets.py fetch {d.name})", file=sys.stderr)
             continue
         corpus, texts, ids, qrels = beir_to_text(
-            *(by_role[r].read_text(encoding="utf-8").splitlines() for r in need))
+            *(by_role[r].read_text(encoding="utf-8").splitlines() for r in need),
+            dangling=frozenset(d.raw.get("qrels_dangling", [])))
         out = DATA_ROOT / d.name / TEXT_DIR
         out.mkdir(parents=True, exist_ok=True)
         for name, lines in (("corpus.jsonl", corpus), ("queries.txt", texts),
@@ -1056,6 +1068,17 @@ def cmd_self_test(args) -> int:
     assert (texts, ids) == (["two lines", "one"], ["q2", "q1"]), \
         "judged queries only, in queries.jsonl order, line breaks folded"
     assert qr == ["0\t2\t2", "0\t0\t1", "1\t1\t1"], "qrels in row space"
+    # A listed dangling document: its judgement goes, its query stays.
+    c, texts, ids, qr = beir_to_text(corpus, queries, [*qrels, "q9\tgone\t1"],
+                                     dangling=frozenset({"gone"}))
+    assert ids == ["q9", "q2", "q1"] and qr == ["1\t2\t2", "1\t0\t1", "2\t1\t1"], \
+        "a dangling judgement is dropped and its query kept with nothing judged"
+    try:
+        beir_to_text(corpus, queries, qrels, dangling=frozenset({"never-named"}))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a qrels_dangling entry no judgement names must fail")
     for bad, why in ((["q1\tnope\t1"], "an unknown document"),
                      (["q7\td1\t1"], "an unknown query")):
         try:

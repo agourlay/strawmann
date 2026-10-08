@@ -1400,7 +1400,9 @@ def collection_settings() -> dict:
         "hnsw_inline_storage": False,
         # Only for a text corpus, so no vector pair's stamp moves.
         **({"text_index": paths.text_index(DATASET),
-            "w15_ladder": [list(x) for x in W15_LADDER]} if paths.is_text(DATASET) else {}),
+            "w15_ladder": [list(x) for x in W15_LADDER],
+            "w15_indexing_threshold_kb": W15_INDEXING_THRESHOLD_KB}
+           if paths.is_text(DATASET) else {}),
     }
 
 
@@ -1556,6 +1558,16 @@ W15_COLLECTION = "bench15"
 W15_LADDER = (("k0.9-b0.4", 0.9, 0.4), ("b0", 1.2, 0.0))
 
 
+#: Qdrant's indexing threshold for W15's collection, in KB, when set. The
+#: placeholder vectors are 16 bytes a point, so under Qdrant's default
+#: (10,000 KB) a corpus below 640,000 points never leaves its appendable plain
+#: segment and its text index is served from the write path; a low threshold
+#: makes the optimizer build the immutable segment a deployment would serve
+#: from (the fiqa and zipf-1m smoke runs, 2026-10-07). In the text-only stamp.
+W15_INDEXING_THRESHOLD_KB: int | None = (
+    int(os.environ["W15_INDEXING_THRESHOLD_KB"]) if os.environ.get("W15_INDEXING_THRESHOLD_KB")
+    else None)
+
 #: The parity value W15-filtered's recall is measured at. bfb draws either
 #: value per query; each keeps half the corpus, so one stands for both.
 W15_RECALL_PARITY = "keyword_0"
@@ -1612,8 +1624,11 @@ def text_upload_config(collection: str, memory: str | None = None) -> str:
         "collection:\n"
         f"  name: {collection}\n"
     )
-    if seg is not None:
-        out += f"  optimizers:\n    default_segment_number: {seg}\n"
+    opt = ([f"    default_segment_number: {seg}"] if seg is not None else []) + (
+        [f"    indexing_threshold: {W15_INDEXING_THRESHOLD_KB}"]
+        if W15_INDEXING_THRESHOLD_KB is not None else [])
+    if opt:
+        out += "  optimizers:\n" + "".join(f"{x}\n" for x in opt)
     out += (
         "  vectors:\n"
         f"    - size: {paths.TEXT_PLACEHOLDER_DIM}\n"

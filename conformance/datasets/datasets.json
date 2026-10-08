@@ -513,6 +513,57 @@
     }
   },
   {
+    "name": "arguana",
+    "text_index": {
+      "stopwords": "english",
+      "stemmer": "english"
+    },
+    "role": "BM25 over a text index with long queries: every query is a whole argument, the shape a Qdrant user reported slow (decisions.md, 2026-10-08)",
+    "format": "beir",
+    "n": 8674,
+    "n_queries": 1406,
+    "gt_shipped": false,
+    "status": "available",
+    "notes": "BEIR ArguAna, test split. No vectors: `convert-beir` writes the text layout `conformance bm25-truth` reads. md5 is BEIR's published digest. Five test judgements name documents the corpus does not hold (BEIR's own files); they are listed in `qrels_dangling`, dropped, and their queries kept with nothing judged.",
+    "files": [
+      {
+        "path": "arguana.zip",
+        "link": "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/arguana.zip",
+        "bytes": 3773617,
+        "sha256": "cfdf79adce27a401b3cd3ea267903134dbfab2c6afeb95d7fe5724a00bf7557b",
+        "md5": "8ad3e3c2a5867cdced806d6503f29b99",
+        "role": "archive"
+      }
+    ],
+    "extract": {
+      "kind": "zip",
+      "members": [
+        {
+          "path": "arguana/corpus.jsonl",
+          "bytes": 9829628,
+          "role": "base"
+        },
+        {
+          "path": "arguana/queries.jsonl",
+          "bytes": 1805776,
+          "role": "queries"
+        },
+        {
+          "path": "arguana/qrels/test.tsv",
+          "bytes": 96296,
+          "role": "qrels"
+        }
+      ]
+    },
+    "qrels_dangling": [
+      "test-education-ufsdfkhbwu-con03b",
+      "test-free-speech-debate-yfsdfkhbwu-con03b",
+      "test-politics-dhwem-pro06b",
+      "test-science-sghwbdgmo-con03b",
+      "test-society-asfhwapg-con04b"
+    ]
+  },
+  {
     "name": "bm25-zipf-200k",
     "role": "BM25 over a text index at scale, shaped as Qdrant's own BM25 benchmark corpus so the two can be read together (decisions.md, 2026-10-07)",
     "format": "zipf",

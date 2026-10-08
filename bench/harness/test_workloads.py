@@ -3976,6 +3976,18 @@ class TextTableTests(unittest.TestCase):
         self.assertIn("size: 4", cfg)
         self.assertIn("format: tar", cfg)
 
+    def test_qdrants_indexing_threshold_is_a_w15_knob_in_the_text_stamp(self):
+        cfg = self.w.text_upload_config("bench15")
+        self.assertNotIn("indexing_threshold", cfg)
+        self.assertIsNone(self.w.collection_settings()["w15_indexing_threshold_kb"])
+        with mock.patch.object(self.w, "W15_INDEXING_THRESHOLD_KB", 1):
+            cfg = self.w.text_upload_config("bench15")
+            self.assertIn("  optimizers:\n", cfg)
+            self.assertIn("    indexing_threshold: 1\n", cfg)
+            self.assertEqual(self.w.collection_settings()["w15_indexing_threshold_kb"], 1)
+        self.w.use_dataset("sift1m")
+        self.assertNotIn("w15_indexing_threshold_kb", self.w.collection_settings())
+
     def test_a_zipf_corpus_indexes_lowercase_only(self):
         self.w.use_dataset("bm25-zipf-200k")
         cfg = self.w.text_upload_config("bench15")
