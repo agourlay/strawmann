@@ -773,7 +773,7 @@ class TextCorpusTests(unittest.TestCase):
 
     def test_text_corpora_are_runnable_and_known_as_text(self):
         p = self.paths
-        self.assertEqual(p.text_names(), ["arguana", "bm25-zipf-1m", "bm25-zipf-200k", "fiqa", "scifact"])
+        self.assertEqual(p.text_names(), ["arguana", "bm25-zipf-1m", "bm25-zipf-200k", "fiqa", "quora", "scifact"])
         self.assertTrue(p.is_text("scifact"))
         self.assertFalse(p.is_text("sift1m"))
         self.assertIn("fiqa", p.runnable())

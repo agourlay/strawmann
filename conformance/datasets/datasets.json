@@ -564,6 +564,50 @@
     ]
   },
   {
+    "name": "quora",
+    "text_index": {
+      "stopwords": "english",
+      "stemmer": "english"
+    },
+    "role": "BM25 over a text index at scale with short documents and short queries: half a million questions, each judged against its duplicates (decisions.md, 2026-10-08)",
+    "format": "beir",
+    "n": 522931,
+    "n_queries": 10000,
+    "gt_shipped": false,
+    "status": "available",
+    "notes": "BEIR Quora, test split (10,000 of queries.jsonl's 15,000; the dev split is not read). No vectors: `convert-beir` writes the text layout `conformance bm25-truth` reads. Every document has an empty title, so each is `[\"\", question]`; 14 have no text and are not documents, as in Qdrant since 8cec8ad. md5 is BEIR's published digest.",
+    "files": [
+      {
+        "path": "quora.zip",
+        "link": "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/quora.zip",
+        "bytes": 15853968,
+        "sha256": "56aacd9dcc4d9c093b63f175afdda0e21cbc8442ecf6c717d09de7b358d77531",
+        "md5": "18fb154900ba42a600f84b839c173167",
+        "role": "archive"
+      }
+    ],
+    "extract": {
+      "kind": "zip",
+      "members": [
+        {
+          "path": "quora/corpus.jsonl",
+          "bytes": 63335960,
+          "role": "base"
+        },
+        {
+          "path": "quora/queries.jsonl",
+          "bytes": 1460859,
+          "role": "queries"
+        },
+        {
+          "path": "quora/qrels/test.tsv",
+          "bytes": 255698,
+          "role": "qrels"
+        }
+      ]
+    }
+  },
+  {
     "name": "bm25-zipf-200k",
     "role": "BM25 over a text index at scale, shaped as Qdrant's own BM25 benchmark corpus so the two can be read together (decisions.md, 2026-10-07)",
     "format": "zipf",
