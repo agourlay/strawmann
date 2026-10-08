@@ -301,6 +301,16 @@
   {%- endfor %}
   {%- endif %}
 
+  {%- if tables.relevance %}
+  <h2 id="relevance">Relevance</h2>
+  <p class="lede">nDCG@10 and MRR@10 of each BM25 variant's results against the
+  corpus's relevance judgements: what BM25 itself is worth on this corpus. Reported, not
+  ratioed or gated: engines that agree on every score may still order a tie differently,
+  and that moves them. A filtered variant reads low by construction, since its filter
+  keeps half the corpus and the judgements cover all of it.</p>
+  {{ tables.relevance|safe }}
+  {%- endif %}
+
   {%- if tables.latency_compact %}
   <h2 id="latency">Latency</h2>
   <p class="lede">Client-side round trip. A closed loop understates the tail (a stalled

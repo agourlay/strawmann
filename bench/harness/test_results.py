@@ -1105,6 +1105,27 @@ class ResultsSinkTests(unittest.TestCase):
         self.assertEqual(got, {"W12-sel1": 1.0, "W12-sel10": 0.99},
                          "each grade joins its own sweep, not the other's")
 
+    def test_a_w15_row_carries_its_variants_ndcg_into_the_sink(self):
+        """`ndcg_at_10` has been a perf column since the schema, and nothing
+        filled it: W15 on a judged corpus measures it beside recall@10."""
+        import contextlib
+        import io
+        res = self.res
+        root = Path(self.tmp.name)
+        meta = {"dataset": {"name": "scifact"}, "isa_build": "avx512",
+                "strawmann": {"commit": "abcdef123456", "dirty": True}}
+        d = self._label("arm", meta, {**self.CONF, "dataset": "scifact"})
+        (d / "rows.json").write_text(json.dumps([_row("W15-sat", 14280.0, ef=None,
+                                                      collection="bench15")]))
+        (d / "text_recall.json").write_text(json.dumps({"dataset": "scifact", "variants": {
+            "k1.2-b0.75": {"k1": 1.2, "b": 0.75, "parity": None, "limit": 10, "recall": 1.0,
+                           "semantic": {"ndcg_at_10": 0.6886, "mrr_at_10": 0.6503}}}}))
+        db = res.connect(":memory:")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(res.ingest_run(db, "arm", root), 0)
+        self.assertEqual(db.execute("SELECT recall_at_10, ndcg_at_10 FROM perf "
+                                    "WHERE workload = 'W15-sat'").fetchone(), (1.0, 0.6886))
+
     def test_ingest_names_every_refused_row_and_why(self):
         """The sink printed the first refusal per label and a hint to sweep the
         collection -- which for W11 is the collection the row had just mutated.

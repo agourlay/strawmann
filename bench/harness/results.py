@@ -503,6 +503,10 @@ def ingest_run(db, label: str, root: Path) -> int:
             "recall_at_10": (rec or {}).get("recall_at_10"),
             "recall_at_100": (rec or {}).get("recall_at_100"),
             "mrde": (rec or {}).get("mean_relative_distance_error"),
+            # Against the corpus's relevance judgements, where it has them:
+            # W15 on a BEIR corpus (`recall.load_text_recall`). A column since
+            # §8.9's schema, empty until now.
+            "ndcg_at_10": (rec or {}).get("ndcg_at_10"),
             "load_mode": r.get("load_mode") or "closed-loop",
             "notes": "; ".join(x for x in (r.get("foreign", ""), r.get("notes", "")) if x),
             "measured_at": r.get("when", ""),

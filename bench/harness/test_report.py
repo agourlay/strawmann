@@ -697,6 +697,30 @@ class ReportHostTests(unittest.TestCase):
             report, runs, df = self._pair(Path(tmp), [_row("W2", 1)], [_row("W2", 1)])
             self.assertIsNone(report.chart_throughput(runs, df))
 
+    def test_ndcg_is_reported_per_variant_and_only_where_measured(self):
+        """W15 on a judged corpus measures nDCG@10 and MRR@10 beside recall;
+        both documents show them per variant, and a pair without any shows no
+        section at all."""
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            report, runs, _df = self._pair(Path(tmp), [_row("W3", 4000)], [_row("W3", 2000)])
+            compare, recall = sys.modules["compare"], sys.modules["recall"]
+            self.assertEqual(compare.relevance_block("a", "b"), [])
+            self.assertNotIn('id="relevance"', report.build(runs, "t"))
+            ds = compare.dataset_of("a")
+            for lbl, ndcg in (("a", 0.6886), ("b", 0.6880)):
+                p = recall.text_recall_path(lbl)
+                p.write_text(json.dumps({"dataset": ds, "variants": {
+                    "k1.2-b0.75": {"k1": 1.2, "b": 0.75, "parity": None, "limit": 10,
+                                   "recall": 1.0, "semantic": {"ndcg_at_10": ndcg,
+                                                               "mrr_at_10": 0.65}}}}))
+            md = "\n".join(compare.relevance_block("a", "b"))
+            self.assertIn("| W15, W15-sat | k1 1.2, b 0.75 | 0.6886 | 0.6880 | 0.6500 | 0.6500 |", md)
+            self.assertNotIn("keyword_0", md, "a variant nobody measured gets no row")
+            html = report.build(runs, "t")
+            self.assertIn('id="relevance"', html)
+            self.assertIn("0.6880", html)
+
     def test_licence_carries_the_delta_behind_the_tier(self):
         """§8.9 lists max|Δscore| and p99|Δscore| as row fields. They were
         measured and then rendered into T1's prose, so the page carried the

@@ -1473,6 +1473,59 @@ def environment_line(label: str, rows: dict[str, dict]) -> str:
             + (f"; contaminated rows: {', '.join(dirty)}" if dirty else ""))
 
 
+def relevance(a_label: str, b_label: str | None) -> list[dict]:
+    """nDCG@10 and MRR@10 of each W15 variant, per engine, against the corpus's
+    relevance judgements (`recall.load_text_recall`), or [] where no label has
+    any: a corpus without qrels, or a vector corpus.
+
+    One entry per variant rather than per row, since W15 and W15-sat search
+    the same variant and score the same.
+    """
+    import workloads
+    dataset = dataset_of(a_label) or (dataset_of(b_label) if b_label else None)
+    groups: dict[str, dict] = {}
+    for w in workloads.text_table():
+        if (v := workloads.text_variant(w)) is not None:
+            groups.setdefault(v.key, {"variant": v, "rows": []})["rows"].append(w.id)
+    out = []
+    for g in groups.values():
+        first = g["rows"][0]
+        ra = recall_mod.load_text_recall(a_label, dataset, first) or {}
+        rb = (recall_mod.load_text_recall(b_label, dataset, first) or {}) if b_label else {}
+        if ra.get("ndcg_at_10") is None and rb.get("ndcg_at_10") is None:
+            continue
+        out.append({**g, "a": ra, "b": rb})
+    return out
+
+
+def variant_text(v) -> str:
+    """A W15 variant as a reader names it: `k1 1.2, b 0.75`, plus its filter."""
+    return f"k1 {v.k1:g}, b {v.b:g}" + (f", filtered to {v.parity}" if v.parity else "")
+
+
+def relevance_block(a_label: str, b_label: str) -> list[str]:
+    """`relevance` as the comparison document's markdown, or []."""
+    rel = relevance(a_label, b_label)
+    if not rel:
+        return []
+    fmt = lambda x: "-" if x is None else f"{x:.4f}"
+    a_name, b_name = display_name(a_label), display_name(b_label)
+    lede = ("**Relevance against the corpus's judgements.** nDCG@10 and MRR@10 of each "
+            "variant's results against the corpus's qrels: what BM25 itself is worth here. "
+            "Reported beside recall@10 and not ratioed or gated, since engines that agree "
+            "on every score may still order a tie differently, and that moves them. A "
+            "filtered variant is scored against every judgement while its filter keeps "
+            "half the corpus, so it reads low by construction.")
+    head = (f"| rows | variant | {a_name} nDCG@10 | {b_name} nDCG@10 "
+            f"| {a_name} MRR@10 | {b_name} MRR@10 |")
+    out = [lede, "", head, "|---|---|--:|--:|--:|--:|"]
+    for g in rel:
+        out.append(f"| {', '.join(g['rows'])} | {variant_text(g['variant'])} "
+                   f"| {fmt(g['a'].get('ndcg_at_10'))} | {fmt(g['b'].get('ndcg_at_10'))} "
+                   f"| {fmt(g['a'].get('mrr_at_10'))} | {fmt(g['b'].get('mrr_at_10'))} |")
+    return out
+
+
 def storage_and_io(a_label: str, b_label: str,
                    a: dict[str, dict], b: dict[str, dict],
                    markdown: bool = False) -> list[str]:
@@ -2120,6 +2173,9 @@ def full_block(a_label: str, b_label: str,
         rows.append(f"| {wid} | {name} | {r['a_qps']} | {r['b_qps']} | {r['ratio']} "
                     f"| {r['a_lat']} | {r['b_lat']} | {recall} | {note} |")
 
+    rel = relevance_block(a_label, b_label)
+    if rel:
+        rows += ["", *rel]
     io = storage_and_io(a_label, b_label, a, b, markdown=True)
     if io:
         rows += ["", ("**Storage and I/O.** Queries per second is half the "

@@ -1517,6 +1517,30 @@ def compact_latency_table(runs: list[Run]) -> str:
     return warn + _engine_grouped(runs, [n for n, _ in COMPACT_LAT_COLS], body)
 
 
+def relevance_table(runs: list[Run]) -> str:
+    """W15's nDCG@10 and MRR@10 per variant and engine (`compare.relevance`),
+    or "" where nothing has them."""
+    a = runs[0].label
+    b = runs[1].label if len(runs) > 1 else None
+    rel = compare.relevance(a, b)
+    if not rel:
+        return ""
+    labels = [r.label for r in runs]
+    head = "".join(f'<th class="num">{html.escape(lbl)} nDCG@10</th>' for lbl in labels) + \
+        "".join(f'<th class="num">{html.escape(lbl)} MRR@10</th>' for lbl in labels)
+    sides = ["a", "b"][:len(runs)]
+    def num(v, f):
+        return format(v, f) if isinstance(v, (int, float)) else "-"
+    body = []
+    for g in rel:
+        cells = "".join(f'<td class="num">{num(g[s].get("ndcg_at_10"), ".4f")}</td>' for s in sides) + \
+            "".join(f'<td class="num">{num(g[s].get("mrr_at_10"), ".4f")}</td>' for s in sides)
+        body.append(f'<tr><td class="wid">{html.escape(", ".join(g["rows"]))}</td>'
+                    f'<td>{html.escape(compare.variant_text(g["variant"]))}</td>{cells}</tr>')
+    return (f'<table><thead><tr><th>rows</th><th>variant</th>{head}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table>')
+
+
 def recall_table(runs: list[Run]) -> str:
     """The conformance side of W10: recall against the fp64 oracle, by `ef`.
 
@@ -3314,6 +3338,8 @@ class Tables:
     provenance: str
     latency: str
     recall: str
+    #: W15's nDCG@10 and MRR@10 per variant (`relevance_table`), "" without.
+    relevance: str
     matched_recall: str
     #: The summary-level versions, shown by default; the full tables above
     #: are the appendix's.
@@ -3436,6 +3462,7 @@ def build(runs: list[Run], title: str) -> str:
             provenance=provenance_table(runs),
             latency=latency_table(runs),
             recall=recall_table(runs),
+            relevance=relevance_table(runs),
             matched_recall=matched_recall_table(runs),
             throughput_compact=compact_throughput_table(runs, df),
             latency_compact=compact_latency_table(runs),
