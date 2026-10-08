@@ -20,8 +20,9 @@ use qdrant_client::qdrant::{
     SearchParamsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
 };
 
-/// The vector every text-collection point carries: both engines need one, and
-/// the `text` query never reads it.
+/// The vector every text-collection point carries: strawmANN's collections
+/// require one (Qdrant's do not), both engines hold the same, and the `text`
+/// query never reads it.
 const TEXT_PLACEHOLDER_DIM: usize = 4;
 const TEXT_PLACEHOLDER: [f32; TEXT_PLACEHOLDER_DIM] = [1.0, 0.0, 0.0, 0.0];
 

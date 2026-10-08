@@ -2381,3 +2381,11 @@ documents, so it checks agreement and says nothing of BM25's relevance), and
 the text differ's row licensing both arms. Saturating rows on scifact last under a
 second for strawmANN, so its saturating numbers there are dominated by the
 client; fiqa and the Zipf corpora are the measured ones.
+
+Changed 2026-10-08, at the user's request: the synthetic Zipf corpora
+(`bm25-zipf-200k`, `bm25-zipf-1m`) are removed, with their generator
+(`datasets.py synthesize-text`) and the descriptor's `generated` status. They
+carried no relevance judgements and no real text, so they measured BM25 on a
+shape no user has; W15 runs on BEIR corpora only (scifact, FiQA, ArguAna,
+Quora, and the ones added after). Their two smoke runs (2026-10-07) stay in
+the record above.

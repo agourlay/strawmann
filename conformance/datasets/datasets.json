@@ -606,53 +606,5 @@
         }
       ]
     }
-  },
-  {
-    "name": "bm25-zipf-200k",
-    "role": "BM25 over a text index at scale, shaped as Qdrant's own BM25 benchmark corpus so the two can be read together (decisions.md, 2026-10-07)",
-    "format": "zipf",
-    "n": 200000,
-    "n_queries": 1000,
-    "gt_shipped": false,
-    "status": "generated",
-    "generator": {
-      "kind": "zipf-text",
-      "vocab": 20000,
-      "exponent": 0.9,
-      "doc_len": [
-        20,
-        200
-      ],
-      "query_len": [
-        2,
-        5
-      ],
-      "seed": 20261007
-    },
-    "notes": "Qdrant's lib/segment/src/fixtures/bm25_corpus.rs at 850859ec9: terms w<rank> of a 20,000-term vocabulary drawn with weight 1/(rank+1)^0.9, documents of 20 to 200 terms, queries of 2 to 5. Deterministic in its seed; `datasets.py synthesize-text` writes <name>/text/{corpus.jsonl, queries.txt}. No qrels: BM25's own ranking is the truth (`bm25-truth`)."
-  },
-  {
-    "name": "bm25-zipf-1m",
-    "role": "BM25 over a text index at scale, shaped as Qdrant's own BM25 benchmark corpus so the two can be read together (decisions.md, 2026-10-07)",
-    "format": "zipf",
-    "n": 1000000,
-    "n_queries": 1000,
-    "gt_shipped": false,
-    "status": "generated",
-    "generator": {
-      "kind": "zipf-text",
-      "vocab": 20000,
-      "exponent": 0.9,
-      "doc_len": [
-        20,
-        200
-      ],
-      "query_len": [
-        2,
-        5
-      ],
-      "seed": 20261007
-    },
-    "notes": "Qdrant's lib/segment/src/fixtures/bm25_corpus.rs at 850859ec9: terms w<rank> of a 20,000-term vocabulary drawn with weight 1/(rank+1)^0.9, documents of 20 to 200 terms, queries of 2 to 5. Deterministic in its seed; `datasets.py synthesize-text` writes <name>/text/{corpus.jsonl, queries.txt}. No qrels: BM25's own ranking is the truth (`bm25-truth`)."
   }
 ]

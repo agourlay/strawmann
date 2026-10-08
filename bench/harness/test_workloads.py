@@ -3988,9 +3988,9 @@ class TextTableTests(unittest.TestCase):
         self.w.use_dataset("sift1m")
         self.assertNotIn("w15_indexing_threshold_kb", self.w.collection_settings())
 
-    def test_a_zipf_corpus_indexes_lowercase_only(self):
-        self.w.use_dataset("bm25-zipf-200k")
-        cfg = self.w.text_upload_config("bench15")
+    def test_a_corpus_without_text_index_options_indexes_lowercase_only(self):
+        with mock.patch.object(self.w.paths, "text_index", lambda _: {"lowercase": True}):
+            cfg = self.w.text_upload_config("bench15")
         self.assertIn("lowercase: true, scoring: bm25", cfg)
         self.assertNotIn("stemmer", cfg)
 
@@ -4073,9 +4073,10 @@ class TextArmTests(unittest.TestCase):
         d = self.f.text_differ_argv("http://a", "http://b", Path("/c.json"))
         self.assertIn("text-differ", d)
         self.assertEqual(d[d.index("--dataset") + 1], "scifact")
-        self.w.use_dataset("bm25-zipf-200k")
-        self.f.DATASET = "bm25-zipf-200k"
-        d = self.f.text_differ_argv("http://a", "http://b", Path("/c.json"))
+        tc = self.w.paths.text_dataset("scifact")
+        with mock.patch.object(self.w.paths, "text_index", lambda _: {"lowercase": True}), \
+                mock.patch.object(self.w.paths, "text_dataset", lambda _: tc._replace(qrels=None)):
+            d = self.f.text_differ_argv("http://a", "http://b", Path("/c.json"))
         self.assertNotIn("--english-stemmer", d)
         self.assertNotIn("--qrels", d)
 

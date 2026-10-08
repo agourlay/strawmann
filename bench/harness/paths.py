@@ -201,12 +201,13 @@ def _entry(name: str) -> dict:
 
 
 #: The descriptor formats that are text corpora for W15, BM25 over a text index
-#: (decisions.md, 2026-10-07), rather than vector corpora: BEIR sets and the
-#: synthetic Zipf corpora. Their files are `datasets.py`'s `text/` and `bfb/`.
-TEXT_FORMATS = frozenset({"beir", "zipf"})
+#: (decisions.md, 2026-10-07), rather than vector corpora: the BEIR sets. Their
+#: files are `datasets.py`'s `text/` and `bfb/`.
+TEXT_FORMATS = frozenset({"beir"})
 
-#: A text point's vector: both engines need one and the text query never reads
-#: it (`datasets.TEXT_PLACEHOLDER`, conformance's `engine.rs`).
+#: A text point's vector: strawmANN's collections require one (Qdrant's do not),
+#: both engines hold the same, and the text query never reads it
+#: (`datasets.TEXT_PLACEHOLDER`, conformance's `engine.rs`).
 TEXT_PLACEHOLDER_DIM = 4
 TEXT_PLACEHOLDER_METRIC = "dot"
 
