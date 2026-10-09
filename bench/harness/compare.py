@@ -1477,10 +1477,14 @@ def text_index_note(a_label: str, b_label: str) -> str:
     """On a text pair, which of Qdrant's text indexes served W15
     (`report_data.text_segment_note`), so no ratio reads as Qdrant's BM25 in
     general; "" on a vector pair."""
+    import paths
     import report_data
-    runs = [report_data.load_run(a_label), report_data.load_run(b_label)]
-    if not report_data.is_text_pair(runs):
+    # Decided from `run.json` alone, which reads leniently: `load_run` requires
+    # rows, and the readme gate runs this on hosts that have none.
+    names = [dataset_of(a_label), dataset_of(b_label)]
+    if not all(n and paths.is_text(n) for n in names):
         return ""
+    runs = [report_data.load_run(a_label), report_data.load_run(b_label)]
     note = report_data.text_segment_note(runs)
     return f"**Which Qdrant text index.** {note}" if note else ""
 

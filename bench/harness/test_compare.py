@@ -222,6 +222,12 @@ class CompareTests(unittest.TestCase):
                                  good_stamp(), good_stamp(), failed, failed, [], [])
         self.assertFalse(cmp.licence("a", "b")["scores_agree"])
 
+    def test_the_text_index_note_needs_no_results_on_a_vector_or_empty_host(self):
+        """The readme gate renders the blocks for labels that may not exist on
+        the host; the note loaded them strictly and the gate exited."""
+        cmp = self.m["compare"]
+        self.assertEqual(cmp.text_index_note("nobody", "nowhere"), "")
+
     def test_licence_banner_when_not_comparative(self):
         sw = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.98))]
         _rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
