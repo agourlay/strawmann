@@ -2375,8 +2375,9 @@ to 8cec8ad on 2026-10-08 for #11016, then the same day to a `release` build of
 8cec8ad and 24f67eb18 the protos gain only `Datatype.Turbo16`, and the text
 index only stores immutable token counts as u32 in RAM (#11030); text-differ
 on fiqa, Quora, scifact and ArguAna passes every tier on both engines against
-it (T1 at most 6.5e-7, ArguAna's now included since its empty array no
-longer counts). The vector pairs keep dbeb0f73.
+it (T1 well inside its 1e-5 tolerance: 7.0e-7 at most so far, Qdrant on
+ArguAna in the 2026-10-08 full run; ArguAna is now included since its empty
+array no longer counts). The vector pairs keep dbeb0f73.
 
 The first end-to-end pass, scifact at `--reps 1` (a smoke run, so nothing
 published): every W15 row measured on both engines, every variant's recall@10

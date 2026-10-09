@@ -112,6 +112,7 @@ from report_data import (  # noqa: F401
     frontier_points,
     gate_pass_of,
     glance_of,
+    is_text_pair,
     load_run,
     matched_ratios,
     matched_recall_refusal,
@@ -125,6 +126,7 @@ from report_data import (  # noqa: F401
     segment_note,
     segments_of,
     series_meta,
+    text_segment_note,
 )
 from report_noise import (  # noqa: F401  re-exported
     UNDISCRIMINATING_BAND,
@@ -274,7 +276,9 @@ def _num_cell(r: pd.Series | None) -> str:
     if r is None or r.empty:
         return '<td class="num muted">-</td>'
     if pd.isna(r["qps"]):
-        klass = "na" if r["status"] == Status.not_applicable else "bad"
+        # An upload row measured a duration and has no qps: `ok` is not a failure.
+        klass = ("na" if r["status"] == Status.not_applicable
+                 else "muted" if r["status"] == Status.ok else "bad")
         return f'<td class="num {klass}">{r["status"]}</td>'
     sub = ""
     # `4,562` above `4,542 rps` read as one broken number, `4,5624,542`, and
@@ -1904,7 +1908,17 @@ def licence_of(runs: list[Run]) -> dict:
         "comparative": bool(conf.get("licenses_comparative")),
         "hash": conf.get("hash"),
         "headline": f"Conformance tier reached: {tier}.",
+        # A text row's tiers are its own (`text-differ`): T1 every score against
+        # the f64 oracle, T2 the tie-aware ranking, on both engines. T3 is a
+        # vector tier and was never run.
         "detail": (
+            ("T1 (every BM25 score within its tolerance of the f64 oracle) and T2 "
+             "(tie-aware rank) passed on both engines: the same documents at the same "
+             "scores, so a throughput comparison is licensed (§8)."
+             if conf.get("licenses_comparative") else
+             "T1 or T2 did not pass on both engines, so their results differ and no "
+             "throughput comparison is licensed (§8).")
+            if conf.get("metric") == "BM25" else
             ("T1 passed, so single-engine performance rows are licensed (§8). "
              if conf.get("licenses_perf") else
              "T1 did not pass, so §8 licenses no performance number here. ")
@@ -1944,6 +1958,17 @@ def summary(runs: list[Run], df: pd.DataFrame) -> dict:
         # A summary that states only the wins is an advertisement. These are
         # the rows the same arithmetic, with the same refusals, calls losses.
         out["losses"] = losses(runs)
+
+    if len(runs) == 2 and is_text_pair(runs):
+        # W15: every row's results are the oracle's on both engines (T1, T2),
+        # so the rows compare as they stand, at equal results.
+        a, b = runs
+        ratios = [v for jr in compare.joined(a.label, b.label, a.by_id(), b.by_id())
+                  if jr.id.startswith("W15") and (v := ratio_value(jr.ratio)) is not None]
+        if ratios:
+            out["text"] = {"lo": min(ratios), "hi": max(ratios), "a": a.label, "b": b.label,
+                           "note": text_segment_note(runs)}
+        return out
 
     if len(have) == 2 and not out["matched_refusal"]:
         a, b = have

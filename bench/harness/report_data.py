@@ -59,7 +59,7 @@ FALLBACK = ("#4C9AFF", "#2EA44F", "#A970FF")
 UPLOAD_ROWS = ("W0-upload", "W1", "W2", "W6-upload", "W7-upload", "W7-2bit-upload",
                "W7-1p5bit-upload", "W8-upload", "W14-1bit-upload", "W14-1p5bit-upload",
                "W14-2bit-upload", "W14-4bit-upload",
-               "W12-upload")
+               "W12-upload", "W15-upload")
 
 def colour(label: str, i: int = 0) -> str:
     return SERIES.get(label.lower(), FALLBACK[i % len(FALLBACK)])
@@ -665,8 +665,52 @@ def _arms(runs: list[Run]) -> tuple[Run | None, Run | None]:
     return sm, qd
 
 
+def is_text_pair(runs: list[Run]) -> bool:
+    """Whether every run measured a text corpus (W15 alone), from `run.json`."""
+    import paths
+    names = [((r.meta or {}).get("dataset") or {}).get("name") for r in runs]
+    return bool(names) and all(n and paths.is_text(n) for n in names)
+
+
+def text_segment_note(runs: list[Run]) -> str:
+    """What Qdrant served W15 from, read back per segment: on a corpus under its
+    indexing threshold that is its appendable plain segment, the write path,
+    and the page has to say so beside every ratio."""
+    import workloads
+    _, qd_run = _arms(runs)
+    if qd_run is None:
+        return ""
+    segs = next((c.get("segments") or [] for c in (qd_run.collections or {}).get("collections") or []
+                 if c.get("collection") == workloads.W15_COLLECTION), [])
+    held = [s for s in segs if s.get("points")]
+    if not held:
+        return (f"{qd_run.label}'s {workloads.W15_COLLECTION} segments were not read back, so "
+                f"which of its text indexes served W15 is not known.")
+    total = sum(s["points"] for s in held)
+    write_path = sum(s["points"] for s in held if s.get("appendable"))
+    kb = (((qd_run.meta or {}).get("harness") or {}).get("collection") or {}).get(
+        "w15_indexing_threshold_kb")
+    knob = ("W15_INDEXING_THRESHOLD_KB unset, Qdrant's default threshold" if kb is None
+            else f"W15_INDEXING_THRESHOLD_KB {kb}")
+    if write_path == total:
+        where = (f"its appendable segment, the write-path text index: all {total:,} points "
+                 f"({knob}), since the placeholder vectors stay under the threshold that "
+                 f"would make its optimizer build the immutable segment a deployment serves from")
+    elif write_path == 0:
+        where = f"optimized segments only: all {total:,} points in immutable indexes ({knob})"
+    else:
+        where = (f"both kinds: {write_path:,} of {total:,} points in appendable segments, "
+                 f"the write path, the rest optimized ({knob})")
+    return (f"{qd_run.label} served BM25 from {where}. strawmANN served it from its one "
+            f"text index. Every ratio on this page is against that Qdrant index.")
+
+
 def segment_note(runs: list[Run]) -> str:
     """One sentence on what `ef` bought each engine, from the measured counts."""
+    # W15 has no `ef`; what a text page needs instead is which of Qdrant's text
+    # indexes served it.
+    if is_text_pair(runs):
+        return text_segment_note(runs)
     seg = segments_of(runs)
     pop = populated_of(runs)
     sm_run, qd_run = _arms(runs)
@@ -732,6 +776,10 @@ def matched_recall_refusal(runs: list[Run], row_prefix: str = "W10-ef") -> str:
     instruments, which is what "50x to 81x" turned out to be.
     """
     if len(runs) != 2:
+        return ""
+    # W15 has no ef sweep: text-differ's T1 and T2 make every row's results
+    # the oracle's, so its rows are compared as they stand (`text_summary`).
+    if is_text_pair(runs):
         return ""
     a, b = runs
     stale = compare.stale_reasons(a.label, b.label)

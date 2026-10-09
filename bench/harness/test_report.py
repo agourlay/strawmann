@@ -721,6 +721,55 @@ class ReportHostTests(unittest.TestCase):
             self.assertIn('id="relevance"', html)
             self.assertIn("0.6880", html)
 
+    def test_a_text_page_reads_as_a_text_comparison(self):
+        """The BM25 pages of 2026-10-08 read as vector pages: the summary
+        refused a ratio the table printed, the licence said "T3 passed", an
+        ef paragraph appeared on rows with no ef, W15-upload's `ok` was styled
+        a failure, and nothing said Qdrant served BM25 from its write path."""
+        import importlib
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fx = Fixture(root)
+            _reload(root)
+            report = importlib.reload(self.report)
+            conf = {**CONF_T3, "metric": "BM25", "dataset": "scifact", "tier_reached": "T2 tie-aware rank",
+                    "licenses_comparative": True, "max_delta": 2e-7, "epsilon": 1e-5,
+                    "epsilon_relative": True, "epsilon_source": "text-t1"}
+            rows = lambda q: [_row("W15-upload", None, ef=None, collection="bench15"),
+                              _row("W15", q, ef=None, collection="bench15"),
+                              _row("W15-sat", 10 * q, ef=None, collection="bench15")]
+            seg = [{"collection": "bench15", "points_count": 5183, "segments_count": 1,
+                    "segments": [{"points": 5183, "indexed": 0, "type": "plain", "appendable": True}]}]
+            fx.label("a", rows(4917), good_stamp(), conf, dataset="scifact")
+            d = fx.label("b", rows(820), good_stamp(), conf, dataset="scifact", collections=seg)
+            meta = _json.loads((d / "run.json").read_text())
+            meta["qdrant"] = {"version": "1.19.3-dev"}
+            (d / "run.json").write_text(_json.dumps(meta))
+            import sys
+            for lbl in ("a", "b"):
+                sys.modules["recall"].text_recall_path(lbl).write_text(_json.dumps({
+                    "dataset": "scifact", "variants": {"k1.2-b0.75": {
+                        "k1": 1.2, "b": 0.75, "parity": None, "limit": 10, "recall": 1.0}}}))
+            sys.modules["compare"]._RECALL_CACHE.clear()
+            runs = [report.load_run("a"), report.load_run("b")]
+            self.assertTrue(report.is_text_pair(runs))
+            html = report.build(runs, "t")
+            self.assertNotIn("No matched-recall ratio", html)
+            # 4,917 against 820 on both rows (W15-sat is ten times each): 6.00x.
+            self.assertRegex(html, r"serves\s+6\.00x to 6\.00x")
+            self.assertIn("T1 (every BM25 score", html)
+            self.assertNotIn("T3 passed", html)
+            self.assertNotIn("ef is not the same unit", html)
+            self.assertIn("served BM25 from its appendable segment, the write-path text index", html)
+            self.assertNotIn('<td class="num bad">ok</td>', html)
+            self.assertTrue(sys.modules["compare"].text_index_note("a", "b").startswith(
+                "**Which Qdrant text index.** b served BM25 from its appendable segment"))
+            # A vector pair is untouched: its licence still speaks of T3.
+            report, vruns, _df = self._pair(root, [_row("W3", 4000)], [_row("W3", 2000)])
+            self.assertFalse(report.is_text_pair(vruns))
+            self.assertIn("T3", report.licence_of(vruns)["detail"])
+
     def test_licence_carries_the_delta_behind_the_tier(self):
         """§8.9 lists max|Δscore| and p99|Δscore| as row fields. They were
         measured and then rendered into T1's prose, so the page carried the

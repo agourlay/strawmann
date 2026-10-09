@@ -155,6 +155,12 @@
     <p><b>No matched-recall ratio is stated between {{ runs[0].label }} and
     {{ runs[1].label }}.</b> {{ summary.matched_refusal }} The per-row tables below
     carry the same refusal wherever it applies.</p>
+    {%- elif summary.text %}
+    <p class="verdict"><b>{{ summary.text.a }} serves
+    {{ '%.2f'|format(summary.text.lo) }}x to {{ '%.2f'|format(summary.text.hi) }}x
+    {{ summary.text.b }}'s BM25 throughput across the W15 rows, at equal results:</b>
+    every row's top 10 matches the f64 BM25 oracle on both engines.
+    {{ summary.text.note }}</p>
     {%- elif summary.matched %}
     <p class="verdict"><b>At equal recall, {{ summary.matched.a }} serves
     {{ '%.2f'|format(summary.matched.lo) }}x to

@@ -1473,6 +1473,18 @@ def environment_line(label: str, rows: dict[str, dict]) -> str:
             + (f"; contaminated rows: {', '.join(dirty)}" if dirty else ""))
 
 
+def text_index_note(a_label: str, b_label: str) -> str:
+    """On a text pair, which of Qdrant's text indexes served W15
+    (`report_data.text_segment_note`), so no ratio reads as Qdrant's BM25 in
+    general; "" on a vector pair."""
+    import report_data
+    runs = [report_data.load_run(a_label), report_data.load_run(b_label)]
+    if not report_data.is_text_pair(runs):
+        return ""
+    note = report_data.text_segment_note(runs)
+    return f"**Which Qdrant text index.** {note}" if note else ""
+
+
 def relevance(a_label: str, b_label: str | None) -> list[dict]:
     """nDCG@10 and MRR@10 of each W15 variant, per engine, against the corpus's
     relevance judgements (`recall.load_text_recall`), or [] where no label has
@@ -2173,6 +2185,9 @@ def full_block(a_label: str, b_label: str,
         rows.append(f"| {wid} | {name} | {r['a_qps']} | {r['b_qps']} | {r['ratio']} "
                     f"| {r['a_lat']} | {r['b_lat']} | {recall} | {note} |")
 
+    note = text_index_note(a_label, b_label)
+    if note:
+        rows += ["", note]
     rel = relevance_block(a_label, b_label)
     if rel:
         rows += ["", *rel]
