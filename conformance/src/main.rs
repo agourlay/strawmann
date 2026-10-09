@@ -2815,8 +2815,51 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
                 Some(128),
             )
             .await?;
-        let (r, _a, _b) =
-            differ::compare_ann(&ours_ann, &theirs_ann, &gt, &eps, limit, Some(&rescorer));
+        // Matched recall, not equal ef (§8.5): start at the shared 128, then
+        // raise the less accurate engine (`differ::t3_next`).
+        let eval =
+            |r: &[relevance::Returned]| relevance::evaluate(&gt, r, &eps, limit, Some(&rescorer));
+        let mut steps = vec![differ::T3Step {
+            ef_ours: differ::T3_EF_LADDER[0],
+            ef_theirs: differ::T3_EF_LADDER[0],
+            ours: eval(&ours_ann),
+            theirs: eval(&theirs_ann),
+        }];
+        while let Some((ef_ours, ef_theirs)) = differ::t3_next(&steps) {
+            let last = steps.last().expect("T3 steps start with one");
+            let (mut ours, mut theirs) = (last.ours.clone(), last.theirs.clone());
+            for (i, (ef, prev)) in [(ef_ours, last.ef_ours), (ef_theirs, last.ef_theirs)]
+                .into_iter()
+                .enumerate()
+            {
+                if ef == prev {
+                    continue;
+                }
+                let got = engines[i]
+                    .query(
+                        collection,
+                        &queries.data,
+                        queries.n,
+                        queries.dim,
+                        limit as u64,
+                        false,
+                        Some(ef),
+                    )
+                    .await?;
+                if i == 0 {
+                    ours = eval(&got);
+                } else {
+                    theirs = eval(&got);
+                }
+            }
+            steps.push(differ::T3Step {
+                ef_ours,
+                ef_theirs,
+                ours,
+                theirs,
+            });
+        }
+        let r = differ::t3_verdict(&steps);
         println!(
             "{}: {} - {}",
             r.tier.as_str(),

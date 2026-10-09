@@ -993,39 +993,98 @@ pub fn rank_biased_overlap(a: &[u32], b: &[u32], p: f64) -> f64 {
 
 /// §8.5 T3: "Held-out query set against the static ground truth of §4.3 — *not*
 /// against either engine's own exact search, which is what bfb's
-/// `--search-quality` does and why it can't be used here."
-pub fn compare_ann(
-    ours: &[Returned],
-    theirs: &[Returned],
-    gt: &GroundTruth,
-    eps: &Epsilon,
-    limit: usize,
-    rescorer: Option<&crate::oracle::Rescorer>,
-) -> (TierResult, Geometric, Geometric) {
-    let a = relevance::evaluate(gt, ours, eps, limit, rescorer);
-    let b = relevance::evaluate(gt, theirs, eps, limit, rescorer);
-    let matched = relevance::recall_is_matched(&a, &b);
+/// `--search-quality` does and why it can't be used here." Each engine's
+/// results are scored with `relevance::evaluate` into a `T3Step`, and the
+/// verdict is `t3_verdict`'s.
+/// The `ef` values T3 compares at. Both engines start at the first, 128, the
+/// `ef` every search row pins; when their recall@10 intervals do not overlap,
+/// the engine whose recall is lower is raised through the rest, since §8.5
+/// asks for "overlapping CIs at matched recall", not at equal `ef`. An engine
+/// more accurate at equal `ef` (h-and-m 1009: strawmANN 0.9988 against
+/// Qdrant's 0.9967 at 128, on two differ runs) otherwise fails the tier for
+/// being more accurate.
+pub const T3_EF_LADDER: [u64; 3] = [128, 256, 512];
 
-    (
-        TierResult {
-            advisory: false,
-            tier: Tier::T3AnnStatistical,
-            passed: matched,
-            detail: format!(
-                "strawmann {} | qdrant {} | recall@10 CIs {}",
-                a.describe(),
-                b.describe(),
-                if matched {
-                    "overlap — QPS is comparable at this point"
-                } else {
-                    "DO NOT overlap — a QPS comparison here would be at unequal recall (§7.4)"
-                }
-            ),
-            distribution: None,
-        },
-        a,
-        b,
-    )
+/// One T3 comparison: each engine's `ef` and the recall it reached there.
+#[derive(Clone, Debug)]
+pub struct T3Step {
+    pub ef_ours: u64,
+    pub ef_theirs: u64,
+    pub ours: Geometric,
+    pub theirs: Geometric,
+}
+
+/// The `(ef_ours, ef_theirs)` to try after `steps`, or `None` when the last
+/// step matched or matching is out of reach: only the engine that was less
+/// accurate at the shared `ef` is raised, and only while it still is, so an
+/// engine that overtakes without the intervals ever meeting ends the search
+/// rather than being raised past the point of a match.
+pub fn t3_next(steps: &[T3Step]) -> Option<(u64, u64)> {
+    let first = steps.first()?;
+    let last = steps.last()?;
+    if relevance::recall_is_matched(&last.ours, &last.theirs) {
+        return None;
+    }
+    let raise_ours = first.ours.recall_at_10 < first.theirs.recall_at_10;
+    let still_lower = if raise_ours {
+        last.ours.recall_at_10 < last.theirs.recall_at_10
+    } else {
+        last.theirs.recall_at_10 < last.ours.recall_at_10
+    };
+    if !still_lower {
+        return None;
+    }
+    let current = if raise_ours {
+        last.ef_ours
+    } else {
+        last.ef_theirs
+    };
+    let next = T3_EF_LADDER.iter().copied().find(|&e| e > current)?;
+    Some(if raise_ours {
+        (next, last.ef_theirs)
+    } else {
+        (last.ef_ours, next)
+    })
+}
+
+/// T3's verdict over the steps taken: passed when the last one matched. The
+/// detail names the `ef` each engine was compared at, and the shared-`ef`
+/// comparison it started from when that one did not match.
+pub fn t3_verdict(steps: &[T3Step]) -> TierResult {
+    let last = steps.last().expect("T3 compares at least once");
+    let matched = relevance::recall_is_matched(&last.ours, &last.theirs);
+    let mut detail = format!(
+        "strawmann ef {} {} | qdrant ef {} {} | recall@10 CIs {}",
+        last.ef_ours,
+        last.ours.describe(),
+        last.ef_theirs,
+        last.theirs.describe(),
+        if matched {
+            "overlap — QPS is comparable at matched recall"
+        } else {
+            "DO NOT overlap at any ef tried — a QPS comparison here would be at unequal recall (§7.4)"
+        }
+    );
+    if steps.len() > 1 {
+        let first = &steps[0];
+        detail.push_str(&format!(
+            " | at the shared ef {} they did not overlap: strawmann {:.4} [{:.4},{:.4}] qdrant {:.4} [{:.4},{:.4}]",
+            first.ef_ours,
+            first.ours.recall_at_10,
+            first.ours.recall_at_10_ci95.low,
+            first.ours.recall_at_10_ci95.high,
+            first.theirs.recall_at_10,
+            first.theirs.recall_at_10_ci95.low,
+            first.theirs.recall_at_10_ci95.high
+        ));
+    }
+    TierResult {
+        advisory: false,
+        tier: Tier::T3AnnStatistical,
+        passed: matched,
+        detail,
+        distribution: None,
+    }
 }
 
 // =========================================================================
@@ -1534,6 +1593,140 @@ mod tests {
         assert!(top_agrees > top_differs, "{top_agrees} vs {top_differs}");
     }
 
+    /// T3 at the shared ef alone: one step, its verdict, and both recalls.
+    fn t3_once(
+        ours: &[Returned],
+        theirs: &[Returned],
+        gt: &GroundTruth,
+        limit: usize,
+    ) -> (TierResult, Geometric, Geometric) {
+        let e = eps(Metric::Euclid, 1e-9);
+        let step = T3Step {
+            ef_ours: T3_EF_LADDER[0],
+            ef_theirs: T3_EF_LADDER[0],
+            ours: relevance::evaluate(gt, ours, &e, limit, None),
+            theirs: relevance::evaluate(gt, theirs, &e, limit, None),
+        };
+        let (a, b) = (step.ours.clone(), step.theirs.clone());
+        (t3_verdict(&[step]), a, b)
+    }
+
+    fn at(recall: f64, low: f64, high: f64) -> Geometric {
+        Geometric {
+            queries: 10_000,
+            recall_at_10: recall,
+            recall_at_10_ci95: relevance::Ci95 { low, high },
+            ..Geometric::default()
+        }
+    }
+
+    fn step(ef_ours: u64, ef_theirs: u64, ours: Geometric, theirs: Geometric) -> T3Step {
+        T3Step {
+            ef_ours,
+            ef_theirs,
+            ours,
+            theirs,
+        }
+    }
+
+    #[test]
+    fn t3_matches_at_the_shared_ef_when_it_can() {
+        let s = [step(
+            128,
+            128,
+            at(0.9988, 0.9979, 0.9993),
+            at(0.9980, 0.9970, 0.9988),
+        )];
+        assert_eq!(t3_next(&s), None);
+        let r = t3_verdict(&s);
+        assert!(r.passed, "{}", r.detail);
+        assert!(!r.detail.contains("shared ef"), "{}", r.detail);
+    }
+
+    #[test]
+    fn t3_raises_the_less_accurate_engine_until_the_intervals_meet() {
+        // h-and-m 1009: strawmANN 0.9988 [0.9979,0.9993], Qdrant 0.9967
+        // [0.9954,0.9976] at ef 128. Qdrant is raised, strawmANN stays at 128.
+        let base = step(
+            128,
+            128,
+            at(0.9988, 0.9979, 0.9993),
+            at(0.9967, 0.9954, 0.9976),
+        );
+        assert_eq!(t3_next(std::slice::from_ref(&base)), Some((128, 256)));
+        let raised = step(
+            128,
+            256,
+            at(0.9988, 0.9979, 0.9993),
+            at(0.9984, 0.9975, 0.9990),
+        );
+        let steps = [base.clone(), raised];
+        assert_eq!(t3_next(&steps), None);
+        let r = t3_verdict(&steps);
+        assert!(r.passed, "{}", r.detail);
+        assert!(
+            r.detail.contains("strawmann ef 128") && r.detail.contains("qdrant ef 256"),
+            "{}",
+            r.detail
+        );
+        assert!(
+            r.detail
+                .contains("at the shared ef 128 they did not overlap"),
+            "{}",
+            r.detail
+        );
+        // The symmetric case raises strawmANN.
+        let flipped = step(
+            128,
+            128,
+            at(0.9967, 0.9954, 0.9976),
+            at(0.9988, 0.9979, 0.9993),
+        );
+        assert_eq!(t3_next(&[flipped]), Some((256, 128)));
+    }
+
+    #[test]
+    fn t3_fails_when_the_raised_engine_overtakes_or_the_ladder_ends() {
+        let base = step(
+            128,
+            128,
+            at(0.9988, 0.9979, 0.9993),
+            at(0.9967, 0.9954, 0.9976),
+        );
+        // Raised past the other without the intervals ever meeting.
+        let over = step(
+            128,
+            256,
+            at(0.9988, 0.9979, 0.9993),
+            at(0.9999, 0.9996, 1.0),
+        );
+        assert_eq!(t3_next(&[base.clone(), over.clone()]), None);
+        assert!(!t3_verdict(&[base.clone(), over]).passed);
+        // Still short at the top of the ladder.
+        let top = step(
+            128,
+            512,
+            at(0.9988, 0.9979, 0.9993),
+            at(0.9970, 0.9957, 0.9978),
+        );
+        assert_eq!(t3_next(&[base.clone(), top.clone()]), None);
+        let r = t3_verdict(&[base, top]);
+        assert!(
+            !r.passed && r.detail.contains("at any ef tried"),
+            "{}",
+            r.detail
+        );
+        // An unmeasurable recall never matches and is never raised.
+        let nan = step(
+            128,
+            128,
+            at(f64::NAN, f64::NAN, f64::NAN),
+            at(0.99, 0.98, 1.0),
+        );
+        assert_eq!(t3_next(std::slice::from_ref(&nan)), None);
+        assert!(!t3_verdict(&[nan]).passed);
+    }
+
     #[test]
     fn t3_flags_unequal_recall_rather_than_comparing_qps_anyway() {
         // §7.4: "Compare at equal recall."
@@ -1576,7 +1769,7 @@ mod tests {
             })
             .collect();
 
-        let (r, a, b) = compare_ann(&good, &bad, &gt, &eps(Metric::Euclid, 1e-9), k, None);
+        let (r, a, b) = t3_once(&good, &bad, &gt, k);
         assert!(!r.passed);
         assert!(r.detail.contains("DO NOT overlap"));
         assert!(
@@ -1637,7 +1830,7 @@ mod tests {
             condition: None,
             n_matching: None,
         };
-        let (r, _, _) = compare_ann(&[], &[], &gt, &eps(Metric::Euclid, 1e-9), 10, None);
+        let (r, _, _) = t3_once(&[], &[], &gt, 10);
         assert!(!r.passed, "{}", r.detail);
         assert!(r.detail.contains("n=0"), "{}", r.detail);
     }

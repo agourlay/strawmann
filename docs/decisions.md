@@ -2396,3 +2396,22 @@ carried no relevance judgements and no real text, so they measured BM25 on a
 shape no user has; W15 runs on BEIR corpora only (scifact, FiQA, ArguAna,
 Quora, and the ones added after). Their two smoke runs (2026-10-07) stay in
 the record above.
+
+## T3 compares at matched recall, not at equal ef, decided 2026-10-09
+
+Spec §8.5 licenses a comparison on "overlapping CIs at matched recall". The
+differ compared both engines at `ef` 128 only, so an engine more accurate at
+equal `ef` failed the tier for being more accurate. h-and-m 1009 did, twice:
+strawmANN 0.9988 [0.9979, 0.9993] against Qdrant 0.9967 [0.9954, 0.9976] on the
+night's differ run and on a re-run, a miss of 0.0003 to 0.0004 with Qdrant's
+graph rebuilt in between, so not its build draw (the 0929 miss of 0.0001 was).
+
+T3 now starts at the shared `ef` 128 and, when the recall@10 intervals do not
+overlap, raises the engine whose recall is lower through `ef` 256 and 512
+(`differ::T3_EF_LADDER`, `t3_next`), holding the other at 128. It passes at the
+first step where the intervals overlap, and the tier's detail names both
+engines' `ef` and the shared-`ef` miss it started from. It fails when the raised
+engine overtakes the other without the intervals ever meeting, or the ladder
+ends short. The throughput comparison itself was already at matched recall
+(the W10 frontier interpolation); this only stops the licence from demanding
+equal `ef` where the comparison never did.
