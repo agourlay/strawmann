@@ -228,6 +228,42 @@ class CompareTests(unittest.TestCase):
         cmp = self.m["compare"]
         self.assertEqual(cmp.text_index_note("nobody", "nowhere"), "")
 
+    def test_a_renamed_qdrant_binary_still_titles_its_column_qdrant(self):
+        cmp = self.m["compare"]
+        d = Path(self.tmp.name) / "bench/results/qd"
+        d.mkdir(parents=True)
+        (d / "run.json").write_text(json.dumps({"engine_comm": "qdrant-dev-24f6",
+                                                "qdrant": {"version": "1.19.3-dev"}}))
+        self.assertEqual(cmp.column_title("qd"), "qdrant 1.19")
+
+    def test_a_text_corpus_gets_a_bm25_panel(self):
+        """The landing page's BM25 section: W15's rows, nDCG@10 in the caption,
+        and which Qdrant text index served them, in place of the vector
+        panel's frontier and dimension."""
+        cmp, rec = self.m["compare"], self.m["recall"]
+        rows = lambda q: [_row("W15", q, ef=None, collection="bench15"),
+                          _row("W15-sat", 10 * q, ef=None, collection="bench15")]
+        seg = [{"collection": "bench15", "segments": [
+            {"points": 5183, "indexed": 5183, "type": "indexed", "appendable": False}]}]
+        conf = {**CONF_T3, "metric": "BM25", "dataset": "scifact", "licenses_comparative": True}
+        self.fx.label("a", rows(4917), good_stamp(), conf, dataset="scifact")
+        d = self.fx.label("b", rows(2960), good_stamp(), conf, dataset="scifact", collections=seg)
+        meta = json.loads((d / "run.json").read_text())
+        meta["qdrant"] = {"version": "1.19.3-dev"}
+        (d / "run.json").write_text(json.dumps(meta))
+        for lbl in ("a", "b"):
+            rec.text_recall_path(lbl).write_text(json.dumps({"dataset": "scifact", "variants": {
+                "k1.2-b0.75": {"k1": 1.2, "b": 0.75, "parity": None, "limit": 10, "recall": 1.0,
+                               "semantic": {"ndcg_at_10": 0.6886, "mrr_at_10": 0.65}}}}))
+        cmp._RECALL_CACHE.clear()
+        self.assertIn(("docs/index.html", "landing-scifact"), cmp.blocks_targets("scifact"))
+        panel = cmp.landing_block("a", "b", cmp.load("a"), cmp.load("b"))
+        self.assertIn("BM25, 5,183 documents, 300 queries", panel)
+        self.assertIn("One query at a time<small>single client; nDCG@10 0.6886 / 0.6886", panel)
+        self.assertIn("served BM25 from optimized segments only", panel)
+        self.assertNotIn("At equal recall", panel)
+        self.assertNotIn("dimension", panel)
+
     def test_licence_banner_when_not_comparative(self):
         sw = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.98))]
         _rows, cmp = self._joined([_row("W3", 4000)], [_row("W3", 2000)],

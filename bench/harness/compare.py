@@ -1757,7 +1757,7 @@ def blocks_targets(dataset: str) -> list[tuple[str, str]]:
     if dataset == HEADLINE_DATASET:
         out.append(("README.md", "compare-table"))
     out.append((f"docs/comparison-{dataset}.md", "compare-full"))
-    if dataset in LANDING_DATASETS:
+    if dataset in LANDING_DATASETS or dataset in LANDING_TEXT_DATASETS:
         out.append((LANDING_PAGE, landing_kind(dataset)))
     return out
 
@@ -1781,6 +1781,17 @@ HEADLINE_DATASET = "sift1m"
 LANDING_PAGE = "docs/index.html"
 LANDING_DATASETS = ("sift1m", "dbpedia-openai-1m", "laion-small-clip",
                     "h-and-m-2048-angular-filters")
+
+#: Text corpora with a panel in the landing page's BM25 section, below the
+#: vector panels: a different query, so a different comparison.
+LANDING_TEXT_DATASETS = ("scifact", "fiqa", "arguana", "quora")
+
+#: A text panel's rows: W15's, with its judged corpus's nDCG@10 as a caption.
+LANDING_TEXT_ROWS = [
+    ("W15", "One query at a time", "single client"),
+    ("W15-sat", "Saturating", "closed loop, every core busy"),
+    ("W15-filtered", "Filtered", "a keyword filter keeping half the corpus"),
+]
 
 #: The rows each landing panel shows, in order, with a caption for a reader
 #: who has not read §4, or `None` for the row's recall pair. The equal-recall
@@ -1853,14 +1864,21 @@ def landing_block(a_label: str, b_label: str,
     refused ratio reads as refused here too, and the equal-recall row comes
     from the same frontier as the README's line.
     """
+    import paths
     rows = {r.id: r for r in joined(a_label, b_label, a, b)}
     spec = dataset_spec_of(a_label, b_label)
     name = spec.get("name") or "unknown"
-    what = [f"d={spec['dim']}"] if spec.get("dim") else []
-    if spec.get("metric"):
-        what.append(str(spec["metric"]).lower())
-    if human_count(spec.get("n")):
-        what.append(f"{human_count(spec.get('n'))} vectors")
+    text = paths.is_text(name)
+    if text:
+        # A text corpus: its documents and queries, not a vector width.
+        what = ["BM25", f"{human_count(paths.text_n(name))} documents",
+                f"{paths.n_queries(name):,} queries"]
+    else:
+        what = [f"d={spec['dim']}"] if spec.get("dim") else []
+        if spec.get("metric"):
+            what.append(str(spec["metric"]).lower())
+        if human_count(spec.get("n")):
+            what.append(f"{human_count(spec.get('n'))} vectors")
     meta = read_json(a_label, "run.json")
     when = []
     if meta.get("started"):
@@ -1884,7 +1902,7 @@ def landing_block(a_label: str, b_label: str,
             f'<th scope="col">{col_b}</th><th scope="col">ratio</th></tr>'),
            "    </thead>",
            "    <tbody>"]
-    anchors = matched_anchors(a_label, b_label)
+    anchors = None if text else matched_anchors(a_label, b_label)
     if anchors:
         best, top, n = anchors
         out += ["      <tr>",
@@ -1894,12 +1912,19 @@ def landing_block(a_label: str, b_label: str,
                  f'falling to {top["ratio"]:,.2f}x at {top["recall"]:.4f}</td>'),
                 "        " + landing_ratio_cell(f"{best['ratio']:,.2f}x"),
                 "      </tr>"]
-    for wid, title, fixed in LANDING_ROWS:
+    ndcg = {}
+    if text:
+        for g in relevance(a_label, b_label):
+            for wid in g["rows"]:
+                ndcg[wid] = (g["a"].get("ndcg_at_10"), g["b"].get("ndcg_at_10"))
+    for wid, title, fixed in (LANDING_TEXT_ROWS if text else LANDING_ROWS):
         r = rows.get(wid)
         if not r:
             continue
         caption = fixed or (f"recall {r.rec_a:.4f} against {r.rec_b:.4f}"
                             if r.rec_a is not None and r.rec_b is not None else "")
+        if wid in ndcg and None not in ndcg[wid]:
+            caption = f"{caption}; nDCG@10 {ndcg[wid][0]:.4f} / {ndcg[wid][1]:.4f}"
         if r.ratio == "-":
             caption = "; ".join(filter(None, [caption, "not compared, the full table says why"]))
         out += ["      <tr>",
@@ -1914,8 +1939,15 @@ def landing_block(a_label: str, b_label: str,
             '  <div class="panel-foot">',
             '    <span class="bar-note">The bar runs from 0x to 5x; the tick marks parity.</span>',
             "    Every row, with its latency percentiles, recall and the rows the comparison",
-            f'    refuses, is in <a href="{doc}"><code>comparison-{html.escape(name)}.md</code></a>.',
-            "    These ratios are this dimension's and do not carry to another."]
+            f'    refuses, is in <a href="{doc}"><code>comparison-{html.escape(name)}.md</code></a>.']
+    if text:
+        # Which of Qdrant's text indexes served the rows, read back per
+        # segment, beside the ratios it qualifies.
+        note = text_index_note(a_label, b_label).removeprefix("**Which Qdrant text index.** ")
+        if note:
+            out.append(f"    {html.escape(note)}")
+    else:
+        out.append("    These ratios are this dimension's and do not carry to another.")
     for bnr in banners(a_label, b_label):
         out.append(f'    <p class="warn">{html.escape(bnr)}</p>')
     report = published_report(name, a_label, b_label)
@@ -2043,6 +2075,11 @@ def column_title(label: str) -> str:
     # fold. The full table underneath still names the labels, and the
     # provenance section names commits and digests.
     name = meta.get("engine_comm") or label
+    # A Qdrant build copied under its own name (`qdrant-dev-24f67eb18`, the
+    # BM25 pin) is still Qdrant: its process name is that name cut to the
+    # kernel's 15 characters, which titled a column `qdrant-dev-24f6`.
+    if name.startswith("qdrant"):
+        name = "qdrant"
     v = (meta.get("qdrant") or {}).get("version")
     return f"{name} {'.'.join(str(v).split('.')[:2])}" if v else name
 
@@ -2281,7 +2318,7 @@ def blocks_for(a_label: str, b_label: str,
         "compare-full": full_block(a_label, b_label, a, b),
     }
     dataset = dataset_of(a_label) or dataset_of(b_label)
-    if dataset in LANDING_DATASETS:
+    if dataset in LANDING_DATASETS or dataset in LANDING_TEXT_DATASETS:
         out[landing_kind(dataset)] = landing_block(a_label, b_label, a, b)
     return out
 

@@ -11,7 +11,7 @@ The table below is generated from the last full run that measured this dataset. 
 | W15-k0.9-b0.4 | text: BM25 query at k1 0.9, b 0.4, saturating | 21,952 | 1,895 | 11.58x | 2.87 ms / 3.59 ms | 33.60 ms / 44.90 ms | 1.0000 |  |
 | W15-b0 | text: BM25 query at k1 1.2, b 0.0, saturating | 23,506 | 2,036 | 11.55x | 2.68 ms / 3.32 ms | 31.10 ms / 41.10 ms | 1.0000 |  |
 
-**Which Qdrant text index.** qd-fiqa-perf-1008 served BM25 from its appendable segment, the write-path text index: all 57,638 points (W15_INDEXING_THRESHOLD_KB unset, Qdrant's default threshold), since the placeholder vectors stay under the threshold that would make its optimizer build the immutable segment a deployment serves from. strawmANN served it from its one text index. Every ratio on this page is against that Qdrant index.
+**Which Qdrant text index.** qd-fiqa-perf-1008 served BM25 from its appendable segment, the write-path text index: all 57,638 points (no indexing threshold sent, so Qdrant's default), since the placeholder vectors stay under the threshold that would make its optimizer build the immutable segment a deployment serves from. strawmANN served it from its one text index. Every ratio on this page is against that Qdrant index.
 
 **Relevance against the corpus's judgements.** nDCG@10 and MRR@10 of each variant's results against the corpus's qrels: what BM25 itself is worth here. Reported beside recall@10 and not ratioed or gated, since engines that agree on every score may still order a tie differently, and that moves them. A filtered variant is scored against every judgement while its filter keeps half the corpus, so it reads low by construction.
 
