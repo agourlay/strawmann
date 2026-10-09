@@ -690,8 +690,8 @@ def text_segment_note(runs: list[Run]) -> str:
     write_path = sum(s["points"] for s in held if s.get("appendable"))
     kb = (((qd_run.meta or {}).get("harness") or {}).get("collection") or {}).get(
         "w15_indexing_threshold_kb")
-    knob = ("W15_INDEXING_THRESHOLD_KB unset, Qdrant's default threshold" if kb is None
-            else f"W15_INDEXING_THRESHOLD_KB {kb}")
+    knob = ("no indexing threshold sent, so Qdrant's default" if kb is None
+            else f"indexing threshold {kb} KB")
     if write_path == total:
         where = (f"its appendable segment, the write-path text index: all {total:,} points "
                  f"({knob}), since the placeholder vectors stay under the threshold that "

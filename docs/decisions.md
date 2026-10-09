@@ -2419,3 +2419,24 @@ engine overtakes the other without the intervals ever meeting, or the ladder
 ends short. The throughput comparison itself was already at matched recall
 (the W10 frontier interpolation); this only stops the licence from demanding
 equal `ef` where the comparison never did.
+
+## W15 takes the harness's indexing threshold, decided 2026-10-09
+
+Every collection here asks Qdrant for `INDEXING_THRESHOLD_KB` (1 KB) under
+either segment policy (`collection_flags`), because the threshold decides
+whether Qdrant builds its optimized structures at all, which is not the axis a
+segment policy varies. W15's upload config sent none, so Qdrant kept its 10,000
+KB default, and W15's 16-byte placeholder vectors left every corpus under
+640,000 points in Qdrant's appendable plain segment: the 2026-10-08 pairs for
+scifact, FiQA, ArguAna and Quora measured Qdrant's write-path text index, as
+their pages now say.
+
+W15 now sends `INDEXING_THRESHOLD_KB` like every other collection. Bigger
+placeholder vectors were the alternative (about 500 dimensions to cover
+scifact): they keep Qdrant's default configuration but trigger the optimizer
+only through the corpus's size, grow Quora's vector file from 8 MB to 1.6 GB,
+and make both engines build a graph no W15 query reads.
+`W15_INDEXING_THRESHOLD_KB` overrides the threshold, and `default` sends none,
+for the write path on purpose. Checked on scifact: all 5,183 points in one
+immutable segment, the appendable empty. The threshold is in the collection
+stamp, so the next BEIR pairs are STALE against the 2026-10-08 ones by design.

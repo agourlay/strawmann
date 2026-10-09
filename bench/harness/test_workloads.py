@@ -3976,15 +3976,22 @@ class TextTableTests(unittest.TestCase):
         self.assertIn("size: 4", cfg)
         self.assertIn("format: tar", cfg)
 
-    def test_qdrants_indexing_threshold_is_a_w15_knob_in_the_text_stamp(self):
+    def test_w15_takes_the_harness_indexing_threshold_unless_told_otherwise(self):
+        """Every collection here asks Qdrant for INDEXING_THRESHOLD_KB under
+        either segment policy; W15 did not, and Qdrant served all four BEIR
+        corpora from its write path."""
         cfg = self.w.text_upload_config("bench15")
-        self.assertNotIn("indexing_threshold", cfg)
-        self.assertIsNone(self.w.collection_settings()["w15_indexing_threshold_kb"])
-        with mock.patch.object(self.w, "W15_INDEXING_THRESHOLD_KB", 1):
-            cfg = self.w.text_upload_config("bench15")
-            self.assertIn("  optimizers:\n", cfg)
-            self.assertIn("    indexing_threshold: 1\n", cfg)
-            self.assertEqual(self.w.collection_settings()["w15_indexing_threshold_kb"], 1)
+        self.assertIn("  optimizers:\n", cfg)
+        self.assertIn(f"    indexing_threshold: {self.w.INDEXING_THRESHOLD_KB}\n", cfg)
+        self.assertEqual(self.w.collection_settings()["w15_indexing_threshold_kb"],
+                         self.w.INDEXING_THRESHOLD_KB)
+        with mock.patch.object(self.w, "SEGMENT_POLICY", self.w.SegmentPolicy.as_deployed):
+            self.assertIn("indexing_threshold:", self.w.text_upload_config("bench15"))
+        with mock.patch.dict(os.environ, {"W15_INDEXING_THRESHOLD_KB": "default"}):
+            self.assertNotIn("indexing_threshold", self.w.text_upload_config("bench15"))
+            self.assertIsNone(self.w.collection_settings()["w15_indexing_threshold_kb"])
+        with mock.patch.dict(os.environ, {"W15_INDEXING_THRESHOLD_KB": "500"}):
+            self.assertIn("    indexing_threshold: 500\n", self.w.text_upload_config("bench15"))
         self.w.use_dataset("sift1m")
         self.assertNotIn("w15_indexing_threshold_kb", self.w.collection_settings())
 
