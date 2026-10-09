@@ -2402,9 +2402,13 @@ the record above.
 Spec §8.5 licenses a comparison on "overlapping CIs at matched recall". The
 differ compared both engines at `ef` 128 only, so an engine more accurate at
 equal `ef` failed the tier for being more accurate. h-and-m 1009 did, twice:
-strawmANN 0.9988 [0.9979, 0.9993] against Qdrant 0.9967 [0.9954, 0.9976] on the
-night's differ run and on a re-run, a miss of 0.0003 to 0.0004 with Qdrant's
-graph rebuilt in between, so not its build draw (the 0929 miss of 0.0001 was).
+strawmANN 0.9988 [0.9979, 0.9993] against Qdrant 0.9965 and 0.9967 on the
+night's differ run and on a re-run, misses of 0.0004 and 0.0003. A third Qdrant
+build, in the first differ run with this change, reached 0.9973 [0.9961, 0.9981]
+and overlapped at the shared `ef` without the ladder: Qdrant's recall at 128
+moves with its build by about 0.0008 here, and strawmANN sits at the edge of
+that range, so whether the equal-`ef` tier passed was a draw (as 0929's 0.0001
+miss was). With the ladder it no longer is.
 
 T3 now starts at the shared `ef` 128 and, when the recall@10 intervals do not
 overlap, raises the engine whose recall is lower through `ef` 256 and 512
