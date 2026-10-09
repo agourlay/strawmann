@@ -69,6 +69,8 @@
   .actions img { height: 20px; display: block; }
 
   h2 { font-size: 1.25rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 a { color: inherit; text-decoration: none; }
+  h2 a:hover { text-decoration: underline; }
   .section-note { color: var(--muted); margin: 0 0 16px; font-size: 0.95rem; max-width: 80ch; }
   section { margin-bottom: 44px; }
 
@@ -162,8 +164,8 @@
     </div>
   </header>
 
-  <section>
-    <h2>Headline results</h2>
+  <section id="headline">
+    <h2><a href="#headline">Headline results</a></h2>
     <p class="section-note">Queries per second, higher is better. A ratio above 1x means strawmANN serves more.</p>
 
     <div class="results">
@@ -387,8 +389,8 @@
     </div>
   </section>
 
-  <section>
-    <h2>BM25 over a text index</h2>
+  <section id="bm25">
+    <h2><a href="#bm25">BM25 over a text index</a></h2>
     <p class="section-note">Full-text search on BEIR corpora: Qdrant's <code>text</code> query
     against strawmANN's, the same documents at the same BM25 scores (checked against an f64
     oracle). Queries per second, higher is better; nDCG@10 is against each corpus's relevance
