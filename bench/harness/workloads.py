@@ -763,12 +763,22 @@ W9_PARALLEL = int(os.environ.get("W9_PARALLEL", 8))
 #: every W15 ladder row would have run Qdrant at 1.2 / 0.75. The builder bfb
 #: calls kept its signatures, so no request code changed, and the rest of the
 #: regenerated proto adds only `Datatype.Turbo16`, which no row sends.
-BFB_PIN = ("dev @ 22e5481 (qdrant/bfb#186, BM25 k/b in qdrant#11012's nested params; "
-           "carries #185's text requests and #172, findings 32's --rps reaping fix)")
+#: Moved forward to `96fd5f0` on 2026-10-12, two commits on: #187 updates the
+#: Rust dependencies and #188 adds a Dependabot config. Read in `Cargo.lock`:
+#: `qdrant-client` stays at rust-client `637cee6`, and `tonic`, `prost` and
+#: `rand_core` are unchanged, so no request a row sends is encoded differently.
+#: The client's transport moves (`tokio` 1.52.3 to 1.53.2, `h2` 0.4.13 to
+#: 0.4.20, `hyper` 1.9.0 to 1.12.0), which can shift client-side overhead, and
+#: `parquet` 59 to 60 reads dataset files only. `self_update.rs` formats a
+#: digest for `sha2` 0.11. A different instrument all the same, which the
+#: `bfb_pin` stamp records.
+BFB_PIN = ("dev @ 96fd5f0 (qdrant/bfb#188; #187's dependency update on top of #186, "
+           "BM25 k/b in qdrant#11012's nested params, #185's text requests and #172, "
+           "findings 32's --rps reaping fix)")
 
 #: The short hash inside `BFB_PIN`, which is what the checkout is checked
 #: against. Written once, parsed once, rather than repeated.
-BFB_COMMIT = "22e5481"
+BFB_COMMIT = "96fd5f0"
 BFB_CLIENT = "qdrant-client 1.16.1-dev (git dev branch)"
 HARNESS_CLIENT = "qdrant-client git 637cee6 (dev, qdrant/rust-client#301 merged, 1.16.1-dev line)"
 

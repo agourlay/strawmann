@@ -2385,7 +2385,7 @@ The 2026-10-12 move carries #11012, which nests BM25's `k` and `b` in
 `TextQuery.scoring.bm25` and reserves their old fields 2 and 3. A current
 Qdrant drops those as unknown fields, so a client on the old proto runs every
 k1/b ladder row at 1.2 / 0.75 with no error. It moved with the clients: bfb to
-22e5481 (qdrant/bfb#186) and conformance to rust-client 637cee6
+22e5481 (qdrant/bfb#186, then the same day 96fd5f0 for #187's dependency update) and conformance to rust-client 637cee6
 (qdrant/rust-client#301), and strawmANN's decoder reads the new message and
 skips the reserved fields as Qdrant does, so an old client gets the defaults
 from both engines rather than a split. It also brings the term frequencies in

@@ -14,10 +14,16 @@ manifest and digest work in Python.
 Pinned reference, per §8.9 and §4.1:
 
 ```
-qdrant/bfb  branch dev  HEAD 22e5481  "Send BM25 k and b in the nested params of qdrant#11012 (#186)"  2026-10-12
+qdrant/bfb  branch dev  HEAD 96fd5f0  "chore: add Dependabot configuration targeting dev (#188)"  2026-10-12
 ```
 
-Advanced from `caaeeef` on 2026-10-12. #186 only moves `Cargo.lock`'s
+Advanced from `22e5481` on 2026-10-12. #187 updates the Rust dependencies and
+#188 adds a Dependabot config. `qdrant-client`, `tonic` and `prost` keep their
+locked versions, so the requests are encoded as before; the client transport
+(`tokio`, `h2`, `hyper`) moves, which is client-side overhead the `bfb_pin`
+stamp tells apart. `workloads.BFB_PIN` records the reading.
+
+`22e5481` had advanced from `caaeeef` the same day. #186 only moves `Cargo.lock`'s
 `qdrant-client` to rust-client `637cee6` (qdrant/rust-client#301), whose proto
 carries qdrant#11012's nested `TextQuery.scoring.bm25`: the old `k` and `b`
 fields are reserved and a current Qdrant drops them, so W15's k1/b ladder needs
