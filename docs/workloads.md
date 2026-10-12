@@ -14,10 +14,19 @@ manifest and digest work in Python.
 Pinned reference, per §8.9 and §4.1:
 
 ```
-qdrant/bfb  branch dev  HEAD 29240511  "Introduce hybrid queries (#183)"  2026-09-24
+qdrant/bfb  branch dev  HEAD 22e5481  "Send BM25 k and b in the nested params of qdrant#11012 (#186)"  2026-10-12
 ```
 
-Advanced from `fc6632e5` on 2026-10-02. The seven commits between them (#177
+Advanced from `caaeeef` on 2026-10-12. #186 only moves `Cargo.lock`'s
+`qdrant-client` to rust-client `637cee6` (qdrant/rust-client#301), whose proto
+carries qdrant#11012's nested `TextQuery.scoring.bm25`: the old `k` and `b`
+fields are reserved and a current Qdrant drops them, so W15's k1/b ladder needs
+it. The builder bfb calls kept its signatures; no request code changed.
+
+`caaeeef` (#185, 2026-10-07) added the `kind: text` request and the text
+payload options W15 needs, and kept every request the other rows send.
+
+`29240511` had advanced from `fc6632e5` on 2026-10-02. The seven commits between them (#177
 to #183) add multivector and hybrid queries, `--acorn`, and a serverless fix;
 none of them changes a request these rows send, which are dense,
 file-sourced, unfused and without prefetch. `workloads.BFB_PIN` records the

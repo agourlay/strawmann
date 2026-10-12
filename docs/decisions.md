@@ -2371,13 +2371,34 @@ W15 rows from strawmANN's T1 with both builds named.
 Text pairs run as their own `fullrun` on a text dataset with
 `--qdrant-binary` set to the BM25 build (Qdrant `dev` 850859ec9, re-pinned
 to 8cec8ad on 2026-10-08 for #11016, then the same day to a `release` build of
-`dev` 24f67eb18, sha256 225af7d4): no release serves the text query. Between
+`dev` 24f67eb18, sha256 225af7d4, then on 2026-10-12 to a `release` build of
+`dev` bfc0eab31, sha256 640af6bf, `qdrant-ab/bin/qdrant-dev-bfc0eab31`): no
+release serves the text query. Between
 8cec8ad and 24f67eb18 the protos gain only `Datatype.Turbo16`, and the text
 index only stores immutable token counts as u32 in RAM (#11030); text-differ
 on fiqa, Quora, scifact and ArguAna passes every tier on both engines against
 it (T1 well inside its 1e-5 tolerance: 7.0e-7 at most so far, Qdrant on
 ArguAna in the 2026-10-08 full run; ArguAna is now included since its empty
 array no longer counts). The vector pairs keep dbeb0f73.
+
+The 2026-10-12 move carries #11012, which nests BM25's `k` and `b` in
+`TextQuery.scoring.bm25` and reserves their old fields 2 and 3. A current
+Qdrant drops those as unknown fields, so a client on the old proto runs every
+k1/b ladder row at 1.2 / 0.75 with no error. It moved with the clients: bfb to
+22e5481 (qdrant/bfb#186) and conformance to rust-client 637cee6
+(qdrant/rust-client#301), and strawmANN's decoder reads the new message and
+skips the reserved fields as Qdrant does, so an old client gets the defaults
+from both engines rather than a split. It also brings the term frequencies in
+the mutable postings (#10762), rescoring prefetched points with a text query
+(#11034), BM25 on edge (#11057) and `params.idf.corpus` for text (#11081, which
+W15 does not send). The text pairs before and after are different instruments
+(the 2026-10-08 pages measured Qdrant's write path besides).
+
+text-differ against the new pin passes every tier on both engines on scifact,
+ArguAna, FiQA and Quora, at the defaults and at the 0.9 / 0.4 rung (a fresh
+upload per rung): T1 9.6e-7 at most, Qdrant on ArguAna at 0.9 / 0.4. The rung
+is the evidence the move needed, since a dropped `k` or `b` scores at 1.2 /
+0.75 and misses the 0.9 / 0.4 oracle by far more than T1's 1e-5.
 
 The first end-to-end pass, scifact at `--reps 1` (a smoke run, so nothing
 published): every W15 row measured on both engines, every variant's recall@10

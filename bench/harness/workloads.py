@@ -755,14 +755,22 @@ W9_PARALLEL = int(os.environ.get("W9_PARALLEL", 8))
 #:   * `Cargo.lock` moves `qdrant-client` 1.16.1-dev from rust-client `18002ab`
 #:     to `71143d8` (qdrant/rust-client#299): the proto regenerated from Qdrant
 #:     dev, which adds fields and changes no field a dense request sets.
-BFB_PIN = ("dev @ caaeeef (qdrant/bfb#185, BM25 text requests; carries #183 and "
-           "#172, findings 32's --rps reaping fix)")
+#: Moved forward to `22e5481` on 2026-10-12, one commit on: #186, which only
+#: moves `Cargo.lock`'s `qdrant-client` from rust-client `71143d8` to `637cee6`
+#: (qdrant/rust-client#301) and fixes the one test that read `TextQuery.k`.
+#: qdrant#11012 nested `TextQuery`'s `k` and `b` in `scoring.bm25` and reserved
+#: their old fields 2 and 3, which a current Qdrant drops, so under `caaeeef`
+#: every W15 ladder row would have run Qdrant at 1.2 / 0.75. The builder bfb
+#: calls kept its signatures, so no request code changed, and the rest of the
+#: regenerated proto adds only `Datatype.Turbo16`, which no row sends.
+BFB_PIN = ("dev @ 22e5481 (qdrant/bfb#186, BM25 k/b in qdrant#11012's nested params; "
+           "carries #185's text requests and #172, findings 32's --rps reaping fix)")
 
 #: The short hash inside `BFB_PIN`, which is what the checkout is checked
 #: against. Written once, parsed once, rather than repeated.
-BFB_COMMIT = "caaeeef"
+BFB_COMMIT = "22e5481"
 BFB_CLIENT = "qdrant-client 1.16.1-dev (git dev branch)"
-HARNESS_CLIENT = "qdrant-client git 71143d8 (dev, qdrant/rust-client#299 merged, 1.16.1-dev line)"
+HARNESS_CLIENT = "qdrant-client git 637cee6 (dev, qdrant/rust-client#301 merged, 1.16.1-dev line)"
 
 #: bfb's per-request `--timeout`, in seconds. docs/workloads.md §2 quotes it.
 BFB_TIMEOUT_S = int(os.environ.get("BFB_TIMEOUT_S", 60))

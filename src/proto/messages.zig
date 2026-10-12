@@ -853,9 +853,13 @@ pub const VectorInput = struct {
 ///
 /// §2: "We need `QueryPoints` with `query = Query{ nearest: VectorInput{ dense } }`
 /// ... Everything else in the `Query` oneof → `UNIMPLEMENTED`."
-/// `TextQuery { string query = 1; optional float k = 2; optional float b = 3; }`
-/// (VERIFIED, points.proto at Qdrant 850859ec9): BM25 over the text index of
-/// the payload field the request's `using` names (decisions.md, 2026-10-07).
+/// `TextQuery { reserved 2, 3; string query = 1; oneof scoring { Bm25Params bm25 = 4; } }`
+/// and `Bm25Params { optional float k = 1; optional float b = 2; }` (VERIFIED,
+/// points.proto at Qdrant bfc0eab31; qdrant#11012 nested the scorer's params):
+/// BM25 over the text index of the payload field the request's `using` names
+/// (decisions.md, 2026-10-07). The old `k = 2`, `b = 3` are skipped, as
+/// Qdrant now skips them, so a client still sending them gets the defaults
+/// from both engines rather than from one.
 pub const TextQuery = struct {
     query: []const u8 = &.{},
     k: ?f32 = null,
@@ -867,8 +871,20 @@ pub const TextQuery = struct {
             const t = try r.tag();
             switch (t.field) {
                 1 => out.query = try r.bytes(),
-                2 => out.k = try r.float(),
-                3 => out.b = try r.float(),
+                4 => {
+                    // A oneof of one message: the last on the wire wins whole.
+                    out.k = null;
+                    out.b = null;
+                    var sub = try r.nested();
+                    while (!sub.atEnd()) {
+                        const st = try sub.tag();
+                        switch (st.field) {
+                            1 => out.k = try sub.float(),
+                            2 => out.b = try sub.float(),
+                            else => try sub.skip(st.wire_type),
+                        }
+                    }
+                },
                 else => try r.skip(t.wire_type),
             }
         }
@@ -1704,17 +1720,50 @@ test "every rejected Query variant names itself" {
     }
 }
 
-test "a text query decodes its query, k and b" {
+test "a text query decodes its query, and k and b from its BM25 params" {
     var buf: [64]u8 = undefined;
     var w = Writer.init(&buf);
     const n = try w.beginNested(12, 2);
     try w.writeStringField(1, "alpha gamma");
-    try w.writeFloatField(2, 1.5);
+    const p = try w.beginNested(4, 1);
+    try w.writeFloatField(1, 1.5);
+    try w.endNested(p);
     try w.endNested(n);
     var r = Reader.init(w.written());
     const q = try Query.decode(&r);
     try testing.expectEqualStrings("alpha gamma", q.text.query);
     try testing.expectEqual(@as(?f32, 1.5), q.text.k);
+    try testing.expectEqual(@as(?f32, null), q.text.b);
+}
+
+test "a text query keeps an explicit b of zero" {
+    var buf: [64]u8 = undefined;
+    var w = Writer.init(&buf);
+    const n = try w.beginNested(12, 2);
+    try w.writeStringField(1, "alpha");
+    const p = try w.beginNested(4, 1);
+    try w.writeFloatFieldAlways(2, 0.0);
+    try w.endNested(p);
+    try w.endNested(n);
+    var r = Reader.init(w.written());
+    const q = try Query.decode(&r);
+    try testing.expectEqual(@as(?f32, null), q.text.k);
+    try testing.expectEqual(@as(?f32, 0.0), q.text.b);
+}
+
+test "a text query skips the k and b fields qdrant#11012 reserved" {
+    // Fields 2 and 3 were `k` and `b` before the nesting. Qdrant now drops
+    // them as unknown, so honouring them here would split the two engines.
+    var buf: [64]u8 = undefined;
+    var w = Writer.init(&buf);
+    const n = try w.beginNested(12, 2);
+    try w.writeStringField(1, "alpha");
+    try w.writeFloatField(2, 1.5);
+    try w.writeFloatField(3, 0.25);
+    try w.endNested(n);
+    var r = Reader.init(w.written());
+    const q = try Query.decode(&r);
+    try testing.expectEqual(@as(?f32, null), q.text.k);
     try testing.expectEqual(@as(?f32, null), q.text.b);
 }
 

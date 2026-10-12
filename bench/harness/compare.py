@@ -2075,9 +2075,9 @@ def column_title(label: str) -> str:
     # fold. The full table underneath still names the labels, and the
     # provenance section names commits and digests.
     name = meta.get("engine_comm") or label
-    # A Qdrant build copied under its own name (`qdrant-dev-24f67eb18`, the
+    # A Qdrant build copied under its own name (`qdrant-dev-bfc0eab31`, the
     # BM25 pin) is still Qdrant: its process name is that name cut to the
-    # kernel's 15 characters, which titled a column `qdrant-dev-24f6`.
+    # kernel's 15 characters, which titled a column `qdrant-dev-bfc0`.
     if name.startswith("qdrant"):
         name = "qdrant"
     v = (meta.get("qdrant") or {}).get("version")
