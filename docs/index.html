@@ -173,7 +173,7 @@
 <div class="panel" id="sift1m">
   <div class="panel-head">
     <strong>sift1m <span>· d=128, euclid, 1M vectors</span></strong>
-    <span>measured 2026-10-06 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-10-12 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -183,33 +183,33 @@
     <tbody>
       <tr>
         <td class="what">At equal recall<small>§7.4's comparison, over 8 anchors</small></td>
-        <td class="num span" colspan="2">best at recall 0.9882, falling to 1.59x at 0.9987</td>
-        <td><div class="ratio win"><span class="track"><i style="width:48.2%"></i></span><b>2.41x</b></div></td>
+        <td class="num span" colspan="2">best at recall 0.9625, falling to 1.34x at 0.9977</td>
+        <td><div class="ratio win"><span class="track"><i style="width:48.0%"></i></span><b>2.40x</b></div></td>
       </tr>
       <tr>
-        <td class="what">Saturating<small>closed loop, every core busy</small></td>
-        <td class="num">27,472</td><td class="num">14,218</td>
-        <td><div class="ratio win"><span class="track"><i style="width:38.6%"></i></span><b>1.93x</b></div></td>
+        <td class="what">Saturating<small>closed loop, every core busy; not compared, the full table says why</small></td>
+        <td class="num">27,947</td><td class="num">14,226</td>
+        <td><div class="ratio even"><b>-</b></div></td>
       </tr>
       <tr>
         <td class="what">Batched<small>16 queries per request</small></td>
-        <td class="num">27,641</td><td class="num">17,448</td>
-        <td><div class="ratio win"><span class="track"><i style="width:31.6%"></i></span><b>1.58x</b></div></td>
+        <td class="num">28,156</td><td class="num">17,217</td>
+        <td><div class="ratio win"><span class="track"><i style="width:32.8%"></i></span><b>1.64x</b></div></td>
       </tr>
       <tr>
         <td class="what">Exact<small>brute force, no index</small></td>
-        <td class="num">189</td><td class="num">122</td>
-        <td><div class="ratio win"><span class="track"><i style="width:31.0%"></i></span><b>1.55x</b></div></td>
+        <td class="num">191</td><td class="num">123</td>
+        <td><div class="ratio win"><span class="track"><i style="width:31.2%"></i></span><b>1.56x</b></div></td>
       </tr>
       <tr>
         <td class="what">One query at a time<small>single client, latency bound</small></td>
-        <td class="num">2,087</td><td class="num">1,994</td>
-        <td><div class="ratio win"><span class="track"><i style="width:21.0%"></i></span><b>1.05x</b></div></td>
+        <td class="num">2,142</td><td class="num">2,013</td>
+        <td><div class="ratio win"><span class="track"><i style="width:21.2%"></i></span><b>1.06x</b></div></td>
       </tr>
       <tr>
-        <td class="what">Quantized, PQ<small>recall 0.9858 against 0.9776</small></td>
-        <td class="num">26,559</td><td class="num">19,429</td>
-        <td><div class="ratio win"><span class="track"><i style="width:27.4%"></i></span><b>1.37x</b></div></td>
+        <td class="what">Quantized, PQ<small>recall 0.9829 against 0.9780</small></td>
+        <td class="num">27,153</td><td class="num">19,240</td>
+        <td><div class="ratio win"><span class="track"><i style="width:28.2%"></i></span><b>1.41x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -219,7 +219,6 @@
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-sift1m.md"><code>comparison-sift1m.md</code></a>.
     These ratios are this dimension's and do not carry to another.
-    <a class="report-link" href="reports/report-sift1m-sm-sift-perf-1007-vs-qd-sift-perf-1007-2026-10-06-2330.html">Full report for this run</a>
   </div>
 </div>
 <!-- END landing-sift1m -->
@@ -282,7 +281,7 @@
 <div class="panel" id="laion-small-clip">
   <div class="panel-head">
     <strong>laion-small-clip <span>· d=512, cosine, 100K vectors</span></strong>
-    <span>measured 2026-10-07 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-10-12 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -292,33 +291,33 @@
     <tbody>
       <tr>
         <td class="what">At equal recall<small>§7.4's comparison, over 8 anchors</small></td>
-        <td class="num span" colspan="2">best at recall 0.9622, falling to 1.62x at 0.9979</td>
-        <td><div class="ratio win"><span class="track"><i style="width:38.4%"></i></span><b>1.92x</b></div></td>
+        <td class="num span" colspan="2">best at recall 0.9619, falling to 1.76x at 0.9977</td>
+        <td><div class="ratio win"><span class="track"><i style="width:38.6%"></i></span><b>1.93x</b></div></td>
       </tr>
       <tr>
         <td class="what">Saturating<small>closed loop, every core busy</small></td>
-        <td class="num">11,307</td><td class="num">10,801</td>
-        <td><div class="ratio win"><span class="track"><i style="width:21.0%"></i></span><b>1.05x</b></div></td>
+        <td class="num">11,341</td><td class="num">10,924</td>
+        <td><div class="ratio even"><b>parity</b></div></td>
       </tr>
       <tr>
         <td class="what">Batched<small>16 queries per request</small></td>
-        <td class="num">11,218</td><td class="num">12,706</td>
-        <td><div class="ratio lose"><span class="track"><i style="width:17.6%"></i></span><b>0.88x</b></div></td>
+        <td class="num">11,193</td><td class="num">12,591</td>
+        <td><div class="ratio lose"><span class="track"><i style="width:17.8%"></i></span><b>0.89x</b></div></td>
       </tr>
       <tr>
         <td class="what">Exact<small>brute force, no index</small></td>
-        <td class="num">317</td><td class="num">314</td>
+        <td class="num">321</td><td class="num">318</td>
         <td><div class="ratio even"><b>parity</b></div></td>
       </tr>
       <tr>
         <td class="what">One query at a time<small>single client, latency bound</small></td>
-        <td class="num">1,630</td><td class="num">1,643</td>
+        <td class="num">1,659</td><td class="num">1,662</td>
         <td><div class="ratio even"><b>parity</b></div></td>
       </tr>
       <tr>
-        <td class="what">Quantized, PQ<small>recall 0.9929 against 0.9861</small></td>
-        <td class="num">17,264</td><td class="num">13,280</td>
-        <td><div class="ratio win"><span class="track"><i style="width:26.0%"></i></span><b>1.30x</b></div></td>
+        <td class="what">Quantized, PQ<small>recall 0.9926 against 0.9859</small></td>
+        <td class="num">18,462</td><td class="num">13,247</td>
+        <td><div class="ratio win"><span class="track"><i style="width:27.8%"></i></span><b>1.39x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -328,7 +327,6 @@
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-laion-small-clip.md"><code>comparison-laion-small-clip.md</code></a>.
     These ratios are this dimension's and do not carry to another.
-    <a class="report-link" href="reports/report-laion-small-clip-sm-laion-perf-1007-vs-qd-laion-perf-1007-2026-10-07-0300.html">Full report for this run</a>
   </div>
 </div>
 <!-- END landing-laion-small-clip -->
@@ -336,7 +334,7 @@
 <div class="panel" id="h-and-m-2048-angular-filters">
   <div class="panel-head">
     <strong>h-and-m-2048-angular-filters <span>· d=2048, cosine, 105,100 vectors</span></strong>
-    <span>measured 2026-09-29 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-10-13 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -346,33 +344,33 @@
     <tbody>
       <tr>
         <td class="what">At equal recall<small>§7.4's comparison, over 8 anchors</small></td>
-        <td class="num span" colspan="2">best at recall 0.9943, falling to 1.30x at 0.9993</td>
-        <td><div class="ratio win"><span class="track"><i style="width:33.2%"></i></span><b>1.66x</b></div></td>
+        <td class="num span" colspan="2">best at recall 0.9941, falling to 1.21x at 0.9993</td>
+        <td><div class="ratio win"><span class="track"><i style="width:33.0%"></i></span><b>1.65x</b></div></td>
       </tr>
       <tr>
         <td class="what">Saturating<small>closed loop, every core busy</small></td>
-        <td class="num">4,656</td><td class="num">5,683</td>
+        <td class="num">4,658</td><td class="num">5,673</td>
         <td><div class="ratio lose"><span class="track"><i style="width:16.4%"></i></span><b>0.82x</b></div></td>
       </tr>
       <tr>
         <td class="what">Batched<small>16 queries per request</small></td>
-        <td class="num">4,656</td><td class="num">2,164</td>
-        <td><div class="ratio win"><span class="track"><i style="width:43.0%"></i></span><b>2.15x</b></div></td>
+        <td class="num">4,649</td><td class="num">5,953</td>
+        <td><div class="ratio lose"><span class="track"><i style="width:15.6%"></i></span><b>0.78x</b></div></td>
       </tr>
       <tr>
         <td class="what">Exact<small>brute force, no index</small></td>
-        <td class="num">71</td><td class="num">71</td>
+        <td class="num">71</td><td class="num">72</td>
         <td><div class="ratio even"><b>parity</b></div></td>
       </tr>
       <tr>
         <td class="what">One query at a time<small>single client, latency bound</small></td>
-        <td class="num">1,281</td><td class="num">986</td>
-        <td><div class="ratio win"><span class="track"><i style="width:26.0%"></i></span><b>1.30x</b></div></td>
+        <td class="num">1,286</td><td class="num">995</td>
+        <td><div class="ratio win"><span class="track"><i style="width:25.8%"></i></span><b>1.29x</b></div></td>
       </tr>
       <tr>
-        <td class="what">Quantized, PQ<small>recall 0.9982 against 0.9963</small></td>
-        <td class="num">1,452</td><td class="num">1,121</td>
-        <td><div class="ratio win"><span class="track"><i style="width:26.0%"></i></span><b>1.30x</b></div></td>
+        <td class="what">Quantized, PQ<small>recall 0.9980 against 0.9962</small></td>
+        <td class="num">6,507</td><td class="num">4,839</td>
+        <td><div class="ratio win"><span class="track"><i style="width:26.8%"></i></span><b>1.34x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -382,7 +380,6 @@
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-h-and-m-2048-angular-filters.md"><code>comparison-h-and-m-2048-angular-filters.md</code></a>.
     These ratios are this dimension's and do not carry to another.
-    <a class="report-link" href="reports/report-h-and-m-2048-angular-filters-sm-hnm-perf-0929-vs-qd-hnm-perf-0929-2026-09-29-0505.html">Full report for this run</a>
   </div>
 </div>
 <!-- END landing-h-and-m-2048-angular-filters -->
@@ -401,7 +398,7 @@
 <div class="panel" id="scifact">
   <div class="panel-head">
     <strong>scifact <span>· BM25, 5,183 documents, 300 queries</span></strong>
-    <span>measured 2026-10-08 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-10-12 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -411,18 +408,18 @@
     <tbody>
       <tr>
         <td class="what">One query at a time<small>single client; nDCG@10 0.6886 / 0.6886</small></td>
-        <td class="num">4,917</td><td class="num">820</td>
-        <td><div class="ratio win"><span class="track"><i style="width:100.0%"></i></span><b>6.00x</b></div></td>
+        <td class="num">5,136</td><td class="num">3,111</td>
+        <td><div class="ratio win"><span class="track"><i style="width:33.0%"></i></span><b>1.65x</b></div></td>
       </tr>
       <tr>
         <td class="what">Saturating<small>closed loop, every core busy; nDCG@10 0.6886 / 0.6886</small></td>
-        <td class="num">60,710</td><td class="num">6,882</td>
-        <td><div class="ratio win"><span class="track"><i style="width:100.0%"></i></span><b>8.82x</b></div></td>
+        <td class="num">77,932</td><td class="num">29,550</td>
+        <td><div class="ratio win"><span class="track"><i style="width:52.8%"></i></span><b>2.64x</b></div></td>
       </tr>
       <tr>
-        <td class="what">Filtered<small>a keyword filter keeping half the corpus; nDCG@10 0.3542 / 0.3542</small></td>
-        <td class="num">54,853</td><td class="num">9,932</td>
-        <td><div class="ratio win"><span class="track"><i style="width:100.0%"></i></span><b>5.52x</b></div></td>
+        <td class="what">Filtered<small>a keyword filter keeping half the corpus; nDCG@10 0.3542 / 0.3542; not compared, the full table says why</small></td>
+        <td class="num">69,236</td><td class="num">29,261</td>
+        <td><div class="ratio even"><b>-</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -431,7 +428,7 @@
     <span class="bar-note">The bar runs from 0x to 5x; the tick marks parity.</span>
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-scifact.md"><code>comparison-scifact.md</code></a>.
-    qd-scifact-perf-1008 served BM25 from its appendable segment, the write-path text index: all 5,183 points (no indexing threshold sent, so Qdrant&#x27;s default), since the placeholder vectors stay under the threshold that would make its optimizer build the immutable segment a deployment serves from. strawmANN served it from its one text index. Every ratio on this page is against that Qdrant index.
+    qd-scifact-perf-1012 served BM25 from optimized segments only: all 5,183 points in immutable indexes (indexing threshold 1 KB). strawmANN served it from its one text index. Every ratio on this page is against that Qdrant index.
   </div>
 </div>
 <!-- END landing-scifact -->
@@ -439,7 +436,7 @@
 <div class="panel" id="fiqa">
   <div class="panel-head">
     <strong>fiqa <span>· BM25, 57,638 documents, 648 queries</span></strong>
-    <span>measured 2026-10-08 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-10-12 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -449,18 +446,18 @@
     <tbody>
       <tr>
         <td class="what">One query at a time<small>single client; nDCG@10 0.2500 / 0.2500</small></td>
-        <td class="num">2,117</td><td class="num">174</td>
-        <td><div class="ratio win"><span class="track"><i style="width:100.0%"></i></span><b>12.19x</b></div></td>
+        <td class="num">2,159</td><td class="num">1,217</td>
+        <td><div class="ratio win"><span class="track"><i style="width:35.4%"></i></span><b>1.77x</b></div></td>
       </tr>
       <tr>
         <td class="what">Saturating<small>closed loop, every core busy; nDCG@10 0.2500 / 0.2500</small></td>
-        <td class="num">21,961</td><td class="num">1,619</td>
-        <td><div class="ratio win"><span class="track"><i style="width:100.0%"></i></span><b>13.56x</b></div></td>
+        <td class="num">21,792</td><td class="num">10,635</td>
+        <td><div class="ratio win"><span class="track"><i style="width:41.0%"></i></span><b>2.05x</b></div></td>
       </tr>
       <tr>
         <td class="what">Filtered<small>a keyword filter keeping half the corpus; nDCG@10 0.1616 / 0.1616</small></td>
-        <td class="num">12,897</td><td class="num">2,250</td>
-        <td><div class="ratio win"><span class="track"><i style="width:100.0%"></i></span><b>5.73x</b></div></td>
+        <td class="num">12,844</td><td class="num">8,634</td>
+        <td><div class="ratio win"><span class="track"><i style="width:29.8%"></i></span><b>1.49x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -469,7 +466,7 @@
     <span class="bar-note">The bar runs from 0x to 5x; the tick marks parity.</span>
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-fiqa.md"><code>comparison-fiqa.md</code></a>.
-    qd-fiqa-perf-1008 served BM25 from its appendable segment, the write-path text index: all 57,638 points (no indexing threshold sent, so Qdrant&#x27;s default), since the placeholder vectors stay under the threshold that would make its optimizer build the immutable segment a deployment serves from. strawmANN served it from its one text index. Every ratio on this page is against that Qdrant index.
+    qd-fiqa-perf-1012 served BM25 from optimized segments only: all 57,638 points in immutable indexes (indexing threshold 1 KB). strawmANN served it from its one text index. Every ratio on this page is against that Qdrant index.
   </div>
 </div>
 <!-- END landing-fiqa -->
@@ -477,7 +474,7 @@
 <div class="panel" id="arguana">
   <div class="panel-head">
     <strong>arguana <span>· BM25, 8,674 documents, 1,406 queries</span></strong>
-    <span>measured 2026-10-08 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-10-12 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -486,19 +483,19 @@
     </thead>
     <tbody>
       <tr>
-        <td class="what">One query at a time<small>single client; nDCG@10 0.3138 / 0.3137</small></td>
-        <td class="num">1,536</td><td class="num">68</td>
-        <td><div class="ratio win"><span class="track"><i style="width:100.0%"></i></span><b>22.69x</b></div></td>
+        <td class="what">One query at a time<small>single client; nDCG@10 0.3138 / 0.3139</small></td>
+        <td class="num">1,558</td><td class="num">269</td>
+        <td><div class="ratio win"><span class="track"><i style="width:100.0%"></i></span><b>5.79x</b></div></td>
       </tr>
       <tr>
-        <td class="what">Saturating<small>closed loop, every core busy; nDCG@10 0.3138 / 0.3137</small></td>
-        <td class="num">15,261</td><td class="num">583</td>
-        <td><div class="ratio win"><span class="track"><i style="width:100.0%"></i></span><b>26.18x</b></div></td>
+        <td class="what">Saturating<small>closed loop, every core busy; nDCG@10 0.3138 / 0.3139</small></td>
+        <td class="num">15,199</td><td class="num">2,360</td>
+        <td><div class="ratio win"><span class="track"><i style="width:100.0%"></i></span><b>6.44x</b></div></td>
       </tr>
       <tr>
         <td class="what">Filtered<small>a keyword filter keeping half the corpus; nDCG@10 0.2615 / 0.2615</small></td>
-        <td class="num">8,502</td><td class="num">905</td>
-        <td><div class="ratio win"><span class="track"><i style="width:100.0%"></i></span><b>9.39x</b></div></td>
+        <td class="num">8,427</td><td class="num">2,260</td>
+        <td><div class="ratio win"><span class="track"><i style="width:74.6%"></i></span><b>3.73x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -507,7 +504,7 @@
     <span class="bar-note">The bar runs from 0x to 5x; the tick marks parity.</span>
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-arguana.md"><code>comparison-arguana.md</code></a>.
-    qd-arguana-perf-1008 served BM25 from its appendable segment, the write-path text index: all 8,674 points (no indexing threshold sent, so Qdrant&#x27;s default), since the placeholder vectors stay under the threshold that would make its optimizer build the immutable segment a deployment serves from. strawmANN served it from its one text index. Every ratio on this page is against that Qdrant index.
+    qd-arguana-perf-1012 served BM25 from optimized segments only: all 8,674 points in immutable indexes (indexing threshold 1 KB). strawmANN served it from its one text index. Every ratio on this page is against that Qdrant index.
   </div>
 </div>
 <!-- END landing-arguana -->
@@ -515,7 +512,7 @@
 <div class="panel" id="quora">
   <div class="panel-head">
     <strong>quora <span>· BM25, 522,931 documents, 10,000 queries</span></strong>
-    <span>measured 2026-10-08 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-10-12 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -524,19 +521,19 @@
     </thead>
     <tbody>
       <tr>
-        <td class="what">One query at a time<small>single client; nDCG@10 0.7906 / 0.7903</small></td>
-        <td class="num">1,540</td><td class="num">350</td>
-        <td><div class="ratio win"><span class="track"><i style="width:88.0%"></i></span><b>4.40x</b></div></td>
+        <td class="what">One query at a time<small>single client; nDCG@10 0.7905 / 0.7905</small></td>
+        <td class="num">1,558</td><td class="num">1,259</td>
+        <td><div class="ratio win"><span class="track"><i style="width:24.8%"></i></span><b>1.24x</b></div></td>
       </tr>
       <tr>
-        <td class="what">Saturating<small>closed loop, every core busy; nDCG@10 0.7906 / 0.7903</small></td>
-        <td class="num">10,994</td><td class="num">3,216</td>
-        <td><div class="ratio win"><span class="track"><i style="width:68.4%"></i></span><b>3.42x</b></div></td>
+        <td class="what">Saturating<small>closed loop, every core busy; nDCG@10 0.7905 / 0.7905</small></td>
+        <td class="num">10,994</td><td class="num">11,816</td>
+        <td><div class="ratio lose"><span class="track"><i style="width:18.6%"></i></span><b>0.93x</b></div></td>
       </tr>
       <tr>
         <td class="what">Filtered<small>a keyword filter keeping half the corpus; nDCG@10 0.4334 / 0.4334</small></td>
-        <td class="num">5,000</td><td class="num">2,648</td>
-        <td><div class="ratio win"><span class="track"><i style="width:37.8%"></i></span><b>1.89x</b></div></td>
+        <td class="num">4,996</td><td class="num">6,180</td>
+        <td><div class="ratio lose"><span class="track"><i style="width:16.2%"></i></span><b>0.81x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -545,7 +542,7 @@
     <span class="bar-note">The bar runs from 0x to 5x; the tick marks parity.</span>
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-quora.md"><code>comparison-quora.md</code></a>.
-    qd-quora-perf-1008 served BM25 from its appendable segment, the write-path text index: all 522,931 points (no indexing threshold sent, so Qdrant&#x27;s default), since the placeholder vectors stay under the threshold that would make its optimizer build the immutable segment a deployment serves from. strawmANN served it from its one text index. Every ratio on this page is against that Qdrant index.
+    qd-quora-perf-1012 served BM25 from optimized segments only: all 522,931 points in immutable indexes (indexing threshold 1 KB). strawmANN served it from its one text index. Every ratio on this page is against that Qdrant index.
   </div>
 </div>
 <!-- END landing-quora -->
