@@ -389,7 +389,35 @@ pub const Kind = enum(u8) {
     }
 };
 
-const Postings = std.ArrayList(u32);
+/// One value's points: the offsets in write order and, once the value is
+/// dense enough that a bitset over the store's capacity is no larger than the
+/// list, the same points as that bitset. `select` then ORs words in rather
+/// than visiting every point: W15-filtered's half-the-corpus `parity` filter
+/// visited 261k points per query on Quora to admit a dozen (2026-10-13).
+const Postings = struct {
+    list: std.ArrayList(u32) = .empty,
+    /// Empty until the value is dense, then `capacity / 64` words.
+    dense: []u64 = &.{},
+
+    fn deinit(self: *Postings, alloc: std.mem.Allocator) void {
+        self.list.deinit(alloc);
+        alloc.free(self.dense);
+    }
+
+    fn append(self: *Postings, alloc: std.mem.Allocator, offset: u32, capacity: usize) !void {
+        try self.list.append(alloc, offset);
+        if (self.dense.len != 0) {
+            self.dense[offset / 64] |= @as(u64, 1) << @intCast(offset % 64);
+            return;
+        }
+        // `capacity / 8` bytes against the list's 4 per entry.
+        if (self.list.items.len * 32 < capacity) return;
+        const dense = try alloc.alloc(u64, (capacity + 63) / 64);
+        @memset(dense, 0);
+        for (self.list.items) |o| dense[o / 64] |= @as(u64, 1) << @intCast(o % 64);
+        self.dense = dense;
+    }
+};
 
 pub const Field = struct {
     name: []u8,
@@ -402,6 +430,8 @@ pub const Field = struct {
     /// Postings written, which over-counts overwritten points the same way
     /// the postings do. Reported as `PayloadSchemaInfo.points`.
     points: usize = 0,
+    /// The store's capacity, which a dense posting's bitset spans.
+    capacity: usize = 0,
 
     fn deinit(self: *Field, alloc: std.mem.Allocator) void {
         var ki = self.keywords.iterator();
@@ -518,16 +548,16 @@ pub const Field = struct {
             // copy before anything can look it up.
             const owned = try alloc.dupe(u8, s);
             gop.key_ptr.* = owned;
-            gop.value_ptr.* = .empty;
+            gop.value_ptr.* = .{};
         }
-        try gop.value_ptr.append(alloc, offset);
+        try gop.value_ptr.append(alloc, offset, self.capacity);
         self.points += 1;
     }
 
     fn addInteger(self: *Field, alloc: std.mem.Allocator, offset: u32, v: i64) !void {
         const gop = try self.integers.getOrPut(alloc, v);
-        if (!gop.found_existing) gop.value_ptr.* = .empty;
-        try gop.value_ptr.append(alloc, offset);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        try gop.value_ptr.append(alloc, offset, self.capacity);
         self.points += 1;
     }
 };
@@ -599,14 +629,21 @@ pub const Store = struct {
     /// blob no longer backs. While it holds, `select` can admit a
     /// single-condition filter's postings without re-reading the blobs.
     exact_postings: std.atomic.Value(bool) = .init(true),
+    /// Bit `offset` set while `slots[offset]` is non-zero, written after the
+    /// slot with release ordering, so a reader that sees the bit sees the
+    /// blob. It is `has` a word at a time, which a dense posting needs.
+    published: []std.atomic.Value(u64),
 
     pub fn init(alloc: std.mem.Allocator, capacity: usize) !Store {
         const slots = try alloc.alloc(std.atomic.Value(u64), capacity);
         errdefer alloc.free(slots);
         for (slots) |*s| s.* = .init(0);
+        const published = try alloc.alloc(std.atomic.Value(u64), (capacity + 63) / 64);
+        errdefer alloc.free(published);
+        for (published) |*w| w.* = .init(0);
         const chunks = try alloc.alloc(std.atomic.Value(?[*]u8), max_chunks);
         for (chunks) |*c| c.* = .init(null);
-        return .{ .slots = slots, .chunks = chunks };
+        return .{ .slots = slots, .chunks = chunks, .published = published };
     }
 
     pub fn deinit(self: *Store, alloc: std.mem.Allocator) void {
@@ -618,6 +655,7 @@ pub const Store = struct {
         }
         alloc.free(self.chunks);
         alloc.free(self.slots);
+        alloc.free(self.published);
         for (self.fields.items) |*f| f.deinit(alloc);
         self.fields.deinit(alloc);
     }
@@ -744,6 +782,12 @@ pub const Store = struct {
     fn publish(self: *Store, offset: u32, slot: u64) void {
         const had = self.slots[offset].load(.monotonic) != 0;
         self.slots[offset].store(slot, .release);
+        const bit = @as(u64, 1) << @intCast(offset % 64);
+        if (slot != 0) {
+            _ = self.published[offset / 64].fetchOr(bit, .release);
+        } else {
+            _ = self.published[offset / 64].fetchAnd(~bit, .release);
+        }
         if (had and slot == 0) self.with_payload -= 1;
         if (!had and slot != 0) self.with_payload += 1;
     }
@@ -790,7 +834,7 @@ pub const Store = struct {
             }
         }
         const owned = try alloc.dupe(u8, name);
-        var f = Field{ .name = owned, .kind = .text };
+        var f = Field{ .name = owned, .kind = .text, .capacity = self.slots.len };
         errdefer f.deinit(alloc);
         const ti = try alloc.create(text.TextIndex);
         ti.* = text.TextIndex.init(alloc, opts);
@@ -836,7 +880,7 @@ pub const Store = struct {
             }
         }
         const owned = try alloc.dupe(u8, name);
-        var f = Field{ .name = owned, .kind = kind };
+        var f = Field{ .name = owned, .kind = kind, .capacity = self.slots.len };
         errdefer f.deinit(alloc);
         // Populate first, publish second. The field is private until it is
         // appended, so the backfill needs no lock; appending it under the
@@ -885,11 +929,11 @@ pub const Store = struct {
         switch (m) {
             .keyword => |k| {
                 if (f.kind != .keyword) return null;
-                return if (f.keywords.get(k)) |p| p.items.len else 0;
+                return if (f.keywords.get(k)) |p| p.list.items.len else 0;
             },
             .integer => |i| {
                 if (f.kind != .integer) return null;
-                return if (f.integers.get(i)) |p| p.items.len else 0;
+                return if (f.integers.get(i)) |p| p.list.items.len else 0;
             },
             .keywords => |list| {
                 if (f.kind != .keyword) return null;
@@ -899,7 +943,7 @@ pub const Store = struct {
                     const t = r.tag() catch return null;
                     if (t.field == 1 and t.wire_type == .length_delimited) {
                         const s = r.bytes() catch return null;
-                        if (f.keywords.get(s)) |p| n += p.items.len;
+                        if (f.keywords.get(s)) |p| n += p.list.items.len;
                     } else r.skip(t.wire_type) catch return null;
                 }
                 return n;
@@ -918,13 +962,13 @@ pub const Store = struct {
                     switch (t.wire_type) {
                         .varint => {
                             const v: i64 = @bitCast(r.varint() catch return null);
-                            if (f.integers.get(v)) |p| n += p.items.len;
+                            if (f.integers.get(v)) |p| n += p.list.items.len;
                         },
                         .length_delimited => {
                             var pr = r.nested() catch return null;
                             while (!pr.atEnd()) {
                                 const v: i64 = @bitCast(pr.varint() catch return null);
-                                if (f.integers.get(v)) |p| n += p.items.len;
+                                if (f.integers.get(v)) |p| n += p.list.items.len;
                             }
                         },
                         else => r.skip(t.wire_type) catch return null,
@@ -967,10 +1011,17 @@ pub const Store = struct {
         const words = (bound + 63) / 64;
         std.debug.assert(words <= bits.len);
         @memset(bits[0..words], 0);
-        var count: usize = 0;
         var lists = PostingLists.init(pick.f, pick.c.match);
         while (lists.next()) |p| {
-            for (p.items) |off| {
+            // A trusted dense posting is its own answer, masked to the
+            // published points as `has` masks a list's.
+            if (trusted and p.dense.len != 0) {
+                for (bits[0..words], p.dense[0..words], self.published[0..words]) |*w, d, *pw| {
+                    w.* |= d & pw.load(.acquire);
+                }
+                continue;
+            }
+            for (p.list.items) |off| {
                 if (off >= bound) continue;
                 const w = off / 64;
                 const m = @as(u64, 1) << @intCast(off % 64);
@@ -979,9 +1030,12 @@ pub const Store = struct {
                     if (!self.has(off)) continue;
                 } else if (!self.matches(off, filter)) continue;
                 bits[w] |= m;
-                count += 1;
             }
         }
+        // The words cover `bound` rounded up: nothing past it is admitted.
+        if (bound % 64 != 0) bits[words - 1] &= (@as(u64, 1) << @intCast(bound % 64)) - 1;
+        var count: usize = 0;
+        for (bits[0..words]) |w| count += @popCount(w);
         return .{ .count = count };
     }
 
@@ -1322,6 +1376,39 @@ test "postings stay exact until a payload is rewritten, and select trusts them o
     try testing.expect(!store.exact_postings.load(.acquire));
     try testing.expectEqual(@as(usize, 1), store.select(&keywordFilter("a", "x"), &bits, 3).?.count);
     try testing.expectEqual(@as(u64, 0b01), bits[0]);
+}
+
+test "a dense posting answers as its list does, and only for published points" {
+    var store = try Store.init(testing.allocator, 4096);
+    defer store.deinit(testing.allocator);
+    try store.createIndex(testing.allocator, "a", .keyword, 0);
+    var m: [64]u8 = undefined;
+    var e: [32]u8 = undefined;
+    // 200 points of "dense", past capacity / 32, and 4 of "sparse".
+    var off: u32 = 0;
+    while (off < 204) : (off += 1) {
+        const v = if (off < 200) "dense" else "sparse";
+        try store.set(testing.allocator, off, mapBytes(&m, &.{entryBytes(&e, "a", value_string, v)}), 3);
+    }
+    const field = &store.fields.items[0];
+    try testing.expect(field.keywords.get("dense").?.dense.len != 0);
+    try testing.expectEqual(@as(usize, 0), field.keywords.get("sparse").?.dense.len);
+    var bits: [64]u64 = undefined;
+    try testing.expectEqual(@as(usize, 200), store.select(&keywordFilter("a", "dense"), &bits, 204).?.count);
+    try testing.expectEqual(~@as(u64, 0), bits[0]);
+    try testing.expectEqual(@as(u64, 0xff), bits[3]);
+    try testing.expectEqual(@as(usize, 4), store.select(&keywordFilter("a", "sparse"), &bits, 204).?.count);
+    // Indexed but not yet published: the dense answer leaves it out, as
+    // `has` leaves a list's out.
+    const blob = mapBytes(&m, &.{entryBytes(&e, "a", value_string, "dense")});
+    var framed: [64]u8 = undefined;
+    const n = writeVarint(&framed, blob.len);
+    @memcpy(framed[n..][0..blob.len], blob);
+    try store.indexBlob(testing.allocator, 300, framed[0 .. n + blob.len]);
+    try testing.expectEqual(@as(usize, 200), store.select(&keywordFilter("a", "dense"), &bits, 301).?.count);
+    // A bound below the points cuts the answer at the bound.
+    try testing.expectEqual(@as(usize, 70), store.select(&keywordFilter("a", "dense"), &bits, 70).?.count);
+    try testing.expectEqual(@as(u64, 0x3f), bits[1]);
 }
 
 test "a first payload keeps the postings exact; a clear or a merge does not" {
