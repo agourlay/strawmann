@@ -20,11 +20,12 @@ edition = "2024"
 # qdrant/rust-client#301: qdrant#11012 moved `TextQuery`'s `k` and `b` into
 # `scoring.bm25` and reserved their old fields, which a current Qdrant drops,
 # so against such a Qdrant the 71143d8 differ would run its k/b ladder at the
-# defaults. No release has them. It replaced crates.io's
+# defaults; then on 2026-10-13 0309260 (qdrant/rust-client#302) for
+# qdrant#11112, which renumbered that oneof from 4 to 2. No release has them. It replaced crates.io's
 # `=1.19.0`; the crate still calls itself `1.16.1-dev`, the version string of
 # the line bfb builds.
 [dependencies]
-qdrant-client = { git = "https://github.com/qdrant/rust-client", rev = "637cee6fdbfdb0a620dfc41b3677bbce405aaa28" }
+qdrant-client = { git = "https://github.com/qdrant/rust-client", rev = "0309260ed7ba3cf1577d6104ac4308b37bef05a4" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow = "1"
 # The fp64 oracle is exhaustive by definition (§8.2 tier 1), so it is the one

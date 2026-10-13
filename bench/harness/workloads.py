@@ -772,15 +772,21 @@ W9_PARALLEL = int(os.environ.get("W9_PARALLEL", 8))
 #: `parquet` 59 to 60 reads dataset files only. `self_update.rs` formats a
 #: digest for `sha2` 0.11. A different instrument all the same, which the
 #: `bfb_pin` stamp records.
-BFB_PIN = ("dev @ 96fd5f0 (qdrant/bfb#188; #187's dependency update on top of #186, "
-           "BM25 k/b in qdrant#11012's nested params, #185's text requests and #172, "
-           "findings 32's --rps reaping fix)")
+#: Moved forward to `d2a6b6c` on 2026-10-13, one commit on: #189 moves
+#: `Cargo.lock`'s `qdrant-client` to rust-client `0309260` (#302), whose only
+#: change is qdrant#11112 renumbering `TextQuery`'s `scoring` oneof from 4 to
+#: 2. A Qdrant before 1cb0f1800 holds field 2 reserved and drops it, so this
+#: pin needs a BM25 Qdrant at or after that commit, or the k1/b ladder runs at
+#: the defaults with no error, as under qdrant#11012. No other request moves.
+BFB_PIN = ("dev @ d2a6b6c (qdrant/bfb#189, TextQuery's scoring oneof at field 2 for "
+           "qdrant#11112; carries #187's dependency update, #185's text requests and "
+           "#172, findings 32's --rps reaping fix)")
 
 #: The short hash inside `BFB_PIN`, which is what the checkout is checked
 #: against. Written once, parsed once, rather than repeated.
-BFB_COMMIT = "96fd5f0"
+BFB_COMMIT = "d2a6b6c"
 BFB_CLIENT = "qdrant-client 1.16.1-dev (git dev branch)"
-HARNESS_CLIENT = "qdrant-client git 637cee6 (dev, qdrant/rust-client#301 merged, 1.16.1-dev line)"
+HARNESS_CLIENT = "qdrant-client git 0309260 (dev, qdrant/rust-client#302 merged, 1.16.1-dev line)"
 
 #: bfb's per-request `--timeout`, in seconds. docs/workloads.md §2 quotes it.
 BFB_TIMEOUT_S = int(os.environ.get("BFB_TIMEOUT_S", 60))

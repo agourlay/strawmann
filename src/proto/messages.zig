@@ -853,13 +853,15 @@ pub const VectorInput = struct {
 ///
 /// §2: "We need `QueryPoints` with `query = Query{ nearest: VectorInput{ dense } }`
 /// ... Everything else in the `Query` oneof → `UNIMPLEMENTED`."
-/// `TextQuery { reserved 2, 3; string query = 1; oneof scoring { Bm25Params bm25 = 4; } }`
-/// and `Bm25Params { optional float k = 1; optional float b = 2; }` (VERIFIED,
-/// points.proto at Qdrant bfc0eab31; qdrant#11012 nested the scorer's params):
-/// BM25 over the text index of the payload field the request's `using` names
-/// (decisions.md, 2026-10-07). The old `k = 2`, `b = 3` are skipped, as
-/// Qdrant now skips them, so a client still sending them gets the defaults
-/// from both engines rather than from one.
+/// `TextQuery { string query = 1; oneof scoring { Bm25Params bm25 = 2; } }` and
+/// `Bm25Params { optional float k = 1; optional float b = 2; }` (VERIFIED,
+/// points.proto at Qdrant 1cb0f1800): BM25 over the text index of the payload
+/// field the request's `using` names (decisions.md, 2026-10-07). qdrant#11012
+/// nested the scorer's params at field 4 and reserved the flat `k = 2`,
+/// `b = 3`; qdrant#11112 then renumbered the oneof to 2, unreleased either way.
+/// Field 2 is read only as the message it now is: an old client's flat `k`
+/// there is a fixed32 and is skipped, as are `b = 3` and `bm25 = 4`, so a
+/// client on either old proto gets the defaults from both engines alike.
 pub const TextQuery = struct {
     query: []const u8 = &.{},
     k: ?f32 = null,
@@ -871,7 +873,11 @@ pub const TextQuery = struct {
             const t = try r.tag();
             switch (t.field) {
                 1 => out.query = try r.bytes(),
-                4 => {
+                2 => {
+                    if (t.wire_type != .length_delimited) {
+                        try r.skip(t.wire_type);
+                        continue;
+                    }
                     // A oneof of one message: the last on the wire wins whole.
                     out.k = null;
                     out.b = null;
@@ -1725,7 +1731,7 @@ test "a text query decodes its query, and k and b from its BM25 params" {
     var w = Writer.init(&buf);
     const n = try w.beginNested(12, 2);
     try w.writeStringField(1, "alpha gamma");
-    const p = try w.beginNested(4, 1);
+    const p = try w.beginNested(2, 1);
     try w.writeFloatField(1, 1.5);
     try w.endNested(p);
     try w.endNested(n);
@@ -1741,7 +1747,7 @@ test "a text query keeps an explicit b of zero" {
     var w = Writer.init(&buf);
     const n = try w.beginNested(12, 2);
     try w.writeStringField(1, "alpha");
-    const p = try w.beginNested(4, 1);
+    const p = try w.beginNested(2, 1);
     try w.writeFloatFieldAlways(2, 0.0);
     try w.endNested(p);
     try w.endNested(n);
@@ -1751,15 +1757,19 @@ test "a text query keeps an explicit b of zero" {
     try testing.expectEqual(@as(?f32, 0.0), q.text.b);
 }
 
-test "a text query skips the k and b fields qdrant#11012 reserved" {
-    // Fields 2 and 3 were `k` and `b` before the nesting. Qdrant now drops
-    // them as unknown, so honouring them here would split the two engines.
+test "a text query skips the flat k and b, and the BM25 params at field 4" {
+    // The flat `k = 2` and `b = 3` before qdrant#11012, and its `bm25 = 4`
+    // before qdrant#11112. Qdrant drops all three as unknown or mistyped, so
+    // honouring any here would split the two engines.
     var buf: [64]u8 = undefined;
     var w = Writer.init(&buf);
     const n = try w.beginNested(12, 2);
     try w.writeStringField(1, "alpha");
     try w.writeFloatField(2, 1.5);
     try w.writeFloatField(3, 0.25);
+    const p = try w.beginNested(4, 1);
+    try w.writeFloatField(1, 0.9);
+    try w.endNested(p);
     try w.endNested(n);
     var r = Reader.init(w.written());
     const q = try Query.decode(&r);

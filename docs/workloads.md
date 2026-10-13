@@ -14,10 +14,16 @@ manifest and digest work in Python.
 Pinned reference, per §8.9 and §4.1:
 
 ```
-qdrant/bfb  branch dev  HEAD 96fd5f0  "chore: add Dependabot configuration targeting dev (#188)"  2026-10-12
+qdrant/bfb  branch dev  HEAD d2a6b6c  "Bump qdrant-client for the renumbered TextQuery scoring oneof (#189)"  2026-10-13
 ```
 
-Advanced from `22e5481` on 2026-10-12. #187 updates the Rust dependencies and
+Advanced from `96fd5f0` on 2026-10-13. #189 only moves `Cargo.lock`'s
+`qdrant-client` to rust-client `0309260` (#302): qdrant#11112 renumbered
+`TextQuery`'s `scoring` oneof from 4 to 2. A Qdrant before 1cb0f1800 reserves
+field 2 and drops it, so the BM25 Qdrant pin moves with it, or W15's ladder
+runs at the defaults with no error. No other request changes.
+
+`96fd5f0` had advanced from `22e5481` on 2026-10-12. #187 updates the Rust dependencies and
 #188 adds a Dependabot config. `qdrant-client`, `tonic` and `prost` keep their
 locked versions, so the requests are encoded as before; the client transport
 (`tokio`, `h2`, `hyper`) moves, which is client-side overhead the `bfb_pin`

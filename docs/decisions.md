@@ -2372,8 +2372,9 @@ Text pairs run as their own `fullrun` on a text dataset with
 `--qdrant-binary` set to the BM25 build (Qdrant `dev` 850859ec9, re-pinned
 to 8cec8ad on 2026-10-08 for #11016, then the same day to a `release` build of
 `dev` 24f67eb18, sha256 225af7d4, then on 2026-10-12 to a `release` build of
-`dev` bfc0eab31, sha256 640af6bf, `qdrant-ab/bin/qdrant-dev-bfc0eab31`): no
-release serves the text query. Between
+`dev` bfc0eab31, sha256 640af6bf, `qdrant-ab/bin/qdrant-dev-bfc0eab31`, then
+on 2026-10-13 to a `release` build of `dev` d6d3bd35b, sha256 0e0fbc18,
+`qdrant-ab/bin/qdrant-dev-d6d3bd35b`): no release serves the text query. Between
 8cec8ad and 24f67eb18 the protos gain only `Datatype.Turbo16`, and the text
 index only stores immutable token counts as u32 in RAM (#11030); text-differ
 on fiqa, Quora, scifact and ArguAna passes every tier on both engines against
@@ -2399,6 +2400,17 @@ ArguAna, FiQA and Quora, at the defaults and at the 0.9 / 0.4 rung (a fresh
 upload per rung): T1 9.6e-7 at most, Qdrant on ArguAna at 0.9 / 0.4. The rung
 is the evidence the move needed, since a dropped `k` or `b` scores at 1.2 /
 0.75 and misses the 0.9 / 0.4 oracle by far more than T1's 1e-5.
+
+The 2026-10-13 move carries qdrant#11112, which renumbered `TextQuery`'s
+`scoring` oneof from 4 to 2, reusing the field #11012 had reserved; neither
+shape was released. It moved with the clients again: bfb to d2a6b6c
+(qdrant/bfb#189) and conformance to rust-client 0309260
+(qdrant/rust-client#302), and strawmANN's decoder reads field 2 as the message
+and skips the flat fixed32 `k` there, `b = 3` and `bm25 = 4`, as Qdrant now
+does. It also brings the shared stopword filters of qdrant#11113, so Qdrant's
+text rows are a new instrument again. text-differ against it passes every tier
+on both engines on scifact, ArguAna, FiQA and Quora at the defaults and at
+0.9 / 0.4, T1 9.6e-7 at most (Qdrant on ArguAna at 0.9 / 0.4).
 
 The first end-to-end pass, scifact at `--reps 1` (a smoke run, so nothing
 published): every W15 row measured on both engines, every variant's recall@10
