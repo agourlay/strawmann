@@ -15,6 +15,11 @@
 //! skipped. The statistics never read the postings, so stale entries cost a
 //! skip at query time and nothing in a score.
 //!
+//! An entry also carries its document's length, so scoring reads the postings
+//! and the accumulator only. The per-point table is consulted for staleness
+//! alone, and only while some entry may be stale: on a corpus larger than the
+//! cache, that random read was a DRAM miss per posting (Quora, 2026-10-13).
+//!
 //! ## Qdrant's semantics, mirrored
 //!
 //! - A point is a document when its values yield a token; its values' tokens
@@ -31,7 +36,7 @@ const heap = @import("../index/heap.zig");
 pub const default_k1: f32 = 1.2;
 pub const default_b: f32 = 0.75;
 
-const Posting = struct { point: u32, tf: u32, gen: u32 };
+const Posting = struct { point: u32, tf: u32, gen: u32, len: u32 };
 
 const TermCount = struct { term: u32, tf: u32 };
 
@@ -87,6 +92,9 @@ pub const TextIndex = struct {
     docs: std.ArrayList(Doc) = .empty,
     documents: u32 = 0,
     total_tokens: u64 = 0,
+    /// Entries left behind by `remove`, never decreasing: postings are not
+    /// rewritten, so a stale entry stays until the index is rebuilt.
+    stale_postings: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, opts: tokenizer.Options) TextIndex {
         return .{ .gpa = gpa, .opts = opts };
@@ -124,6 +132,7 @@ pub const TextIndex = struct {
         const d = &self.docs.items[point];
         if (!d.live) return;
         for (d.terms) |tc| self.df.items[tc.term] -= 1;
+        self.stale_postings += d.terms.len;
         self.documents -= 1;
         self.total_tokens -= d.len;
         self.gpa.free(d.terms);
@@ -156,7 +165,7 @@ pub const TextIndex = struct {
         const d = &self.docs.items[point];
         for (counts.keys(), counts.values(), 0..) |term, tf, i| {
             terms[i] = .{ .term = term, .tf = tf };
-            try self.postings.items[term].append(self.gpa, .{ .point = point, .tf = tf, .gen = d.gen });
+            try self.postings.items[term].append(self.gpa, .{ .point = point, .tf = tf, .gen = d.gen, .len = len });
         }
         for (terms) |tc| self.df.items[tc.term] += 1;
         d.* = .{ .gen = d.gen, .live = true, .len = len, .terms = terms };
@@ -207,14 +216,17 @@ pub const TextIndex = struct {
         const avg = self.avgdl() orelse return;
         try scratch.cover(self.docs.items.len);
         scratch.touched.clearRetainingCapacity();
+        const may_be_stale = self.stale_postings > 0;
         for (scratch.terms.items) |term| {
             const term_idf = self.idf(term);
             for (self.postings.items[term].items) |p| {
-                const d = self.docs.items[p.point];
-                if (!d.live or d.gen != p.gen) continue;
+                if (may_be_stale) {
+                    const d = self.docs.items[p.point];
+                    if (!d.live or d.gen != p.gen) continue;
+                }
                 if (@TypeOf(allowed) != @TypeOf(null) and !allowed.admits(p.point)) continue;
                 const tf: f32 = @floatFromInt(p.tf);
-                const len: f32 = @floatFromInt(d.len);
+                const len: f32 = @floatFromInt(p.len);
                 const norm = if (b > 0) k1 * (1 - b + b * len / avg) else k1;
                 const s = term_idf * tf * (k1 + 1) / (tf + norm);
                 if (scratch.acc[p.point] == 0) try scratch.touched.append(scratch.gpa, p.point);
@@ -296,4 +308,23 @@ test "scores are Lucene BM25, and a filter narrows without moving statistics" {
     try testing.expectEqual(@as(usize, 0), (try testSearch(&idx, "alpha", Only{ .p = 1 })).len);
     const kept = try testSearch(&idx, "alpha", Only{ .p = 0 });
     try testing.expectEqual(score, kept[0].score);
+}
+
+test "an overwritten point scores once, at its new length, as a fresh index scores it" {
+    var idx = TextIndex.init(testing.allocator, .{});
+    defer idx.deinit();
+    try idx.set(0, texts(&.{"alpha beta beta"}));
+    try idx.set(1, texts(&.{"gamma"}));
+    try testing.expectEqual(@as(u64, 0), idx.stale_postings);
+    try idx.set(0, texts(&.{"alpha"}));
+    try testing.expectEqual(@as(u64, 2), idx.stale_postings);
+    const hits = try testSearch(&idx, "alpha", null);
+    try testing.expectEqual(@as(usize, 1), hits.len);
+    const score = hits[0].score;
+
+    var fresh = TextIndex.init(testing.allocator, .{});
+    defer fresh.deinit();
+    try fresh.set(0, texts(&.{"alpha"}));
+    try fresh.set(1, texts(&.{"gamma"}));
+    try testing.expectEqual(score, (try testSearch(&fresh, "alpha", null))[0].score);
 }
