@@ -1541,6 +1541,28 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(self._prunable(keep={"sm-fresh"}), [])
         self.assertEqual(self._prunable(), ["sm-fresh"])
 
+    def test_a_fold_and_its_passes_go_or_stay_together(self):
+        """1014 removed `sm-dbp1m-perf-0930-rep1` and `-rep2` and kept the
+        fold and `-rep3`, which were newer by hours."""
+        self._label("sm-x-rep1")
+        self._label("sm-x-rep2")
+        self._label("sm-x", age_days=1)
+        self._label("sm-x-rep3", age_days=1)
+        self._label("qd-x-rep1")
+        self.assertEqual(self._prunable(), [])
+        for name in ("sm-x", "sm-x-rep3"):
+            self._label(name)
+        self.assertEqual(self._prunable(),
+                         ["qd-x-rep1", "sm-x", "sm-x-rep1", "sm-x-rep2", "sm-x-rep3"])
+
+    def test_the_qdrant_log_is_kept_with_its_arm(self):
+        """`qdrant-server.log` is rewritten at every start: each arm keeps its own."""
+        self.assertIsNone(self.fr.keep_qdrant_log("qd-x-rep1"))
+        (self.results / "qdrant-server.log").write_text("Version: 1.19.3-dev, build: d6d3bd35\n")
+        got = self.fr.keep_qdrant_log("qd-x-rep1")
+        self.assertEqual(got, self.results / "qd-x-rep1/server.log")
+        self.assertIn("d6d3bd35", got.read_text())
+
     def test_the_noise_floor_is_not_a_label(self):
         (self.results / "noise.json").write_text("{}")
         (self.results / "qdrant-server.log").write_text("x")
@@ -2290,3 +2312,55 @@ class MatchedRecallGateTests(unittest.TestCase):
         """The page shows it under a banner; README and the docs do not show it."""
         self._runs(CONF_T3_FAILED)
         self.assertIsNone(self.m["compare"].matched_line("a", "b"))
+
+
+class LoadUnitTests(unittest.TestCase):
+    """`load_start` is the one-minute load average over every core
+    (`host_load.load_pct`), so the published sentence says per core: "23% of
+    one core" read as a quarter of one core when it meant 5.5 cores busy."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = _reload(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_load_is_stated_per_core(self):
+        compare = self.m["compare"]
+        rows = {"W15": {"id": "W15", "load_start": 23}}
+        with mock.patch.object(compare, "gate_of", return_value="pass"):
+            note = compare.environment_note("a", "b", rows, rows)
+            line = compare.environment_line("a", rows)
+        for text in (note, line):
+            self.assertIn("23% per core", text)
+            self.assertNotIn("of one core", text)
+
+
+class UnarchivedReportTests(unittest.TestCase):
+    """A panel whose page was rendered but not archived says so, rather than
+    going out with no link and nothing said."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.m = _reload(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_rendered_page_outside_docs_reports_is_named(self):
+        compare = self.m["compare"]
+        (self.root / "bench/results").mkdir(parents=True, exist_ok=True)
+        page = "report-scifact-sm-x-vs-qd-x-2026-10-14-0000.html"
+        (self.root / "bench/results" / page).write_text("<html></html>")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            msg = compare.warn_unarchived("scifact", "sm-x", "qd-x")
+        self.assertIn(page, msg)
+        self.assertIn("docs/reports", err.getvalue())
+
+    def test_nothing_rendered_says_nothing(self):
+        compare = self.m["compare"]
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(compare.warn_unarchived("scifact", "sm-y", "qd-y"))
+        self.assertEqual("", err.getvalue())

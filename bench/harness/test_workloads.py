@@ -605,6 +605,19 @@ class WorkloadTests(unittest.TestCase):
         self.assertEqual(sent, [])
         self.assertFalse(got.clock_stopped)
 
+    def test_a_text_run_explains_its_capacity_by_its_corpus(self):
+        """1014's BEIR runs read "covers 5,183 (W11-steady and W11 append 259 +
+        1,037 on top of W2's 5,183 in bench2)" and "covers W4's sockets"."""
+        w = self.w
+        with mock.patch.object(w, "DATASET", "scifact"), \
+                mock.patch.object(w.paths, "is_text", lambda d: d == "scifact"):
+            got = w.strawmann_start_requirements("strawmann", {"W15-upload", "W15-sat"})
+            corpus = w.upload_n()
+        self.assertEqual(len(got), 2, got)
+        self.assertIn("the saturating client", got[0])
+        self.assertIn(f"W15 loads {corpus:,} into {w.W15_COLLECTION}", got[1])
+        self.assertNotIn("W11", got[1])
+
     def test_start_requirements_are_strawmanns_and_only_for_rows_that_need_them(self):
         """0925 printed both lines on all 18 invocations, Qdrant's included,
         and "appends 198,000 on top of W2's 990,000 ... reaches 1,237,500",
@@ -3010,6 +3023,16 @@ class NightrunTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_dirty_names_code_changes_and_counts_documents_apart(self):
+        """1012's sift1m logged `dirty=5`: the chain's own comparison pages,
+        indistinguishable from an uncommitted engine change."""
+        self.assertEqual(self.n.dirty_summary(""), "dirty=0")
+        got = self.n.dirty_summary(" M docs/comparison-quora.md\n M docs/index.html\n")
+        self.assertEqual(got, "dirty=0, 2 document(s) modified "
+                              "(docs/comparison-quora.md, docs/index.html)")
+        got = self.n.dirty_summary(" M src/text/index.zig\n M README.md\n")
+        self.assertTrue(got.startswith("dirty=1 (src/text/index.zig)"), got)
 
     def test_labels_are_stamped_with_the_date(self):
         self.assertEqual(self.n.labels("2026-09-23", "sift1m"),

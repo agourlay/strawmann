@@ -452,6 +452,20 @@ def qdrant_build(pid: int | None) -> dict:
     return {**out, **qdrant_native_build(pid)}
 
 
+def binary_sidecar(binary: Path) -> dict:
+    """`cargo_profile` and `commit` from a `<binary>.json` beside a copied
+    binary. A pin copied out of `target/release/` (`qdrant-ab/bin/qdrant-dev-*`)
+    loses the layout the profile is read from, and the 1014 analyses could
+    only infer it from commit messages, beside an 18% to 23% Qdrant move."""
+    try:
+        doc = json.loads(binary.with_name(binary.name + ".json").read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    return {k: str(doc[k]) for k in ("cargo_profile", "commit") if doc.get(k)}
+
+
 def qdrant_native_build(pid: int | None) -> dict:
     """A Qdrant started from a binary rather than an image.
 
@@ -489,6 +503,7 @@ def qdrant_native_build(pid: int | None) -> dict:
     # query than the fat-LTO `release` binary it replaced.
     if target.parent.parent.name == "target":
         out["cargo_profile"] = target.parent.name
+    out.update(binary_sidecar(target))
     repo = target.parent
     for _ in range(4):
         if (repo / ".git").exists():

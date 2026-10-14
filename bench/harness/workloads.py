@@ -635,25 +635,33 @@ def strawmann_start_requirements(comm: str, wanted: set[str],
     # bare "transport error" on W4. bfb opens roughly `threads x
     # connections`; a server with fewer closes the excess before the HTTP/2
     # preface, and the client cannot tell that from an engine fault.
-    if runs(lambda r: r == "W4" or r.startswith("W4-")):
+    text = paths.is_text(DATASET)
+    # W15-sat drives the same saturating client as W4, so it is named for the
+    # client rather than for W4: a BEIR run's preamble read "covers W4's".
+    if runs(lambda r: r == "W4" or r.startswith("W4-") or r == "W15-sat"):
         want_sockets = 16 * W4_CONNS
+        client = "the saturating client" if text else "W4"
         if conns is not None:
             have = io_threads * conns
-            out.append(f"  ok  io_threads x connections = {have} covers W4's ~{want_sockets} sockets"
+            out.append(f"  ok  io_threads x connections = {have} covers {client}'s "
+                       f"~{want_sockets} sockets"
                        if have >= want_sockets else
-                       f"  !! io_threads x connections = {have}, under W4's ~{want_sockets} "
+                       f"  !! io_threads x connections = {have}, under {client}'s ~{want_sockets} "
                        f"sockets: restart strawmann with --connections {want_sockets}")
         else:
-            out.append(f"  -> W4 will open ~{want_sockets} sockets (-t 16 -c {W4_CONNS}). "
+            out.append(f"  -> {client} will open ~{want_sockets} sockets (-t 16 -c {W4_CONNS}). "
                        f"strawmann must be started with io_threads x connections >= "
                        f"{want_sockets}, e.g. --connections {want_sockets}")
     # Name the collection that actually binds, not one of the two. The
     # message used to explain the requirement with W11's arithmetic
     # regardless, so at a smoke scale it printed a correct number beside a
     # reason that did not produce it.
-    if runs(lambda r: r in ("W2", "W11", "W11-steady", "W12-upload")):
+    if runs(lambda r: r in ("W2", "W11", "W11-steady", "W12-upload", "W15-upload")):
         need = required_capacity()
-        why = (f"W11-steady and W11 append {w11_steady_n():,} + {w11_n():,} on top of "
+        # A text run loads its corpus and appends nothing: 1014's BEIR runs
+        # explained 5,183 with W11's append arithmetic.
+        why = (f"W15 loads {upload_n():,} into {W15_COLLECTION}" if text
+               else f"W11-steady and W11 append {w11_steady_n():,} + {w11_n():,} on top of "
                f"W2's {upload_n():,} in bench2"
                if upload_n() + w11_n() + w11_steady_n() >= w12_n()
                else f"W12 loads {w12_n():,} into bench12")
@@ -2647,7 +2655,7 @@ def run_gate_with_retry() -> subprocess.CompletedProcess:
 
 
 def load_per_core_pct() -> float:
-    """The one-minute load average as a percentage of one core, the gate's reading."""
+    """The one-minute load average per core, as a percentage, the gate's reading."""
     try:
         load1 = float(Path("/proc/loadavg").read_text().split()[0])
     except (OSError, ValueError, IndexError):

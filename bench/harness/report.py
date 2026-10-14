@@ -633,6 +633,26 @@ def _cpu(r: dict):
 #: from the same placement.
 PLACEMENT_SENSITIVE = {"peak RSS", "disk written", "disk read"}
 
+#: Totals over the row rather than rates, so their ratio is only the engines'
+#: when both sent the same number of queries. Per-arm `-n` pinning can give
+#: one twice the other's: FiQA's W15-b0 read `cpu 0.78x` with 100,000 queries
+#: against 50,000, where per query strawmANN used 291 µs to Qdrant's 450 µs.
+EXTENSIVE = {"wall clock", "cpu", "waiting for a core", "migrations",
+             "disk written", "disk read"}
+
+#: Durations that bfb's 3 s polling floor can cut: a floored cell is an upper
+#: bound, so a ratio against it is not a measurement (Quora's `6.34x`).
+FLOORABLE = {"  of which index wait", "time to Green"}
+
+
+def _ratio_meaningful(name: str, rows: list) -> bool:
+    """Whether `name`'s comparison column means anything for these rows."""
+    if name in EXTENSIVE:
+        sent = {r.get("n_queries") for r in rows if r}
+        if len(sent) > 1:
+            return False
+    return not (name in FLOORABLE and any(r and r.get("time_to_green_floored") for r in rows))
+
 WORKLOAD_METRICS: list[tuple[str, object, object, str]] = [
     ("client p50", lambda r: _dur(_lat(r, "client_p50_us")),
      lambda r: _lat(r, "client_p50_us"), "down"),
@@ -907,7 +927,8 @@ def workload_sections(runs: list[Run], df: pd.DataFrame) -> str:
             if name == lead:          # already the headline
                 continue
             cells = "".join(f'<td class="num">{v}</td>' for v in vals)
-            ok = comparable and (same_placement or name not in PLACEMENT_SENSITIVE)
+            ok = (comparable and (same_placement or name not in PLACEMENT_SENSITIVE)
+                  and _ratio_meaningful(name, rows))
             cmp_ = (f'<td class="num">{_compare(raws[0], raws[1], direction)}</td>' if ok
                     else ("<td></td>" if two else ""))
             body.append(f'<tr><td class="desc">{name}</td>{cells}{cmp_}</tr>')
@@ -2671,14 +2692,24 @@ def provenance_table(runs: list[Run]) -> str:
         extra = (f'<div class="muted">{n_parts} file{"" if n_parts == 1 else "s"}, '
                  f"each pinned by sha256 in <code>datasets.json</code></div>"
                  if n_parts else "")
-        shared.append(
-            f'<div class="factcard"><h3>Dataset</h3>'
-            f'<div><b>{_fmt(ds.get("name"))}</b>, {_fmt(ds.get("n"))} × '
-            f'{_fmt(ds.get("dim"))}, {_fmt(ds.get("metric"))}, '
-            f'{_fmt(ds.get("n_queries"))} held-out queries</div>'
-            f'<div class="muted">ground truth: '
-            f'{"recomputed by our fp64 oracle" if not ds.get("gt_shipped") else "shipped, and diffed against our fp64 recompute"}'
-            f"</div>{pins}{extra}</div>")
+        if is_text_pair(runs):
+            # Documents and BM25: the vector card read "unknown × unknown,
+            # unknown" on every BEIR page.
+            shared.append(
+                f'<div class="factcard"><h3>Dataset</h3>'
+                f'<div><b>{_fmt(ds.get("name"))}</b>, {_fmt(ds.get("n"))} documents, '
+                f'BM25 over a text index, {_fmt(ds.get("n_queries"))} queries</div>'
+                f'<div class="muted">truth: exact BM25 from the conformance oracle</div>'
+                f"{pins}{extra}</div>")
+        else:
+            shared.append(
+                f'<div class="factcard"><h3>Dataset</h3>'
+                f'<div><b>{_fmt(ds.get("name"))}</b>, {_fmt(ds.get("n"))} × '
+                f'{_fmt(ds.get("dim"))}, {_fmt(ds.get("metric"))}, '
+                f'{_fmt(ds.get("n_queries"))} held-out queries</div>'
+                f'<div class="muted">ground truth: '
+                f'{"recomputed by our fp64 oracle" if not ds.get("gt_shipped") else "shipped, and diffed against our fp64 recompute"}'
+                f"</div>{pins}{extra}</div>")
     if host:
         bw = bandwidth_of(runs)
         gate = ""
@@ -3421,6 +3452,7 @@ def build(runs: list[Run], title: str) -> str:
         repro=repro_paths(runs),
         title=title,
         glance=glance_of(runs),
+        is_text=is_text_pair(runs),
         # Surfaced at the top as well as in Storage. Residency can move
         # throughput, and the throughput ratio is the first thing on the page:
         # a caveat a reader meets after forming their opinion is a footnote,

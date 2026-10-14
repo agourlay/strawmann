@@ -628,6 +628,37 @@ class NoiseTests(unittest.TestCase):
             self.assertTrue(any("k1.2-b0: measured in 2 of 3" in n for n in notes), notes)
             self.assertTrue(any("differs across passes" in n for n in notes), notes)
 
+    def test_the_text_recall_fold_medians_exact_order_and_says_its_spread(self):
+        """The fold kept pass 1's exact order (291 of 291, 292, 290 on 1014),
+        and nDCG@10 moving in the fourth decimal went unsaid."""
+        import importlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _reload(root)
+            agg = importlib.reload(importlib.import_module("aggregate"))
+            import recall
+            reps = []
+            for i, (order, ndcg) in enumerate(((291, 0.6641), (292, 0.6643), (290, 0.6641)),
+                                              start=1):
+                lbl = f"lbl-rep{i}"
+                variants = {"k1.2-b0": {"k1": 1.2, "b": 0.0, "parity": None, "limit": 10,
+                                        "recall": 1.0, "exact_order": order,
+                                        "semantic": {"ndcg_at_10": ndcg, "mrr_at_10": 0.6}}}
+                p = recall.text_recall_path(lbl)
+                p.parent.mkdir(parents=True)
+                p.write_text(json.dumps({"dataset": "scifact", "variants": variants}))
+                reps.append(lbl)
+            dest = root / "bench/results/lbl"
+            dest.mkdir(parents=True)
+            notes = []
+            agg.fold_text_recall(dest, reps, notes)
+            pt = json.loads((dest / recall.TEXT_RECALL_FILE).read_text())["variants"]["k1.2-b0"]
+            self.assertEqual(pt["exact_order"], 291)
+            self.assertEqual(pt["rep_exact_order"], [291, 292, 290])
+            self.assertTrue(any("exact order differs across passes ([291, 292, 290])" in n
+                                for n in notes), notes)
+            self.assertTrue(any("nDCG@10 differs across passes" in n for n in notes), notes)
+
     def test_a_drift_that_moved_with_major_faults_names_paging(self):
         """dbpedia 0929's W11-steady drifted +24% beside major faults 182,555,
         90,262 and 0, and the note named no cause."""

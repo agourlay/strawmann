@@ -26,14 +26,16 @@
         look. -#}
     <dl class="glance">
       <div><dt>Dataset</dt><dd>{{ glance.dataset }}</dd></div>
-      <div><dt>Vectors</dt><dd>{{ glance.vectors }}
+      <div><dt>{{ 'Corpus' if glance.text else 'Vectors' }}</dt><dd>{{ glance.vectors }}
         {%- if glance.queries %} <span class="sub">· {{ glance.queries }}</span>{% endif %}</dd></div>
       <div><dt>Metric</dt><dd>{{ glance.metric }}</dd></div>
+      {%- if not glance.text %}
       <div><dt>Storage datatype</dt><dd>{{ glance.datatype }}</dd></div>
       <div><dt>Quantization</dt><dd>{{ glance.quantization }}
         {%- if glance.quantization_more %}
         <span class="sub">· separate rows measure {{ glance.quantization_more }}</span>
         {%- endif %}</dd></div>
+      {%- endif %}
     </dl>
     {%- endif %}
     <div class="meta">
@@ -233,6 +235,7 @@
         <dt>recall@10</dt><dd>Of the ten nearest neighbours a query really has,
           the share the engine returned. 1.0 is a perfect answer. "Really has" is
           settled by an exhaustive fp64 search, not by the other engine.</dd>
+        {%- if not is_text %}
         <dt>ef</dt><dd>The candidate-list size: how many nodes the index keeps in
           play while searching. Larger is slower and more accurate. It does
           <em>not</em> mean the same amount of work in both engines, which is why
@@ -240,6 +243,7 @@
         <dt>MRDE</dt><dd>Mean relative distance error: when the engine returns a
           wrong neighbour, how much further away it is than the right one.
           Small numbers mean the misses were near-misses.</dd>
+        {%- endif %}
         <dt>qps</dt><dd>Queries per second. On a batched row one request carries
           several queries, and the request rate is shown under it.</dd>
         <dt>p50 / p99 / p99.9</dt><dd>The latency half of requests beat, that 99%
@@ -458,11 +462,13 @@
     batch <em>requests</em>: at <code>--search-batch-size 16</code> the two differ by 16x,
     and reading one as the other once turned a 2.2x speedup into an apparent 7x
     regression. The tables show the request rate wherever it diverges.</p>
+    {%- if not is_text %}
     <p><b>The open-loop rows are not a speed.</b> <code>W4-sat50/70/90</code> offer a
     fixed fraction of measured saturation; serving it means the engine kept up, not that
     it was faster, so no ratio is printed. They exist because <code>--parallel</code> is
     a closed loop, where a stalled server stops receiving requests and understates its
     own tail.</p>
+    {%- endif %}
     {#- The measured counts, not the cap. `collections.json` records what each
         engine actually held and the page used to quote "capped at 8" three
         times while displaying the real number in §Collection config. -#}

@@ -994,11 +994,11 @@ def chart_load(runs: list[Run], df: pd.DataFrame) -> dict:
                         # the tag is correct and dark mode restyles it.
                         meta=run_meta_tag(run),
                         customdata=sub[mask]["foreign"],
-                        hovertemplate="%{y}: %{x}% of one core"
+                        hovertemplate="%{y}: %{x}% per core"
                                       "<br>%{customdata}<extra></extra>")
     fig.update_layout(**layout(barmode="group",
                               height=110 + 22 * len(df["id"].unique()),
-                              xaxis_title="peak ambient load, percent of one core"))
+                              xaxis_title="peak system load, percent per core"))
     fig.update_yaxes(autorange="reversed")
     return dict(
         section="host", title="Ambient load per row",

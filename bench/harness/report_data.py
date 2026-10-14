@@ -120,6 +120,21 @@ def glance_of(runs: list[Run]) -> dict | None:
     ds = next((r.meta.get("dataset") for r in runs if r.meta.get("dataset")), None)
     if not ds:
         return None
+    if is_text_pair(runs):
+        # A BEIR corpus has documents, BM25 and no vector encoding: its header
+        # read "5183 × unknown", "Metric unknown" and a quantization of the
+        # placeholder vectors no row searches.
+        n = ds.get("n")
+        return {
+            "text": True,
+            "dataset": ds.get("name") or "unknown",
+            "vectors": f"{n:,} documents" if isinstance(n, (int, float)) else "unknown",
+            "queries": f"{ds['n_queries']:,} queries" if ds.get("n_queries") is not None else "",
+            "metric": "BM25 over a text index",
+            "datatype": "",
+            "quantization": "",
+            "quantization_more": "",
+        }
     cols = {r.label: ((r.collections or {}).get("collections") or []) for r in runs}
 
     def field(key: str) -> list[str]:

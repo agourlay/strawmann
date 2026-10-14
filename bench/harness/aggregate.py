@@ -503,10 +503,22 @@ def fold_text_recall(dest: Path, reps: list[str], notes: list[str]) -> None:
         pt["rep_recall"] = recalls
         if len(set(recalls)) > 1:
             notes.append(f"text recall {key}: recall@10 differs across passes ({recalls})")
+        # Ties may come back in either order, so this one can move; the fold
+        # kept pass 1's and the spread went unsaid (291, 292, 290 on 1014).
+        orders = [g.get("exact_order") for g in got]
+        if all(o is not None for o in orders):
+            pt["exact_order"] = _median(orders)
+            pt["rep_exact_order"] = orders
+            if len(set(orders)) > 1:
+                notes.append(f"text recall {key}: exact order differs across passes "
+                             f"({orders}): ties came back in another order")
         sems = [g.get("semantic") for g in got]
         if all(sems):
             pt["semantic"] = {**sems[0], **{m: _median([x.get(m) for x in sems])
                                             for m in ("ndcg_at_10", "mrr_at_10")}}
+            ndcgs = [x.get("ndcg_at_10") for x in sems]
+            if len(set(ndcgs)) > 1:
+                notes.append(f"text recall {key}: nDCG@10 differs across passes ({ndcgs})")
         variants[key] = pt
     out = dest / recall_mod.TEXT_RECALL_FILE
     out.write_text(json.dumps({**docs[0], "variants": variants}, indent=2) + "\n")

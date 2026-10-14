@@ -119,7 +119,14 @@ def _threads_cell(row: dict) -> tuple[str, bool]:
     if cov is not None and cov < 0.995:
         # Only where it is not ~1: a coverage of 100% on every healthy row is
         # a column of noise that hides the one row where it matters.
-        text += f' <span class="warn">{cov:.0%}</span>'
+        if row.get("sched_sampled") == 1.0:
+            # Threads retired mid-row, but the sampler banked their counters,
+            # so the columns are complete: a red 0% beside a printed run-queue
+            # figure read as a contradiction (Qdrant's W15 on 1014).
+            text += (f' <span title="threads exited mid-row; the sampler banked their '
+                     f'counters, so the columns are complete">{cov:.0%} (banked)</span>')
+        else:
+            text += f' <span class="warn">{cov:.0%}</span>'
     return text, True
 
 

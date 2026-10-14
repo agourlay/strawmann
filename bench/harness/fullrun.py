@@ -747,8 +747,13 @@ def record_graph_quality(label: str) -> None:
     # make their recall curves incomparable.
     seed = f", seed 0x{seeds.pop()}" if len(seeds) == 1 else (
         f", {len(seeds)} DIFFERENT SEEDS" if seeds else ", seed not recorded")
+    # A text corpus uploads placeholder vectors no row searches, so its
+    # unreachable count is not a defect, and the bare line read like one.
+    unsearched = " (placeholder vectors of a text corpus; no row searches them)" \
+        if paths.is_text(DATASET) else ""
     print(f"  graph: {len(builds)} build(s) published, worst "
-          f"{worst['unreachable']:,} of {worst['nodes']:,} unreachable{seed}", flush=True)
+          f"{worst['unreachable']:,} of {worst['nodes']:,} unreachable{seed}{unsearched}",
+          flush=True)
 
 
 def finish_conformance(p: subprocess.Popen | None) -> None:
@@ -833,6 +838,19 @@ def stop_scope(unit: str) -> None:
     """Stop a transient scope by name, including one an interrupted run left."""
     if shutil.which("systemctl"):
         sh(["systemctl", "--user", "stop", f"{unit}.scope"], 60)
+
+
+def keep_qdrant_log(label: str) -> Path | None:
+    """Copy the native Qdrant's log into its arm, as strawmANN's `server.log`
+    is: `qdrant-server.log` is rewritten at every start, so by morning only the
+    conformance run's survived (h-and-m 1012, FiQA 1014)."""
+    src = RESULTS / "qdrant-server.log"
+    if not src.is_file():
+        return None
+    dest = RESULTS / label / "server.log"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dest)
+    return dest
 
 
 def stop_qdrant() -> None:
@@ -2229,17 +2247,34 @@ def prunable(keep: set[str] | None = None, retain_days: int = RETAIN_DAYS,
     keep = (keep or set()) | cited_labels(results)
     now = time.time() if now is None else now
     cutoff = now - retain_days * 86400
-    out = []
-    for d in sorted(p for p in results.iterdir() if p.is_dir()):
+
+    def retained(d: Path) -> bool:
         if d.name in keep:
-            continue
+            return True
         if any(d.rglob("*.md")) or any(d.rglob("report-*.html")):
-            continue
+            return True
         newest = max((p.stat().st_mtime for p in d.rglob("*")), default=d.stat().st_mtime)
-        if newest > cutoff:
-            continue
-        out.append(d)
-    return out
+        return newest > cutoff
+
+    # A fold, its `-repN` passes and the other engine's arm are one measurement,
+    # kept or removed whole: judged one directory at a time, 1014 removed
+    # `sm-dbp1m-perf-0930-rep1` and `-rep2` and left the fold and `-rep3`,
+    # which were newer by hours.
+    groups: dict[str, list[Path]] = {}
+    for d in sorted(p for p in results.iterdir() if p.is_dir()):
+        groups.setdefault(label_stem(d.name), []).append(d)
+    out = []
+    for members in groups.values():
+        if not any(retained(d) for d in members):
+            out.extend(members)
+    return sorted(out)
+
+
+def label_stem(name: str) -> str:
+    """What a label shares with its passes and its pair: `sm-x-rep2` and
+    `qd-x` both give `x`."""
+    stem = re.sub(r"-rep\d+$", "", name)
+    return stem[3:] if stem[:3] in ("sm-", "qd-") else stem
 
 
 def prune(keep: set[str] | None = None, retain_days: int = RETAIN_DAYS) -> None:
@@ -2481,14 +2516,18 @@ def main(argv: list[str]) -> int:
     # for it: strawmANN pins its workers and leaves the main thread free, so
     # the observed mask and the requested set legitimately differ.
     os.environ["BENCH_SERVER_CPUS"] = args.server_cpus
-    print(f"mixed rows search until their append ends, then "
-          f"{workloads.W11_SEARCH_MARGIN:.0%} of its span more, at most "
-          f"{workloads.W11_MAX_SEARCH_S:.0f} s", flush=True)
-    if RPS_REFERENCE:
+    # Vector-table preamble only where the table has those rows: a BEIR run
+    # has no W11 to search and no open-loop arm to pin.
+    text_run = paths.is_text(DATASET)
+    if not text_run:
+        print(f"mixed rows search until their append ends, then "
+              f"{workloads.W11_SEARCH_MARGIN:.0%} of its span more, at most "
+              f"{workloads.W11_MAX_SEARCH_S:.0f} s", flush=True)
+    if not text_run and RPS_REFERENCE:
         print(f"open-loop arms pinned to {RPS_REFERENCE:,.0f} qps for both engines "
               f"(§4's fractions of one reference, so the two arms are the same "
               f"offered load and not merely the same fraction of capacity)")
-    elif asked:
+    elif not text_run and asked:
         # Asked for by name: said once here, as the `auto` fallback says it,
         # rather than left for the report to discover.
         print("open-loop arms at each engine's own saturation (--rps-reference none): "
@@ -2642,6 +2681,7 @@ def main(argv: list[str]) -> int:
                               placement=PLACEMENT)
             finally:
                 finish_qdrant_arm()
+                keep_qdrant_log(qd_label)
 
     if args.reps > 1:
         say(f"folding {args.reps} passes per engine (§7.4: median and spread)")

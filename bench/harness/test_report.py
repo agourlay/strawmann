@@ -131,6 +131,26 @@ class ReportHostTests(unittest.TestCase):
     def _section(html: str, wid: str) -> str:
         return html.split(f'id="wl-{wid}"', 1)[1].split("</section>", 1)[0]
 
+    def test_no_ratio_of_totals_over_unequal_queries_or_of_a_floored_wait(self):
+        """FiQA's W15-b0 read `cpu 0.78x` with 100,000 queries against 50,000,
+        and Quora printed `6.34x` against a time to Green at bfb's floor."""
+        def cpu_row(cell: str, sec: str) -> str:
+            return sec.split(f">{cell}</td>", 1)[1].split("</tr>", 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            report, runs, df = self._pair(
+                Path(tmp),
+                [_row("W3", 4000, n_queries=100000, cpu_user_s=29.1),
+                 _row("W5", 800, n_queries=50000, cpu_user_s=20.0),
+                 _row("W2", None, index_wait_s=3.0, time_to_green_floored=True)],
+                [_row("W3", 2000, n_queries=50000, cpu_user_s=22.5),
+                 _row("W5", 400, n_queries=50000, cpu_user_s=10.0),
+                 _row("W2", None, index_wait_s=19.0)])
+            html = report.workload_sections(runs, df)
+            ratio = re.compile(r"\d\.\d\dx")
+            self.assertIsNone(ratio.search(cpu_row("cpu", self._section(html, "W3"))))
+            self.assertIsNotNone(ratio.search(cpu_row("cpu", self._section(html, "W5"))))
+            self.assertIsNone(ratio.search(cpu_row("time to Green", self._section(html, "W2"))))
+
     def test_sections_and_headline_refuse_what_compare_refuses(self):
         import re
         w11 = dict(recall_joinable=False, ratio_policy="search-during-write; no recall join")
@@ -763,6 +783,13 @@ class ReportHostTests(unittest.TestCase):
             self.assertNotIn("ef is not the same unit", html)
             self.assertIn("served BM25 from its appendable segment, the write-path text index", html)
             self.assertNotIn('<td class="num bad">ok</td>', html)
+            # 1014's header read "5183 × unknown" and "Metric unknown", with
+            # the vector glossary and the W4-sat paragraph below it.
+            self.assertIn("BM25 over a text index", html)
+            self.assertNotIn("× unknown", html)
+            self.assertNotIn("<code>W4-sat50/70/90</code>", html)
+            self.assertNotIn("<dt>ef</dt>", html)
+            self.assertNotIn("Storage datatype", html)
             self.assertTrue(sys.modules["compare"].text_index_note("a", "b").startswith(
                 "**Which Qdrant text index.** b served BM25 from its appendable segment"))
             # A vector pair is untouched: its licence still speaks of T3.
@@ -1985,6 +2012,20 @@ class ReportHostTests(unittest.TestCase):
             self.assertIn("build <code>878843e6</code> (from the server's banner", html)
             self.assertNotIn("pinned by commit", html)
 
+    def test_a_copied_qdrant_binary_takes_its_profile_from_a_sidecar(self):
+        """`qdrant-ab/bin/qdrant-dev-*` is a copy out of `target/release/`, so
+        the layout the profile was read from is gone."""
+        import importlib
+        provenance = importlib.import_module("provenance")
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "qdrant-dev-d6d3bd35b"
+            exe.write_bytes(b"#!/bin/true\n")
+            self.assertEqual(provenance.binary_sidecar(exe), {})
+            (Path(tmp) / "qdrant-dev-d6d3bd35b.json").write_text(
+                '{"cargo_profile": "release", "commit": "d6d3bd35b", "built_at": "x"}')
+            self.assertEqual(provenance.binary_sidecar(exe),
+                             {"cargo_profile": "release", "commit": "d6d3bd35b"})
+
     def test_a_native_qdrant_shows_its_cargo_profile(self):
         """`target/perf/qdrant` is release without LTO; the page showed only
         the path, and the Qdrant arm lost 4-13% against a fat-LTO
@@ -2474,6 +2515,11 @@ class InstrumentTests(unittest.TestCase):
         self.assertIn("1%", text)
         clean, _ = report._threads_cell({"threads": 10.0, "sched_coverage": 1.0})
         self.assertEqual(clean, "10")
+        # Banked: the columns are complete, so no warning, and it says why.
+        banked, _ = report._threads_cell({"threads": 45.0, "sched_coverage": 0.0,
+                                          "sched_sampled": 1.0})
+        self.assertIn("0% (banked)", banked)
+        self.assertNotIn("warn", banked)
 
     def test_pressure_says_which_kind_of_blank_it_is(self):
         """Four answers, and a row measured before the column existed is one.

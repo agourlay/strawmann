@@ -233,6 +233,26 @@ def analysis_text(stream: str) -> str:
     return max(texts, key=len, default="")
 
 
+#: The paths whose changes make the measured build differ from its commit.
+#: The rest is what a chained night writes itself (comparison pages, the
+#: landing page), which `dirty=5` on 1012's sift1m counted the same way.
+CODE_PATHS = ("bench/harness/", "src/", "build.zig", "conformance/", "scripts/")
+
+
+def dirty_summary(status: str) -> str:
+    """`dirty=N` for the code the run measures, naming the files, and the
+    documents apart: a bare count could not say whether the build moved."""
+    paths_ = [line[3:] for line in status.splitlines() if len(line) > 3]
+    code = [p for p in paths_ if p.startswith(CODE_PATHS)]
+    docs = [p for p in paths_ if not p.startswith(CODE_PATHS)]
+    out = f"dirty={len(code)}"
+    if code:
+        out += f" ({', '.join(code)})"
+    if docs:
+        out += f", {len(docs)} document(s) modified ({', '.join(docs)})"
+    return out
+
+
 def main(argv: list[str], root: Path = ROOT) -> int:
     ap = argparse.ArgumentParser(description="An unattended publication run.")
     ask = ap.add_mutually_exclusive_group()
@@ -289,8 +309,8 @@ def main(argv: list[str], root: Path = ROOT) -> int:
     oversampling = os.environ.get("OVERSAMPLING_POLICY", "defaults")
     log(f"night run starting: {args.dataset}, labels {sm} / {qd}, reps {reps}, "
         f"oversampling {oversampling}")
-    dirty = len((git(["status", "--short"], root) or "").splitlines())
-    log(f"strawmann {git(['rev-parse', '--short', 'HEAD'], root)} dirty={dirty}")
+    log(f"strawmann {git(['rev-parse', '--short', 'HEAD'], root)} "
+        f"{dirty_summary(git(['status', '--short'], root) or '')}")
     binary = Path(os.environ.get("QDRANT_BINARY",
                                  Path.home() / "Workspace/qdrant/target/release/qdrant"))
     if not os.access(binary, os.X_OK):

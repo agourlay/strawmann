@@ -1450,7 +1450,8 @@ def environment_note(a_label: str, b_label: str,
         # else's. Foreign load is measured separately and per row, by the
         # `/proc` sampler that excludes `_OURS`, and lands in `foreign`.
         s = (f"**{display_name(lbl)}**: §7.1 gate {gate_of(lbl)}, peak system "
-             f"load {peak}% of one core (all processes, this engine included)"
+             f"load {peak}% per core (the one-minute load average over every "
+             f"core; all processes, this engine included)"
              f"{span}")
         if dirty:
             s += f", contaminated rows {', '.join(dirty)}"
@@ -1468,7 +1469,7 @@ def environment_line(label: str, rows: dict[str, dict]) -> str:
     """
     peak = max((r["load_start"] for r in rows.values()), default=0)
     dirty = [r["id"] for r in rows.values() if r.get("foreign")]
-    return (f"{label:<10} peak system load {peak}% of one core (engine included); "
+    return (f"{label:<10} peak system load {peak}% per core (engine included); "
             f"§7.1 gate: {gate_of(label)}"
             + (f"; contaminated rows: {', '.join(dirty)}" if dirty else ""))
 
@@ -1854,6 +1855,24 @@ def published_report(dataset: str, a_label: str, b_label: str) -> str | None:
     return pages[-1].name if pages else None
 
 
+def warn_unarchived(dataset: str, a_label: str, b_label: str) -> str | None:
+    """Say so when this pair has a rendered page that is not in `docs/reports/`.
+
+    A night run renders into `bench/results/`, which is gitignored, so its
+    panel goes out with no report link and nothing said: three panels lost
+    theirs that way on 1012 and four on 1014. The page is the newest render.
+    """
+    pages = sorted((ROOT / "bench/results").glob(
+        f"report-{dataset}-{a_label}-vs-{b_label}-*.html"))
+    if not pages:
+        return None
+    msg = (f"!! {dataset}: the landing panel has no report link: "
+           f"bench/results/{pages[-1].name} is not in docs/reports/. Copy it there "
+           f"and run `compare.py {a_label} {b_label} --write-readme` again.")
+    print(msg, file=sys.stderr)
+    return msg
+
+
 def landing_block(a_label: str, b_label: str,
                   a: dict[str, dict], b: dict[str, dict]) -> str:
     """One dataset's panel on the published landing page.
@@ -1954,6 +1973,8 @@ def landing_block(a_label: str, b_label: str,
     if report:
         out.append(f'    <a class="report-link" href="reports/{html.escape(report)}">'
                    f"Full report for this run</a>")
+    else:
+        warn_unarchived(name, a_label, b_label)
     out += ["  </div>", "</div>"]
     return "\n".join(out)
 

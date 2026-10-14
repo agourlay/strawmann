@@ -27,7 +27,7 @@ import setup
 # --------------------------------------------------------------------------
 
 def load_pct() -> int:
-    """1-minute load as a percentage of one core."""
+    """The 1-minute load average per core, as a percentage: 100 is every core busy."""
     with open("/proc/loadavg") as fh:
         one = float(fh.read().split()[0])
     return int(one / os.cpu_count() * 100)
