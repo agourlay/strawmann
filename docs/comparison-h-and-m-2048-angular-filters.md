@@ -80,5 +80,5 @@ qps is wall-clock: queries / bfb's `duration_secs`, not bfb's `Median qps` (kept
 
 Reached **T4 quantization fidelity**; licenses performance and comparative claims. Conformance hash `11ffa7b2560ce499`.
 
-**sm-hnm-perf-1012**: §7.1 gate pass, peak system load 30% of one core (all processes, this engine included), measured 2026-10-13. **qd-hnm-perf-1012**: §7.1 gate pass, peak system load 47% of one core (all processes, this engine included), measured 2026-10-13.
+**sm-hnm-perf-1012**: §7.1 gate pass, peak system load 30% per core (the one-minute load average over every core; all processes, this engine included), measured 2026-10-13. **qd-hnm-perf-1012**: §7.1 gate pass, peak system load 47% per core (the one-minute load average over every core; all processes, this engine included), measured 2026-10-13.
 <!-- END compare-full -->

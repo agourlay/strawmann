@@ -2234,6 +2234,26 @@ class LandingBlockTests(unittest.TestCase):
         self.assertNotIn("Batched", block)
         self.assertIn("docs/comparison-sift1m.md", block)
 
+    def test_a_ratio_cell_says_what_it_means(self):
+        cell = self.m["compare"].landing_ratio_cell
+        got = cell("1.64x")
+        self.assertIn('title="strawmANN serves 1.64x Qdrant&#x27;s queries per second"', got)
+        self.assertIn('class="track" aria-hidden="true"', got)
+        # A refusal keeps its word, with no bar, and says why on hover.
+        got = cell("parity")
+        self.assertIn("noise band", got)
+        self.assertNotIn("track", got)
+        self.assertIn("full table says why", cell("-"))
+
+    def test_the_page_jumps_to_every_panel(self):
+        """The nav is hand-written in the page's shell: a dataset added to the
+        landing lists without a link there would be unreachable from it."""
+        cmp = self.m["compare"]
+        page = (Path(__file__).resolve().parents[2] / cmp.LANDING_PAGE).read_text()
+        for name in (*cmp.LANDING_DATASETS, *cmp.LANDING_TEXT_DATASETS):
+            self.assertIn(f'<a href="#{name}">', page)
+            self.assertIn(f'<div class="panel" id="{name}">', page)
+
     def test_the_panel_links_its_report_once_it_is_published(self):
         cmp, a, b = self._pair([_row("W4", 4000)], [_row("W4", 2000)])
         self.assertNotIn("report-link", cmp.landing_block("a", "b", a, b))

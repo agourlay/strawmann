@@ -630,7 +630,7 @@ qps is wall-clock: queries / bfb's `duration_secs`, not bfb's `Median qps` (kept
 
 Reached **T4 quantization fidelity**; licenses performance and comparative claims. Conformance hash `fec450c094fe8321`.
 
-**sm-sift-perf-1012**: §7.1 gate pass, peak system load 29% of one core (all processes, this engine included), measured 2026-10-12. **qd-sift-perf-1012**: §7.1 gate pass, peak system load 48% of one core (all processes, this engine included), measured 2026-10-12.
+**sm-sift-perf-1012**: §7.1 gate pass, peak system load 29% per core (the one-minute load average over every core; all processes, this engine included), measured 2026-10-12. **qd-sift-perf-1012**: §7.1 gate pass, peak system load 48% per core (the one-minute load average over every core; all processes, this engine included), measured 2026-10-12.
 <!-- END compare-full -->
 
 The `ratio` column reads `offered` on the open-loop W4 arms rather than a

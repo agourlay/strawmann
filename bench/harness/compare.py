@@ -1810,6 +1810,12 @@ LANDING_ROWS = [
 #: The ratio a landing bar spans end to end. Parity sits at a fifth of it.
 LANDING_BAR_MAX = 5.0
 
+#: A refused ratio cell's tooltip, keyed by the word the table prints.
+LANDING_REFUSALS = {
+    "parity": "within this dataset's noise band: no measured difference, not a small one",
+    "-": "not compared: the full table says why",
+}
+
 
 def landing_kind(dataset: str) -> str:
     return f"landing-{dataset}"
@@ -1835,11 +1841,16 @@ def landing_ratio_cell(ratio: str) -> str:
     try:
         x = float(ratio.removesuffix("x"))
     except ValueError:
-        return f'<td><div class="ratio even"><b>{html.escape(ratio)}</b></div></td>'
+        # The word alone left a reader to guess what it declined to say.
+        why = LANDING_REFUSALS.get(ratio, "not compared: the full table says why")
+        return (f'<td><div class="ratio even" title="{html.escape(why)}">'
+                f'<b>{html.escape(ratio)}</b></div></td>')
     cls = "win" if x > 1 else "lose"
     width = min(x / LANDING_BAR_MAX, 1.0) * 100
-    return (f'<td><div class="ratio {cls}"><span class="track">'
-            f'<i style="width:{width:.1f}%"></i></span><b>{html.escape(ratio)}</b></div></td>')
+    said = f"strawmANN serves {ratio} Qdrant's queries per second"
+    return (f'<td><div class="ratio {cls}" title="{html.escape(said)}">'
+            f'<span class="track" aria-hidden="true"><i style="width:{width:.1f}%"></i></span>'
+            f'<b>{html.escape(ratio)}</b></div></td>')
 
 
 def published_report(dataset: str, a_label: str, b_label: str) -> str | None:
@@ -1907,7 +1918,10 @@ def landing_block(a_label: str, b_label: str,
     ga, gb = gate_of(a_label), gate_of(b_label)
     when.append(f"gate <code>{html.escape(str(ga))}</code> both arms" if ga == gb else
                 f"gate <code>{html.escape(str(ga))}</code> / <code>{html.escape(str(gb))}</code>")
-    col_a, col_b = (html.escape(column_title(lab)) for lab in (a_label, b_label))
+    # The page's own spelling of the engine, which the column title, being a
+    # process name, does not have.
+    col_a, col_b = (html.escape(column_title(lab).replace("strawmann", "strawmANN", 1))
+                    for lab in (a_label, b_label))
 
     out = [f'<div class="panel" id="{html.escape(name)}">',
            '  <div class="panel-head">',
@@ -1956,13 +1970,18 @@ def landing_block(a_label: str, b_label: str,
             "  </table>",
             "  </div>",
             '  <div class="panel-foot">',
-            '    <span class="bar-note">The bar runs from 0x to 5x; the tick marks parity.</span>',
             "    Every row, with its latency percentiles, recall and the rows the comparison",
             f'    refuses, is in <a href="{doc}"><code>comparison-{html.escape(name)}.md</code></a>.']
     if text:
         # Which of Qdrant's text indexes served the rows, read back per
         # segment, beside the ratios it qualifies.
         note = text_index_note(a_label, b_label).removeprefix("**Which Qdrant text index.** ")
+        # A panel, not a report: the engine rather than the run's label, and
+        # "this panel" where the report says "this page".
+        for lab in (a_label, b_label):
+            if note.startswith(lab):
+                note = "Qdrant" + note[len(lab):]
+        note = note.replace("Every ratio on this page", "Every ratio in this panel")
         if note:
             out.append(f"    {html.escape(note)}")
     else:

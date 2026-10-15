@@ -80,5 +80,5 @@ qps is wall-clock: queries / bfb's `duration_secs`, not bfb's `Median qps` (kept
 
 Reached **T4 quantization fidelity**; licenses performance and comparative claims. Conformance hash `352d11da951add45`.
 
-**sm-laion-perf-1012**: §7.1 gate pass, peak system load 28% of one core (all processes, this engine included), measured 2026-10-12. **qd-laion-perf-1012**: §7.1 gate pass, peak system load 60% of one core (all processes, this engine included), measured 2026-10-12.
+**sm-laion-perf-1012**: §7.1 gate pass, peak system load 28% per core (the one-minute load average over every core; all processes, this engine included), measured 2026-10-12. **qd-laion-perf-1012**: §7.1 gate pass, peak system load 60% per core (the one-minute load average over every core; all processes, this engine included), measured 2026-10-12.
 <!-- END compare-full -->
