@@ -843,9 +843,10 @@ def stop_scope(unit: str) -> None:
 def keep_qdrant_log(label: str) -> Path | None:
     """Copy the native Qdrant's log into its arm, as strawmANN's `server.log`
     is: `qdrant-server.log` is rewritten at every start, so by morning only the
-    conformance run's survived (h-and-m 1012, FiQA 1014)."""
+    conformance run's survived (h-and-m 1012, FiQA 1014). A container writes
+    no such file, so its arm would get the last native run's."""
     src = RESULTS / "qdrant-server.log"
-    if not src.is_file():
+    if QDRANT_BINARY is None or not src.is_file():
         return None
     dest = RESULTS / label / "server.log"
     dest.parent.mkdir(parents=True, exist_ok=True)

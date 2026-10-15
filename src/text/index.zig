@@ -163,9 +163,17 @@ pub const TextIndex = struct {
         const terms = try self.gpa.alloc(TermCount, counts.count());
         errdefer self.gpa.free(terms);
         const d = &self.docs.items[point];
+        // A failure part-way leaves postings for a document that never went
+        // live: counted stale, under a generation the next `set` will not use.
+        var appended: u64 = 0;
+        errdefer if (appended > 0) {
+            self.stale_postings += appended;
+            d.gen +%= 1;
+        };
         for (counts.keys(), counts.values(), 0..) |term, tf, i| {
             terms[i] = .{ .term = term, .tf = tf };
             try self.postings.items[term].append(self.gpa, .{ .point = point, .tf = tf, .gen = d.gen, .len = len });
+            appended += 1;
         }
         for (terms) |tc| self.df.items[tc.term] += 1;
         d.* = .{ .gen = d.gen, .live = true, .len = len, .terms = terms };
@@ -327,4 +335,38 @@ test "an overwritten point scores once, at its new length, as a fresh index scor
     try fresh.set(0, texts(&.{"alpha"}));
     try fresh.set(1, texts(&.{"gamma"}));
     try testing.expectEqual(score, (try testSearch(&fresh, "alpha", null))[0].score);
+}
+
+test "a set that fails part-way leaves no posting a search scores" {
+    // Every allocation of the overwrite fails in turn. Whatever postings went
+    // in first, the point is absent until set again, then scores once, as an
+    // index that never failed scores it.
+    var want = TextIndex.init(testing.allocator, .{});
+    defer want.deinit();
+    try want.set(0, texts(&.{"alpha beta gamma delta"}));
+    try want.set(1, texts(&.{"alpha"}));
+    try want.set(0, texts(&.{"eps zeta eta theta"}));
+    const score = (try testSearch(&want, "eps zeta eta theta", null))[0].score;
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
+        var idx = TextIndex.init(fa.allocator(), .{});
+        defer idx.deinit();
+        try idx.set(0, texts(&.{"alpha beta gamma delta"}));
+        try idx.set(1, texts(&.{"alpha"}));
+        fa.fail_index = fa.alloc_index + fail_index;
+        idx.set(0, texts(&.{"eps zeta eta theta"})) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            fa.fail_index = std.math.maxInt(usize);
+            try testing.expectEqual(@as(usize, 0), (try testSearch(&idx, "eps zeta eta theta", null)).len);
+            try idx.set(0, texts(&.{"eps zeta eta theta"}));
+            const hits = try testSearch(&idx, "eps zeta eta theta", null);
+            try testing.expectEqual(@as(usize, 1), hits.len);
+            try testing.expectEqual(score, hits[0].score);
+            continue;
+        };
+        break;
+    }
+    try testing.expect(fail_index > 0);
 }

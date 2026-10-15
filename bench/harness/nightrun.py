@@ -104,7 +104,9 @@ class Log:
 
 def git(args: list[str], cwd: Path) -> str | None:
     r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
-    return r.stdout.strip() if r.returncode == 0 else None
+    # Trailing only: `status --short` puts the meaning in leading columns, and a
+    # stripped ` M src/...` first line read as the document `rc/...`.
+    return r.stdout.rstrip() if r.returncode == 0 else None
 
 
 def qdrant_provenance(binary: Path) -> str:

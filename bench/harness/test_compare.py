@@ -1557,9 +1557,15 @@ class RetentionTests(unittest.TestCase):
 
     def test_the_qdrant_log_is_kept_with_its_arm(self):
         """`qdrant-server.log` is rewritten at every start: each arm keeps its own."""
-        self.assertIsNone(self.fr.keep_qdrant_log("qd-x-rep1"))
+        native = mock.patch.object(self.fr, "QDRANT_BINARY", Path("/opt/qdrant"))
+        with native:
+            self.assertIsNone(self.fr.keep_qdrant_log("qd-x-rep1"))
         (self.results / "qdrant-server.log").write_text("Version: 1.19.3-dev, build: d6d3bd35\n")
-        got = self.fr.keep_qdrant_log("qd-x-rep1")
+        # A container arm: the file is an earlier native run's, not its own.
+        with mock.patch.object(self.fr, "QDRANT_BINARY", None):
+            self.assertIsNone(self.fr.keep_qdrant_log("qd-x-rep1"))
+        with native:
+            got = self.fr.keep_qdrant_log("qd-x-rep1")
         self.assertEqual(got, self.results / "qd-x-rep1/server.log")
         self.assertIn("d6d3bd35", got.read_text())
 

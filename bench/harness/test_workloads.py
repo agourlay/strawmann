@@ -3034,6 +3034,20 @@ class NightrunTests(unittest.TestCase):
         got = self.n.dirty_summary(" M src/text/index.zig\n M README.md\n")
         self.assertTrue(got.startswith("dirty=1 (src/text/index.zig)"), got)
 
+    def test_dirty_reads_the_first_status_line_whole(self):
+        """`git()` stripped the output, so the first ` M src/...` lost its
+        leading column and read as the document `rc/...`."""
+        def run(*a):
+            subprocess.run(["git", *a], cwd=self.root, check=True, capture_output=True)
+        run("init", "-q")
+        (self.root / "src").mkdir()
+        (self.root / "src/a.zig").write_text("a")
+        run("add", ".")
+        run("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a")
+        (self.root / "src/a.zig").write_text("b")
+        got = self.n.dirty_summary(self.n.git(["status", "--short"], self.root))
+        self.assertEqual(got, "dirty=1 (src/a.zig)")
+
     def test_labels_are_stamped_with_the_date(self):
         self.assertEqual(self.n.labels("2026-09-23", "sift1m"),
                          ("sm-sift-perf-0923", "qd-sift-perf-0923"))
