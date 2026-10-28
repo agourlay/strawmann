@@ -446,8 +446,8 @@ def check_toolchain(e: Env) -> None:
     except Exception:  # noqa: BLE001  (failed below as zig=missing)
         ver = "missing"
     e.note(f"zig={ver}")
-    (e.ok if ver.startswith("0.16") else e.fail)(f"zig={ver}"
-                                                 + ("" if ver.startswith("0.16") else ", expected 0.16.x"))
+    (e.ok if ver.startswith("0.17") else e.fail)(f"zig={ver}"
+                                                 + ("" if ver.startswith("0.17") else ", expected 0.17.x"))
 
 
 #: Processes that are supposed to be running during a measurement.

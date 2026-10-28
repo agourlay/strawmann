@@ -1004,7 +1004,7 @@ test "dynamic table: an oversized entry empties the table per RFC 7541 §4.4" {
     t.setMaxSize(100);
     _ = t.insert("small", "value");
     try testing.expectEqual(@as(usize, 1), t.count);
-    const big = [_]u8{'x'} ** 200;
+    const big: [200]u8 = @splat('x');
     _ = t.insert(&big, "v");
     try testing.expectEqual(@as(usize, 0), t.count);
     try testing.expectEqual(@as(usize, 0), t.size);
@@ -1015,7 +1015,7 @@ test "dynamic table: an oversized entry empties the table per RFC 7541 §4.4" {
     var t2 = DynamicTable.init();
     try testing.expect(t2.insert("a", "b"));
     try testing.expectEqual(@as(usize, 1), t2.count);
-    const huge = [_]u8{'y'} ** (max_entry_bytes + 1);
+    const huge: [max_entry_bytes + 1]u8 = @splat('y');
     try testing.expect(t2.insert(&huge, ""));
     try testing.expectEqual(@as(usize, 0), t2.count);
     try testing.expectEqual(@as(usize, 0), t2.size);
@@ -1070,7 +1070,7 @@ test "a literal naming a dynamic entry survives table compaction later in the bl
     var n: usize = 0;
 
     // Header 1: literal with indexing, new name "x-first", 200-byte value.
-    const val = [_]u8{'v'} ** 200;
+    const val: [200]u8 = @splat('v');
     n += encodeInteger(buf[n..], 6, 0x40, 0);
     n += encodeInteger(buf[n..], 7, 0x00, 7);
     @memcpy(buf[n..][0..7], "x-first");
@@ -1095,10 +1095,10 @@ test "a literal naming a dynamic entry survives table compaction later in the bl
     // Then 60 more indexed literals of ~280 bytes each: 16 KiB+ of strings,
     // more than the arena holds, so compaction runs mid-block. Each name is
     // distinct so an aliased slice would visibly change.
-    const filler = [_]u8{'f'} ** 270;
+    const filler: [270]u8 = @splat('f');
     for (0..60) |i| {
         var name: [8]u8 = undefined;
-        _ = std.fmt.bufPrint(&name, "n{d:0>7}", .{i}) catch unreachable;
+        _ = std.mem.print(&name, "n{d:0>7}", .{i}) catch unreachable;
         n += encodeInteger(buf[n..], 6, 0x40, 0);
         n += encodeInteger(buf[n..], 7, 0x00, name.len);
         @memcpy(buf[n..][0..name.len], &name);
@@ -1131,7 +1131,7 @@ test "an indexed dynamic header survives table compaction later in the block" {
     var buf: [24 * 1024]u8 = undefined;
     var n: usize = 0;
 
-    const val = [_]u8{'p'} ** 200;
+    const val: [200]u8 = @splat('p');
     n += encodeInteger(buf[n..], 6, 0x40, 4); // name = static 4, ":path"
     n += encodeInteger(buf[n..], 7, 0x00, val.len);
     @memcpy(buf[n..][0..val.len], &val);
@@ -1139,10 +1139,10 @@ test "an indexed dynamic header survives table compaction later in the block" {
 
     n += encodeInteger(buf[n..], 7, 0x80, 62); // indexed dynamic
 
-    const filler = [_]u8{'f'} ** 270;
+    const filler: [270]u8 = @splat('f');
     for (0..60) |i| {
         var name: [8]u8 = undefined;
-        _ = std.fmt.bufPrint(&name, "n{d:0>7}", .{i}) catch unreachable;
+        _ = std.mem.print(&name, "n{d:0>7}", .{i}) catch unreachable;
         n += encodeInteger(buf[n..], 6, 0x40, 0);
         n += encodeInteger(buf[n..], 7, 0x00, name.len);
         @memcpy(buf[n..][0..name.len], &name);

@@ -580,7 +580,7 @@ test "dependent access costs at least as much as independent over a cold arena" 
     // the ordering, not a host's numbers, and uses a small arena so it runs in
     // the unit-test budget. In Debug the unoptimised kernel dwarfs the miss
     // cost and the ordering does not hold, so it is a ReleaseFast-only check.
-    if (@import("builtin").mode == .Debug) return error.SkipZigTest;
+    if (@import("builtin").mode == .debug) return error.SkipZigTest;
     const dim = 128;
     const spec = hammingSpec(dim);
     var prng = std.Random.DefaultPrng.init(17);
@@ -616,8 +616,8 @@ test "the two access variants start their walks on disjoint slot prefixes" {
         const dep_start = startSlot(.dependent, slots);
         try std.testing.expect(ind_start < slots);
         try std.testing.expect(dep_start < slots);
-        var touched = try std.DynamicBitSet.initEmpty(std.testing.allocator, slots);
-        defer touched.deinit();
+        var touched = try std.bit_set.Dynamic.initEmpty(std.testing.allocator, slots);
+        defer touched.deinit(std.testing.allocator);
         for (0..n) |k| touched.set(order[(ind_start + k) % slots]);
         for (0..n) |k| {
             const slot = order[(dep_start + k) % slots];
@@ -643,9 +643,8 @@ test "the dependent loop scores through an opaque function pointer, not a compti
     // And `run` takes the spec at runtime, so the pointer's target is unknown
     // to the optimiser at the call site.
     const RunFn = @TypeOf(run);
-    const params = @typeInfo(RunFn).@"fn".params;
-    try std.testing.expect(!params[0].is_generic);
-    try std.testing.expectEqual(Spec, params[0].type.?);
+    const params = @typeInfo(RunFn).@"fn".param_types;
+    try std.testing.expectEqual(Spec, params[0].?);
     // A spec built here still routes through the pointer, and scores.
     const spec = hammingSpec(64);
     try std.testing.expect(@TypeOf(spec.score) == *const fn (*const anyopaque, [*]const u8, usize, usize) f64);
@@ -657,8 +656,8 @@ test "randomOrder is a permutation" {
     const order = try randomOrder(std.testing.allocator, 1000, prng.random());
     defer std.testing.allocator.free(order);
 
-    var seen = try std.DynamicBitSet.initEmpty(std.testing.allocator, 1000);
-    defer seen.deinit();
+    var seen = try std.bit_set.Dynamic.initEmpty(std.testing.allocator, 1000);
+    defer seen.deinit(std.testing.allocator);
     for (order) |o| {
         try std.testing.expect(!seen.isSet(o));
         seen.set(o);

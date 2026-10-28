@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://ziglang.org/download/"><img alt="Zig 0.16" src="https://img.shields.io/badge/Zig-0.16-F7A41D?logo=zig&logoColor=white"></a>
+  <a href="https://ziglang.org/download/"><img alt="Zig 0.17" src="https://img.shields.io/badge/Zig-0.17-F7A41D?logo=zig&logoColor=white"></a>
   <a href="docs/comparison-sift1m.md"><img alt="Wire-compatible with Qdrant 1.19" src="https://img.shields.io/badge/wire-Qdrant%201.19-DC244B"></a>
   <a href="docs/comparison-sift1m.md"><img alt="Conformance: T0 to T4 pass" src="https://img.shields.io/badge/conformance-T0%20%E2%86%92%20T4-2ea44f"></a>
   <img alt="Kernels: AVX-512 VNNI, AVX2, SSE" src="https://img.shields.io/badge/kernels-AVX--512%20VNNI%20%C2%B7%20AVX2%20%C2%B7%20SSE-0071C5">
@@ -81,7 +81,7 @@ resolve here.
 
 ## Quick start
 
-Zig **0.16.0**, pinned in `build.zig.zon` and installed exactly by CI.
+Zig **0.17.0**, pinned in `build.zig.zon` and installed exactly by CI.
 
 ```sh
 scripts/doctor.py                    # host setup, what it can measure, where it writes

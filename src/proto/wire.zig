@@ -169,7 +169,7 @@ pub const Reader = struct {
         const t = try self.varint32();
         const field = t >> 3;
         if (field == 0) return Error.InvalidFieldNumber;
-        const wt: WireType = @enumFromInt(@as(u3, @truncate(t)));
+        const wt: WireType = @fromBackingInt(@intCast(@as(u3, @truncate(t))));
         switch (wt) {
             .varint, .fixed64, .length_delimited, .fixed32 => {},
             else => return Error.InvalidWireType,
@@ -211,7 +211,7 @@ pub const Reader = struct {
         // it would silently produce reversed floats: no error, no crash, just
         // wrong vectors and therefore wrong neighbours. Assert it at compile
         // time so that build fails instead of that run lying.
-        comptime std.debug.assert(builtin.cpu.arch.endian() == .little);
+        comptime std.debug.assert(builtin.target.cpu.arch.endian() == .little);
         const raw = try self.bytes();
         if (raw.len % 4 != 0) return Error.InvalidPackedLength;
         const count = raw.len / 4;
@@ -293,7 +293,7 @@ pub const Writer = struct {
         // byte of 0, which a decoder reads as end-of-message. Every field
         // written after it would be silently dropped.
         std.debug.assert(field > 0);
-        try self.varint((@as(u64, field) << 3) | @intFromEnum(wt));
+        try self.varint((@as(u64, field) << 3) | @backingInt(wt));
     }
 
     pub fn fixed32(self: *Writer, v: u32) Writer.Error!void {
@@ -448,7 +448,7 @@ test "varint round-trips across the interesting magnitudes" {
 
 test "varint rejects overlong and overflowing encodings" {
     // 11 continuation bytes: never valid.
-    const too_long = [_]u8{0xff} ** 11;
+    const too_long: [11]u8 = @splat(0xff);
     var r = Reader.init(&too_long);
     try std.testing.expectError(Error.InvalidVarint, r.varint());
 
@@ -586,7 +586,7 @@ test "nested length backfill handles a body that grows past one length byte" {
     const n = try w.beginNested(1, 2);
     // 200 bytes of body: needs 2 length bytes in minimal encoding, and our
     // reservation is exactly 2.
-    const body = [_]u8{0xab} ** 200;
+    const body: [200]u8 = @splat(0xab);
     try w.raw(&body);
     try w.endNested(n);
 

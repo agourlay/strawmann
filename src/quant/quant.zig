@@ -49,7 +49,7 @@ pub const CompressionRatio = enum(u32) {
     }
 
     pub fn toProto(self: CompressionRatio) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     /// The divisor itself: `.x16` compresses 16:1.
@@ -221,7 +221,7 @@ test "§6.7: the modes bfb can emit all parse" {
     try testing.expectEqualStrings("binary1p5bit", Mode.name(.{ .binary = .one_half }));
     for ([_]usize{ 4, 8, 16, 32, 64 }) |n| {
         var buf: [32]u8 = undefined;
-        const s = try std.fmt.bufPrint(&buf, "product-x{d}", .{n});
+        const s = try std.mem.print(&buf, "product-x{d}", .{n});
         try testing.expectEqual(n, Mode.parse(s).mode.product.ratio());
     }
     // An unsupported ratio is refused rather than rounded to a supported one.

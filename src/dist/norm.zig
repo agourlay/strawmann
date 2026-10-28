@@ -122,7 +122,7 @@ const scale: Scale = .divide;
 /// The cpuid probe is cached in `dispatch`, so this is a load and two compares
 /// per call.
 pub fn pathFor(dim: usize) Path {
-    if (builtin.cpu.arch == .x86_64) {
+    if (builtin.target.cpu.arch == .x86_64) {
         if (dim >= min_dim_avx and dispatch.hostHasAvxFma()) return .avx;
         // `is_x86_feature_detected!("sse")` is unconditionally true on x86_64;
         // SSE2 is part of the base ISA.
@@ -454,7 +454,7 @@ test "§8.3 trap 3: the test is on the SQUARED length, before the root" {
 
 test "§8.3 trap 3: a zero vector is left untouched, not divided by zero" {
     for (std.enums.values(Path)) |p| {
-        var v = [_]f32{0.0} ** 128;
+        var v: [128]f32 = @splat(0.0);
         const divided = normalizeInPlaceOn(p, &v);
         try std.testing.expect(!divided);
         for (v) |x| try std.testing.expectEqual(@as(f32, 0.0), x);
@@ -593,14 +593,14 @@ test "off x86-64, pathFor is scalar: the NEON path Qdrant would take is not repl
     // Documents the limitation rather than hiding it: on aarch64 Qdrant 1.19.0
     // uses `cosine_preprocess_neon` for dim >= 16, and this project (Linux
     // x86-64 only) makes no bit-exactness claim there.
-    if (comptime builtin.cpu.arch == .x86_64) return error.SkipZigTest;
+    if (comptime builtin.target.cpu.arch == .x86_64) return error.SkipZigTest;
     try std.testing.expectEqual(Path.scalar, pathFor(15));
     try std.testing.expectEqual(Path.scalar, pathFor(16));
     try std.testing.expectEqual(Path.scalar, pathFor(1536));
 }
 
 test "pathFor makes Qdrant 1.19.0's choice from this host's cpuid" {
-    if (comptime builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+    if (comptime builtin.target.cpu.arch != .x86_64) return error.SkipZigTest;
     // Below MIN_DIM_SIZE_SIMD nothing SIMD is considered.
     try std.testing.expectEqual(Path.scalar, pathFor(0));
     try std.testing.expectEqual(Path.scalar, pathFor(15));

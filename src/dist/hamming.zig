@@ -239,8 +239,8 @@ test "packSigns then signDotFromHamming reproduces the sign dot product" {
 }
 
 test "similarity is negated so higher is better" {
-    var a = [_]u64{0} ** 4;
-    var b = [_]u64{0} ** 4;
+    var a: [4]u64 = @splat(0);
+    var b: [4]u64 = @splat(0);
     b[0] = 0xff; // 8 bits differ
     try std.testing.expectEqual(@as(f32, -8.0), native.similarity(&a, &b));
     try std.testing.expectEqual(@as(f32, 0.0), native.similarity(&a, &a));

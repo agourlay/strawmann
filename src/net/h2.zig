@@ -117,7 +117,7 @@ pub const FrameHeader = struct {
     pub fn parse(buf: *const [frame_header_len]u8) FrameHeader {
         return .{
             .length = (@as(u32, buf[0]) << 16) | (@as(u32, buf[1]) << 8) | buf[2],
-            .frame_type = @enumFromInt(buf[3]),
+            .frame_type = @fromBackingInt(@intCast(buf[3])),
             .flags = buf[4],
             // The high bit is reserved and RFC 9113 §4.1 says a receiver must
             // ignore it rather than reject the frame.
@@ -129,7 +129,7 @@ pub const FrameHeader = struct {
         buf[0] = @truncate(self.length >> 16);
         buf[1] = @truncate(self.length >> 8);
         buf[2] = @truncate(self.length);
-        buf[3] = @intFromEnum(self.frame_type);
+        buf[3] = @backingInt(self.frame_type);
         buf[4] = self.flags;
         std.mem.writeInt(u32, buf[5..9], self.stream_id, .big);
     }
@@ -446,7 +446,7 @@ pub const Connection = struct {
     }
 
     fn writeSetting(buf: []u8, id: SettingId, value: u32) usize {
-        std.mem.writeInt(u16, buf[0..2], @intFromEnum(id), .big);
+        std.mem.writeInt(u16, buf[0..2], @backingInt(id), .big);
         std.mem.writeInt(u32, buf[2..6], value, .big);
         return 6;
     }
@@ -472,14 +472,14 @@ pub const Connection = struct {
         self.goaway_sent = true;
         var payload: [8]u8 = undefined;
         std.mem.writeInt(u32, payload[0..4], self.last_stream_id, .big);
-        std.mem.writeInt(u32, payload[4..8], @intFromEnum(code), .big);
+        std.mem.writeInt(u32, payload[4..8], @backingInt(code), .big);
         try out.frame(.goaway, 0, 0, &payload);
     }
 
     pub fn sendRstStream(self: *Connection, out: *OutBuf, id: u31, code: ErrorCode) Error!void {
         _ = self;
         var payload: [4]u8 = undefined;
-        std.mem.writeInt(u32, &payload, @intFromEnum(code), .big);
+        std.mem.writeInt(u32, &payload, @backingInt(code), .big);
         try out.frame(.rst_stream, 0, id, &payload);
     }
 
@@ -586,7 +586,7 @@ pub const Connection = struct {
 
         var i: usize = 0;
         while (i + 6 <= payload.len) : (i += 6) {
-            const id: SettingId = @enumFromInt(std.mem.readInt(u16, payload[i..][0..2], .big));
+            const id: SettingId = @fromBackingInt(@intCast(std.mem.readInt(u16, payload[i..][0..2], .big)));
             const value = std.mem.readInt(u32, payload[i + 2 ..][0..4], .big);
             switch (id) {
                 .header_table_size => self.peer.header_table_size = value,
@@ -1068,12 +1068,12 @@ test "initial frames raise BOTH the stream and connection windows" {
                 while (i + 6 <= payload.len) : (i += 6) {
                     const id = std.mem.readInt(u16, payload[i..][0..2], .big);
                     const v = std.mem.readInt(u32, payload[i + 2 ..][0..4], .big);
-                    if (id == @intFromEnum(SettingId.initial_window_size)) {
+                    if (id == @backingInt(SettingId.initial_window_size)) {
                         try testing.expectEqual(Settings.default_window, v);
                         found_window = true;
                     }
                     // The limit the decoder enforces is the one the peer is told.
-                    if (id == @intFromEnum(SettingId.max_header_list_size)) {
+                    if (id == @backingInt(SettingId.max_header_list_size)) {
                         try testing.expectEqual(c.local.max_header_list_size, v);
                         found_header_list = true;
                     }
@@ -1111,7 +1111,7 @@ test "SETTINGS is acked and a peer initial_window_size change adjusts open strea
 
     // Peer raises initial window to 1 MiB.
     var payload: [6]u8 = undefined;
-    std.mem.writeInt(u16, payload[0..2], @intFromEnum(SettingId.initial_window_size), .big);
+    std.mem.writeInt(u16, payload[0..2], @backingInt(SettingId.initial_window_size), .big);
     std.mem.writeInt(u32, payload[2..6], 1024 * 1024, .big);
     var frame_buf: [frame_header_len + 6]u8 = undefined;
     (FrameHeader{ .length = 6, .frame_type = .settings, .flags = 0, .stream_id = 0 }).write(frame_buf[0..frame_header_len]);
@@ -1325,7 +1325,7 @@ test "exceeding the stream pool yields REFUSED_STREAM, not a stall" {
     try testing.expectEqual(FrameType.rst_stream, h.frame_type);
     try testing.expectEqual(@as(u31, 5), h.stream_id);
     const code = std.mem.readInt(u32, out.buf[frame_header_len..][0..4], .big);
-    try testing.expectEqual(@intFromEnum(ErrorCode.refused_stream), code);
+    try testing.expectEqual(@backingInt(ErrorCode.refused_stream), code);
 }
 
 test "a body larger than the stream buffer fails the stream, not the connection" {
@@ -1430,7 +1430,7 @@ test "unknown frame types are ignored, per RFC 9113 §4.1" {
     var out = OutBuf.init(&ob);
 
     var f: [frame_header_len + 4]u8 = undefined;
-    (FrameHeader{ .length = 4, .frame_type = @enumFromInt(0xfa), .flags = 0, .stream_id = 0 }).write(f[0..frame_header_len]);
+    (FrameHeader{ .length = 4, .frame_type = @fromBackingInt(@intCast(0xfa)), .flags = 0, .stream_id = 0 }).write(f[0..frame_header_len]);
     const r = try c.readFrame(&f, &out);
     try testing.expectEqual(f.len, r.consumed);
     try testing.expectEqual(Event.progress, r.event);
@@ -1491,7 +1491,7 @@ test "window update overflow is a flow-control error" {
 test "OutBuf refuses to overflow and beginFrame backfills the length" {
     var small: [16]u8 = undefined;
     var out = OutBuf.init(&small);
-    try testing.expectError(Error.OutputFull, out.frame(.data, 0, 1, &[_]u8{0} ** 32));
+    try testing.expectError(Error.OutputFull, out.frame(.data, 0, 1, &@as([32]u8, @splat(0))));
 
     var big: [256]u8 = undefined;
     var out2 = OutBuf.init(&big);
@@ -1582,7 +1582,7 @@ test "DATA on a half-closed stream is refused, not dispatched twice" {
 fn expectRst(sid: u31, code: ErrorCode) [frame_header_len + 4]u8 {
     var b: [frame_header_len + 4]u8 = undefined;
     (FrameHeader{ .length = 4, .frame_type = .rst_stream, .flags = 0, .stream_id = sid }).write(b[0..frame_header_len]);
-    std.mem.writeInt(u32, b[frame_header_len..][0..4], @intFromEnum(code), .big);
+    std.mem.writeInt(u32, b[frame_header_len..][0..4], @backingInt(code), .big);
     return b;
 }
 
@@ -1667,7 +1667,7 @@ fn testHeadersFrame(buf: []u8, stream_id: u31, flags: u8, path: []const u8) []co
 fn testRstFrame(buf: *[frame_header_len + 4]u8, stream_id: u31, code: ErrorCode) []const u8 {
     (FrameHeader{ .length = 4, .frame_type = .rst_stream, .flags = 0, .stream_id = stream_id })
         .write(buf[0..frame_header_len]);
-    std.mem.writeInt(u32, buf[frame_header_len..][0..4], @intFromEnum(code), .big);
+    std.mem.writeInt(u32, buf[frame_header_len..][0..4], @backingInt(code), .big);
     return buf;
 }
 
@@ -1786,7 +1786,7 @@ test "a refused HEADERS still decodes its block, so the dynamic table stays in s
     const rst = FrameHeader.parse(out.buf[0..frame_header_len]);
     try testing.expectEqual(FrameType.rst_stream, rst.frame_type);
     try testing.expectEqual(@as(u31, 3), rst.stream_id);
-    try testing.expectEqual(@intFromEnum(ErrorCode.refused_stream), std.mem.readInt(u32, out.buf[frame_header_len..][0..4], .big));
+    try testing.expectEqual(@backingInt(ErrorCode.refused_stream), std.mem.readInt(u32, out.buf[frame_header_len..][0..4], .big));
 
     // Free the slot, then a request naming the refused block's entry by
     // index (62 = most recent insertion) must decode to it.
@@ -2020,7 +2020,7 @@ test "an over-long :path is an unknown method on that stream, not a connection e
     var out = OutBuf.init(&ob);
     var fb: [512]u8 = undefined;
 
-    const long = "/" ++ "x" ** 200;
+    const long = "/" ++ @as([200]u8, @splat('x'));
     const r = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers | Flags.end_stream, long), &out);
     const idx = r.event.request;
     try testing.expectEqual(c.streams[idx].path_buf.len, c.streams[idx].path().len);

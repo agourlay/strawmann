@@ -8,7 +8,7 @@
     // language still moves; a benchmark that silently changes compiler is not a
     // benchmark." LLVM's autovectoriser and its AVX-512 cost model both move
     // between releases, and an unpinned compiler turns the ISA matrix into noise.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
 
     .dependencies = .{},
 

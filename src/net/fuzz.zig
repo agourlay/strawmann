@@ -328,7 +328,7 @@ test "fuzz: structurally valid frames with random payloads" {
             const payload_len = rnd.uintLessThan(u32, 48);
             const h = h2.FrameHeader{
                 .length = payload_len,
-                .frame_type = @enumFromInt(rnd.uintLessThan(u8, 12)),
+                .frame_type = @fromBackingInt(@intCast(rnd.uintLessThan(u8, 12))),
                 .flags = rnd.int(u8),
                 .stream_id = rnd.uintLessThan(u31, 8),
             };
@@ -447,7 +447,7 @@ fn interleavedStreamsRound(alloc: std.mem.Allocator, seed: u64) !void {
     const owed = try alloc.alloc(Owed, max_ids);
     defer alloc.free(owed);
     @memset(owed, .unknown);
-    var owned = [_]?u31{null} ** pool;
+    var owned: [pool]?u31 = @splat(null);
 
     // The wire, built frame by frame, then fed in random reads.
     const wire = try alloc.alloc(u8, 1 << 20);
@@ -479,10 +479,10 @@ fn interleavedStreamsRound(alloc: std.mem.Allocator, seed: u64) !void {
                 // SETTINGS: a new initial window size, or a bigger frame size.
                 var p: [6]u8 = undefined;
                 if (rnd.boolean()) {
-                    std.mem.writeInt(u16, p[0..2], @intFromEnum(h2.SettingId.initial_window_size), .big);
+                    std.mem.writeInt(u16, p[0..2], @backingInt(h2.SettingId.initial_window_size), .big);
                     std.mem.writeInt(u32, p[2..6], rnd.uintLessThan(u32, 1 << 20), .big);
                 } else {
-                    std.mem.writeInt(u16, p[0..2], @intFromEnum(h2.SettingId.max_frame_size), .big);
+                    std.mem.writeInt(u16, p[0..2], @backingInt(h2.SettingId.max_frame_size), .big);
                     std.mem.writeInt(u32, p[2..6], 16384 + rnd.uintLessThan(u32, 1 << 20), .big);
                 }
                 try wo.frame(.settings, 0, 0, &p);
@@ -531,7 +531,7 @@ fn interleavedStreamsRound(alloc: std.mem.Allocator, seed: u64) !void {
                     st.header_pieces = 0;
                 } else if (!st.reset and rnd.uintLessThan(u8, 6) == 0) {
                     var p: [4]u8 = undefined;
-                    std.mem.writeInt(u32, &p, @intFromEnum(h2.ErrorCode.cancel), .big);
+                    std.mem.writeInt(u32, &p, @backingInt(h2.ErrorCode.cancel), .big);
                     try wo.frame(.rst_stream, 0, st.id, &p);
                     st.reset = true;
                 } else if (st.data_pieces > 0 and !st.reset) {
@@ -679,7 +679,7 @@ fn noteRefusals(out: *const h2.OutBuf, refused: []bool) !void {
         const h = h2.FrameHeader.parse(out.buf[pos..][0..h2.frame_header_len]);
         if (h.frame_type == .rst_stream and h.length == 4) {
             const code = std.mem.readInt(u32, out.buf[pos + h2.frame_header_len ..][0..4], .big);
-            if (code == @intFromEnum(h2.ErrorCode.refused_stream)) refused[h.stream_id] = true;
+            if (code == @backingInt(h2.ErrorCode.refused_stream)) refused[h.stream_id] = true;
         }
         pos += h2.frame_header_len + h.length;
     }

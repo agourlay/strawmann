@@ -130,9 +130,9 @@ pub const Client = struct {
         var out = h2.OutBuf.init(&ob);
         // The SETTINGS and stream-0 WINDOW_UPDATE hyper's h2 sends first.
         var st: [12]u8 = undefined;
-        std.mem.writeInt(u16, st[0..2], @intFromEnum(h2.SettingId.initial_window_size), .big);
+        std.mem.writeInt(u16, st[0..2], @backingInt(h2.SettingId.initial_window_size), .big);
         std.mem.writeInt(u32, st[2..6], settings.stream_window, .big);
-        std.mem.writeInt(u16, st[6..8], @intFromEnum(h2.SettingId.max_frame_size), .big);
+        std.mem.writeInt(u16, st[6..8], @backingInt(h2.SettingId.max_frame_size), .big);
         std.mem.writeInt(u32, st[8..12], hyper_max_frame_size, .big);
         try out.frame(.settings, 0, 0, &st);
         if (settings.conn_window > 65535) {
@@ -239,7 +239,7 @@ pub const Client = struct {
         var fb: [32]u8 = undefined;
         var fo = h2.OutBuf.init(&fb);
         var code: [4]u8 = undefined;
-        std.mem.writeInt(u32, &code, @intFromEnum(h2.ErrorCode.cancel), .big);
+        std.mem.writeInt(u32, &code, @backingInt(h2.ErrorCode.cancel), .big);
         try fo.frame(.rst_stream, 0, sid, &code);
         try self.writeAll(fo.written());
         if (self.reset_n < self.reset_sids.len) {
@@ -447,7 +447,7 @@ pub const Client = struct {
                         const hdrs = try self.dec.decode(payload);
                         for (hdrs) |hd| {
                             if (std.mem.eql(u8, hd.name, "grpc-status")) {
-                                r.status = @enumFromInt(try std.fmt.parseInt(u32, hd.value, 10));
+                                r.status = @fromBackingInt(@intCast(try std.fmt.parseInt(u32, hd.value, 10)));
                             } else if (std.mem.eql(u8, hd.name, "grpc-message")) {
                                 // Decode, as a real client does. `§` is two
                                 // non-ASCII bytes, so every message citing a

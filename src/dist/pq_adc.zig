@@ -55,9 +55,9 @@ const common = @import("common.zig");
 fn hasVpshufb(comptime L: usize) bool {
     if (builtin.zig_backend != .stage2_llvm) return false;
     return switch (L) {
-        16 => builtin.cpu.has(.x86, .avx),
-        32 => builtin.cpu.has(.x86, .avx2),
-        64 => builtin.cpu.has(.x86, .avx512bw),
+        16 => builtin.target.cpu.has(.x86, .avx),
+        32 => builtin.target.cpu.has(.x86, .avx2),
+        64 => builtin.target.cpu.has(.x86, .avx512bw),
         else => false,
     };
 }

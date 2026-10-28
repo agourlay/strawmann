@@ -77,9 +77,9 @@ fn hasVnniAt(comptime bytes: usize) bool {
     // equality test below rather than silently skipped.
     if (builtin.zig_backend != .stage2_llvm) return false;
 
-    const has_512 = builtin.cpu.has(.x86, .avx512vnni);
-    const has_vl = builtin.cpu.has(.x86, .avx512vl);
-    const has_vex = builtin.cpu.has(.x86, .avxvnni);
+    const has_512 = builtin.target.cpu.has(.x86, .avx512vnni);
+    const has_vl = builtin.target.cpu.has(.x86, .avx512vl);
+    const has_vex = builtin.target.cpu.has(.x86, .avxvnni);
     return switch (bytes) {
         64 => has_512,
         32, 16 => has_vex or (has_512 and has_vl),

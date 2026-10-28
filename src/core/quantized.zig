@@ -596,7 +596,7 @@ pub const Query = struct {
     /// the measured one, and nothing past d=512 changes.
     pub fn prefetch(ctx: *const anyopaque, node: u32) void {
         const self: *const Query = @ptrCast(@alignCast(ctx));
-        const hint: std.builtin.PrefetchOptions = .{ .rw = .read, .locality = 3, .cache = .data };
+        const hint: std.lang.PrefetchOptions = .{ .rw = .read, .locality = 3, .cache = .data };
         const pf = dist.common.prefetchRow;
         switch (self.store.*) {
             .none => {},

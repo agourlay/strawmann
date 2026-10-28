@@ -709,7 +709,7 @@ fn unimplementedRpc(
     };
 
     const buf = out.available();
-    const msg_text = std.fmt.bufPrint(
+    const msg_text = std.mem.print(
         buf,
         "/{s}/{s} is not implemented by strawmann ({s})",
         .{ path.service, path.method, where },

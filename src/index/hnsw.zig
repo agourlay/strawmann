@@ -908,7 +908,7 @@ test "level assignment is deterministic per node and independent of order" {
 test "level distribution follows the exponential decay" {
     const p = Params.fromM(16, 100, 7);
     const n = 100_000;
-    var counts = [_]usize{0} ** 16;
+    var counts: [16]usize = @splat(0);
     for (0..n) |i| counts[assignLevel(p, @intCast(i))] += 1;
 
     // §6.5: "standard exponential decay, mL = 1/ln(M)". At M=16 the expected

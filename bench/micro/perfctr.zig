@@ -50,15 +50,15 @@ pub const Event = enum {
 
     fn attrConfig(self: Event) u64 {
         return switch (self) {
-            .cycles => @intFromEnum(PERF.COUNT.HW.CPU_CYCLES),
-            .ref_cycles => @intFromEnum(PERF.COUNT.HW.REF_CPU_CYCLES),
-            .instructions => @intFromEnum(PERF.COUNT.HW.INSTRUCTIONS),
-            .cache_misses => @intFromEnum(PERF.COUNT.HW.CACHE_MISSES),
-            .branch_misses => @intFromEnum(PERF.COUNT.HW.BRANCH_MISSES),
+            .cycles => @backingInt(PERF.COUNT.HW.CPU_CYCLES),
+            .ref_cycles => @backingInt(PERF.COUNT.HW.REF_CPU_CYCLES),
+            .instructions => @backingInt(PERF.COUNT.HW.INSTRUCTIONS),
+            .cache_misses => @backingInt(PERF.COUNT.HW.CACHE_MISSES),
+            .branch_misses => @backingInt(PERF.COUNT.HW.BRANCH_MISSES),
             // HW_CACHE config is (cache_id) | (op_id << 8) | (result_id << 16).
-            .dtlb_load_misses => @intFromEnum(PERF.COUNT.HW.CACHE.DTLB) |
-                (@intFromEnum(PERF.COUNT.HW.CACHE.OP.READ) << 8) |
-                (@intFromEnum(PERF.COUNT.HW.CACHE.RESULT.MISS) << 16),
+            .dtlb_load_misses => @backingInt(PERF.COUNT.HW.CACHE.DTLB) |
+                (@backingInt(PERF.COUNT.HW.CACHE.OP.READ) << 8) |
+                (@backingInt(PERF.COUNT.HW.CACHE.RESULT.MISS) << 16),
         };
     }
 

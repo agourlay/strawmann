@@ -483,7 +483,7 @@ pub fn cpuCaches(cpu: usize) CpuCaches {
 
 /// Read a small sysfs/procfs file into `buf`, trimmed of the trailing newline.
 fn readSysfs(pbuf: []u8, buf: []u8, comptime fmt: []const u8, args: anytype) ?[]const u8 {
-    const path = std.fmt.bufPrintZ(pbuf, fmt, args) catch return null;
+    const path = std.mem.printSentinel(pbuf, fmt, args, 0) catch return null;
     const rc = linux.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(rc) != .SUCCESS) return null;
     const fd: linux.fd_t = @intCast(rc);
@@ -542,7 +542,7 @@ test "a long shared_cpu_list is kept whole up to the buffer and marked when cut"
     c.setL3Shared("0-3,12-15");
     try std.testing.expectEqualStrings("0-3,12-15", c.l3SharedList());
     // Exactly the capacity: still verbatim, no mark.
-    const exact = "7," ** (CpuCaches.l3_shared_capacity / 2);
+    const exact = std.mem.asBytes(&@as([CpuCaches.l3_shared_capacity / 2][2]u8, @splat("7,".*)));
     c.setL3Shared(exact);
     try std.testing.expectEqualStrings(exact, c.l3SharedList());
     // A 512-CPU part listing every other core: "0,2,4,...,1022" is well over
@@ -606,8 +606,8 @@ test "pointer chains form a single cycle covering every slot" {
     const idx = std.mem.bytesAsSlice(usize, r.bytes);
 
     const slots = r.bytes.len / line_size;
-    var seen = std.DynamicBitSet.initEmpty(std.testing.allocator, slots) catch unreachable;
-    defer seen.deinit();
+    var seen = std.bit_set.Dynamic.initEmpty(std.testing.allocator, slots) catch unreachable;
+    defer seen.deinit(std.testing.allocator);
 
     var p = heads[0];
     var count: usize = 0;

@@ -509,7 +509,7 @@ test "a truncated grpc-message never ends in a partial escape" {
     // bytes) overflows the 256-byte grpc-message budget. The cut must fall
     // between escapes, whatever the buffer size, or a conformant client
     // decoding the header sees a malformed `%XX`.
-    const msg = "§" ** 100;
+    const msg = std.mem.asBytes(&@as([100][2]u8, @splat("§".*)));
     var sizes = [_]usize{ 256, 255, 254, 253, 100, 7, 4, 3, 2, 1, 0 };
     for (&sizes) |size| {
         var buf: [256]u8 = undefined;
@@ -544,7 +544,7 @@ test "every status code has distinct text matching its number" {
     };
     for (all) |s| {
         const parsed = try std.fmt.parseInt(u32, s.text(), 10);
-        try testing.expectEqual(@intFromEnum(s), parsed);
+        try testing.expectEqual(@backingInt(s), parsed);
     }
 }
 

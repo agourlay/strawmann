@@ -255,7 +255,7 @@ pub const VectorSpace = struct {
         var h = storage.Header{
             .magic = storage.magic,
             .format_version = storage.format_version,
-            .kind = @intFromEnum(storage.Header.Kind.vectors),
+            .kind = @backingInt(storage.Header.Kind.vectors),
             .dim = dim,
             .count = 0,
             .capacity = capacity,
@@ -271,7 +271,7 @@ pub const VectorSpace = struct {
             else
                 0,
             .seed = 0,
-            .datatype = @intFromEnum(dt),
+            .datatype = @backingInt(dt),
             .graph_checksum = 0,
             .header_crc = 0,
         };
@@ -318,7 +318,7 @@ pub const VectorSpace = struct {
     /// fragmented system the kernel may decline. Nothing here is load-bearing
     /// for correctness, so the return value is deliberately ignored.
     fn adviseHugePages(bytes: []u8) void {
-        if (builtin.os.tag != .linux) return;
+        if (builtin.target.os.tag != .linux) return;
         const two_mib = 2 * 1024 * 1024;
         if (bytes.len < two_mib) return;
 
@@ -461,7 +461,7 @@ pub const Collection = struct {
     id_space: ids.IdSpace,
 
     /// §3: "**Deletes**: tombstone bitmap only, no compaction."
-    deleted: std.DynamicBitSet,
+    deleted: std.bit_set.Dynamic,
     deleted_count: usize = 0,
 
     /// §3: "**Payload**: opaque, append-only blob per point", and M7's
@@ -682,7 +682,7 @@ pub const Collection = struct {
     /// `noteOverwrite` and read/cleared by `buildIndex`, both under
     /// `write_lock`; `overwrite_log_active` says whether a build is between
     /// its first arena read and its publish.
-    overwrite_log: std.DynamicBitSet,
+    overwrite_log: std.bit_set.Dynamic,
     overwrite_log_active: bool = false,
     /// Test hook: called by `buildIndex` after the graph and codes are built
     /// and before either is published, so a test can land an overwrite in
@@ -698,7 +698,7 @@ pub const Collection = struct {
     /// A mapped arena's file, `<dir>/<name>.vectors.bin`: the one definition,
     /// for `init` that creates it and `Engine.drop` that removes it.
     pub fn arenaPath(buf: []u8, dir: []const u8, name: []const u8) ?[]const u8 {
-        return std.fmt.bufPrint(buf, "{s}/{s}.vectors.bin", .{ dir, name }) catch null;
+        return std.mem.print(buf, "{s}/{s}.vectors.bin", .{ dir, name }) catch null;
     }
 
     pub fn init(alloc: std.mem.Allocator, name: []const u8, config: Config) !Collection {
@@ -726,10 +726,10 @@ pub const Collection = struct {
         var id_space = try ids.IdSpace.init(alloc, config.capacity);
         errdefer id_space.deinit(alloc);
 
-        const deleted = try std.DynamicBitSet.initEmpty(alloc, config.capacity);
+        const deleted = try std.bit_set.Dynamic.initEmpty(alloc, config.capacity);
         errdefer {
             var d = deleted;
-            d.deinit();
+            d.deinit(alloc);
         }
 
         // 4 bytes per point, against 512 for the vector itself at d=128. Not
@@ -741,8 +741,8 @@ pub const Collection = struct {
 
         // One bit per row, allocated up front for the same reason as
         // `row_versions`: the write that needs it has already been accepted.
-        var overwrite_log = try std.DynamicBitSet.initEmpty(alloc, config.capacity);
-        errdefer overwrite_log.deinit();
+        var overwrite_log = try std.bit_set.Dynamic.initEmpty(alloc, config.capacity);
+        errdefer overwrite_log.deinit(alloc);
 
         const payload = try payload_mod.Store.init(alloc, config.capacity);
 
@@ -793,8 +793,8 @@ pub const Collection = struct {
         self.space.deinit(self.alloc);
         self.alloc.free(self.row_versions);
         self.id_space.deinit(self.alloc);
-        self.deleted.deinit();
-        self.overwrite_log.deinit();
+        self.deleted.deinit(self.alloc);
+        self.overwrite_log.deinit(self.alloc);
         self.payload.deinit(self.alloc);
     }
 
@@ -2048,7 +2048,7 @@ pub fn buildIndex(coll: *Collection, mode: BuildMode, threads: usize) !void {
     errdefer {
         coll.write_lock.lock();
         coll.overwrite_log_active = false;
-        coll.overwrite_log.unmanaged.unsetAll();
+        coll.overwrite_log.unsetAll();
         coll.write_lock.unlock();
     }
 
@@ -2172,7 +2172,7 @@ pub fn buildIndex(coll: *Collection, mode: BuildMode, threads: usize) !void {
             moved += 1;
             if (store) |st| st.encodeRow(@intCast(off), coll.space.readInto(@intCast(off), widen));
         }
-        coll.overwrite_log.unmanaged.unsetAll();
+        coll.overwrite_log.unsetAll();
     }
     // An atomic store: since the previous graph is served throughout a
     // rebuild, a search may be loading this pointer at this very moment
@@ -3238,7 +3238,7 @@ test "a two-hop filtered walk returns only admitted, live points and keeps recal
 
     var scratch = try hnsw.Index.Scratch.init(testing.allocator, n, 256);
     defer scratch.deinit(testing.allocator);
-    var bits = [_]u64{0} ** ((n + 63) / 64);
+    var bits: [(n + 63) / 64]u64 = @splat(0);
     for ([_]u32{ 10, 50 }) |every| {
         @memset(&bits, 0);
         for (0..n) |i| if (rnd.uintLessThan(u32, every) == 0) {
@@ -3670,7 +3670,7 @@ test "the graph builds and searches on every datatype" {
         var c = try makeCollectionDt(dim, .euclid, dt, 1024);
         defer c.deinit();
 
-        var prng = std.Random.DefaultPrng.init(0x9e3 + @as(u64, @intFromEnum(dt)));
+        var prng = std.Random.DefaultPrng.init(0x9e3 + @as(u64, @backingInt(dt)));
         const rnd = prng.random();
         var target: [dim]f32 = undefined;
         for (&target) |*x| x.* = 200;

@@ -14,7 +14,7 @@ Newest entries at the bottom of each section.
 
 ## Toolchain
 
-- **Zig 0.16.0**, pinned in `build.zig.zon` via `minimum_zig_version`. §9: "a
+- **Zig 0.17.0**, pinned in `build.zig.zon` via `minimum_zig_version`. §9: "a
   benchmark that silently changes compiler is not a benchmark." LLVM's
   autovectoriser and its AVX-512 cost model both move between releases, so an
   unpinned compiler turns the §7.5 ISA matrix into noise.
@@ -66,6 +66,22 @@ Newest entries at the bottom of each section.
   `0 warnings` vacuously. That mistake has been made and caught elsewhere,
   where it went unnoticed for weeks. `scripts/check.py` therefore has a canary step that appends an unused
   declaration and fails if zlint still passes.
+
+- **Zig 0.16.0 to 0.17.0** (2026-10-28). The pin moved, so by §9 the compiler
+  changed under every number: a run on 0.17 is not comparable to one on 0.16
+  until it is re-measured, and `provenance.py` records `zig` per run so the
+  two cannot be mixed by accident. LLVM goes to 22, but loop vectorisation
+  stays disabled as it was in 0.16 (the workaround is lifted in 0.18 with
+  LLVM 23), so the kernels' explicit `@Vector` code is what carries the ISA
+  matrix on both. Two changes could alter behaviour without a compile error,
+  and both were audited: `@hasDecl` now sees only `pub` declarations (every
+  scorer's `prefetch`, which `hnsw.Scorer.of` probes with it, is `pub`), and
+  `@bitCast` on arrays and vectors now uses the logical bit order (the one
+  such cast, `u16` to `@Vector(16, bool)` in `quant/turbo.zig`, means the same
+  on little-endian). The optimize modes were renamed `debug`/`safe`/`fast`/
+  `small`; the banner's `build mode` line keeps the old names, because the
+  report refuses any run whose mode is not `ReleaseFast` and every recorded run
+  says it that way. `-Doptimize=ReleaseFast` is still accepted.
 
 ## Architecture
 

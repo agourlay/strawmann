@@ -1344,7 +1344,7 @@ fn parseInput(server: *Server, t: *IoThread, c: *Connection, ci: usize) void {
                 // stream's slot is freed when the error has been written and
                 // the rest of the body is drained by the frame reader.
                 const sc = &c.scratch[idx];
-                const m = std.fmt.bufPrint(
+                const m = std.mem.print(
                     sc.response,
                     "request body exceeds the {d} KiB per-stream limit; send smaller batches",
                     .{server.config.request_buffer / 1024},
@@ -1761,7 +1761,7 @@ const RawClient = struct {
     fn sendGoaway(self: *RawClient, last: u31) !void {
         var p: [8]u8 = undefined;
         std.mem.writeInt(u32, p[0..4], last, .big);
-        std.mem.writeInt(u32, p[4..8], @intFromEnum(h2.ErrorCode.no_error), .big);
+        std.mem.writeInt(u32, p[4..8], @backingInt(h2.ErrorCode.no_error), .big);
         var ob: [64]u8 = undefined;
         var out = h2.OutBuf.init(&ob);
         try out.frame(.goaway, 0, 0, &p);
@@ -1889,7 +1889,7 @@ test "a client GOAWAY still gets its in-flight response, and new streams are ref
     while (try cl.readFrame()) |f| {
         if (f.header.stream_id == 3) {
             try testing.expectEqual(h2.FrameType.rst_stream, f.header.frame_type);
-            try testing.expectEqual(@intFromEnum(h2.ErrorCode.refused_stream), std.mem.readInt(u32, f.payload[0..4], .big));
+            try testing.expectEqual(@backingInt(h2.ErrorCode.refused_stream), std.mem.readInt(u32, f.payload[0..4], .big));
             saw_rst3 = true;
         } else if (f.header.stream_id == 1) {
             frames1 += 1;

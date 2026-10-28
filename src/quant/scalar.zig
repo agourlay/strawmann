@@ -564,7 +564,7 @@ test "quantizeOne clamps rather than wrapping" {
 }
 
 test "degenerate training data does not divide by zero" {
-    var values = [_]f32{3.5} ** 100;
+    var values: [100]f32 = @splat(3.5);
     const p = try trainOn(testing.allocator, &values, 8);
     try testing.expect(p.alpha > 0);
     // Everything maps to one code and decodes back to the constant.

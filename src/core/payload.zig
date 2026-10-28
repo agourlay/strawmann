@@ -385,7 +385,7 @@ pub const Kind = enum(u8) {
 
     /// `PayloadSchemaType`.
     pub fn schemaType(self: Kind) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 
@@ -824,7 +824,7 @@ pub const Store = struct {
         name: []const u8,
         opts: text.tokenizer.Options,
         count: usize,
-        deleted: *const std.DynamicBitSet,
+        deleted: *const std.bit_set.Dynamic,
     ) !void {
         for (self.fields.items) |f| {
             if (std.mem.eql(u8, f.name, name)) {
@@ -1301,7 +1301,7 @@ test "the index selects exactly the matching points, whether built before or aft
     // 64 points, keyword `a` = "k<i % 4>", indexed after the first half.
     for (0..64) |i| {
         if (i == 32) try store.createIndex(testing.allocator, "a", .keyword, 32);
-        const s = try std.fmt.bufPrint(&nbuf, "k{d}", .{i % 4});
+        const s = try std.mem.print(&nbuf, "k{d}", .{i % 4});
         try store.set(testing.allocator, @intCast(i), mapBytes(&m, &.{entryBytes(&e, "a", value_string, s)}), 3);
     }
     var bits: [2]u64 = undefined;

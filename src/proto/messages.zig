@@ -1478,7 +1478,7 @@ pub const PointsOperationResponse = struct {
         {
             const n = try w.beginNested(1, 2);
             try w.writeVarintField(1, self.operation_id);
-            try w.writeVarintField(2, @intFromEnum(self.status));
+            try w.writeVarintField(2, @backingInt(self.status));
             try w.endNested(n);
         }
         try w.writeDoubleField(2, self.time);

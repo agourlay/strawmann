@@ -92,12 +92,12 @@ pub const Tier = enum {
 /// width a `Tier` names, as a suffix for labels: `""` on a plain SSE2 build,
 /// `"+fma+vex"` on x86_64_v3, `"+fma+evex"` on an AVX-512 build.
 pub const compiled_feature_suffix: []const u8 = blk: {
-    if (builtin.cpu.arch != .x86_64) break :blk "";
+    if (builtin.target.cpu.arch != .x86_64) break :blk "";
     var s: []const u8 = "";
-    if (builtin.cpu.has(.x86, .fma)) s = s ++ "+fma";
-    if (builtin.cpu.has(.x86, .avx512f)) {
+    if (builtin.target.cpu.has(.x86, .fma)) s = s ++ "+fma";
+    if (builtin.target.cpu.has(.x86, .avx512f)) {
         s = s ++ "+evex";
-    } else if (builtin.cpu.has(.x86, .avx)) {
+    } else if (builtin.target.cpu.has(.x86, .avx)) {
         s = s ++ "+vex";
     }
     break :blk s;
@@ -107,7 +107,7 @@ pub const compiled_feature_suffix: []const u8 = blk: {
 /// see the module doc. A build for `x86_64_v3` reports `avx2` even on a Zen 5
 /// host, because that is genuinely all its code contains.
 pub fn compiledMaxTier() Tier {
-    if (builtin.cpu.arch != .x86_64) return .scalar;
+    if (builtin.target.cpu.arch != .x86_64) return .scalar;
     // Mirrors `std.simd.suggestVectorLength`: `prefer_256_bit` caps the
     // effective width even when avx512f is present, which is exactly the trap
     // documented in `build.zig`.
@@ -125,7 +125,7 @@ pub fn compiledMaxTier() Tier {
 /// running below the host's capability is a fact worth seeing rather than
 /// inferring.
 pub fn hostMaxTier() Tier {
-    if (builtin.cpu.arch != .x86_64) return .scalar;
+    if (builtin.target.cpu.arch != .x86_64) return .scalar;
 
     // Order matters here, and getting it wrong faults rather than mis-reports.
     //
@@ -177,7 +177,7 @@ pub fn hostMaxTier() Tier {
 /// hundred cycles, so the answer is probed once and cached; ingest calls this
 /// per vector.
 pub fn hostHasAvxFma() bool {
-    if (builtin.cpu.arch != .x86_64) return false;
+    if (builtin.target.cpu.arch != .x86_64) return false;
     // 0 = not yet probed, 1 = no, 2 = yes. A benign race: two threads probing
     // at once compute the same value.
     const cached = host_avx_fma.load(.acquire);
@@ -272,7 +272,7 @@ pub const Vtable = struct {
 /// the tier it actually got.
 pub fn vtableFor(requested: Tier) Vtable {
     const max = compiledMaxTier();
-    const tier: Tier = if (@intFromEnum(requested) > @intFromEnum(max)) max else requested;
+    const tier: Tier = if (@backingInt(requested) > @backingInt(max)) max else requested;
 
     return switch (tier) {
         .scalar => .{
@@ -331,9 +331,9 @@ pub const active: Vtable = blk: {
 // -------------------------------------------------------------------------
 
 test "tier ordering matches lane width" {
-    try std.testing.expect(@intFromEnum(Tier.scalar) < @intFromEnum(Tier.sse));
-    try std.testing.expect(@intFromEnum(Tier.sse) < @intFromEnum(Tier.avx2));
-    try std.testing.expect(@intFromEnum(Tier.avx2) < @intFromEnum(Tier.avx512));
+    try std.testing.expect(@backingInt(Tier.scalar) < @backingInt(Tier.sse));
+    try std.testing.expect(@backingInt(Tier.sse) < @backingInt(Tier.avx2));
+    try std.testing.expect(@backingInt(Tier.avx2) < @backingInt(Tier.avx512));
     try std.testing.expectEqual(@as(usize, 1), Tier.scalar.f32Lanes());
     try std.testing.expectEqual(@as(usize, 16), Tier.avx512.f32Lanes());
 }
@@ -341,7 +341,7 @@ test "tier ordering matches lane width" {
 test "vtableFor clamps a request beyond what the build can execute" {
     const max = compiledMaxTier();
     const v = vtableFor(.avx512);
-    try std.testing.expect(@intFromEnum(v.tier) <= @intFromEnum(max));
+    try std.testing.expect(@backingInt(v.tier) <= @backingInt(max));
 
     // Scalar is always available, so it is never clamped.
     try std.testing.expectEqual(Tier.scalar, vtableFor(.scalar).tier);
@@ -401,11 +401,11 @@ test "tierFromOption round-trips the documented spellings" {
 test "hostHasAvxFma is stable across calls and matches a fresh probe" {
     const first = hostHasAvxFma();
     for (0..8) |_| try std.testing.expectEqual(first, hostHasAvxFma());
-    if (builtin.cpu.arch == .x86_64) {
+    if (builtin.target.cpu.arch == .x86_64) {
         try std.testing.expectEqual(probeHostAvxFma(), first);
         // A build that has FMA in its own feature set can only be running on
         // a host that has it, otherwise nothing here would execute at all.
-        if (builtin.cpu.has(.x86, .fma)) try std.testing.expect(first);
+        if (builtin.target.cpu.has(.x86, .fma)) try std.testing.expect(first);
     } else {
         try std.testing.expect(!first);
     }
@@ -420,10 +420,10 @@ test "Vtable.label names the width and the compiled feature set" {
     try std.testing.expect(std.mem.endsWith(u8, sse.label(), compiled_feature_suffix ++ "]"));
     // On a build with FMA the bare `sse` would be a lie by omission; the label
     // must say so.
-    if (builtin.cpu.arch == .x86_64 and builtin.cpu.has(.x86, .fma)) {
+    if (builtin.target.cpu.arch == .x86_64 and builtin.target.cpu.has(.x86, .fma)) {
         try std.testing.expect(std.mem.indexOf(u8, sse.label(), "+fma") != null);
     }
-    if (builtin.cpu.arch == .x86_64 and !builtin.cpu.has(.x86, .avx)) {
+    if (builtin.target.cpu.arch == .x86_64 and !builtin.target.cpu.has(.x86, .avx)) {
         try std.testing.expectEqualStrings("sse[4 f32 lanes]", sse.label());
     }
 }

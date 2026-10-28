@@ -1376,7 +1376,7 @@ test "e2e: a TurboQuant collection serves its nearest neighbours, and with Manha
     }
     for ([_]u64{ 0, 1, 2, 3 }) |bits| {
         var name_buf: [8]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "tq{d}", .{bits});
+        const name = try std.mem.print(&name_buf, "tq{d}", .{bits});
         // Dot (3), so each stored vector's own score leads.
         const resp = try c.call("/qdrant.Collections/Create", try Create.body(&req_buf, name, dim, 3, bits), &out);
         try testing.expectEqual(grpc.Status.ok, resp.status);
@@ -1803,7 +1803,7 @@ const TmpDir = struct {
 
     fn make(tag: []const u8) !TmpDir {
         var d = TmpDir{};
-        const p = try std.fmt.bufPrint(&d.path, "/tmp/strawmann-place-{s}\x00", .{tag});
+        const p = try std.mem.print(&d.path, "/tmp/strawmann-place-{s}\x00", .{tag});
         d.len = p.len - 1;
         // The linux syscalls directly, as `storage.zig`'s own tests do: this
         // has to work the same way the code under test opens its files.
@@ -1817,7 +1817,7 @@ const TmpDir = struct {
 
     /// A NUL-terminated path inside this directory.
     fn file(self: *const TmpDir, buf: []u8, name: []const u8) [:0]const u8 {
-        const p = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ self.slice(), name }) catch unreachable;
+        const p = std.mem.printSentinel(buf, "{s}/{s}", .{ self.slice(), name }, 0) catch unreachable;
         return p;
     }
 
@@ -1841,7 +1841,7 @@ const TmpDir = struct {
             _ = linux.unlink(self.file(&buf, n).ptr);
         }
         var z: [64]u8 = undefined;
-        const p = std.fmt.bufPrintZ(&z, "{s}", .{self.slice()}) catch return;
+        const p = std.mem.printSentinel(&z, "{s}", .{self.slice()}, 0) catch return;
         _ = linux.rmdir(p.ptr);
     }
 };
@@ -2468,7 +2468,7 @@ test "e2e: a top-level hnsw_config asking for an on-disk graph is refused, on_di
         .{ .on_disk = false, .memory = 1, .want = .unimplemented },
     }, 0..) |case, i| {
         var name_buf: [8]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "od{d}", .{i});
+        const name = try std.mem.print(&name_buf, "od{d}", .{i});
         var w = wire.Writer.init(&req_buf);
         try w.writeStringField(1, name);
         {
@@ -2514,7 +2514,7 @@ test "e2e: the binary storage encodings are accepted, and scalar query encodings
         .{ .oneof = 3, .field = 1, .value = 1, .want = .ok, .name_in_msg = "" },
     }, 0..) |case, i| {
         var name_buf: [8]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "bq{d}", .{i});
+        const name = try std.mem.print(&name_buf, "bq{d}", .{i});
         var w = wire.Writer.init(&req_buf);
         try w.writeStringField(1, name);
         {

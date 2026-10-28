@@ -359,8 +359,8 @@ pub fn planeBytes(bits: Bits, padded: usize) usize {
 }
 
 pub fn hasIntKernel() bool {
-    return builtin.zig_backend == .stage2_llvm and builtin.cpu.has(.x86, .avx512bw) and
-        builtin.cpu.has(.x86, .avx512vnni);
+    return builtin.zig_backend == .stage2_llvm and builtin.target.cpu.has(.x86, .avx512bw) and
+        builtin.target.cpu.has(.x86, .avx512vnni);
 }
 
 /// Integerise the prepared query for the 2- and 4-bit kernels: Qdrant's
@@ -451,7 +451,7 @@ fn quantile(v: []const f32, p: f64) f32 {
 // -------------------------------------------------------------------------
 
 fn hasVpermps() bool {
-    return builtin.zig_backend == .stage2_llvm and builtin.cpu.has(.x86, .avx512f);
+    return builtin.zig_backend == .stage2_llvm and builtin.target.cpu.has(.x86, .avx512f);
 }
 
 /// `out[j] = tbl[idx[j] & 15]`: one `vpermps zmm`, the whole 4-bit codebook
@@ -684,7 +684,7 @@ test "the rotation is orthonormal and its maps are permutations" {
     defer rot.deinit(testing.allocator);
     // Each map is a permutation.
     for (0..3) |p| {
-        var seen = [_]bool{false} ** 24;
+        var seen: [24]bool = @splat(false);
         for (rot.maps[p * 24 ..][0..24]) |k| seen[k] = true;
         for (seen) |s| try testing.expect(s);
     }

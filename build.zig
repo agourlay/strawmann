@@ -115,7 +115,7 @@ const BuildOptions = struct {
     isa_build_name: []const u8,
     visited_set: []const u8,
     live_insert: bool,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 };
 
 fn buildOptions(b: *std.Build, o: BuildOptions) *std.Build.Module {
@@ -144,7 +144,15 @@ fn buildOptions(b: *std.Build, o: BuildOptions) *std.Build.Module {
     // recorded `isa build: native` and nothing contradicted it — the two were
     // told apart afterwards only by file size. The mode is the single build fact
     // that invalidates a number outright, so it travels with the run.
-    opts.addOption([]const u8, "optimize_mode", @tagName(o.optimize));
+    // Printed under the pre-0.17 names: Zig 0.17 renamed the modes to
+    // `debug`/`safe`/`fast`/`small`, and the harness and every recorded run
+    // read this line as `ReleaseFast`.
+    opts.addOption([]const u8, "optimize_mode", switch (o.optimize) {
+        .debug => "Debug",
+        .safe => "ReleaseSafe",
+        .fast => "ReleaseFast",
+        .small => "ReleaseSmall",
+    });
     return opts.createModule();
 }
 
@@ -234,7 +242,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run the strawmann server");
     run_step.dependOn(&run_cmd.step);
 
@@ -306,7 +314,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("bench/micro/main.zig"),
             .target = target,
             // §9: results are only ever quoted from ReleaseFast.
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "strawmann", .module = mod },
                 .{ .name = "build_options", .module = options_mod },
@@ -320,7 +328,7 @@ pub fn build(b: *std.Build) void {
     // `zig build bench` with no `-Doptimize` would otherwise leave a Debug
     // server in `zig-out/bin`, which the harness starts by path.
     run_bench_micro.step.dependOn(&b.addInstallArtifact(bench_micro, .{}).step);
-    if (b.args) |args| run_bench_micro.addArgs(args);
+    run_bench_micro.addPassthruArgs();
     const bench_step = b.step("bench", "Run the hardware + kernel microbenchmarks");
     bench_step.dependOn(&run_bench_micro.step);
 
@@ -333,7 +341,7 @@ pub fn build(b: *std.Build) void {
     const graph_diff_mod = b.createModule(.{
         .root_source_file = b.path("bench/graphdiff/main.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
         .imports = &.{
             .{ .name = "strawmann", .module = mod },
             .{ .name = "build_options", .module = options_mod },
@@ -356,7 +364,7 @@ pub fn build(b: *std.Build) void {
 
     const run_graph_diff = b.addRunArtifact(graph_diff);
     run_graph_diff.step.dependOn(&install_graph_diff.step);
-    if (b.args) |args| run_graph_diff.addArgs(args);
+    run_graph_diff.addPassthruArgs();
     const graph_diff_step = b.step("graph-diff", "Compare N builds of one corpus (findings 34)");
     graph_diff_step.dependOn(&run_graph_diff.step);
 
@@ -392,8 +400,8 @@ pub fn build(b: *std.Build) void {
             .abi = .gnu,
         };
         if (isa.model) |m| q.cpu_model = .{ .explicit = m };
-        for (isa.add) |f| q.cpu_features_add.addFeature(@intFromEnum(f));
-        for (isa.sub) |f| q.cpu_features_sub.addFeature(@intFromEnum(f));
+        for (isa.add) |f| q.cpu_features_add.addFeature(@backingInt(f));
+        for (isa.sub) |f| q.cpu_features_sub.addFeature(@backingInt(f));
 
         const isa_target = b.resolveTargetQuery(q);
 
@@ -409,13 +417,13 @@ pub fn build(b: *std.Build) void {
             // matrix.
             .visited_set = visited_set,
             .live_insert = live_insert,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         });
 
         const isa_mod = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
             .target = isa_target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "build_options", .module = isa_options_mod },
             },
@@ -426,7 +434,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("bench/micro/main.zig"),
                 .target = isa_target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .imports = &.{
                     .{ .name = "strawmann", .module = isa_mod },
                     .{ .name = "build_options", .module = isa_options_mod },
@@ -439,7 +447,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),
                 .target = isa_target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .imports = &.{
                     .{ .name = "strawmann", .module = isa_mod },
                     .{ .name = "build_options", .module = isa_options_mod },
@@ -455,7 +463,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("bench/isa/asm_probe.zig"),
                 .target = isa_target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .imports = &.{
                     .{ .name = "strawmann", .module = isa_mod },
                     .{ .name = "build_options", .module = isa_options_mod },

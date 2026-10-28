@@ -286,13 +286,13 @@ pub const Header = extern struct {
     /// `kind_field` read as what a `.vectors` header stores in it: the metric,
     /// as a `Distance` proto value for `Metric.fromProto`.
     pub fn metricField(self: *const Header) u32 {
-        std.debug.assert(self.kind == @intFromEnum(Kind.vectors));
+        std.debug.assert(self.kind == @backingInt(Kind.vectors));
         return self.kind_field;
     }
 
     /// `kind_field` read as what a `.graph` header stores in it.
     pub fn entryPointField(self: *const Header) u32 {
-        std.debug.assert(self.kind == @intFromEnum(Kind.graph));
+        std.debug.assert(self.kind == @backingInt(Kind.graph));
         return self.kind_field;
     }
 
@@ -319,7 +319,7 @@ pub const Header = extern struct {
         // Its own error. Reporting `BadMagic` for a well-formed header of the
         // wrong kind names the wrong failure: the magic matched, the file is
         // ours, it is the pairing that is wrong.
-        if (self.kind != @intFromEnum(expect_kind)) return Error.BadKind;
+        if (self.kind != @backingInt(expect_kind)) return Error.BadKind;
     }
 };
 
@@ -678,20 +678,20 @@ fn diskPath(buf: []u8, name: []const u8) ?[]const u8 {
     @memcpy(z[0..dir.len], dir);
     z[dir.len] = 0;
     _ = linux.mkdir(@ptrCast(&z), 0o755); // EEXIST is fine
-    return std.fmt.bufPrint(buf, "{s}/strawmann-{s}", .{ dir, name }) catch null;
+    return std.mem.print(buf, "{s}/strawmann-{s}", .{ dir, name }) catch null;
 }
 
 /// A scratch path under `/tmp`, which is enough for a header round-trip and
 /// nothing that needs a real block device (`diskPath` is for that).
 fn tmpPath(buf: []u8, name: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, "/tmp/strawmann-test-{s}", .{name}) catch unreachable;
+    return std.mem.print(buf, "/tmp/strawmann-test-{s}", .{name}) catch unreachable;
 }
 
 test "header round-trips and the CRC covers only the header" {
     var h = Header{
         .magic = 0,
         .format_version = 0,
-        .kind = @intFromEnum(Header.Kind.vectors),
+        .kind = @backingInt(Header.Kind.vectors),
         .dim = 768,
         .count = 1000,
         .capacity = 1_100_000,
@@ -751,7 +751,7 @@ test "write then read a file under every placement" {
         var h = Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @intFromEnum(Header.Kind.vectors),
+            .kind = @backingInt(Header.Kind.vectors),
             .dim = 16,
             .count = capacity,
             .capacity = capacity,
@@ -804,7 +804,7 @@ test "§5.5: the pinned placement requests huge pages, the mapped ones do not" {
     var h = Header{
         .magic = 0,
         .format_version = 0,
-        .kind = @intFromEnum(Header.Kind.vectors),
+        .kind = @backingInt(Header.Kind.vectors),
         .dim = 1024,
         .count = 64,
         .capacity = 64,
@@ -852,7 +852,7 @@ test "§5.5: the pinned placement is actually huge-backed when THP allows it" {
     var h = Header{
         .magic = 0,
         .format_version = 0,
-        .kind = @intFromEnum(Header.Kind.vectors),
+        .kind = @backingInt(Header.Kind.vectors),
         .dim = 1024,
         .count = rows,
         .capacity = rows,
@@ -928,7 +928,7 @@ test "a mapped placement is writable and changes are visible through a fresh rea
     var h = Header{
         .magic = 0,
         .format_version = 0,
-        .kind = @intFromEnum(Header.Kind.vectors),
+        .kind = @backingInt(Header.Kind.vectors),
         .dim = 16,
         .count = 16,
         .capacity = 16,
@@ -1010,7 +1010,7 @@ test "cached prefaults its pages and cold does not" {
         var h = Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @intFromEnum(Header.Kind.vectors),
+            .kind = @backingInt(Header.Kind.vectors),
             .dim = 1024,
             .count = capacity,
             .capacity = capacity,

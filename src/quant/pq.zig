@@ -620,7 +620,7 @@ test "manhattan ADC has the right sign and value" {
 
     var qt = try QueryTable.init(testing.allocator, &cb);
     defer qt.deinit(testing.allocator);
-    var q = [_]f32{0.0} ** dim;
+    var q: [dim]f32 = @splat(0.0);
     qt.build(&cb, .manhattan, &q);
 
     // Codes (0,0): reconstruction is all zeros, L1 distance 0.

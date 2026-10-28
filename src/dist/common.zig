@@ -60,8 +60,8 @@ pub fn treeReduce(comptime V: type, comptime N: usize, acc: [N]V) V {
 /// On x86 that is the FMA feature (Haswell / Piledriver and later, part of
 /// x86_64_v3). AArch64 has had `fmla` since ARMv8.0, so it is always true
 /// there. Anything else is assumed not to.
-pub const has_hw_fma = switch (builtin.cpu.arch) {
-    .x86, .x86_64 => builtin.cpu.has(.x86, .fma),
+pub const has_hw_fma = switch (builtin.target.cpu.arch) {
+    .x86, .x86_64 => builtin.target.cpu.has(.x86, .fma),
     .aarch64, .aarch64_be => true,
     else => false,
 };
@@ -195,7 +195,7 @@ test "treeReduce of a single accumulator is the identity" {
 }
 
 test "nativeLanes is at least 4 for f32 on x86_64" {
-    if (builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+    if (builtin.target.cpu.arch != .x86_64) return error.SkipZigTest;
     try std.testing.expect(nativeLanes(f32) >= 4);
 }
 

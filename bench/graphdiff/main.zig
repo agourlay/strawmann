@@ -980,7 +980,7 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const alloc = gpa_state.allocator();
 
@@ -1269,8 +1269,9 @@ test "the default seed is the engine's" {
     // membership, a different entry point, a different graph to diff. The
     // literal is duplicated from `core.Config` because a bench root should not
     // widen the engine's API; this is what stops it drifting.
-    const field = std.meta.fieldInfo(strawmann.core.Config, .seed);
-    try testing.expectEqual(field.defaultValue().?, (Args{}).seed);
+    const info = @typeInfo(strawmann.core.Config).@"struct";
+    const i = std.meta.fieldIndex(strawmann.core.Config, "seed").?;
+    try testing.expectEqual(info.field_attrs[i].defaultValue(info.field_types[i]).?, (Args{}).seed);
 }
 
 test "the argument parser refuses what it cannot measure" {

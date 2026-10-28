@@ -54,9 +54,9 @@ pub const Persistence = struct {
     /// asserting made that illegal behaviour in ReleaseFast, which is the mode
     /// §9 quotes numbers from. `ensureDir` five lines down already returns this
     /// error for the same buffer, and `Collection.init` returns one for the
-    /// same `bufPrint` — this was the only one of the three that asserted.
+    /// same `mem.print` — this was the only one of the three that asserted.
     fn path(buf: []u8, dir: []const u8, name: []const u8) ![]const u8 {
-        return std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, name }) catch
+        return std.mem.print(buf, "{s}/{s}", .{ dir, name }) catch
             error.PathTooLong;
     }
 
@@ -131,7 +131,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         var h = storage.Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @intFromEnum(storage.Header.Kind.vectors),
+            .kind = @backingInt(storage.Header.Kind.vectors),
             .dim = coll.config.dim,
             .count = n,
             .capacity = coll.config.capacity,
@@ -144,7 +144,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
                 storage.Header.Flags.normalised
             else
                 0,
-            .datatype = @intFromEnum(coll.config.datatype),
+            .datatype = @backingInt(coll.config.datatype),
             .seed = coll.config.seed,
             .graph_checksum = if (coll.graph) |g| g.checksum() else 0,
             .hnsw_m = @intCast(coll.config.hnsw_m),
@@ -164,7 +164,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         var h = storage.Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @intFromEnum(storage.Header.Kind.ids),
+            .kind = @backingInt(storage.Header.Kind.ids),
             .dim = 0,
             .count = n,
             .capacity = coll.config.capacity,
@@ -192,7 +192,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         var h = storage.Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @intFromEnum(storage.Header.Kind.deleted),
+            .kind = @backingInt(storage.Header.Kind.deleted),
             .dim = 0,
             .count = coll.deleted_count,
             .capacity = coll.config.capacity,
@@ -204,7 +204,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
             .header_crc = 0,
         };
         try storage.writeHeader(fd, &h);
-        // Serialise the bitmap word by word rather than casting the DynamicBitSet's
+        // Serialise the bitmap word by word rather than casting the bit set's
         // internals, whose representation is not part of its API.
         const tmp = try coll.alloc.alloc(u64, words);
         defer coll.alloc.free(tmp);
@@ -231,7 +231,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         var h = storage.Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @intFromEnum(storage.Header.Kind.payload),
+            .kind = @backingInt(storage.Header.Kind.payload),
             .dim = 0,
             .count = n,
             .capacity = coll.config.capacity,
@@ -274,7 +274,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         var h = storage.Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @intFromEnum(storage.Header.Kind.payload_schema),
+            .kind = @backingInt(storage.Header.Kind.payload_schema),
             .dim = 0,
             .count = coll.payload.fields.items.len,
             .capacity = coll.config.capacity,
@@ -290,7 +290,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         defer coll.alloc.free(buf);
         var w: usize = 0;
         for (coll.payload.fields.items) |f| {
-            buf[w] = @intFromEnum(f.kind);
+            buf[w] = @backingInt(f.kind);
             std.mem.writeInt(u16, buf[w + 1 ..][0..2], @intCast(f.name.len), .little);
             @memcpy(buf[w + 3 ..][0..f.name.len], f.name);
             w += 3 + f.name.len;
@@ -318,7 +318,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         var h = storage.Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @intFromEnum(storage.Header.Kind.graph),
+            .kind = @backingInt(storage.Header.Kind.graph),
             .dim = g.params.m,
             .count = g.count,
             .capacity = g.capacity,
@@ -670,7 +670,7 @@ test "a data dir longer than the path buffer is an error, not illegal behaviour"
     // This used to be `catch unreachable`: a clean error in Debug and illegal
     // behaviour in ReleaseFast, which is the mode §9 quotes numbers from.
     var buf: [512]u8 = undefined;
-    const long = "/" ** 600;
+    const long = &@as([600]u8, @splat('/'));
     try std.testing.expectError(error.PathTooLong, Persistence.path(&buf, long, "vectors.bin"));
 
     // And the ordinary case still produces the path it always did.
@@ -752,7 +752,7 @@ test "§6.4: payloads and the field indexes survive the round-trip" {
         const entry = try w.beginNested(3, 2);
         try w.writeStringField(1, "a");
         const val = try w.beginNested(2, 2);
-        try w.writeStringField(payload_mod.value_string, try std.fmt.bufPrint(&nbuf, "k{d}", .{i % 3}));
+        try w.writeStringField(payload_mod.value_string, try std.mem.print(&nbuf, "k{d}", .{i % 3}));
         try w.endNested(val);
         try w.endNested(entry);
         _ = try c.upsertWithPayload(.{ .num = i }, &v, w.written(), 3);
@@ -920,7 +920,7 @@ test "§6.4: a cosine collection records that it stored normalised vectors" {
     const dim = 16;
     var c = try makeCollection(dim, .cosine, 64);
     defer c.deinit();
-    var v = [_]f32{ 3, 4 } ++ [_]f32{0} ** 14;
+    var v = [_]f32{ 3, 4 } ++ @as([14]f32, @splat(0));
     _ = try c.upsert(.{ .num = 1 }, &v);
 
     const dir = "/tmp/strawmann-test-cosine";
@@ -1246,7 +1246,7 @@ test "§6.4: every storage datatype round-trips, and the header carries which" {
         var c = try collection.makeCollectionDt(dim, .euclid, dt, 512);
         defer c.deinit();
 
-        var prng = std.Random.DefaultPrng.init(0x0d7 + @as(u64, @intFromEnum(dt)));
+        var prng = std.Random.DefaultPrng.init(0x0d7 + @as(u64, @backingInt(dt)));
         const rnd = prng.random();
         for (0..n) |i| {
             var v: [dim]f32 = undefined;

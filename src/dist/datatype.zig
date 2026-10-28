@@ -222,7 +222,7 @@ test "the wire numbering is qdrant's and the storage numbering is ours" {
         try std.testing.expectEqual(d, Datatype.fromProto(d.toProto()).?);
     }
     // The tag values are the on-disk format and must not drift.
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(Datatype.float32));
+    try std.testing.expectEqual(@as(u8, 0), @backingInt(Datatype.float32));
 }
 
 test "§8.3's ingest normalisation rule is per datatype, not global" {

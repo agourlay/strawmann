@@ -399,8 +399,8 @@ test "encode then similarity reproduces the sign dot product" {
 }
 
 test "similarity is negated so higher is better" {
-    var a = [_]u64{0} ** 4;
-    var b = [_]u64{0} ** 4;
+    var a: [4]u64 = @splat(0);
+    var b: [4]u64 = @splat(0);
     try testing.expectEqual(@as(f32, 0.0), similarity(&a, &b));
     b[0] = 0xff;
     try testing.expectEqual(@as(f32, -8.0), similarity(&a, &b));
@@ -414,8 +414,8 @@ test "signDot fed to Metric.postprocess reproduces Qdrant's binary wire score" {
     // The ranking-only `similarity` (−100) would put −100, 10 and 100 on the
     // wire instead.
     const dim = 768;
-    var a = [_]u64{0} ** paddedWordsFor(dim);
-    var b = [_]u64{0} ** paddedWordsFor(dim);
+    var a: [paddedWordsFor(dim)]u64 = @splat(0);
+    var b: [paddedWordsFor(dim)]u64 = @splat(0);
     // 100 differing bits: one full word (64) plus 36 in the next.
     b[0] = std.math.maxInt(u64);
     b[1] = (@as(u64, 1) << 36) - 1;
@@ -430,7 +430,7 @@ test "signDot fed to Metric.postprocess reproduces Qdrant's binary wire score" {
 
     // And it ranks exactly as `similarity` does: fewer differing bits, higher
     // score, on both.
-    var c = [_]u64{0} ** paddedWordsFor(dim);
+    var c: [paddedWordsFor(dim)]u64 = @splat(0);
     c[0] = 0xff;
     try testing.expect(signDot(dim, &a, &c) > signDot(dim, &a, &b));
     try testing.expect(similarity(&a, &c) > similarity(&a, &b));

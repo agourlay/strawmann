@@ -128,7 +128,7 @@ test "--max-dim refuses a value the integer kernels could overflow at" {
     var w = std.Io.Writer.fixed(&buf);
     try usage(&w);
     var num: [16]u8 = undefined;
-    const spelled = try std.fmt.bufPrint(&num, "at most {d}", .{max_dim_limit});
+    const spelled = try std.mem.print(&num, "at most {d}", .{max_dim_limit});
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), spelled) != null);
 }
 
@@ -141,15 +141,22 @@ fn parse(comptime T: type, value: ?[]const u8) !T {
 /// A `net.Config` field's default. `Config` needs an address, so it cannot be
 /// instantiated just to read one off.
 fn serverDefault(comptime field: std.meta.FieldEnum(net.Config)) usize {
-    return std.meta.fieldInfo(net.Config, field).defaultValue().?;
+    return fieldDefault(net.Config, @tagName(field));
 }
 
 /// An `api.Engine` field's default, for the same reason `serverDefault` exists:
 /// the CLI's default must be the engine's, not a second copy of it that can
 /// drift (`--connections` said 8 while the server said 16, and the server won
 /// every run).
-fn engineDefault(comptime field: std.meta.FieldEnum(api.Engine)) std.meta.fieldInfo(api.Engine, field).type {
-    return std.meta.fieldInfo(api.Engine, field).defaultValue().?;
+fn engineDefault(comptime field: std.meta.FieldEnum(api.Engine)) @FieldType(api.Engine, @tagName(field)) {
+    return fieldDefault(api.Engine, @tagName(field));
+}
+
+/// The declared default of `T.name`, a compile error if it has none.
+fn fieldDefault(comptime T: type, comptime name: []const u8) @FieldType(T, name) {
+    const info = @typeInfo(T).@"struct";
+    const i = std.meta.fieldIndex(T, name).?;
+    return info.field_attrs[i].defaultValue(info.field_types[i]).?;
 }
 
 const Options = struct {
@@ -260,7 +267,7 @@ test "the CLI's connection default is the server's" {
     var w = std.Io.Writer.fixed(&buf);
     try usage(&w);
     var num: [64]u8 = undefined;
-    const spelled = try std.fmt.bufPrint(&num, "connections per io thr (default {d})", .{serverDefault(.connections_per_io)});
+    const spelled = try std.mem.print(&num, "connections per io thr (default {d})", .{serverDefault(.connections_per_io)});
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), spelled) != null);
 }
 
@@ -300,7 +307,7 @@ test "--io-threads, --workers and --streams refuse the values that hang or overf
     var w = std.Io.Writer.fixed(&buf);
     try usage(&w);
     var num: [32]u8 = undefined;
-    const spelled = try std.fmt.bufPrint(&num, "at most {d})", .{max_streams_limit});
+    const spelled = try std.mem.print(&num, "at most {d})", .{max_streams_limit});
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), spelled) != null);
 }
 
@@ -542,7 +549,7 @@ pub fn main(init: std.process.Init) !void {
     defer {
         const st = srv.totalStats();
         var buf: [512]u8 = undefined;
-        const line = std.fmt.bufPrint(
+        const line = std.mem.print(
             &buf,
             "\nstats: accepted={d} connections_refused={d} requests={d} submit_full={d}\n",
             .{ st.accepted, st.connections_refused, st.requests, st.submit_full },

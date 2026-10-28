@@ -171,9 +171,9 @@ fn fmtBytes(v: ?usize) HumanBytes {
         return out;
     };
     const txt = if (n >= 1024 * 1024 and n % (1024 * 1024) == 0)
-        std.fmt.bufPrint(&out.buf, "{d} MiB", .{n / (1024 * 1024)}) catch unreachable
+        std.mem.print(&out.buf, "{d} MiB", .{n / (1024 * 1024)}) catch unreachable
     else
-        std.fmt.bufPrint(&out.buf, "{d} KiB", .{n / 1024}) catch unreachable;
+        std.mem.print(&out.buf, "{d} KiB", .{n / 1024}) catch unreachable;
     out.len = txt.len;
     return out;
 }

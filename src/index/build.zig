@@ -541,7 +541,7 @@ pub const Builder = struct {
     /// and its evict loop runs only on a full row -- and, being outside
     /// `Builder`, cannot call this.
     inline fn assertEmptiesAreASuffix(list: []const u32) void {
-        if (!std.debug.runtime_safety) return;
+        if (!@import("builtin").mode.runtimeSafety()) return;
         var seen_empty = false;
         for (list) |n| {
             if (n == empty_neighbour) {

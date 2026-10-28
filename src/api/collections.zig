@@ -401,7 +401,7 @@ pub fn getCollectionInfo(ctx: *Context, req: *const server.Request, body: []cons
     var w = wire.Writer.init(out.available());
     const outer = w.beginNested(1, 3) catch return err(req, .internal, "response buffer overflow");
 
-    w.writeVarintField(1, @intFromEnum(collectionStatus(coll.status()))) catch
+    w.writeVarintField(1, @backingInt(collectionStatus(coll.status()))) catch
         return err(req, .internal, "buf");
     // OptimizerStatus is a message with `bool ok = 1; string error = 2;`.
     // §2 requires it present and Ok. Note `ok = true` is written explicitly
