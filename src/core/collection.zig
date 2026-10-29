@@ -1578,7 +1578,7 @@ pub fn monotonicNs() u64 {
 /// version is inside. So the publish is a seq_cst read-modify-write and the
 /// counter read after it is seq_cst, and the reader's two accesses are
 /// seq_cst as well, which is the four-way ordering the store-buffering
-/// litmus test needs. Zig 0.16 has no `@fence`; a seq_cst RMW is the
+/// litmus test needs. Zig has no `@fence` (0.16, 0.17); a seq_cst RMW is the
 /// portable spelling of the full barrier, and on x86 the reader's cost is
 /// nil (a locked RMW already is one, a seq_cst load is a plain load).
 fn beginInPlace(self: *Collection) void {

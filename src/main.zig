@@ -132,6 +132,18 @@ test "--max-dim refuses a value the integer kernels could overflow at" {
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), spelled) != null);
 }
 
+test "the banner's build mode keeps the pre-0.17 names" {
+    // `provenance.py` reads `build mode : ReleaseFast` and the report refuses
+    // any other spelling, so `build.zig` maps 0.17's `.fast` back by hand.
+    const want = switch (@import("builtin").mode) {
+        .debug => "Debug",
+        .safe => "ReleaseSafe",
+        .fast => "ReleaseFast",
+        .small => "ReleaseSmall",
+    };
+    try std.testing.expectEqualStrings(want, build_options.optimize_mode);
+}
+
 /// Parse a required numeric argument, turning a missing value into the same
 /// error every flag reports.
 fn parse(comptime T: type, value: ?[]const u8) !T {

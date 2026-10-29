@@ -95,7 +95,7 @@ pub inline fn mulAdd(comptime V: type, a: V, b: V, c: V) V {
 /// A **correctly rounded** `x * y + z` in f32, without hardware FMA.
 ///
 /// Why `@mulAdd(f32, ...)` is not enough on a no-FMA build: LLVM lowers it to
-/// compiler_rt's `fmaf`, and Zig 0.16's `lib/compiler_rt/fma.zig` computes
+/// compiler_rt's `fmaf`, and `lib/compiler_rt/fma.zig` (0.16 and 0.17) computes
 /// `@floatCast(@as(f64, x) * y + z)`, which rounds twice (once to f64, once to
 /// f32) and is therefore *not* the single rounding an FMA promises.
 /// Counterexample: `x = 4.0009613, y = 15.996156, z = 2^30` gives 1073741952

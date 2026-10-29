@@ -643,8 +643,10 @@ test "the dependent loop scores through an opaque function pointer, not a compti
     // And `run` takes the spec at runtime, so the pointer's target is unknown
     // to the optimiser at the call site.
     const RunFn = @TypeOf(run);
-    const params = @typeInfo(RunFn).@"fn".param_types;
-    try std.testing.expectEqual(Spec, params[0].?);
+    const fn_info = @typeInfo(RunFn).@"fn";
+    // A `comptime spec: Spec` keeps the type but makes `run` generic.
+    try std.testing.expect(!fn_info.is_generic);
+    try std.testing.expectEqual(Spec, fn_info.param_types[0].?);
     // A spec built here still routes through the pointer, and scores.
     const spec = hammingSpec(64);
     try std.testing.expect(@TypeOf(spec.score) == *const fn (*const anyopaque, [*]const u8, usize, usize) f64);

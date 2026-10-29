@@ -69,8 +69,9 @@ Newest entries at the bottom of each section.
 
 - **Zig 0.16.0 to 0.17.0** (2026-10-28). The pin moved, so by §9 the compiler
   changed under every number: a run on 0.17 is not comparable to one on 0.16
-  until it is re-measured, and `provenance.py` records `zig` per run so the
-  two cannot be mixed by accident. LLVM goes to 22, but loop vectorisation
+  until it is re-measured. `bench/setup.py` hashes `zig=<version>` into the
+  run's `env_hash`, which `compare` and the regression floors refuse on, so
+  the two cannot be mixed by accident. LLVM goes to 22, but loop vectorisation
   stays disabled as it was in 0.16 (the workaround is lifted in 0.18 with
   LLVM 23), so the kernels' explicit `@Vector` code is what carries the ISA
   matrix on both. Two changes could alter behaviour without a compile error,
