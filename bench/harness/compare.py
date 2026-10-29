@@ -1814,6 +1814,9 @@ LANDING_BAR_MAX = 5.0
 LANDING_REFUSALS = {
     "parity": "within this dataset's noise band: no measured difference, not a small one",
     "-": "not compared: the full table says why",
+    "offered": "an open-loop row: both engines kept up with the offered rate, which is not a speed",
+    "short of offer": "an open-loop row an engine did not keep up with: the full table says by how much",
+    "saturated": "an open-loop row that queued past a second: the full table says which engine",
 }
 
 
@@ -1834,12 +1837,13 @@ def human_count(n: int | None) -> str:
 def landing_ratio_cell(ratio: str) -> str:
     """A ratio with its bar, or the refusal text alone.
 
-    Only a number gets a bar. `parity`, `-` and `offered` are the table's
+    Only a number gets a bar. The words in `LANDING_REFUSALS` are the table's
     refusals and keep their words: a bar drawn for them would be a number the
     comparison declined to print.
     """
     try:
-        x = float(ratio.removesuffix("x"))
+        # The equal-recall row prints `1,234.50x`, which is still a number.
+        x = float(ratio.removesuffix("x").replace(",", ""))
     except ValueError:
         # The word alone left a reader to guess what it declined to say.
         why = LANDING_REFUSALS.get(ratio, "not compared: the full table says why")
@@ -1851,6 +1855,17 @@ def landing_ratio_cell(ratio: str) -> str:
     return (f'<td><div class="ratio {cls}" title="{html.escape(said)}">'
             f'<span class="track" aria-hidden="true"><i style="width:{width:.1f}%"></i></span>'
             f'<b>{html.escape(ratio)}</b></div></td>')
+
+
+def landing_text_note(note: str, labels: tuple[str, ...]) -> str:
+    """`text_index_note` as a panel says it: the engine rather than the run's
+    label, and "this panel" where the report says "this page". Both rewrites
+    match `report_data.text_segment_note`'s wording, which a test pins."""
+    note = note.removeprefix("**Which Qdrant text index.** ")
+    for lab in labels:
+        if note.startswith(lab):
+            note = "Qdrant" + note[len(lab):]
+    return note.replace("Every ratio on this page", "Every ratio in this panel")
 
 
 def published_report(dataset: str, a_label: str, b_label: str) -> str | None:
@@ -1975,13 +1990,7 @@ def landing_block(a_label: str, b_label: str,
     if text:
         # Which of Qdrant's text indexes served the rows, read back per
         # segment, beside the ratios it qualifies.
-        note = text_index_note(a_label, b_label).removeprefix("**Which Qdrant text index.** ")
-        # A panel, not a report: the engine rather than the run's label, and
-        # "this panel" where the report says "this page".
-        for lab in (a_label, b_label):
-            if note.startswith(lab):
-                note = "Qdrant" + note[len(lab):]
-        note = note.replace("Every ratio on this page", "Every ratio in this panel")
+        note = landing_text_note(text_index_note(a_label, b_label), (a_label, b_label))
         if note:
             out.append(f"    {html.escape(note)}")
     else:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import html
 import importlib
 import io
 import json
@@ -2244,6 +2245,31 @@ class LandingBlockTests(unittest.TestCase):
         self.assertIn("noise band", got)
         self.assertNotIn("track", got)
         self.assertIn("full table says why", cell("-"))
+        # Every refusal the table can print has its own tooltip, not the
+        # fallback, and a ratio with a thousands separator is still a ratio.
+        for word, why in self.m["compare"].LANDING_REFUSALS.items():
+            self.assertIn(html.escape(why), cell(word))
+        self.assertIn('class="track"', cell("1,234.50x"))
+
+    def test_a_text_panel_names_the_engine_not_the_run(self):
+        """`landing_text_note` rewrites `text_segment_note`'s wording; this pins
+        the two together, in both of that note's shapes."""
+        rd, cmp = self.m["report_data"], self.m["compare"]
+        sm = rd.Run("sm-scifact", [], "", True, "h", meta={"strawmann": {"commit": "c"}})
+        segs = {"collections": [{"collection": self.m["workloads"].W15_COLLECTION,
+                                 "segments": [{"points": 10, "appendable": False}]}]}
+        notes = []
+        for collections in (segs, {}):
+            qd = rd.Run("qd-scifact", [], "", True, "h", meta={"qdrant": {"version": "1.19"}},
+                        collections=collections)
+            note = rd.text_segment_note([sm, qd])
+            got = cmp.landing_text_note(f"**Which Qdrant text index.** {note}",
+                                        ("sm-scifact", "qd-scifact"))
+            self.assertTrue(got.startswith("Qdrant"), got)
+            self.assertNotIn("qd-scifact", got)
+            self.assertNotIn("this page", got)
+            notes.append(got)
+        self.assertIn("Every ratio in this panel", notes[0])
 
     def test_the_page_jumps_to_every_panel(self):
         """The nav is hand-written in the page's shell: a dataset added to the
