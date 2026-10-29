@@ -224,6 +224,13 @@ pub const TextIndex = struct {
         const avg = self.avgdl() orelse return;
         try scratch.cover(self.docs.items.len);
         scratch.touched.clearRetainingCapacity();
+        // Every posting writes its point past the end of `touched` and keeps
+        // it only if new, which mispredicts far less than a branch where most
+        // postings are a new point. A point is new at most once, and the write
+        // lands at most at the postings walked so far, hence the capacity.
+        var postings: usize = 0;
+        for (scratch.terms.items) |term| postings += self.postings.items[term].items.len;
+        try scratch.touched.ensureTotalCapacity(scratch.gpa, @min(postings, self.docs.items.len + 1));
         const may_be_stale = self.stale_postings > 0;
         for (scratch.terms.items) |term| {
             const term_idf = self.idf(term);
@@ -237,13 +244,21 @@ pub const TextIndex = struct {
                 const len: f32 = @floatFromInt(p.len);
                 const norm = if (b > 0) k1 * (1 - b + b * len / avg) else k1;
                 const s = term_idf * tf * (k1 + 1) / (tf + norm);
-                if (scratch.acc[p.point] == 0) try scratch.touched.append(scratch.gpa, p.point);
+                const fresh = scratch.acc[p.point] == 0;
+                scratch.touched.items.ptr[scratch.touched.items.len] = p.point;
+                scratch.touched.items.len += @intFromBool(fresh);
                 scratch.acc[p.point] += s;
             }
         }
+        // Most touched points lose to the worst survivor, so they are turned
+        // away before `push`. A tie still goes in: a smaller id displaces it.
+        var worst = -std.math.inf(f32);
         for (scratch.touched.items) |point| {
-            top.push(.{ .id = point, .score = scratch.acc[point] });
+            const score = scratch.acc[point];
             scratch.acc[point] = 0;
+            if (score < worst) continue;
+            top.push(.{ .id = point, .score = score });
+            if (top.isFull() and top.len > 0) worst = top.peekWorst().score;
         }
     }
 };
@@ -398,4 +413,51 @@ test "a first set that fails part-way leaves no posting a search scores" {
     }
     // Some failure fell after a posting went in, the case this is about.
     try testing.expect(reached);
+}
+
+test "past the heap's fill, a tie with a smaller id still displaces the worst" {
+    var idx = TextIndex.init(testing.allocator, .{});
+    defer idx.deinit();
+    // Touched in set order: 5 fills a heap of one, then 2 ties it.
+    try idx.set(5, texts(&.{"alpha beta"}));
+    try idx.set(2, texts(&.{"alpha beta"}));
+    try idx.set(7, texts(&.{"alpha gamma"}));
+    try idx.set(1, texts(&.{"delta"}));
+    var scratch = SearchScratch.init(testing.allocator);
+    defer scratch.deinit();
+    var top = heap.TopK.init(&test_results, 1);
+    try idx.search(&scratch, "alpha beta", default_k1, default_b, &top, null);
+    const hits = top.finish();
+    try testing.expectEqual(@as(usize, 1), hits.len);
+    try testing.expectEqual(@as(u32, 2), hits[0].id);
+    // Every touched score was cleared, so the next search starts clean.
+    for (scratch.acc) |a| try testing.expectEqual(@as(f32, 0), a);
+    // A heap of none takes nothing and never reads a worst survivor.
+    top = heap.TopK.init(&test_results, 0);
+    try idx.search(&scratch, "alpha beta", default_k1, default_b, &top, null);
+    try testing.expectEqual(@as(usize, 0), top.finish().len);
+}
+
+test "a top k below the touched points is the head of the full ranking" {
+    var idx = TextIndex.init(testing.allocator, .{});
+    defer idx.deinit();
+    // Points match one or both terms, at varied tf and length, with ties.
+    const docs = [_][]const u8{
+        "alpha",             "beta beta",        "alpha beta", "gamma alpha alpha",
+        "beta",              "alpha beta beta",  "alpha",      "gamma gamma beta",
+        "alpha alpha alpha", "beta gamma gamma", "alpha beta", "gamma",
+    };
+    for (docs, 0..) |d, i| try idx.set(@intCast(i), &.{d});
+    var full_storage: [16]heap.Candidate = undefined;
+    var full = heap.TopK.init(&full_storage, 16);
+    var scratch = SearchScratch.init(testing.allocator);
+    defer scratch.deinit();
+    try idx.search(&scratch, "alpha beta", default_k1, default_b, &full, null);
+    const ranking = full.finish();
+    try testing.expectEqual(@as(usize, 11), ranking.len);
+    for (1..ranking.len) |k| {
+        var top = heap.TopK.init(&test_results, k);
+        try idx.search(&scratch, "alpha beta", default_k1, default_b, &top, null);
+        try testing.expectEqualSlices(heap.Candidate, ranking[0..k], top.finish());
+    }
 }
