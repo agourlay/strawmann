@@ -370,3 +370,32 @@ test "a set that fails part-way leaves no posting a search scores" {
     }
     try testing.expect(fail_index > 0);
 }
+
+test "a first set that fails part-way leaves no posting a search scores" {
+    // Nothing removed or overwritten before it, so only the failed set's own
+    // stale count turns on the generation check a search makes. Point 1 keeps
+    // a document live, or the search would return before reading a posting.
+    var reached = false;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
+        var idx = TextIndex.init(fa.allocator(), .{});
+        defer idx.deinit();
+        try idx.set(1, texts(&.{"alpha"}));
+        try testing.expectEqual(@as(u64, 0), idx.stale_postings);
+        fa.fail_index = fa.alloc_index + fail_index;
+        idx.set(0, texts(&.{"eps zeta eta theta"})) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            fa.fail_index = std.math.maxInt(usize);
+            // Counted from the lists, not `stale_postings`, which is under test.
+            var postings: usize = 0;
+            for (idx.postings.items) |list| postings += list.items.len;
+            if (postings > 1) reached = true;
+            try testing.expectEqual(@as(usize, 0), (try testSearch(&idx, "eps zeta eta theta", null)).len);
+            continue;
+        };
+        break;
+    }
+    // Some failure fell after a posting went in, the case this is about.
+    try testing.expect(reached);
+}
