@@ -3978,7 +3978,12 @@ test "a search never sees half of one vector and half of another" {
     while (reads < 20_000) : (reads += 1) {
         var buf: [4]Candidate = undefined;
         var out = heap.TopK.init(&buf, 1);
+        // Under the guard every search holds: the first overwrite's drain
+        // waits out a scan that read the flag as clear, which is the only
+        // thing keeping that scan's unversioned row read whole.
+        const guard = SearchGuard.begin(&c);
         bruteForce(&c, &q, &out);
+        guard.end();
         const got = out.finish();
         if (got.len == 0) continue;
         const s = got[0].score;
