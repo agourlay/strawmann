@@ -2429,6 +2429,20 @@ text rows are a new instrument again. text-differ against it passes every tier
 on both engines on scifact, ArguAna, FiQA and Quora at the defaults and at
 0.9 / 0.4, T1 9.6e-7 at most (Qdrant on ArguAna at 0.9 / 0.4).
 
+Moved again 2026-10-30, at the user's request, to a `release` build of `dev`
+0beaf512a (sha256 3a0de135, `qdrant-ab/bin/qdrant-dev-0beaf512a`, reporting
+1.20.1-dev; `dev` efa782c65 differs from it in CI files only). It is 99
+commits past d6d3bd35b and brings MaxScore's dense term-at-a-time pass for
+long queries (#11072), scoring from a term frequency file without positions
+(#11165) and document lengths held as 16-bit codes (#11169, #11186), exact to
+8,192 tokens, which every document of the four corpora is under (FiQA's
+longest is 2,973 words). The protos only gain fields (`nested` on the index
+params, `TokenizerType.Code`), with no renumbering, so bfb and the
+conformance client stay where they are. text-differ against it passes every
+tier on both engines on the four corpora at both rungs, T1 8.9e-7 at most
+(Qdrant on ArguAna at 0.9 / 0.4). Qdrant's text rows are a new instrument
+again: the 1029 BM25 pages measured d6d3bd35b.
+
 The first end-to-end pass, scifact at `--reps 1` (a smoke run, so nothing
 published): every W15 row measured on both engines, every variant's recall@10
 1.0 on both, nDCG@10 equal to the oracle's per variant (0.6886 at the
