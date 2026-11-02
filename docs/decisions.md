@@ -2443,6 +2443,18 @@ tier on both engines on the four corpora at both rungs, T1 8.9e-7 at most
 (Qdrant on ArguAna at 0.9 / 0.4). Qdrant's text rows are a new instrument
 again: the 1029 BM25 pages measured d6d3bd35b.
 
+Moved again 2026-11-02, at the user's request, to a `release` build of `dev`
+e5fa1f3ce (sha256 f20f4394, `qdrant-ab/bin/qdrant-dev-e5fa1f3ce`, reporting
+1.20.1-dev; the user's clean `~/Workspace/qdrant` build). It is 15 commits
+past 0beaf512a and none touches the full-text index. The closest are the first
+two filter postings PRs (#11352, #11353: batched value checks and one read per
+on-disk posting list, in the map, numeric and geo indexes), which a filtered
+text query's keyword condition can reach. The protos change in comments only,
+so bfb and the conformance client stay where they are. text-differ against it
+passes every tier on both engines on the four corpora at both rungs, T1 7.1e-7
+at most (ArguAna at 0.9 / 0.4). Qdrant's text rows are a new instrument again:
+the 1031 BM25 pages measured 0beaf512a.
+
 The first end-to-end pass, scifact at `--reps 1` (a smoke run, so nothing
 published): every W15 row measured on both engines, every variant's recall@10
 1.0 on both, nDCG@10 equal to the oracle's per variant (0.6886 at the
