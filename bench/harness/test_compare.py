@@ -730,6 +730,37 @@ class CompareTests(unittest.TestCase):
         self.assertIn("NOT writing README.md", out)
         self.assertIn("not a fault in it", out)
 
+    def test_render_writes_the_page_before_the_readme(self):
+        """`--write-readme` warns when a pair's page is not in `docs/reports/`,
+        and it can only find a page that exists. Rendered after, the warning
+        never fired: 1102's three landing panels lost their report link with
+        nothing in `fullrun.out`."""
+        fr = importlib.import_module("fullrun")
+        calls = []
+        real = fr.sh
+
+        def record(argv, *a, **k):
+            calls.append(" ".join(str(x) for x in argv))
+            return 0, ""
+        fr.RESULTS = self.fx.root / "bench/results"
+        labels = ["sm-x", "qd-x"]
+        rows = [_row("W3", r, gate="pass") for r in (1, 2, 3)]
+        for label in labels:
+            d = fr.RESULTS / label
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "rows.json").write_text(json.dumps(rows))
+        (fr.RESULTS / labels[0] / "conformance.json").write_text(json.dumps(CONF_T3))
+        fr.sh = record
+        try:
+            with mock.patch.object(fr, "publish_refusals", lambda label: []), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                fr.render(labels)
+        finally:
+            fr.sh = real
+        page = next(i for i, c in enumerate(calls) if "report.py" in c)
+        readme = next(i for i, c in enumerate(calls) if "--write-readme" in c)
+        self.assertLess(page, readme, calls)
+
     def test_render_still_fails_the_run_on_a_refusal_that_names_a_defect(self):
         """The gate this keeps: a defect fails even when a by-design reason is
         printed beside it, so the fix above cannot be widened into silence."""
@@ -1236,6 +1267,23 @@ class CompareTests(unittest.TestCase):
                                  cmp.load("sm-sift-perf"), cmp.load("qd-sift-perf"))
         self.assertIn("strawmann", block)
         self.assertNotIn("sm-sift-perf", block)
+        self.assertNotIn("qd-sift-perf", block)
+
+    def test_the_block_prose_names_a_renamed_qdrant_binary_qdrant(self):
+        """1102's README read `[qdrant-dev-e5fa: qps over the 60.6 s ...]`:
+        the header called the copy `qdrant`, the prose its process name."""
+        cmp = self.m["compare"]
+        for lab, eng in (("sm-sift-perf", "strawmann"), ("qd-sift-perf", "qdrant-dev-e5fa")):
+            self.fx.label(lab, [_row("W3", 1000)], good_stamp(), CONF_T3, ())
+            f = cmp.ROOT / "bench/results" / lab / "run.json"
+            d = json.loads(f.read_text())
+            d["engine_comm"] = eng
+            f.write_text(json.dumps(d))
+        self.assertEqual(cmp.engine_name("qd-sift-perf"), "qdrant")
+        self.assertEqual(cmp.engine_name("sm-sift-perf"), "strawmann")
+        block = cmp.header_block("sm-sift-perf", "qd-sift-perf",
+                                 cmp.load("sm-sift-perf"), cmp.load("qd-sift-perf"))
+        self.assertNotIn("qdrant-dev", block)
         self.assertNotIn("qd-sift-perf", block)
 
     def test_parity_band_refuses_a_floor_from_another_dataset(self):

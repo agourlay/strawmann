@@ -463,7 +463,12 @@ def binary_sidecar(binary: Path) -> dict:
         return {}
     if not isinstance(doc, dict):
         return {}
-    return {k: str(doc[k]) for k in ("cargo_profile", "commit") if doc.get(k)}
+    out = {k: str(doc[k]) for k in ("cargo_profile", "commit") if doc.get(k)}
+    # Said where it came from: without it the night log called a sidecar's
+    # commit a checkout's (1102), and the report printed "pinned by commit".
+    if "commit" in out:
+        out["commit_source"] = f"sidecar {binary.name}.json"
+    return out
 
 
 def qdrant_native_build(pid: int | None) -> dict:
@@ -508,6 +513,7 @@ def qdrant_native_build(pid: int | None) -> dict:
     for _ in range(4):
         if (repo / ".git").exists():
             out["commit"] = _run(["git", "rev-parse", "--short=12", "HEAD"], cwd=repo)
+            out.pop("commit_source", None)  # a checkout outranks a sidecar
             out["dirty"] = bool(_run(["git", "status", "--porcelain"], cwd=repo))
             out["source"] = str(repo)
             # And whether `commit` can be the binary's source at all. `dirty`

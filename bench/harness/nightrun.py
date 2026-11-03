@@ -119,7 +119,9 @@ def qdrant_provenance(binary: Path) -> str:
     records.
     """
     import provenance
+    side = provenance.binary_sidecar(binary)
     commit = (git(["rev-parse", "--short", "HEAD"], binary.parent)
+              or (f"{side['commit']} ({side['commit_source']})" if side.get("commit") else None)
               or "not in a git tree; fullrun reads it from the server banner into run.json")
     predates = (" (BINARY PREDATES THIS COMMIT; sha256 is the identity that holds)"
                 if provenance.qdrant_binary_predates_head(binary) else "")
@@ -240,18 +242,32 @@ def analysis_text(stream: str) -> str:
 #: landing page), which `dirty=5` on 1012's sift1m counted the same way.
 CODE_PATHS = ("bench/harness/", "src/", "build.zig", "conformance/", "scripts/")
 
+#: What an *untracked* file under `CODE_PATHS` must be to count as code. A
+#: tracked file there is code whatever its suffix; an untracked one is usually
+#: output: 1102's three nights each logged `dirty=1 (conformance/differ-both/)`,
+#: eight text-differ JSON files and no change to anything built.
+SOURCE_SUFFIXES = (".zig", ".zon", ".rs", ".toml", ".lock", ".py", ".sh")
+
 
 def dirty_summary(status: str) -> str:
     """`dirty=N` for the code the run measures, naming the files, and the
     documents apart: a bare count could not say whether the build moved."""
-    paths_ = [line[3:] for line in status.splitlines() if len(line) > 3]
-    code = [p for p in paths_ if p.startswith(CODE_PATHS)]
-    docs = [p for p in paths_ if not p.startswith(CODE_PATHS)]
+    lines = [(line[:2], line[3:]) for line in status.splitlines() if len(line) > 3]
+    code, data, docs = [], [], []
+    for mark, p in lines:
+        if not p.startswith(CODE_PATHS):
+            docs.append(p)
+        elif mark == "??" and not p.endswith(SOURCE_SUFFIXES):
+            data.append(p)
+        else:
+            code.append(p)
     out = f"dirty={len(code)}"
     if code:
         out += f" ({', '.join(code)})"
     if docs:
         out += f", {len(docs)} document(s) modified ({', '.join(docs)})"
+    if data:
+        out += f", {len(data)} untracked non-source file(s) ({', '.join(data)})"
     return out
 
 
@@ -312,7 +328,7 @@ def main(argv: list[str], root: Path = ROOT) -> int:
     log(f"night run starting: {args.dataset}, labels {sm} / {qd}, reps {reps}, "
         f"oversampling {oversampling}")
     log(f"strawmann {git(['rev-parse', '--short', 'HEAD'], root)} "
-        f"{dirty_summary(git(['status', '--short'], root) or '')}")
+        f"{dirty_summary(git(['status', '--short', '--untracked-files=all'], root) or '')}")
     binary = Path(os.environ.get("QDRANT_BINARY",
                                  Path.home() / "Workspace/qdrant/target/release/qdrant"))
     if not os.access(binary, os.X_OK):

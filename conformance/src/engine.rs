@@ -13,12 +13,12 @@
 
 use crate::oracle::Metric;
 use crate::relevance::Returned;
-use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
     CreateCollectionBuilder, DeleteCollectionBuilder, Distance, Filter,
     OptimizersConfigDiffBuilder, PointStruct, QueryBatchPointsBuilder, QueryPointsBuilder,
     SearchParamsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
 };
+use qdrant_client::{Qdrant, config::QdrantConfig};
 
 /// The vector every text-collection point carries: strawmANN's collections
 /// require one (Qdrant's do not), both engines hold the same, and the `text`
@@ -149,30 +149,53 @@ impl Engine {
         // construction and compares the returned version against its own. A
         // mismatch is a warning; a failure to answer is fatal. Leaving the
         // check enabled is deliberate — it is part of what T0 verifies.
-        // The default client timeout is far too short for bulk ingest at the
-        // headline dimension.
-        //
-        // Qdrant indexes *while* it ingests, so a `wait(true)` upsert of a
-        // 256 KB batch can block for many seconds once the collection is large
-        // and the optimizer is busy — long enough that the client cancels the
-        // request. The failure surfaces as `The operation was cancelled Timeout
-        // expired`, which reads like a server fault and is not one: the server
-        // was healthy and mid-optimization throughout.
-        //
-        // This is a property of the *comparison target*, not of our harness, so
-        // the right response is to wait rather than to shrink the batches or
-        // drop `wait`. Both would change what is being measured.
-        let client = Qdrant::from_url(url)
-            .timeout(std::time::Duration::from_secs(600))
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .build()?;
+        Self::with_config(label, url, client_config(url, true))
+    }
+
+    /// `connect` without the compatibility check, for the per-row utilities
+    /// (config readback, drop, recall sweeps, dumps). T0 still runs it in the
+    /// differ; here it only repeated one warning per call, 236 times in a night
+    /// (1102), burying anything else on stderr.
+    pub fn connect_quiet(label: &str, url: &str) -> anyhow::Result<Engine> {
+        Self::with_config(label, url, client_config(url, false))
+    }
+
+    fn with_config(label: &str, url: &str, config: QdrantConfig) -> anyhow::Result<Engine> {
+        let client = Qdrant::new(config)?;
         Ok(Engine {
             label: label.to_string(),
             client,
             url: url.to_string(),
         })
     }
+}
 
+/// The client's settings; `check` is the compatibility check `connect` keeps.
+fn client_config(url: &str, check: bool) -> QdrantConfig {
+    // The default client timeout is far too short for bulk ingest at the
+    // headline dimension.
+    //
+    // Qdrant indexes *while* it ingests, so a `wait(true)` upsert of a
+    // 256 KB batch can block for many seconds once the collection is large
+    // and the optimizer is busy — long enough that the client cancels the
+    // request. The failure surfaces as `The operation was cancelled Timeout
+    // expired`, which reads like a server fault and is not one: the server
+    // was healthy and mid-optimization throughout.
+    //
+    // This is a property of the *comparison target*, not of our harness, so
+    // the right response is to wait rather than to shrink the batches or
+    // drop `wait`. Both would change what is being measured.
+    let config = Qdrant::from_url(url)
+        .timeout(std::time::Duration::from_secs(600))
+        .connect_timeout(std::time::Duration::from_secs(30));
+    if check {
+        config
+    } else {
+        config.skip_compatibility_check()
+    }
+}
+
+impl Engine {
     pub async fn recreate_collection(
         &self,
         name: &str,
@@ -1012,6 +1035,12 @@ pub fn grpc_status_code(e: &qdrant_client::QdrantError) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_differ_connection_checks_compatibility() {
+        assert!(client_config("http://localhost:6334", true).check_compatibility);
+        assert!(!client_config("http://localhost:6334", false).check_compatibility);
+    }
 
     fn telemetry(points: &[u64]) -> serde_json::Value {
         let segs: Vec<_> = points

@@ -2105,6 +2105,18 @@ def unbanded_banner(a_label: str, b_label: str) -> list[str]:
     return out
 
 
+def engine_name(label: str) -> str:
+    """The engine a label measured, as the README names it.
+
+    A Qdrant build copied under its own name (`qdrant-dev-bfc0eab31`, the BM25
+    pin) is still Qdrant: its process name is that name cut to the kernel's 15
+    characters, which titled a column `qdrant-dev-bfc0` and, while only the
+    column used this, put `[qdrant-dev-e5fa: ...]` in the README's notes (1102).
+    """
+    name = read_json(label, "run.json").get("engine_comm") or label
+    return "qdrant" if name.startswith("qdrant") else name
+
+
 def column_title(label: str) -> str:
     """The label with the engine version its `run.json` recorded, if any.
 
@@ -2123,12 +2135,7 @@ def column_title(label: str) -> str:
     # `sm-sift-perf` / `qd-sift-perf` would have put run bookkeeping above the
     # fold. The full table underneath still names the labels, and the
     # provenance section names commits and digests.
-    name = meta.get("engine_comm") or label
-    # A Qdrant build copied under its own name (`qdrant-dev-bfc0eab31`, the
-    # BM25 pin) is still Qdrant: its process name is that name cut to the
-    # kernel's 15 characters, which titled a column `qdrant-dev-bfc0`.
-    if name.startswith("qdrant"):
-        name = "qdrant"
+    name = engine_name(label)
     v = (meta.get("qdrant") or {}).get("version")
     return f"{name} {'.'.join(str(v).split('.')[:2])}" if v else name
 
@@ -2213,8 +2220,7 @@ def header_block(a_label: str, b_label: str,
     # has to as well: a header reading `strawmann` above a note reading
     # `sm-sift-perf` makes the reader work out that they are the same run. The
     # full table below keeps labels, because there the columns *are* labels.
-    engines = {lab: (read_json(lab, "run.json").get("engine_comm") or lab)
-               for lab in (a_label, b_label)}
+    engines = {lab: engine_name(lab) for lab in (a_label, b_label)}
 
     def as_engines(text: str) -> str:
         for lab, eng in engines.items():

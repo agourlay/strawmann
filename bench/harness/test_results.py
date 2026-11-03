@@ -487,6 +487,26 @@ class NoiseTests(unittest.TestCase):
             self.assertEqual(floor["measured_on"], "2026-01-01")
             self.assertIn("W3", floor["rsd"])
 
+    def test_a_folded_readback_is_labelled_as_the_fold_and_names_its_pass(self):
+        """1102's folded `collections.json` read `"label": "qd-sift-perf-1102-rep1"`
+        under the folded label, with nothing saying it was one pass of three."""
+        import importlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _reload(root)
+            agg = importlib.reload(importlib.import_module("aggregate"))
+            for i in (1, 2, 3):
+                self._rep(root, f"lbl-rep{i}", [_row("W3", 1000.0 + i)])
+                (root / f"bench/results/lbl-rep{i}/collections.json").write_text(json.dumps(
+                    {"label": f"lbl-rep{i}", "engine": "qdrant", "collections": []}))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(agg.main(["aggregate.py", "lbl",
+                                           "lbl-rep1", "lbl-rep2", "lbl-rep3"]), 0)
+            doc = json.loads((root / "bench/results/lbl/collections.json").read_text())
+            self.assertEqual(doc["label"], "lbl")
+            self.assertEqual(doc["readback_of"], "lbl-rep1")
+            self.assertEqual(doc["engine"], "qdrant")
+
     def test_a_monotone_slide_is_folded_as_drift_and_not_as_spread(self):
         """`rep_rsd` describes passes as draws from one distribution; a slide
         in one direction is not that.
@@ -557,6 +577,27 @@ class NoiseTests(unittest.TestCase):
         self.assertIsNone(agg._rep_outlier([314.0, 311.0, 294.0]))
         self.assertIsNone(agg._rep_outlier([1000.0, 1000.0]))
 
+    def test_an_outlier_line_says_whether_the_odd_pass_did_the_same_work(self):
+        """laion 1102's Qdrant W12-sel10-ef64 read -34% on pass 2 at 6.73M
+        against 6.71M instructions per query and +51% cycles; the line said
+        only "-34%"."""
+        import importlib
+        agg = importlib.import_module("aggregate")
+
+        def row(instr, cycles, dram):
+            return {"n_queries": 1000, "perf_instructions": instr * 1000,
+                    "perf_cycles": cycles * 1000, "perf_dram_fills": dram * 1000}
+        same = [row(6.71e6, 3.27e6, 22800), row(6.73e6, 4.93e6, 35600),
+                row(6.71e6, 3.27e6, 22800)]
+        note = agg._counter_note(same, 1)
+        self.assertIn("instructions/query +0%", note)
+        self.assertIn("cycles/query +51%", note)
+        self.assertIn("the same work ran at another speed", note)
+        more = [row(6.7e6, 3.3e6, 1), row(9.4e6, 4.6e6, 1), row(6.7e6, 3.3e6, 1)]
+        self.assertIn("a different amount of work", agg._counter_note(more, 1))
+        # No counters, no claim.
+        self.assertEqual(agg._counter_note([{"n_queries": 1}] * 3, 1), "")
+
     def test_the_floored_flag_follows_the_folded_time(self):
         """h-and-m 0929's Qdrant W0-upload kept pass 1's `floored` (3.01 s)
         beside a folded 4.01 s, and the report daggered it."""
@@ -594,6 +635,10 @@ class NoiseTests(unittest.TestCase):
             agg.fold_recall(dest, reps, [])
             pt = json.loads((dest / "recall.sift1m.bench12.sel10.json").read_text())["points"][0]
             self.assertEqual(pt["n_matching_range"], [19941, 20193])
+            doc = json.loads((dest / "recall.sift1m.bench12.sel10.json").read_text())
+            # The fold's, not pass 1's (1102 read `-rep1` over medianed points).
+            self.assertEqual(doc["label"], "lbl")
+            self.assertEqual(doc["folded_from"], reps)
 
     def test_a_folded_label_carries_w15s_recall(self):
         """`--reps 3` publishes the fold, and the sink refuses a row with a qps

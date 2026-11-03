@@ -174,6 +174,47 @@ def _paging_note(got: list[dict]) -> str:
     return f" (major faults {mf[0]:,.0f} to {mf[-1]:,.0f} across them: the engine was paging)"
 
 
+#: Instructions per query within this of the pair's: the odd pass did the
+#: same work, so its speed moved for another reason (stalls, placement, load).
+SAME_WORK_MAX = 0.05
+
+_PER_QUERY = (("perf_instructions", "instructions"), ("perf_cycles", "cycles"),
+              ("perf_dram_fills", "DRAM fills"))
+
+
+def _counter_note(got: list[dict], odd: int) -> str:
+    """Whether the odd pass did more work per query or the same work slower.
+
+    laion 1102's Qdrant W12-sel10-ef64 read -34% on pass 2, and the line said
+    only that: its counters, beside it in the rows, showed 6.73M against 6.71M
+    instructions per query at +51% cycles. The same work ran slower, which is
+    a different question from a different plan. `odd` is 0-based.
+    """
+    per_q: dict[str, list[float]] = {}
+    for key, _name in _PER_QUERY:
+        vals = []
+        for r in got:
+            v, n = r.get(key), r.get("n_queries")
+            if not isinstance(v, (int, float)) or not isinstance(n, (int, float)) or n <= 0:
+                return ""
+            vals.append(v / n)
+        per_q[key] = vals
+
+    def move(key: str) -> float | None:
+        vals = per_q[key]
+        pair = [v for j, v in enumerate(vals) if j != odd]
+        mid = sum(pair) / 2
+        return (vals[odd] - mid) / mid if mid > 0 else None
+    moves = {key: move(key) for key, _ in _PER_QUERY}
+    if any(m is None for m in moves.values()):
+        return ""
+    parts = ", ".join(f"{name}/query {moves[key]:+.0%}" for key, name in _PER_QUERY)
+    verdict = ("the same work ran at another speed"
+               if abs(moves["perf_instructions"]) <= SAME_WORK_MAX
+               else "it did a different amount of work per query")
+    return f" ({parts} against the pair: {verdict})"
+
+
 #: How far the passes' huge-page bytes must disagree, as a share of the
 #: largest, before `_huge_page_note` names them. See there.
 HUGE_SPREAD_MIN = 0.10
@@ -442,7 +483,7 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
             notes.append(f"{wid}: pass {odd['pass']} read {odd['move']:+.0%} against "
                          f"two passes that agree; one pass set this row's spread, "
                          f"and a band built from it would call a real difference parity"
-                         + _paging_note(got))
+                         + _paging_note(got) + _counter_note(got, odd["pass"] - 1))
         elif (drift := _rep_drift([r.get("qps") for r in got])) is not None:
             merged["rep_drift"] = drift
             notes.append(f"{wid}: qps moved {drift:+.0%} monotonically across the "
@@ -580,6 +621,10 @@ def fold_recall(dest: Path, reps: list[str], notes: list[str]) -> None:
             (dest / name).unlink(missing_ok=True)
             continue
         merged = dict(docs[0])
+        # Not pass 1's: the points below are the passes' medians, and the copy
+        # still introduced itself as `-rep1` (1102).
+        merged["label"] = dest.name
+        merged["folded_from"] = from_reps
         by_ef: dict[object, list[dict]] = {}
         for d in docs:
             for pt in d.get("points") or []:
@@ -668,6 +713,16 @@ def main(argv: list[str]) -> int:
             meta["label"] = label
             meta["passes"] = pass_spans(reps, passes)
             (dest / name).write_text(json.dumps(meta, indent=2) + "\n")
+        elif name == "collections.json":
+            # One pass's readback, which is what it stays: the engines that
+            # answered are gone and the passes' graphs differ. It is labelled
+            # as the fold's and says which pass it was, rather than reading
+            # `-rep1` under the folded label (1102).
+            doc = json.loads(f.read_text())
+            if isinstance(doc, dict):
+                doc["label"] = label
+                doc["readback_of"] = reps[0]
+            (dest / name).write_text(json.dumps(doc, indent=2) + "\n")
         else:
             (dest / name).write_text(f.read_text())
     fold_recall(dest, reps, notes)

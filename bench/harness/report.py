@@ -2550,6 +2550,11 @@ def provenance_table(runs: list[Run]) -> str:
                     commit = "commit unknown (no checkout around the binary)"
                     pill = ('<span class="pill warn">native binary outside a checkout: '
                             'sha256 is the identity (§8.9)</span>')
+                elif str(q.get("commit_source", "")).startswith("sidecar"):
+                    commit = (f"build {code} (from {_fmt(q['commit_source'])}, "
+                              f"written beside the copy, not a checkout)")
+                    pill = ('<span class="pill warn">native binary outside a checkout: '
+                            'sha256 is the identity (§8.9)</span>')
                 elif q.get("commit_source") == "server banner":
                     commit = f"build {code} (from the server's banner, not a checkout)"
                     pill = ('<span class="pill warn">native binary outside a checkout: '

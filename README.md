@@ -43,7 +43,7 @@
   at equal recall (§7.4's comparison, not equal ef): 2.47x at recall 0.9626, falling to 1.34x at 0.9978, over 8 anchors
 
   saturating: [strawmann: -n 100000 (2x the table's 50000)]
-  mixed read/write: [strawmann: qps over the 60.6 s of the append the search saw (19,682 over the whole search); append 3,300 points/s] [qdrant-dev-e5fa: qps over the 60.6 s of the append the search saw (1,856 over the whole search); append 3,300 points/s] [search-during-write; no recall join]
+  mixed read/write: [strawmann: qps over the 60.6 s of the append the search saw (19,682 over the whole search); append 3,300 points/s] [qdrant: qps over the 60.6 s of the append the search saw (1,856 over the whole search); append 3,300 points/s] [search-during-write; no recall join]
   exact: [within the ±18.3% band this dataset's noise floor puts on W9: no measured difference, not a small one]
 ```
 <!-- END compare-table -->

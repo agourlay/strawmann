@@ -3034,6 +3034,18 @@ class NightrunTests(unittest.TestCase):
         got = self.n.dirty_summary(" M src/text/index.zig\n M README.md\n")
         self.assertTrue(got.startswith("dirty=1 (src/text/index.zig)"), got)
 
+    def test_dirty_does_not_count_untracked_output_as_code(self):
+        """1102 logged `dirty=1 (conformance/differ-both/)` on every night: a
+        directory of text-differ JSON, not a change to anything built."""
+        got = self.n.dirty_summary("?? conformance/differ-both/fiqa-k1.2-b0.75.json\n")
+        self.assertEqual(got, "dirty=0, 1 untracked non-source file(s) "
+                              "(conformance/differ-both/fiqa-k1.2-b0.75.json)")
+        # An untracked source file is still code, and so is a tracked change
+        # under a code path whatever its suffix.
+        self.assertTrue(self.n.dirty_summary("?? src/new.zig\n").startswith("dirty=1"))
+        self.assertTrue(self.n.dirty_summary(
+            " M conformance/fixtures/a.json\n").startswith("dirty=1"))
+
     def test_dirty_reads_the_first_status_line_whole(self):
         """`git()` stripped the output, so the first ` M src/...` lost its
         leading column and read as the document `rc/...`."""
@@ -3161,6 +3173,24 @@ class NightrunTests(unittest.TestCase):
                          "qdrant build 878843e6 (server banner, run.json)")
         meta.write_text(json.dumps({"qdrant": {}}))
         self.assertIsNone(self.n.qdrant_build_recorded(meta))
+
+    def test_the_provenance_line_names_a_sidecar_commit_as_a_sidecar(self):
+        """1102's copy had a sidecar, and night.log said both "not in a git
+        tree; fullrun reads it from the server banner" and "(checkout,
+        run.json)": neither was where the commit came from."""
+        (self.root / "cache").mkdir()
+        binary = self.root / "cache/qdrant-dev-e5fa1f3ce"
+        binary.write_bytes(b"\x7fELF")
+        (self.root / "cache/qdrant-dev-e5fa1f3ce.json").write_text(
+            '{"cargo_profile": "release", "commit": "e5fa1f3ce"}')
+        line = self.n.qdrant_provenance(binary)
+        self.assertIn("commit=e5fa1f3ce (sidecar qdrant-dev-e5fa1f3ce.json)", line)
+        self.assertNotIn("server banner", line)
+        meta = self.root / "run.json"
+        meta.write_text(json.dumps({"qdrant": {
+            "commit": "e5fa1f3ce", "commit_source": "sidecar qdrant-dev-e5fa1f3ce.json"}}))
+        self.assertEqual(self.n.qdrant_build_recorded(meta),
+                         "qdrant build e5fa1f3ce (sidecar qdrant-dev-e5fa1f3ce.json, run.json)")
         self.assertIsNone(self.n.qdrant_build_recorded(self.root / "absent.json"))
 
     def test_a_whole_night_end_to_end_with_a_stub_fullrun(self):

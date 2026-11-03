@@ -2136,6 +2136,25 @@ def render(labels: list[str], lax: bool = False) -> int:
                        f"{conf.get('tier_reached')!r}): a ratio between the engines "
                        f"is not a claim §8 allows")
 
+    # Rendered before the README is decided, not after: `--write-readme` asks
+    # `compare.warn_unarchived` whether this pair has a page that is not in
+    # `docs/reports/`, and with the page not yet written the answer was always
+    # no. 1102's three panels lost their link with nothing said.
+    #
+    # One report, both labels, side by side — called once per label it produced
+    # two single-engine pages and printed a path neither was at. No `-o`:
+    # `report.default_out` keys the name by dataset and labels, and a second
+    # spelling here is the copy that cannot see what the runs measured.
+    code, out = sh(["uv", "run", "--project", str(ROOT / "bench"),
+                    str(ROOT / "bench/harness/report.py"), *labels], 600, cwd=ROOT)
+    print(out.rstrip(), flush=True)
+    if code != 0:
+        # Not "no report was written": `report.py` renders for ungated and
+        # refused runs on purpose, since the page carries its own banner. A
+        # non-zero exit here means it could not render, and it says why above.
+        print(f"  !! report.py exited {code}; see its output above", file=sys.stderr)
+        rc |= 1
+
     cmp_argv = [sys.executable, str(ROOT / "bench/harness/compare.py"), labels[0], labels[1]]
     if reasons:
         print("\n!! NOT writing README.md / docs/comparison-<dataset>.md, "
@@ -2163,19 +2182,6 @@ def render(labels: list[str], lax: bool = False) -> int:
         print(out.rstrip(), flush=True)
         rc |= code
 
-    # One report, both labels, side by side — called once per label it produced
-    # two single-engine pages and printed a path neither was at. No `-o`:
-    # `report.default_out` keys the name by dataset and labels, and a second
-    # spelling here is the copy that cannot see what the runs measured.
-    code, out = sh(["uv", "run", "--project", str(ROOT / "bench"),
-                    str(ROOT / "bench/harness/report.py"), *labels], 600, cwd=ROOT)
-    print(out.rstrip(), flush=True)
-    if code != 0:
-        # Not "no report was written": `report.py` renders for ungated and
-        # refused runs on purpose, since the page carries its own banner. A
-        # non-zero exit here means it could not render, and it says why above.
-        print(f"  !! report.py exited {code}; see its output above", file=sys.stderr)
-        rc |= 1
     return rc
 
 

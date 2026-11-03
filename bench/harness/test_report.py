@@ -2011,6 +2011,12 @@ class ReportHostTests(unittest.TestCase):
             html = report.build(runs, "t")
             self.assertIn("build <code>878843e6</code> (from the server's banner", html)
             self.assertNotIn("pinned by commit", html)
+            # A sidecar's commit is named as the sidecar's (1102).
+            runs[1].meta["qdrant"].update(
+                commit="e5fa1f3ce", commit_source="sidecar qdrant-dev-e5fa1f3ce.json")
+            html = report.build(runs, "t")
+            self.assertIn("(from sidecar qdrant-dev-e5fa1f3ce.json, written beside the copy", html)
+            self.assertNotIn("pinned by commit", html)
 
     def test_a_copied_qdrant_binary_takes_its_profile_from_a_sidecar(self):
         """`qdrant-ab/bin/qdrant-dev-*` is a copy out of `target/release/`, so
@@ -2024,7 +2030,8 @@ class ReportHostTests(unittest.TestCase):
             (Path(tmp) / "qdrant-dev-d6d3bd35b.json").write_text(
                 '{"cargo_profile": "release", "commit": "d6d3bd35b", "built_at": "x"}')
             self.assertEqual(provenance.binary_sidecar(exe),
-                             {"cargo_profile": "release", "commit": "d6d3bd35b"})
+                             {"cargo_profile": "release", "commit": "d6d3bd35b",
+                              "commit_source": "sidecar qdrant-dev-d6d3bd35b.json"})
 
     def test_a_native_qdrant_shows_its_cargo_profile(self):
         """`target/perf/qdrant` is release without LTO; the page showed only

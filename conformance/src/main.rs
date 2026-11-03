@@ -1617,7 +1617,7 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
             v.clone(),
         )])
     });
-    let eng = engine::Engine::connect(&a.label, &a.engine)?;
+    let eng = engine::Engine::connect_quiet(&a.label, &a.engine)?;
     if !a.skip_upload {
         eprintln!(
             "[{}] loading {} documents into {}",
@@ -1725,7 +1725,7 @@ async fn run_filtered_truth(a: FilteredTruthRun) -> anyhow::Result<()> {
         v.join(",")
     });
 
-    let eng = engine::Engine::connect("strawmann", &a.engine)?;
+    let eng = engine::Engine::connect_quiet("strawmann", &a.engine)?;
     let mut cursor: Option<PointId> = None;
     let mut matching: Vec<u32> = Vec::new();
     let mut scanned: usize = 0;
@@ -1872,7 +1872,7 @@ async fn run_collection_info(
     collections: &str,
     out: &Path,
 ) -> anyhow::Result<()> {
-    let eng = engine::Engine::connect(label, url)?;
+    let eng = engine::Engine::connect_quiet(label, url)?;
     let mut got = Vec::new();
     for name in collections
         .split(',')
@@ -1898,7 +1898,7 @@ async fn run_collection_info(
 /// Delete each named collection, reporting what went and what was already gone.
 #[tokio::main(flavor = "multi_thread")]
 async fn run_drop_collections(url: &str, collections: &str) -> anyhow::Result<()> {
-    let eng = engine::Engine::connect("drop", url)?;
+    let eng = engine::Engine::connect_quiet("drop", url)?;
     for name in collections
         .split(',')
         .map(str::trim)
@@ -1924,7 +1924,7 @@ async fn run_scroll_check(
     use qdrant_client::qdrant::point_id::PointIdOptions;
     use qdrant_client::qdrant::{PointId, ScrollPointsBuilder};
 
-    let eng = engine::Engine::connect("strawmann", url)?;
+    let eng = engine::Engine::connect_quiet("strawmann", url)?;
     let mut cursor: Option<PointId> = None;
     let mut seen: usize = 0;
     let mut pages: usize = 0;
@@ -2008,7 +2008,7 @@ async fn run_dump_scores(d: DumpRun) -> anyhow::Result<()> {
         q.dim
     );
 
-    let eng = engine::Engine::connect("dump", &d.engine)?;
+    let eng = engine::Engine::connect_quiet("dump", &d.engine)?;
     if !d.skip_upload {
         eng.recreate_collection(&d.collection, base.dim as u64, m, base.n as u64)
             .await?;
@@ -2227,6 +2227,17 @@ struct RecallSweep {
     points: Vec<RecallPoint>,
 }
 
+/// `v` to `prec` places, or `n/a` when it was not measured: recall@100 at
+/// `limit` 10 is NaN, and the table printed `NaN` on every sweep line (1102),
+/// where the differ already says `recall@100=n/a`.
+fn fixed_or_na(v: f64, prec: usize) -> String {
+    if v.is_finite() {
+        format!("{v:.prec$}")
+    } else {
+        "n/a".to_string()
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn run_relevance(r: RelevanceRun) -> anyhow::Result<()> {
     let m = parse_metric(&r.metric)?;
@@ -2313,7 +2324,7 @@ async fn run_relevance(r: RelevanceRun) -> anyhow::Result<()> {
     })
     .map_err(anyhow::Error::msg)?;
 
-    let eng = engine::Engine::connect(&r.label, &r.engine)?;
+    let eng = engine::Engine::connect_quiet(&r.label, &r.engine)?;
     let n_q = q.n.min(gt.n_queries);
 
     // §4.3: the ground truth indexes into base-file row order, so it
@@ -2454,7 +2465,7 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
         let elapsed = t.elapsed().as_secs_f64();
         let g = relevance::evaluate(&gt, &res, &eps, r.limit as usize, Some(&rescorer));
         println!(
-            "{:>6}  {:>10.4}  {:>10.4}  {:>10.4}  {:>10.5}  [{:.4}, {:.4}]   {:.1} q/s{}{}{}",
+            "{:>6}  {:>10.4}  {:>10.4}  {:>10}  {:>10.5}  [{:.4}, {:.4}]   {:.1} q/s{}{}{}",
             if r.exact {
                 "exact".to_string()
             } else {
@@ -2462,7 +2473,7 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
             },
             g.recall_at_1,
             g.recall_at_10,
-            g.recall_at_100,
+            fixed_or_na(g.recall_at_100, 4),
             g.mean_relative_distance_error,
             g.recall_at_10_ci95.low,
             g.recall_at_10_ci95.high,
@@ -3418,6 +3429,12 @@ fn spread_across_arms(paths: &[PathBuf]) -> anyhow::Result<differ::tolerance::Di
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unmeasured_recall_prints_as_not_applicable() {
+        assert_eq!(fixed_or_na(f64::NAN, 4), "n/a");
+        assert_eq!(fixed_or_na(0.98765, 4), "0.9877");
+    }
 
     /// The harness reads a sweep from `--json`, never from stdout, so every
     /// violation counter the console prints has to survive serialisation.
