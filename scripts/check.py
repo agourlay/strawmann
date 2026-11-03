@@ -310,13 +310,26 @@ def check_paths() -> int:
     return 0
 
 
-#: Kernels whose `align(64)` is load-bearing (findings 69), by the symbol name
-#: Zig gives them.
-ALIGNED_KERNELS = ("dist.dot_f32.Dot(16,8).call", "dist.l2_f32.Euclid(16,8).call")
 RELEASE_BINARY = ROOT / "zig-out/bin/strawmann"
+_LANES = re.compile(r"f32 lanes / accumulators: (\d+) / (\d+)")
 
 
-def kernel_alignment(nm_text: str, names=ALIGNED_KERNELS, align: int = 64) -> list[str]:
+def native_kernels(probe_text: str) -> tuple[str, ...] | None:
+    """The fp32 kernels whose `align(64)` is load-bearing (findings 69), by the
+    symbol names Zig gives them, at the width this build compiled.
+
+    The width is the build host's (`-Dcpu=native`): `Dot(16,8)` on an AVX-512
+    host, `Dot(8,8)` on an AVX2 one. Naming the 16-lane kernels failed CI on
+    every runner without AVX-512, so the binary's own `--probe` says which.
+    """
+    m = _LANES.search(probe_text)
+    if m is None:
+        return None
+    lanes, acc = m.groups()
+    return (f"dist.dot_f32.Dot({lanes},{acc}).call", f"dist.l2_f32.Euclid({lanes},{acc}).call")
+
+
+def kernel_alignment(nm_text: str, names: tuple[str, ...], align: int = 64) -> list[str]:
     """What is wrong with each kernel in `nm` output, or nothing.
 
     A missing symbol means the compiler inlined it, which is the 0.17 failure:
@@ -341,15 +354,22 @@ def check_kernel_align(binary: Path = RELEASE_BINARY) -> int:
     if not binary.exists():
         print(f"{binary} not built: run the zig-build step first", file=sys.stderr)
         return 1
+    probe = subprocess.run([str(binary), "--probe", "--no-bandwidth-probe"],
+                           capture_output=True, text=True)
+    names = native_kernels(probe.stdout)
+    if names is None:
+        print("`strawmann --probe` printed no `f32 lanes / accumulators` line, so the "
+              "kernels' names are unknown", file=sys.stderr)
+        return 1
     r = subprocess.run(["nm", str(binary)], capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stderr.strip(), file=sys.stderr)
         return 1
-    bad = kernel_alignment(r.stdout)
+    bad = kernel_alignment(r.stdout, names)
     for b in bad:
         print(b, file=sys.stderr)
     if not bad:
-        print(f"ok: {len(ALIGNED_KERNELS)} kernels out of line and 64-byte aligned")
+        print(f"ok: {', '.join(names)} out of line and 64-byte aligned")
     return 1 if bad else 0
 
 

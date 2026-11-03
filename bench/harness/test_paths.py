@@ -774,6 +774,8 @@ class KernelAlignTests(unittest.TestCase):
         sys.modules[spec.name] = cls.check  # @dataclass looks its module up
         spec.loader.exec_module(cls.check)
 
+    NAMES = ("dist.dot_f32.Dot(16,8).call", "dist.l2_f32.Euclid(16,8).call")
+
     def nm(self, dot: int, l2: int | None) -> str:
         lines = [f"{dot:016x} t dist.dot_f32.Dot(16,8).call",
                  "000000000110f130 t core.collection.Probe.scoreRow"]
@@ -781,16 +783,24 @@ class KernelAlignTests(unittest.TestCase):
             lines.append(f"{l2:016x} t dist.l2_f32.Euclid(16,8).call")
         return "\n".join(lines)
 
+    def test_the_kernels_named_are_the_width_the_build_compiled(self):
+        """CI failed on a runner without AVX-512: its build had `Dot(8,8)`."""
+        self.assertEqual(self.check.native_kernels(
+            "isa build              : native\nf32 lanes / accumulators: 8 / 8\n"),
+            ("dist.dot_f32.Dot(8,8).call", "dist.l2_f32.Euclid(8,8).call"))
+        self.assertIsNone(self.check.native_kernels("isa build: native\n"))
+
     def test_aligned_out_of_line_kernels_pass(self):
-        self.assertEqual(self.check.kernel_alignment(self.nm(0x1167640, 0x1167380)), [])
+        self.assertEqual(self.check.kernel_alignment(self.nm(0x1167640, 0x1167380),
+                                                     self.NAMES), [])
 
     def test_an_inlined_kernel_is_named_as_inlined(self):
-        bad = self.check.kernel_alignment(self.nm(0x1167640, None))
+        bad = self.check.kernel_alignment(self.nm(0x1167640, None), self.NAMES)
         self.assertEqual(len(bad), 1)
         self.assertIn("Euclid(16,8).call: no symbol, so it was inlined", bad[0])
 
     def test_a_misaligned_kernel_says_by_how_much(self):
-        bad = self.check.kernel_alignment(self.nm(0x1167650, 0x1167380))
+        bad = self.check.kernel_alignment(self.nm(0x1167650, 0x1167380), self.NAMES)
         self.assertEqual(bad, [("dist.dot_f32.Dot(16,8).call: at 0x1167650, "
                                 "16 bytes past a 64-byte line")])
 
