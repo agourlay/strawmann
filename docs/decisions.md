@@ -2455,6 +2455,19 @@ passes every tier on both engines on the four corpora at both rungs, T1 7.1e-7
 at most (ArguAna at 0.9 / 0.4). Qdrant's text rows are a new instrument again:
 the 1031 BM25 pages measured 0beaf512a.
 
+The vector pairs move to the same binary on 2026-11-02, at the user's request,
+from `dbeb0f73` (`878843e6e`, 315 commits earlier). In that span the protos
+only gain fields, so bfb d2a6b6c stays. The span carries the graph builder
+split (#11193, #11195) and the first filter postings PRs (#11352, #11353).
+Before the move, the vector differ, with Qdrant held to one segment, passed
+every tier through T4 on sift1m, laion-small-clip and
+h-and-m-2048-angular-filters, with T3's recall@10 intervals overlapping on all
+three. dbpedia-openai-1m is not yet checked against it: three attempts died
+of disk space (a tmpfs quota under the differ's Qdrant twice, then a full
+root filesystem from another process), never of a tier. It must pass before a
+dbpedia pair runs on this binary. The 1102 vector pairs are the first on it,
+STALE against 1012 by design.
+
 The first end-to-end pass, scifact at `--reps 1` (a smoke run, so nothing
 published): every W15 row measured on both engines, every variant's recall@10
 1.0 on both, nDCG@10 equal to the oracle's per variant (0.6886 at the
