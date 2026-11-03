@@ -626,14 +626,16 @@ def wipe_strawmann_storage() -> None:
 
 def start_strawmann(server_cpus: str, port: int, log: Path,
                     workers: int, capacity: int,
-                    binary: Path | None = None) -> subprocess.Popen | None:
+                    binary: Path | None = None,
+                    extra: list[str] = ()) -> subprocess.Popen | None:
     """Start the engine pinned to `server_cpus`.
 
     One I/O thread plus `workers` must fit the set, because `--cpus` refuses
     rather than wrapping around — a pool short by one used to mean a worker
     landed on a core the run had isolated *away* from the server.
 
-    `binary` is another build of the engine, for `commit_ab.py`.
+    `binary` is another build of the engine and `extra` its arm's flags
+    (`--filtered-plan scan`), for `commit_ab.py`.
     """
     argv = [
         str(binary or ROOT / "zig-out/bin/strawmann"),
@@ -658,6 +660,7 @@ def start_strawmann(server_cpus: str, port: int, log: Path,
         # `strawmann --probe` itself, from under the client's taskset). The
         # bus is saturated once either way, before any row runs; this way the
         # server measures it with the whole machine and the record says so.
+        *extra,
     ]
     # In a scope of its own, as the Qdrant side already is: a process started
     # from a shell inherits the shell's cgroup, which here holds the editor and

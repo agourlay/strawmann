@@ -91,6 +91,12 @@ pub const Engine = struct {
     /// than leave them in the pending tail every query scans until a rebuild.
     /// `--no-drain` is the arm without it.
     drain_tail: bool = true,
+    /// `--filtered-plan`: a plan every counted filter takes, in place of the
+    /// one `filteredPlan` picks. A calibration arm, not a tuning knob: the
+    /// cost model was fit at 2 requests in flight (0929) and W12 now runs W4's
+    /// client, so refitting it needs each plan measured on the same query set.
+    /// `null` is the model. `params.exact` still scans either way.
+    filtered_plan: ?FilteredPlan = null,
     /// Largest vector dimension any worker's scratch can hold.
     ///
     /// §6.3 forbids allocating on the query path, so `Workspace.query` is sized
@@ -1482,7 +1488,7 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
         pred = prepared.filter;
         if (prepared.selected) |n| {
             const m0 = coll.config.hnsw_m * 2;
-            const plan: FilteredPlan = if (exact) .scan else filteredPlan(n, prepared.bound, ef, m0, coll.config.dim);
+            const plan: FilteredPlan = if (exact) .scan else ctx.engine.filtered_plan orelse filteredPlan(n, prepared.bound, ef, m0, coll.config.dim);
             switch (plan) {
                 .scan => {
                     core.collection.searchSelected(coll, raw, ctx.workspace.filter_bits, @intCast(prepared.bound), &top);
@@ -2063,7 +2069,7 @@ fn fullScanPreferred(coll: *const core.Collection) bool {
 /// How an indexed filter's query is answered: score the matching set, walk the
 /// graph ACORN-1 style (`hnsw.Index.expandTwoHop`), or walk it scoring every
 /// neighbour.
-const FilteredPlan = enum { scan, two_hop, walk };
+pub const FilteredPlan = enum { scan, two_hop, walk };
 
 /// The plan for a filter the index counted exactly.
 ///

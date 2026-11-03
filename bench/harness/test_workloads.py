@@ -3641,6 +3641,63 @@ class CommitAbTests(unittest.TestCase):
                                     binary=Path("/x/zig-out/bin/strawmann"))
         self.assertIn("/x/zig-out/bin/strawmann", seen[0])
 
+    def test_an_arm_is_a_commit_a_named_commit_or_a_built_engine(self):
+        arms = self.ab.parse_arms(
+            ["b3ca8d2", "scan=HEAD", "two_hop=HEAD", "zig016=/w/zig-out/bin/strawmann"],
+            ["scan=--filtered-plan scan", "two_hop=--filtered-plan two_hop"])
+        self.assertEqual([a.name for a in arms], ["b3ca8d2", "scan", "two_hop", "zig016"])
+        self.assertEqual(arms[0].source, "b3ca8d2")
+        self.assertEqual(arms[1].flags, ("--filtered-plan", "scan"))
+        self.assertEqual(arms[0].flags, ())
+        self.assertTrue(arms[3].prebuilt)
+        self.assertFalse(arms[1].prebuilt)
+
+    def test_a_malformed_arm_or_flag_is_refused(self):
+        for specs, flags in ((["=x"], []), (["a="], []), (["a=x", "a=y"], []),
+                             (["a=x"], ["b=--x"]), (["a=x"], ["a="]), (["a=x"], ["a"]),
+                             # The census knows the engine by name: `base` is load.
+                             (["old=/w/bin/base"], [])):
+            with self.assertRaises(ValueError, msg=(specs, flags)):
+                self.ab.parse_arms(specs, flags)
+
+    def test_one_commit_is_built_once_for_all_its_arms(self):
+        built = []
+        with tempfile.TemporaryDirectory() as tmp:
+            pre = Path(tmp) / "strawmann"
+            pre.write_text("")
+            arms = self.ab.parse_arms(["scan=HEAD", "auto=HEAD", "old=abc", f"z={pre}"])
+            with mock.patch.object(self.ab, "build",
+                                   lambda c: built.append(c) or Path(f"/wt/{c}/strawmann")):
+                got = self.ab.binaries_for(arms)
+            self.assertEqual(built, ["HEAD", "abc"])
+            self.assertEqual(got["scan"], got["auto"])
+            self.assertEqual(got["z"], pre)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertIsNone(self.ab.binaries_for(
+                    self.ab.parse_arms([f"gone={tmp}/missing/strawmann"])))
+            self.assertIn("no engine at", err.getvalue())
+
+    def test_an_arms_flags_reach_the_engine(self):
+        import fullrun
+        seen = []
+
+        class Dead:
+            pid = 1
+            def poll(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(fullrun.subprocess, "Popen",
+                                  lambda argv, **k: seen.append(argv) or Dead()), \
+                mock.patch.object(fullrun, "wipe_strawmann_storage", lambda: None), \
+                mock.patch.object(fullrun.time, "sleep", lambda _s: None), \
+                mock.patch.object(fullrun, "maybe_scope", lambda argv, _unit: argv), \
+                contextlib.redirect_stderr(io.StringIO()):
+            fullrun.start_strawmann("4-11", 1, Path(tmp) / "server.log", 7, 10,
+                                    extra=["--filtered-plan", "scan"])
+        self.assertEqual(seen[0][-2:], ["--filtered-plan", "scan"])
+
     def test_drain_lines_and_the_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "server.log"
@@ -3655,6 +3712,49 @@ class CommitAbTests(unittest.TestCase):
             self.assertIn("11,450", text)
             self.assertLess(text.index("old"), text.index("new"))
             self.assertIn("1,758", text)
+
+
+class PlannerAbTests(unittest.TestCase):
+    """The filtered planner's refit: both plans forced on one build, per corpus."""
+
+    def setUp(self):
+        self.pa = importlib.import_module("planner_ab")
+
+    def test_one_build_runs_as_both_plans_on_the_w12_ladder(self):
+        argv = self.pa.argv("laion-small-clip", "abc1234", "planner-ab-1103", "4-11", "0-3", 1)
+        ab = importlib.import_module("commit_ab")
+        arms = ab.parse_arms(argv[argv.index("--commits") + 1:argv.index("--flags")],
+                             [argv[i + 1] for i, a in enumerate(argv) if a == "--flags"])
+        self.assertEqual([(a.name, a.source, a.flags) for a in arms], [
+            ("scan", "abc1234", ("--filtered-plan", "scan")),
+            ("two_hop", "abc1234", ("--filtered-plan", "two_hop"))])
+        self.assertEqual(argv[argv.index("--upload") + 1], "W12-upload")
+        self.assertIn("W12-sel10-ef512", argv)
+        self.assertEqual(argv[argv.index("--tag") + 1], "planner-ab-1103-laion-small-clip")
+
+    def test_the_model_break_even_is_where_filtered_plan_flips(self):
+        # handlers.zig: 20,000 of 200,000 at d=1536, m0=32 walks two-hop at
+        # ef 256 and scans at ef 512.
+        be = self.pa.model_break_even(20_000, 1536)
+        self.assertTrue(256 < be < 512, be)
+
+    def test_the_fit_names_a_wrong_pick(self):
+        summary = [{"row": f"W12-sel10-ef{ef}", "commit": plan, "qps": q}
+                   for plan, qs in (("scan", (1000, 1000, 1000)),
+                                    ("two_hop", (3000, 1500, 600)))
+                   for ef, q in zip((32, 128, 512), qs, strict=True)]
+        got = self.pa.ladder(summary)
+        self.assertEqual(got["two_hop"], {32: 3000, 128: 1500, 512: 600})
+        # Model break-even ef ~ 19,121 x 752 / 72,000 = 200: it walks at 128
+        # (right) and scans at 512 (right); at a measured break-even under 128
+        # it would be wrong at 128.
+        line = self.pa.fit_line("laion", 512, got, 19_121)
+        self.assertIn("model 200", line)
+        self.assertNotIn("(wrong)", line)
+        got["two_hop"][128] = 900
+        self.assertIn("ef128:two_hop(wrong)", self.pa.fit_line("laion", 512, got, 19_121))
+        self.assertIn("measured scan, not both",
+                      self.pa.fit_line("laion", 512, {"scan": {32: 1.0}}, 1))
 
 
 class QdrantBuildAbTests(unittest.TestCase):

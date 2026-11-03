@@ -44,6 +44,7 @@ const Flag = enum {
     build_threads,
     build_mode,
     no_drain,
+    filtered_plan,
 
     /// The text each flag is spelled with.
     ///
@@ -72,6 +73,7 @@ const Flag = enum {
             .build_threads => "--build-threads",
             .build_mode => "--build-mode",
             .no_drain => "--no-drain",
+            .filtered_plan => "--filtered-plan",
         };
     }
 
@@ -108,6 +110,23 @@ test "every flag is reachable from the command line and documented" {
 /// u8 vectors wraps and the score is silently wrong. The f32 kernels and the
 /// heaps carry no such bound, so this is the only one enforced here.
 pub const max_dim_limit: usize = dist.dot_i8.max_safe_dim;
+
+/// `auto` is the cost model, so it parses to no forced plan.
+fn parseFilteredPlan(v: []const u8) error{BadFilteredPlan}!?api.FilteredPlan {
+    if (std.mem.eql(u8, v, "auto")) return null;
+    return std.meta.stringToEnum(api.FilteredPlan, v) orelse error.BadFilteredPlan;
+}
+
+test "--filtered-plan parses auto as the model and refuses an unknown plan" {
+    try std.testing.expectEqual(@as(?api.FilteredPlan, null), try parseFilteredPlan("auto"));
+    try std.testing.expectEqual(@as(?api.FilteredPlan, .scan), try parseFilteredPlan("scan"));
+    try std.testing.expectEqual(@as(?api.FilteredPlan, .two_hop), try parseFilteredPlan("two_hop"));
+    try std.testing.expectEqual(@as(?api.FilteredPlan, .walk), try parseFilteredPlan("walk"));
+    try std.testing.expectError(error.BadFilteredPlan, parseFilteredPlan("two-hop"));
+    // The default is the model: a run that names nothing measures what every
+    // run so far measured.
+    try std.testing.expectEqual(@as(?api.FilteredPlan, null), (Options{}).filtered_plan);
+}
 
 fn validateMaxDim(n: usize) error{MaxDimTooLarge}!void {
     if (n > max_dim_limit) return error.MaxDimTooLarge;
@@ -226,6 +245,7 @@ const Options = struct {
     build_threads: usize = engineDefault(.build_threads),
     build_mode: core.collection.BuildMode = engineDefault(.build_mode),
     drain_tail: bool = engineDefault(.drain_tail),
+    filtered_plan: ?api.FilteredPlan = engineDefault(.filtered_plan),
     pin: bool = false,
     /// §5.5. Declared, never ambient, §7.1's rule, so a result row can state
     /// which arm produced it.
@@ -257,6 +277,9 @@ fn usage(w: *Io.Writer) !void {
         \\  --no-drain           leave appends to a built graph in the pending tail
         \\                       until a rebuild, instead of linking them in the
         \\                       background (the A/B arm for the drainer)
+        \\  --filtered-plan      auto|scan|two_hop|walk for a counted filter
+        \\                       (default auto, the cost model; the others are
+        \\                       calibration arms)
         \\  --pin                pin threads to cores   (§6.3, §7.1)
         \\  --cpus <list>        which cpus --pin may use, e.g. 4-11 or 0,2,4-6
         \\                       (default 0..; name them on a heterogeneous part)
@@ -387,6 +410,14 @@ pub fn main(init: std.process.Init) !void {
                 };
             },
             .build_threads => opts.build_threads = try parse(usize, next(args, &i)),
+            .filtered_plan => {
+                const v = next(args, &i) orelse return error.MissingValue;
+                opts.filtered_plan = parseFilteredPlan(v) catch {
+                    try w.print("error: --filtered-plan must be one of auto, scan, two_hop, walk\n", .{});
+                    try w.flush();
+                    return error.BadArgument;
+                };
+            },
             .build_mode => {
                 const v = next(args, &i) orelse return error.MissingValue;
                 opts.build_mode = std.meta.stringToEnum(core.collection.BuildMode, v) orelse {
@@ -420,6 +451,7 @@ pub fn main(init: std.process.Init) !void {
     engine.build_threads = opts.build_threads;
     engine.build_mode = opts.build_mode;
     engine.drain_tail = opts.drain_tail;
+    engine.filtered_plan = opts.filtered_plan;
     if (opts.default_placement.isMapped() and opts.data_dir == null) {
         try w.print("error: --default-placement {s} needs --data-dir <path>\n", .{opts.default_placement.name()});
         try w.flush();
@@ -620,6 +652,11 @@ pub fn main(init: std.process.Init) !void {
         try w.print("  appends                : linked into the built graph in the background on {d} threads, until {d}% pending asks for a rebuild\n", .{ engine.build_threads, @as(u32, @intFromFloat(core.collection.rebuild_ratio * 100)) });
     } else {
         try w.print("  appends                : pending tail until a rebuild (--no-drain)\n", .{});
+    }
+    if (engine.filtered_plan) |p| {
+        try w.print("  filtered plan          : forced {s} (--filtered-plan), not the cost model\n", .{@tagName(p)});
+    } else {
+        try w.print("  filtered plan          : cost model (scan, two-hop or walk per query)\n", .{});
     }
 
     // §7.2: the hardware baseline belongs next to the result, not in a separate

@@ -8,6 +8,7 @@ pub const e2e = @import("e2e.zig");
 pub const e2e_client = @import("e2e_client.zig");
 
 pub const Engine = handlers.Engine;
+pub const FilteredPlan = handlers.FilteredPlan;
 pub const Context = handlers.Context;
 pub const Workspace = handlers.Workspace;
 pub const handle = handlers.handle;

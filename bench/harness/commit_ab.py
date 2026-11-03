@@ -13,6 +13,12 @@ records its own foreign load. Usage:
 
     commit_ab.py --server-cpus 4-11 --client-cpus 0-3 [--reps 3]
                  [--dataset laion-small-clip] [--commits A B ...]
+                 [--flags NAME='--filtered-plan scan' ...] [--upload W12-upload]
+
+An arm is a commit (`b3ca8d2`), a named commit (`scan=HEAD`, so one commit can
+run as several arms), or a named engine already built (`zig016=/path/to/
+strawmann`, for a build this checkout's `zig` cannot make). `--flags` adds
+server flags to one arm by name.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ import dataclasses
 import json
 import os
 import re
+import shlex
 import statistics
 import sys
 import time
@@ -42,6 +49,48 @@ PORT = 6334
 WORKTREES = Path.home() / ".cache/strawmann/ab"
 
 _DRAIN = re.compile(r"index: drain .*")
+
+
+@dataclasses.dataclass(frozen=True)
+class Arm:
+    name: str
+    #: A commit to build, or the path of an engine already built.
+    source: str
+    flags: tuple[str, ...] = ()
+
+    @property
+    def prebuilt(self) -> bool:
+        return "/" in self.source
+
+
+def parse_arms(specs: list[str], flags: list[str] = ()) -> list[Arm]:
+    """`commit`, `name=commit` or `name=/path/strawmann`, in the order given.
+
+    A prebuilt engine must be called `strawmann`: the foreign-load census
+    knows the engine by its process name, so a binary called anything else is
+    counted as load on itself.
+    """
+    arms: dict[str, Arm] = {}
+    for spec in specs:
+        name, eq, source = spec.partition("=")
+        if not eq:
+            source = name
+        if not name or not source or name in arms:
+            raise ValueError(f"arm {spec!r}: want COMMIT, NAME=COMMIT or NAME=PATH, "
+                             f"each name once")
+        if "/" in source:
+            source = str(Path(source).expanduser())
+            if Path(source).name != "strawmann":
+                raise ValueError(f"arm {spec!r}: name the binary `strawmann`, or the "
+                                 f"census counts it as foreign load")
+        arms[name] = Arm(name, source)
+    for f in flags:
+        name, eq, argv = f.partition("=")
+        if not eq or name not in arms or not argv.strip():
+            raise ValueError(f"--flags {f!r}: want NAME='--flag value' for an arm given")
+        arms[name] = dataclasses.replace(arms[name], flags=(*arms[name].flags,
+                                                            *shlex.split(argv)))
+    return list(arms.values())
 
 
 def plan(commits: list[str], reps: int) -> list[tuple[int, str]]:
@@ -141,20 +190,40 @@ def measure(w: workloads.Workload, uri: str, out: Path, commit: str, rep: int) -
     return row
 
 
+def binaries_for(arms: list[Arm]) -> dict[str, Path] | None:
+    """Each arm's engine, a commit built once however many arms run it."""
+    built: dict[str, Path] = {}
+    out = {}
+    for a in arms:
+        if a.prebuilt:
+            if not Path(a.source).is_file():
+                print(f"arm {a.name}: no engine at {a.source}", file=sys.stderr)
+                return None
+            out[a.name] = Path(a.source)
+            continue
+        if a.source not in built:
+            if (b := build(a.source)) is None:
+                return None
+            built[a.source] = b
+        out[a.name] = built[a.source]
+    return out
+
+
 def run_sessions(args, out: Path, binaries: dict[str, Path], rows: list[dict]) -> int:
     table = {w.id: w for w in workloads.table()}
+    flags = {a.name: list(a.flags) for a in args.arms}
     uri = f"http://localhost:{PORT}"
     workers = max(1, fullrun.cpu_count(args.server_cpus) - 1)
-    for rep, commit in plan(list(args.commits), args.reps):
+    for rep, commit in plan([a.name for a in args.arms], args.reps):
         fullrun.say(f"{commit} rep {rep}")
         log = out / f"{worktree_dir(commit).name}-r{rep}" / "server.log"
         engine = fullrun.start_strawmann(args.server_cpus, PORT, log, workers,
                                          workloads.required_capacity(),
-                                         binary=binaries[commit])
+                                         binary=binaries[commit], extra=flags[commit])
         if engine is None:
             return 1
         try:
-            up = workloads.run_one(table["W2"], uri, log.parent, w9_ab.COMMON)
+            up = workloads.run_one(table[args.upload], uri, log.parent, w9_ab.COMMON)
             if up.status != workloads.Status.ok:
                 print(f"upload failed: {up.status}", file=sys.stderr)
                 return 1
@@ -184,7 +253,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--server-cpus", required=True)
     ap.add_argument("--client-cpus", required=True)
     ap.add_argument("--dataset", default="laion-small-clip")
-    ap.add_argument("--commits", nargs="+", default=list(COMMITS))
+    ap.add_argument("--commits", nargs="+", default=list(COMMITS),
+                    help="arms: COMMIT, NAME=COMMIT or NAME=/path/to/strawmann")
+    ap.add_argument("--flags", action="append", default=[], metavar="NAME=FLAGS",
+                    help="server flags for one arm, e.g. scan='--filtered-plan scan'")
+    ap.add_argument("--upload", default="W2",
+                    help="the upload row each session starts with (W12-upload for W12)")
     ap.add_argument("--rows", nargs="+", default=list(ROWS))
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--tag", default=f"commit-ab-{time.strftime('%m%d')}")
@@ -199,18 +273,21 @@ def main(argv: list[str]) -> int:
     if claude:
         print(f"!! {len(claude)} claude process(es) alive; their idle CPU is foreign load",
               flush=True)
-    binaries = {}
-    for c in args.commits:
-        if (b := build(c)) is None:
-            return 1
-        binaries[c] = b
+    try:
+        args.arms = parse_arms(args.commits, args.flags)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    if (binaries := binaries_for(args.arms)) is None:
+        return 1
     out = fullrun.RESULTS / args.tag
     out.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
+    names = [a.name for a in args.arms]
     try:
         return run_sessions(args, out, binaries, rows)
     finally:
-        write_summary(out, rows, list(args.commits))
+        write_summary(out, rows, names)
 
 
 if __name__ == "__main__":
