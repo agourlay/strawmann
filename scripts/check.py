@@ -75,6 +75,15 @@ def steps() -> list[Step]:
         Step("zig-build", "the release binary must build, not merely typecheck",
              ["zig", "build", "-Doptimize=ReleaseFast"]),
 
+        # The Zig test of the same name takes each kernel's address, and that
+        # alone keeps an aligned out-of-line copy in the test binary. Under Zig
+        # 0.17 the server binary had none: both kernels were inlined into
+        # Probe.scoreRow and the test stayed green (findings 69, decision 2115).
+        # So this reads the symbols of the binary zig-build just produced.
+        Step("kernel-align", "the release binary keeps the fp32 kernels out of line and on "
+                             "a cache line, which the test binary cannot show",
+             [sys.executable, str(Path(__file__).resolve()), "--check-kernel-align"]),
+
         Step("rust-test", "conformance harness: oracle, differ tiers, relevance metrics",
              ["cargo", "test", "--release", "--quiet"], cwd=ROOT / "conformance"),
 
@@ -301,6 +310,49 @@ def check_paths() -> int:
     return 0
 
 
+#: Kernels whose `align(64)` is load-bearing (findings 69), by the symbol name
+#: Zig gives them.
+ALIGNED_KERNELS = ("dist.dot_f32.Dot(16,8).call", "dist.l2_f32.Euclid(16,8).call")
+RELEASE_BINARY = ROOT / "zig-out/bin/strawmann"
+
+
+def kernel_alignment(nm_text: str, names=ALIGNED_KERNELS, align: int = 64) -> list[str]:
+    """What is wrong with each kernel in `nm` output, or nothing.
+
+    A missing symbol means the compiler inlined it, which is the 0.17 failure:
+    the attribute is silently dropped with the function.
+    """
+    addr: dict[str, int] = {}
+    for line in nm_text.splitlines():
+        parts = line.split(maxsplit=2)
+        if len(parts) == 3 and parts[1] in "tT":
+            addr[parts[2]] = int(parts[0], 16)
+    bad = []
+    for name in names:
+        if name not in addr:
+            bad.append(f"{name}: no symbol, so it was inlined and its align({align}) is gone")
+        elif addr[name] % align:
+            bad.append(f"{name}: at {addr[name]:#x}, {addr[name] % align} bytes past a "
+                       f"{align}-byte line")
+    return bad
+
+
+def check_kernel_align(binary: Path = RELEASE_BINARY) -> int:
+    if not binary.exists():
+        print(f"{binary} not built: run the zig-build step first", file=sys.stderr)
+        return 1
+    r = subprocess.run(["nm", str(binary)], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr.strip(), file=sys.stderr)
+        return 1
+    bad = kernel_alignment(r.stdout)
+    for b in bad:
+        print(b, file=sys.stderr)
+    if not bad:
+        print(f"ok: {len(ALIGNED_KERNELS)} kernels out of line and 64-byte aligned")
+    return 1 if bad else 0
+
+
 def check_report() -> int:
     """The report tooling imports and its template renders.
 
@@ -497,6 +549,7 @@ def main() -> int:
     ap.add_argument("--check-regression", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--check-syntax", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--check-harness-unit", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--check-kernel-align", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     if args.canary:
@@ -513,6 +566,8 @@ def main() -> int:
         return check_report()
     if args.check_regression:
         return check_regression()
+    if args.check_kernel_align:
+        return check_kernel_align()
 
     todo = steps()
     if args.only:

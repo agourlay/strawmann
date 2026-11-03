@@ -758,6 +758,43 @@ class DoctorDatasetsTests(unittest.TestCase):
         self.assertIn("652.6MB", items["total"].detail)
 
 
+class KernelAlignTests(unittest.TestCase):
+    """The gate reads `nm` of the release binary for the fp32 kernels.
+
+    Under Zig 0.17 both kernels vanished from the server binary into
+    Probe.scoreRow while the Zig test, which takes their addresses and so
+    keeps a copy, stayed green. Absence is the failure to name.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "strawmann_check", HERE.parents[1] / "scripts/check.py")
+        cls.check = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = cls.check  # @dataclass looks its module up
+        spec.loader.exec_module(cls.check)
+
+    def nm(self, dot: int, l2: int | None) -> str:
+        lines = [f"{dot:016x} t dist.dot_f32.Dot(16,8).call",
+                 "000000000110f130 t core.collection.Probe.scoreRow"]
+        if l2 is not None:
+            lines.append(f"{l2:016x} t dist.l2_f32.Euclid(16,8).call")
+        return "\n".join(lines)
+
+    def test_aligned_out_of_line_kernels_pass(self):
+        self.assertEqual(self.check.kernel_alignment(self.nm(0x1167640, 0x1167380)), [])
+
+    def test_an_inlined_kernel_is_named_as_inlined(self):
+        bad = self.check.kernel_alignment(self.nm(0x1167640, None))
+        self.assertEqual(len(bad), 1)
+        self.assertIn("Euclid(16,8).call: no symbol, so it was inlined", bad[0])
+
+    def test_a_misaligned_kernel_says_by_how_much(self):
+        bad = self.check.kernel_alignment(self.nm(0x1167650, 0x1167380))
+        self.assertEqual(bad, [("dist.dot_f32.Dot(16,8).call: at 0x1167650, "
+                                "16 bytes past a 64-byte line")])
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -212,6 +212,11 @@ jobs:
       - name: Release build
         run: scripts/check.py --only 'zig-build'
 
+      # Reads the binary the step above built, so it comes after it.
+      # gate: kernel-align
+      - name: Kernel placement in the release binary
+        run: scripts/check.py --only 'kernel-align'
+
   conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 30

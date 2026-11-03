@@ -46,7 +46,13 @@ pub fn Dot(comptime L: usize, comptime NACC: usize) type {
         /// then this function's own, not wherever the code before it ends. A change
         /// that added 704 bytes elsewhere (f346aea) moved it 16 bytes and cost fp32
         /// search 4% at the same instructions (findings 69).
-        pub fn call(a: []const f32, b: []const f32) align(64) f32 {
+        ///
+        /// `noinline`: Zig 0.17 inlines this into `Probe.scoreRow`, where the
+        /// alignment no longer applies and the loop lands wherever scoreRow's
+        /// code puts it. The test below takes the function's address, which
+        /// keeps an aligned copy in the test binary whatever the server does;
+        /// `scripts/check.py`'s kernel-align step reads the release binary.
+        pub noinline fn call(a: []const f32, b: []const f32) align(64) f32 {
             @setFloatMode(.optimized);
             std.debug.assert(a.len == b.len);
 
