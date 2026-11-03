@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -3755,6 +3756,48 @@ class PlannerAbTests(unittest.TestCase):
         self.assertIn("ef128:two_hop(wrong)", self.pa.fit_line("laion", 512, got, 19_121))
         self.assertIn("measured scan, not both",
                       self.pa.fit_line("laion", 512, {"scan": {32: 1.0}}, 1))
+
+
+class Phase1ChainTests(unittest.TestCase):
+    """The 1102 plan's phase 1, three drivers in one quiet stretch."""
+
+    def setUp(self):
+        self.ch = importlib.import_module("phase1_chain")
+
+    def test_the_kernel_and_w9_steps_run_the_same_three_engines(self):
+        ab = importlib.import_module("commit_ab")
+        chain = {s.name: s.argv for s in self.ch.steps("t", Path("/w/bin/strawmann"))}
+        self.assertEqual(list(chain), ["kernel-laion", "w9-sift1m", "planner"])
+        for name in ("kernel-laion", "w9-sift1m"):
+            argv = chain[name]
+            arms = ab.parse_arms(argv[argv.index("--commits") + 1:])
+            self.assertEqual([(a.name, a.source) for a in arms], [
+                ("zig016", "/w/bin/strawmann"), ("inlined", self.ch.INLINED),
+                ("noinline", self.ch.NOINLINE)])
+        self.assertIn("W9", chain["w9-sift1m"])
+        self.assertEqual(chain["planner"][chain["planner"].index("--commit") + 1],
+                         self.ch.NOINLINE)
+
+    def test_a_failed_step_leaves_the_next_to_run(self):
+        calls = []
+
+        def runner(argv, **_k):
+            calls.append(Path(argv[1]).name)
+            return types.SimpleNamespace(returncode=1 if len(calls) == 1 else 0)
+
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            done = self.ch.run(self.ch.steps("t"), Path(tmp), {}, runner)
+            saved = json.loads((Path(tmp) / "chain.json").read_text())
+        self.assertEqual(calls, ["commit_ab.py", "commit_ab.py", "planner_ab.py"])
+        self.assertEqual([d["rc"] for d in done], [1, 0, 0])
+        self.assertEqual(saved, done)
+
+    def test_a_missing_engine_is_named_before_anything_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bfb = Path(tmp) / "bfb"
+            bfb.write_text("")
+            self.assertEqual(self.ch.missing(Path(tmp) / "strawmann", bfb),
+                             [f"no Zig 0.16 engine at {tmp}/strawmann"])
 
 
 class QdrantBuildAbTests(unittest.TestCase):
