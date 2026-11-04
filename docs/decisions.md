@@ -14,7 +14,7 @@ Newest entries at the bottom of each section.
 
 ## Toolchain
 
-- **Zig 0.17.0**, pinned in `build.zig.zon` via `minimum_zig_version`. §9: "a
+- **Zig 0.17.1**, pinned in `build.zig.zon` via `minimum_zig_version`. §9: "a
   benchmark that silently changes compiler is not a benchmark." LLVM's
   autovectoriser and its AVX-512 cost model both move between releases, so an
   unpinned compiler turns the §7.5 ISA matrix into noise.
@@ -83,6 +83,11 @@ Newest entries at the bottom of each section.
   `small`; the banner's `build mode` line keeps the old names, because the
   report refuses any run whose mode is not `ReleaseFast` and every recorded run
   says it that way. `-Doptimize=ReleaseFast` is still accepted.
+
+- **Zig 0.17.0 to 0.17.1** (2026-11-04). A patch release, but §9 still holds:
+  `zig=0.17.1` changes the `env_hash`, so `compare` and the regression floors
+  refuse to mix runs from the two, and every published number on 0.17.0 is
+  STALE until re-measured. `bench/setup.py` already accepts any `0.17.x`.
 
 ## Architecture
 
