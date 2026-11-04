@@ -2096,21 +2096,29 @@ pub const FilteredPlan = enum { scan, two_hop, walk };
 fn filteredPlan(selected: usize, bound: usize, ef: usize, m0: usize, dim: usize) FilteredPlan {
     const reach = std.math.mul(usize, selected, @max(m0, 1)) catch std.math.maxInt(usize);
     if (reach >= bound) {
-        const walk = blk: {
-            const a = std.math.mul(usize, @max(ef, 1), @max(m0, 1)) catch break :blk std.math.maxInt(usize);
-            break :blk (std.math.mul(usize, a, 3) catch std.math.maxInt(usize)) / 2;
-        };
-        // Weighted by what a row costs each way, not row for row. A scanned
-        // row streams all `dim` values, about 24 ns + 0.1 ns per dimension;
-        // a walked row is a random fetch, about 150 ns at any width. From
-        // the four 0929 pairs' W12-sel10 sweeps (scan: q/s x matched rows;
-        // walk: two-hop q/s at ef 128 x 1.5 ef m0 rows): 37 against 128 ns at
-        // d=128, 80 against 129 at 512, 172 against 202 at 1536, 229 against
-        // 142 at 2048. Row for row, sift1m walked at ef 128 and 256 where its
-        // scan was faster (1,353 q/s against 1,272 and 774), and h-and-m
-        // scanned at ef 256 at 408 q/s where the walk would run ~570.
-        const scan_cost = std.math.mul(usize, selected, 240 +| dim) catch std.math.maxInt(usize);
-        const walk_cost = std.math.mul(usize, walk, 1500) catch std.math.maxInt(usize);
+        // In units of one scanned dimension, ~0.075 ns of the server's time.
+        // Fit to the 1103 forced-plan ladders (`planner_ab.py`, W12-sel10 at
+        // W4's client, both plans on each of four corpora), where it picks
+        // the faster plan at all twenty points:
+        //
+        // - the scan streams `dim` values per matched row: 10, 57, 108 and
+        //   159 ns per row at d = 128, 512, 1536, 2048, ~0.075 ns per value;
+        // - the two-hop walk costs ~1.3 us per unit of ef *at every width*
+        //   (1,150 to 1,600 ns), because it scores only admitted points and
+        //   most of a hop is neighbour lists and the filter, not distances.
+        //   560 per `ef · m0` is that slope at m0 = 32; 200,000 is the fixed
+        //   part of a walk (entry descent, heap setup).
+        //
+        // The 0929 model priced a walked row at ~4x a d=512 scanned row from
+        // ladders run at 2 requests in flight, and so scanned laion from
+        // ef 128 (two-hop 2.68x faster) and h-and-m at ef 512 (2.15x): the
+        // 1102 pairs' 0.63x and 0.52x. The walk's cost grows as ~ef^0.8, so
+        // a line through it is slightly pessimistic at wide ef; the two
+        // near-ties (sift1m ef 128 at 0.92x, laion ef 256 at 1.52x) cost at
+        // most 8% when they fall the wrong way.
+        const per_walk = std.math.mul(usize, @max(ef, 1), @max(m0, 1)) catch std.math.maxInt(usize);
+        const walk_cost = (std.math.mul(usize, per_walk, 560) catch std.math.maxInt(usize)) +| 200_000;
+        const scan_cost = std.math.mul(usize, selected, dim) catch std.math.maxInt(usize);
         return if (scan_cost < walk_cost) .scan else .two_hop;
     }
     return if (plainFilteredSearch(selected, bound, ef, m0)) .scan else .walk;
@@ -2185,8 +2193,11 @@ test "an indexed filter scans below 1/m0, walks two-hop above it, and scans agai
     try testing.expectEqual(FilteredPlan.scan, filteredPlan(2_000, 200_000, 128, 32, 1536));
     try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(20_000, 200_000, 128, 32, 1536));
     try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(20_000, 200_000, 256, 32, 1536));
-    // At ef 512 the walk's ~24,600 rows cost more than scoring the 20,000.
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(20_000, 200_000, 512, 32, 1536));
+    // At ef 512 too: the walk's cost barely depends on d, and scoring 20,000
+    // rows of 1,536 values does.
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(20_000, 200_000, 512, 32, 1536));
+    // At d=128 the same 20,000 rows are cheap to scan, so a wide walk loses.
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(20_000, 200_000, 512, 32, 128));
     // A permissive filter walks two-hop too; it used to walk scoring everything.
     try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(100_000, 200_000, 128, 32, 1536));
     // The floor is `selected · m0 >= n`: either side of 6,250.
@@ -2204,21 +2215,21 @@ test "an indexed filter scans below 1/m0, walks two-hop above it, and scans agai
 }
 
 test "the scan-or-walk crossover follows the dimension" {
-    // The four 0929 pairs' W12-sel10, m0 = 32. sift1m (d=128, 20,035 matched
-    // of 200,000): its scan beat the walk from ef 128 up.
-    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(20_035, 200_000, 64, 32, 128));
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(20_035, 200_000, 128, 32, 128));
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(20_035, 200_000, 256, 32, 128));
-    // h-and-m (d=2048, 10,608 of 105,100): the walk wins at ef 256, the scan at 512.
-    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(10_608, 105_100, 256, 32, 2048));
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(10_608, 105_100, 512, 32, 2048));
-    // dbpedia (d=1536, 19,895 of 200,000): unchanged, the scan only at ef 512.
-    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(19_895, 200_000, 256, 32, 1536));
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(19_895, 200_000, 512, 32, 1536));
-    // laion (d=512, 9,999 of 100,000): the walk at ef 64, the scan from 128,
-    // which read faster (1,335 against 1,263 q/s) at recall 1.0000.
-    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(9_999, 100_000, 64, 32, 512));
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(9_999, 100_000, 128, 32, 512));
+    // The 1103 forced-plan ladders, W12-sel10 at W4's client, m0 = 32: the
+    // faster plan measured at each point, with two-hop's q/s over the scan's.
+    // sift1m (d=128, ~19,124 of 200,000): the walk to ef 64, the scan from 128.
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(19_124, 200_000, 64, 32, 128)); // 1.63
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(19_124, 200_000, 128, 32, 128)); // 0.92
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(19_124, 200_000, 256, 32, 128)); // 0.51
+    // laion (d=512, ~9,562 of 100,000): the walk to ef 256, the scan at 512.
+    // The 0929 model scanned from ef 128, the 1102 pair's W12-sel10 0.63x.
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(9_562, 100_000, 128, 32, 512)); // 2.68
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(9_562, 100_000, 256, 32, 512)); // 1.52
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(9_562, 100_000, 512, 32, 512)); // 0.87
+    // dbpedia-100K (d=1536) and h-and-m (d=2048): the walk at every width,
+    // ef 512 included, which the 0929 model scanned (h-and-m 1102: 0.52x).
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(9_562, 100_000, 512, 32, 1536)); // 1.15
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(10_049, 105_100, 512, 32, 2048)); // 2.15
     // h-and-m's 1% filter still scans, below the two-hop floor.
     try testing.expectEqual(FilteredPlan.scan, filteredPlan(1_044, 105_100, 32, 32, 2048));
 }

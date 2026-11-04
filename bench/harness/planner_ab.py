@@ -54,8 +54,11 @@ def argv(dataset: str, commit: str, tag: str, server_cpus: str, client_cpus: str
 
 
 def model_break_even(selected: int, dim: int, m0: int = M0) -> float:
-    """The ef at which `filteredPlan` flips: `selected (240 + d) = 1.5 ef m0 1500`."""
-    return selected * (240 + dim) / (1.5 * m0 * 1500)
+    """The ef at which `filteredPlan` flips: `selected d = 560 ef m0 + 200,000`.
+
+    The same constants as handlers.zig, which this cannot import: change both.
+    """
+    return (selected * dim - 200_000) / (560 * m0)
 
 
 def selected_rows() -> int:

@@ -3734,10 +3734,11 @@ class PlannerAbTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--tag") + 1], "planner-ab-1103-laion-small-clip")
 
     def test_the_model_break_even_is_where_filtered_plan_flips(self):
-        # handlers.zig: 20,000 of 200,000 at d=1536, m0=32 walks two-hop at
-        # ef 256 and scans at ef 512.
-        be = self.pa.model_break_even(20_000, 1536)
-        self.assertTrue(256 < be < 512, be)
+        # handlers.zig's 1103 points, m0=32: laion (9,562 at d=512) walks
+        # two-hop at ef 256 and scans at 512; sift1m (19,124 at d=128) at 64
+        # and 128.
+        self.assertTrue(256 < self.pa.model_break_even(9_562, 512) < 512)
+        self.assertTrue(64 < self.pa.model_break_even(19_124, 128) < 128)
 
     def test_the_fit_names_a_wrong_pick(self):
         summary = [{"row": f"W12-sel10-ef{ef}", "commit": plan, "qps": q}
@@ -3746,14 +3747,14 @@ class PlannerAbTests(unittest.TestCase):
                    for ef, q in zip((32, 128, 512), qs, strict=True)]
         got = self.pa.ladder(summary)
         self.assertEqual(got["two_hop"], {32: 3000, 128: 1500, 512: 600})
-        # Model break-even ef ~ 19,121 x 752 / 72,000 = 200: it walks at 128
-        # (right) and scans at 512 (right); at a measured break-even under 128
-        # it would be wrong at 128.
-        line = self.pa.fit_line("laion", 512, got, 19_121)
-        self.assertIn("model 200", line)
+        # Model break-even ef (9,562 x 512 - 200,000) / 17,920 = 262: it walks
+        # at 128 (right) and scans at 512 (right); at a measured break-even
+        # under 128 it would be wrong at 128.
+        line = self.pa.fit_line("laion", 512, got, 9_562)
+        self.assertIn("model 262", line)
         self.assertNotIn("(wrong)", line)
         got["two_hop"][128] = 900
-        self.assertIn("ef128:two_hop(wrong)", self.pa.fit_line("laion", 512, got, 19_121))
+        self.assertIn("ef128:two_hop(wrong)", self.pa.fit_line("laion", 512, got, 9_562))
         self.assertIn("measured scan, not both",
                       self.pa.fit_line("laion", 512, {"scan": {32: 1.0}}, 1))
 
