@@ -100,6 +100,68 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(rows["W3"].ratio, "-")
         self.assertIn("recall unequal", rows["W3"].note_text)
 
+    #: h-and-m 1102's T3 detail, verbatim: passed on a matched pair of widths,
+    #: apart at the shared ef 128.
+    T3_APART = ("strawmann ef 128 n=10000 recall@1=0.9997 recall@10=0.9988 [0.9979,0.9993] "
+                "recall@100=n/a MRDE=1.9452e-4 | qdrant ef 256 n=10000 recall@1=0.9995 "
+                "recall@10=0.9984 [0.9975,0.9991] recall@100=n/a MRDE=2.2695e-4 | recall@10 "
+                "CIs overlap \u2014 QPS is comparable at matched recall | at the shared ef 128 "
+                "they did not overlap: strawmann 0.9988 [0.9979,0.9993] qdrant 0.9969 "
+                "[0.9956,0.9978]")
+
+    def test_t3_split_reads_the_shared_ef_and_the_matched_pair(self):
+        split = self.m["compare"].t3_split
+        conf = {"tiers": [{"tier": "T3 ANN statistical equivalence", "detail": self.T3_APART}]}
+        self.assertEqual(split(conf), {"ef": 128, "strawmann": 0.9988, "qdrant": 0.9969,
+                                       "matched": (128, 256)})
+        overlap = {"tiers": [{"tier": "T3 ANN statistical equivalence",
+                              "detail": "strawmann ef 128 ... | recall@10 CIs overlap"}]}
+        self.assertIsNone(split(overlap))
+        self.assertIsNone(split(CONF_T3))  # no tiers recorded
+
+    def test_a_ratio_t3_found_apart_in_recall_says_so_and_stays(self):
+        """h-and-m 1102 printed W4 0.82x with nothing said: within RECALL_TOL,
+        and T3 had strawmANN's recall above Qdrant's at that ef."""
+        conf = {**CONF_T3, "tiers": [{"tier": "T3 ANN statistical equivalence",
+                                      "passed": True, "detail": self.T3_APART}]}
+        sw_a = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.9988))]
+        sw_b = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.9970))]
+        rows, _ = self._joined([_row("W4", 4663), _row("W6", 4000, collection="bench6")],
+                               [_row("W4", 5663), _row("W6", 4000, collection="bench6")],
+                               good_stamp(), good_stamp(), conf_a=conf, conf_b=conf,
+                               sweeps_a=sw_a, sweeps_b=sw_b)
+        self.assertEqual(rows["W4"].ratio, "0.82x")
+        self.assertIn("[T3: recall apart at ef 128, strawmann higher (0.9988 vs 0.9969); "
+                      "equal recall is strawmann ef 128 vs qdrant ef 256]", rows["W4"].note_text)
+        # Not on a collection T3 did not measure.
+        self.assertNotIn("T3: recall apart", rows["W6"].note_text)
+
+    def test_the_landing_caption_says_t3_put_one_engines_recall_ahead(self):
+        """The landing page drew h-and-m W4's 0.82x as a red bar with nothing
+        said; the full table's note does not reach it."""
+        conf = {**CONF_T3, "tiers": [{"tier": "T3 ANN statistical equivalence",
+                                      "passed": True, "detail": self.T3_APART}]}
+        sw_a = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.9988))]
+        sw_b = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.9970))]
+        _rows, cmp = self._joined([_row("W4", 4663)], [_row("W4", 5663)], good_stamp(),
+                                  good_stamp(), conf_a=conf, conf_b=conf,
+                                  sweeps_a=sw_a, sweeps_b=sw_b)
+        panel = cmp.landing_block("a", "b", cmp.load("a"), cmp.load("b"))
+        self.assertIn("strawmANN&#x27;s recall is higher (T3): compare at equal recall", panel)
+
+    def test_the_t3_note_is_only_at_the_shared_ef(self):
+        conf = {**CONF_T3, "tiers": [{"tier": "T3 ANN statistical equivalence",
+                                      "passed": True, "detail": self.T3_APART}]}
+        sweep = {"points": [{"ef": 256, "exact": False, "recall_at_1": 0.9,
+                             "recall_at_10": 0.999, "smoke_qps": 1.0}]}
+        sw = [("recall.sift1m.bench2.json", _sweep("bench2", "sift1m", 0.99, **sweep))]
+        rows, _ = self._joined([_row("W10-ef256", 3000, ef=256)],
+                               [_row("W10-ef256", 3000, ef=256)],
+                               good_stamp(), good_stamp(), conf_a=conf, conf_b=conf,
+                               sweeps_a=sw, sweeps_b=sw)
+        self.assertNotEqual(rows["W10-ef256"].ratio, "-", rows["W10-ef256"].note_text)
+        self.assertNotIn("T3: recall apart", rows["W10-ef256"].note_text)
+
     def test_no_ratio_when_recall_missing(self):
         rows, _ = self._joined([_row("W3", 4000)], [_row("W3", 2000)],
                                good_stamp(), good_stamp())

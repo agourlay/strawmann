@@ -6,12 +6,12 @@ The table below is generated from the last full run that measured this dataset. 
 | id | workload | sm-hnm-perf-1102 qps | qd-hnm-perf-1102 qps | ratio | sm-hnm-perf-1102 p50/p99 | qd-hnm-perf-1102 p50/p99 | recall@10 | notes |
 |---|---|--:|--:|--:|--:|--:|--:|---|
 | W0 | d=4 floor: graph traversal with the distance taken out | 5,129 | 4,246 | 1.21x | 193 µs / 230 µs | 232 µs / 292 µs | - | 1.21x is 1.70x less work per query x 0.63x cores busy during the row (0.66 against 1.03) x 1.00x clock x 1.12x counted on-CPU share: the middle term is occupancy, not search speed |
-| W3 | search, fp32, single query | 1,293 | 996 | 1.30x | 751 µs / 1.40 ms | 992 µs / 1.41 ms | 0.9988 / 0.9970 |  |
-| W4 | search, saturating (closed loop) | 4,663 | 5,663 | 0.82x | 13.69 ms / 15.33 ms | 10.97 ms / 23.11 ms | 0.9988 / 0.9970 |  |
+| W3 | search, fp32, single query | 1,293 | 996 | 1.30x | 751 µs / 1.40 ms | 992 µs / 1.41 ms | 0.9988 / 0.9970 | T3: recall apart at ef 128, strawmann higher (0.9988 vs 0.9969); equal recall is strawmann ef 128 vs qdrant ef 256 |
+| W4 | search, saturating (closed loop) | 4,663 | 5,663 | 0.82x | 13.69 ms / 15.33 ms | 10.97 ms / 23.11 ms | 0.9988 / 0.9970 | T3: recall apart at ef 128, strawmann higher (0.9988 vs 0.9969); equal recall is strawmann ef 128 vs qdrant ef 256 |
 | W4-sat50 | search, fixed rate at 50% of saturation (open loop) | 2,329 | 2,329 | offered | 885 µs / 1.60 ms | 1.10 ms / 1.74 ms | 0.9988 / 0.9970 |  |
 | W4-sat70 | search, fixed rate at 70% of saturation (open loop) | 3,260 | 3,260 | offered | 1.01 ms / 2.15 ms | 1.17 ms / 2.32 ms | 0.9988 / 0.9970 |  |
 | W4-sat90 | search, fixed rate at 90% of saturation (open loop) | 4,192 | 4,192 | offered | 1.15 ms / 2.83 ms | 1.38 ms / 3.08 ms | 0.9988 / 0.9970 |  |
-| W5 | search batched (16 distinct dataset queries per request) | 4,644 | 5,985 | 0.78x | 219.93 ms / 225.49 ms | 169.57 ms / 221.59 ms | 0.9988 / 0.9970 | per-batch latency (16 queries/request); queries: dataset, random-sample |
+| W5 | search batched (16 distinct dataset queries per request) | 4,644 | 5,985 | 0.78x | 219.93 ms / 225.49 ms | 169.57 ms / 221.59 ms | 0.9988 / 0.9970 | per-batch latency (16 queries/request); queries: dataset, random-sample T3: recall apart at ef 128, strawmann higher (0.9988 vs 0.9969); equal recall is strawmann ef 128 vs qdrant ef 256 |
 | W6 | quantized: scalar | 10,738 | 10,443 | 1.03x | 5.92 ms / 6.46 ms | 5.60 ms / 15.59 ms | 0.9987 / 0.9971 |  |
 | W6-ef32 | SQ8 recall control, ef=32 (latency only) | 31,305 | 25,561 | 1.22x | 2.02 ms / 2.24 ms | 2.32 ms / 5.53 ms | 0.9941 / 0.9884 | -n 100000 (2x the table's 50000) |
 | W6-ef64 | SQ8 recall control, ef=64 (latency only) | 18,467 | 17,298 | parity | 3.43 ms / 3.75 ms | 3.47 ms / 7.37 ms | 0.9972 / 0.9944 | within the ±11.4% band this dataset's noise floor puts on W6-ef64: no measured difference, not a small one |
@@ -29,7 +29,7 @@ The table below is generated from the last full run that measured this dataset. 
 | W9 | exact / brute force | 71 | 72 | parity | 110.49 ms / 153.29 ms | 111.80 ms / 140.66 ms | - | within the ±3.6% band this dataset's noise floor puts on W9: no measured difference, not a small one |
 | W10-ef32 | recall control, ef=32 (latency only) | 12,018 | 10,508 | 1.14x | 655 µs / 994 µs | 706 µs / 1.40 ms | 0.9950 / 0.9869 | 1.14x is 0.91x less work per query x 1.21x cores busy during the row (6.96 against 5.75) x 1.00x clock x 1.04x counted on-CPU share: the middle term is occupancy, not search speed |
 | W10-ef64 | recall control, ef=64 (latency only) | 7,504 | 7,124 | 1.05x | 1.05 ms / 1.65 ms | 1.02 ms / 2.10 ms | 0.9976 / 0.9942 |  |
-| W10-ef128 | recall control, ef=128 (latency only) | 4,658 | 4,780 | parity | 1.68 ms / 2.77 ms | 1.55 ms / 3.10 ms | 0.9988 / 0.9970 | within the ±4.1% band this dataset's noise floor puts on W10-ef128: no measured difference, not a small one |
+| W10-ef128 | recall control, ef=128 (latency only) | 4,658 | 4,780 | parity | 1.68 ms / 2.77 ms | 1.55 ms / 3.10 ms | 0.9988 / 0.9970 | T3: recall apart at ef 128, strawmann higher (0.9988 vs 0.9969); equal recall is strawmann ef 128 vs qdrant ef 256 within the ±4.1% band this dataset's noise floor puts on W10-ef128: no measured difference, not a small one |
 | W10-ef256 | recall control, ef=256 (latency only) | 2,853 | 3,099 | 0.92x | 2.74 ms / 4.67 ms | 2.47 ms / 4.64 ms | 0.9995 / 0.9984 |  |
 | W10-ef512 | recall control, ef=512 (latency only) | 1,730 | 1,958 | 0.88x | 4.52 ms / 7.76 ms | 3.99 ms / 7.08 ms | 0.9998 / 0.9992 |  |
 | W12-sel1 | filtered search, one keyword (~1% of bench12) | 5,579 | 5,921 | 0.94x | 11.43 ms / 12.18 ms | 10.37 ms / 23.43 ms | 1.0000 |  |

@@ -541,13 +541,47 @@ SATURATED_P50_US = 1_000_000.0
 SERVED_FRACTION = 0.95
 
 
+#: The collection the differ's T3 measures recall on: the fp32 one.
+T3_COLLECTION = "bench2"
+_T3_SPLIT = re.compile(r"at the shared ef (\d+) they did not overlap: "
+                       r"strawmann ([\d.]+) \[[^\]]*\] qdrant ([\d.]+)")
+_T3_MATCHED = re.compile(r"strawmann ef (\d+) .*?\| qdrant ef (\d+) ")
+
+
+def t3_split(conf: dict) -> dict | None:
+    """Where T3 found the two recalls apart at the ef both engines searched.
+
+    T3 can pass on a matched pair of widths (h-and-m 1102: strawmANN ef 128
+    against Qdrant ef 256) while at the shared ef 128 the intervals do not
+    overlap, 0.9988 against 0.9969. `RECALL_TOL` lets that ratio print, and it
+    read as strawmANN 0.82x slower with no word that it was also returning
+    the better answers. Read off the tier's detail, the only place the
+    differ writes it, so every conformance row recorded so far is covered.
+    """
+    for t in conf.get("tiers") or ():
+        if not str(t.get("tier", "")).startswith("T3"):
+            continue
+        detail = t.get("detail") or ""
+        if not (m := _T3_SPLIT.search(detail)):
+            return None
+        out = {"ef": int(m.group(1)), "strawmann": float(m.group(2)),
+               "qdrant": float(m.group(3)), "matched": None}
+        if mm := _T3_MATCHED.search(detail):
+            out["matched"] = (int(mm.group(1)), int(mm.group(2)))
+        return out
+    return None
+
+
 class Row:
     """One joined row, with the arithmetic and the refusals in one place."""
 
     def __init__(self, wid: str, ra: dict, rb: dict, a_label: str, b_label: str,
                  rec_a: float | None, rec_b: float | None, recall_required: bool,
-                 stale: bool, stamps: tuple[dict | None, dict | None] = (None, None)):
+                 stale: bool, stamps: tuple[dict | None, dict | None] = (None, None),
+                 t3: dict | None = None):
         self.id = wid
+        #: `t3_split` of the pair's conformance row, for `_t3_note`.
+        self.t3 = t3
         self.ra, self.rb = ra, rb
         self.a_label, self.b_label = a_label, b_label
         self.rec_a, self.rec_b = rec_a, rec_b
@@ -763,6 +797,8 @@ class Row:
                 self.notes.append(f"[recall unequal: {self.rec_a:.4f} vs {self.rec_b:.4f}; "
                                   f"§7.4 compares at equal recall{self._rescore_cause()}]")
                 return "-"
+            if note := self._t3_note():
+                self.notes.append(note)
         # A band is only a noise band if the spread it came from was noise.
         # `aggregate._rep_drift` marks an arm whose passes moved one way only:
         # strawmANN's W10-ef128 on dbpedia-openai-1m slid 3,662 -> 3,001 ->
@@ -957,6 +993,30 @@ class Row:
                 why = "no payload index: the row measured a full scan"
         return why
 
+    def t3_higher(self) -> str:
+        """`strawmann` or `qdrant`, whichever T3 put ahead in recall at this
+        row's ef, when this row searched what T3 measured; else empty."""
+        coll, ef, _ = recall_key_of(self.ra, self.id)
+        if (not self.t3 or coll != T3_COLLECTION or ef is None
+                or int(ef) != self.t3["ef"] or recall_mod.grade_of(self.id)):
+            return ""
+        return "strawmann" if self.t3["strawmann"] > self.t3["qdrant"] else "qdrant"
+
+    def _t3_note(self) -> str:
+        """Said on a ratio T3 found unequal in recall, though within `RECALL_TOL`.
+
+        Only on rows that search what T3 measured: the fp32 collection, no
+        filter, at the shared ef. The ratio stays: it is still each engine's
+        rate at the same width, and the note says which way recall leans and
+        where the equal-recall comparison is.
+        """
+        if not (higher := self.t3_higher()):
+            return ""
+        matched = (f"; equal recall is strawmann ef {self.t3['matched'][0]} vs qdrant "
+                   f"ef {self.t3['matched'][1]}" if self.t3["matched"] else "")
+        return (f"[T3: recall apart at ef {self.t3['ef']}, {higher} higher "
+                f"({self.t3['strawmann']:.4f} vs {self.t3['qdrant']:.4f}){matched}]")
+
     def _rescore_cause(self) -> str:
         """Marks a rescoring row, whose unequal recall has one known cause.
 
@@ -1087,6 +1147,8 @@ def joined(a_label: str, b_label: str,
     dataset = dataset_of(a_label) or dataset_of(b_label) or "sift1m"
     stamps = (read_json(a_label, "run.json").get("harness") or None,
               read_json(b_label, "run.json").get("harness") or None)
+    t3 = t3_split(read_json(a_label, "conformance.json")
+                  or read_json(b_label, "conformance.json"))
     out = []
     for wid in list(a) + [k for k in b if k not in a]:
         ra, rb = a.get(wid), b.get(wid)
@@ -1099,7 +1161,7 @@ def joined(a_label: str, b_label: str,
         rec_a = recall_at(a_label, dataset, ra, wid)
         rec_b = recall_at(b_label, dataset, rb, wid)
         out.append(Row(wid, ra, rb, a_label, b_label, rec_a, rec_b,
-                       required.get(wid, True), stale, stamps))
+                       required.get(wid, True), stale, stamps, t3))
     return out
 
 
@@ -1975,6 +2037,12 @@ def landing_block(a_label: str, b_label: str,
             caption = f"{caption}; nDCG@10 {ndcg[wid][0]:.4f} / {ndcg[wid][1]:.4f}"
         if r.ratio == "-":
             caption = "; ".join(filter(None, [caption, "not compared, the full table says why"]))
+        elif lean := r.t3_higher():
+            # 0.82x read as a loss with nothing said (h-and-m 1102): T3 found
+            # this width's recalls apart, so the fair figure is the one above.
+            who = "strawmANN" if lean == "strawmann" else "Qdrant"
+            caption = "; ".join(filter(None, [caption, (f"{who}'s recall is higher (T3): "
+                                                         "compare at equal recall")]))
         out += ["      <tr>",
                 f'        <td class="what">{html.escape(title)}<small>{html.escape(caption)}</small></td>',
                 f'        <td class="num">{html.escape(r.sa)}</td><td class="num">{html.escape(r.sb)}</td>',
