@@ -74,7 +74,7 @@ RESULTS = ROOT / "bench/results"
 #: §8.9 pins the comparison target. The tag is resolved to a digest by
 #: `provenance.qdrant_build` from the running container, so this is the request
 #: and that is the record.
-QDRANT_IMAGE = os.environ.get("QDRANT_IMAGE", "qdrant/qdrant:v1.19.0")
+QDRANT_IMAGE = os.environ.get("QDRANT_IMAGE", "qdrant/qdrant:v1.20.0")
 QDRANT_CONTAINER = "strawmann-fullrun-qdrant"
 
 #: A Qdrant binary to run natively instead of the container, from
