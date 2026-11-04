@@ -2462,10 +2462,13 @@ split (#11193, #11195) and the first filter postings PRs (#11352, #11353).
 Before the move, the vector differ, with Qdrant held to one segment, passed
 every tier through T4 on sift1m, laion-small-clip and
 h-and-m-2048-angular-filters, with T3's recall@10 intervals overlapping on all
-three. dbpedia-openai-1m is not yet checked against it: three attempts died
+three. dbpedia-openai-1m was checked afterwards: three attempts on 11-02 died
 of disk space (a tmpfs quota under the differ's Qdrant twice, then a full
-root filesystem from another process), never of a tier. It must pass before a
-dbpedia pair runs on this binary. The 1102 vector pairs are the first on it,
+root filesystem from another process), never of a tier, and on 2026-11-04,
+with Qdrant's storage and working directory on disk, it passed every tier
+through T4 against strawmANN fe782b5 (T3 recall@10 0.9665 [0.9628,0.9699]
+against 0.9678 [0.9642,0.9711] at ef 128, T2 Kendall τ 1.0000). A dbpedia
+pair may run on this binary. The 1102 vector pairs are the first on it,
 STALE against 1012 by design.
 
 The first end-to-end pass, scifact at `--reps 1` (a smoke run, so nothing
