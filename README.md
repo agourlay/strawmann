@@ -82,7 +82,7 @@ resolve here.
 
 ## Quick start
 
-Zig **0.17.0**, pinned in `build.zig.zon` and installed exactly by CI.
+Zig **0.17.1**, pinned in `build.zig.zon` and installed exactly by CI.
 
 ```sh
 scripts/doctor.py                    # host setup, what it can measure, where it writes
