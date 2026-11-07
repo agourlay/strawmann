@@ -261,7 +261,7 @@ What the table does not say:
   crosses `rebuild_ratio`, the graph is rebuilt, and the row mostly measures a
   brute-force scan. Its ratio is refused.
 - **Both arms run at `cached` residency, which is not strawmANN's default.**
-  Qdrant 1.19 does not support `pinned` for dense vectors.
+  Qdrant 1.20 does not support `pinned` for dense vectors.
   `--placement pinned --skip qdrant` measures strawmANN's default alone.
 - **The gate verdict is per row.** A table with any row stamped `FAIL` is not
   spliced into this file.
