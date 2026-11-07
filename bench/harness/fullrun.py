@@ -611,8 +611,9 @@ def wipe_strawmann_storage() -> None:
     the directory is a cache the operator may keep other things in.
     """
     d = paths.STRAWMANN_STORAGE
-    if not d.exists():
-        return
+    # Made here, because every start that maps into it wipes it first, and
+    # nothing else makes it: the engine refuses an absent `--data-dir`.
+    d.mkdir(parents=True, exist_ok=True)
     freed = 0
     for f in d.glob("*.vectors.bin"):
         try:

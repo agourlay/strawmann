@@ -2225,6 +2225,30 @@ class FullrunPreflightTests(unittest.TestCase):
             self.f.start_strawmann("4-11", 6344, log, 8, 1_000_000)
         self.assertTrue(log.exists())
 
+    def test_the_storage_directory_is_made_before_the_engine_maps_into_it(self):
+        """Nothing made `--data-dir`: Qdrant's storage is made at its start and
+        strawmANN's was assumed. With it gone (2026-11-07), the engine refused
+        the first collection, `could not create or map the arena file`, and
+        every run on the host failed within seconds of starting."""
+        class Started:
+            pid = 4321
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as td:
+            storage = Path(td) / "cache" / "strawmann-storage"
+            with mock.patch.object(self.f.paths, "STRAWMANN_STORAGE", storage), \
+                    mock.patch.object(self.f, "PLACEMENT", self.f.workloads.Placement.cached), \
+                    mock.patch.object(self.f, "maybe_scope", lambda argv, _u: argv), \
+                    mock.patch.object(self.f.subprocess, "Popen",
+                                      lambda *_a, **_k: Started()), \
+                    mock.patch.object(self.f.time, "sleep", lambda _s: None), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.f.start_strawmann("4-11", 6344, Path(td) / "server.log", 8, 1_000_000)
+            self.assertTrue(storage.is_dir())
+
 
 class DirtyScopeTests(unittest.TestCase):
     """`dirty` says "this binary may not be what `commit` describes". Computed
