@@ -239,7 +239,6 @@ pub const TextIndex = struct {
                     const d = self.docs.items[p.point];
                     if (!d.live or d.gen != p.gen) continue;
                 }
-                if (@TypeOf(allowed) != @TypeOf(null) and !allowed.admits(p.point)) continue;
                 const tf: f32 = @floatFromInt(p.tf);
                 const len: f32 = @floatFromInt(p.len);
                 const norm = if (b > 0) k1 * (1 - b + b * len / avg) else k1;
@@ -252,11 +251,17 @@ pub const TextIndex = struct {
         }
         // Most touched points lose to the worst survivor, so they are turned
         // away before `push`. A tie still goes in: a smaller id displaces it.
+        // The filter is asked here, of the survivors only, and not per
+        // posting: a score does not depend on it, and `worst` moves only on
+        // admitted pushes, so the result is the same. Per posting, a filter
+        // keeping half the points mispredicted on every one (Qdrant filters
+        // late too, `top_k.rs`), which made 1109's ArguAna W15-filtered 0.67x.
         var worst = -std.math.inf(f32);
         for (scratch.touched.items) |point| {
             const score = scratch.acc[point];
             scratch.acc[point] = 0;
             if (score < worst) continue;
+            if (@TypeOf(allowed) != @TypeOf(null) and !allowed.admits(point)) continue;
             top.push(.{ .id = point, .score = score });
             if (top.isFull() and top.len > 0) worst = top.peekWorst().score;
         }
@@ -436,6 +441,68 @@ test "past the heap's fill, a tie with a smaller id still displaces the worst" {
     top = heap.TopK.init(&test_results, 0);
     try idx.search(&scratch, "alpha beta", default_k1, default_b, &top, null);
     try testing.expectEqual(@as(usize, 0), top.finish().len);
+}
+
+test "a filtered top k is the unfiltered ranking with the filter applied after" {
+    // `search` checks the filter only on points that beat the worst survivor
+    // (Qdrant's late filter), not per posting: on 1109's ArguAna a 50/50
+    // filter mispredicted on every posting, 0.67x. Both orders must agree
+    // exactly, ties, overwrites and stale postings included.
+    var idx = TextIndex.init(testing.allocator, .{});
+    defer idx.deinit();
+    var prng = std.Random.DefaultPrng.init(0x1109);
+    const rnd = prng.random();
+    const words = [_][]const u8{ "alpha", "beta", "gamma", "delta", "eps" };
+    const n_docs = 200;
+    var buf: [64]u8 = undefined;
+    for (0..n_docs + 60) |step| {
+        // The first pass sets every point; the rest overwrite or delete some.
+        const point: u32 = if (step < n_docs) @intCast(step) else rnd.uintLessThan(u32, n_docs);
+        if (step >= n_docs and rnd.boolean()) {
+            idx.remove(point);
+            continue;
+        }
+        var len: usize = 0;
+        for (0..1 + rnd.uintLessThan(usize, 5)) |_| {
+            const w = words[rnd.uintLessThan(usize, words.len)];
+            @memcpy(buf[len..][0..w.len], w);
+            buf[len + w.len] = ' ';
+            len += w.len + 1;
+        }
+        try idx.set(point, &.{buf[0..len]});
+    }
+    try testing.expect(idx.stale_postings > 0);
+    const Mask = struct {
+        bits: *const [n_docs]bool,
+        fn admits(self: @This(), point: u32) bool {
+            return self.bits[point];
+        }
+    };
+    var scratch = SearchScratch.init(testing.allocator);
+    defer scratch.deinit();
+    var full_storage: [n_docs]heap.Candidate = undefined;
+    var want: [10]heap.Candidate = undefined;
+    for (0..50) |_| {
+        var bits: [n_docs]bool = undefined;
+        for (&bits) |*x| x.* = rnd.boolean();
+        const query = words[rnd.uintLessThan(usize, words.len)];
+        const query2 = words[rnd.uintLessThan(usize, words.len)];
+        var q: [16]u8 = undefined;
+        const text = try std.mem.print(&q, "{s} {s}", .{ query, query2 });
+        var full = heap.TopK.init(&full_storage, n_docs);
+        try idx.search(&scratch, text, default_k1, default_b, &full, null);
+        var n: usize = 0;
+        for (full.finish()) |c| {
+            if (n == want.len) break;
+            if (bits[c.id]) {
+                want[n] = c;
+                n += 1;
+            }
+        }
+        var top = heap.TopK.init(&test_results, 10);
+        try idx.search(&scratch, text, default_k1, default_b, &top, Mask{ .bits = &bits });
+        try testing.expectEqualSlices(heap.Candidate, want[0..n], top.finish());
+    }
 }
 
 test "a top k below the touched points is the head of the full ranking" {
