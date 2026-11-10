@@ -2228,12 +2228,56 @@ class MatchedLineTests(unittest.TestCase):
             def frontier_points(run, bfb_only=False): return run
             @staticmethod
             def matched_ratios(pa, pb): return anchors
+            @staticmethod
+            def matched_recall_refusal(runs): return ""
 
         with mock.patch.dict("sys.modules", {"report_data": FakeRD}):
             line = cmp.matched_line("a", "b")
         self.assertIn("2.12x at recall 0.9626", line)
         self.assertIn("falling to 1.48x at 0.9980", line)
         self.assertIn("3 anchors", line)
+
+    def _fake_rd(self, anchors, refusal=""):
+        fx = Fixture(Path(self.tmp.name))
+        for lab in ("a", "b"):
+            fx.label(lab, [_row("W10-ef128", 1.0)], good_stamp(), CONF_T3)
+
+        class FakeRD:
+            @staticmethod
+            def load_run(label): return label
+            @staticmethod
+            def frontier_points(run, bfb_only=False): return run
+            @staticmethod
+            def matched_ratios(pa, pb): return anchors
+            @staticmethod
+            def matched_recall_refusal(runs): return refusal
+        return FakeRD
+
+    def test_a_frontier_the_report_refuses_is_not_published(self):
+        """sm/qd-sift-perf-1109: the report refused the frontier (`W10-ef64:
+        one pass apart from the other two`), and README and the landing panel
+        printed `2.49x at recall 0.9619`, the refused point, as the headline."""
+        cmp = self.m["compare"]
+        rd = self._fake_rd([{"recall": 0.9619, "ratio": 2.49}, {"recall": 0.9970, "ratio": 1.11}],
+                           refusal="W10-ef64: one pass apart from the other two")
+        with mock.patch.dict("sys.modules", {"report_data": rd}):
+            self.assertIsNone(cmp.matched_line("a", "b"))
+            panel = cmp.landing_block("a", "b", cmp.load("a"), cmp.load("b"))
+        self.assertNotIn("At equal recall", panel)
+
+    def test_a_best_at_the_top_is_not_said_to_fall(self):
+        """sm/qd-hnm-perf-1109's panel read `best at recall 0.9989, falling to
+        2.22x at 0.9989` and never named the low point, 1.70x at 0.9985."""
+        cmp = self.m["compare"]
+        rd = self._fake_rd([{"recall": 0.9948, "ratio": 2.05}, {"recall": 0.9985, "ratio": 1.70},
+                            {"recall": 0.9989, "ratio": 2.22}])
+        with mock.patch.dict("sys.modules", {"report_data": rd}):
+            line = cmp.matched_line("a", "b")
+            panel = cmp.landing_block("a", "b", cmp.load("a"), cmp.load("b"))
+        for text in (line, panel):
+            self.assertNotIn("falling to 2.22x at 0.9989", text)
+            self.assertIn("lowest 1.70x at 0.9985", text)
+        self.assertIn("2.22x at recall 0.9989, the top of the curve", line)
 
     def test_a_pair_with_no_frontier_drops_the_line(self):
         """A T3 refusal or a missing sweep loses the line, never the block."""

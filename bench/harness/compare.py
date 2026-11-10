@@ -2014,12 +2014,12 @@ def landing_block(a_label: str, b_label: str,
            "    <tbody>"]
     anchors = None if text else matched_anchors(a_label, b_label)
     if anchors:
-        best, top, n = anchors
+        best, top, low, n = anchors
         out += ["      <tr>",
                 (f"        <td class=\"what\">At equal recall<small>§7.4's comparison, "
                  f"over {n} anchors</small></td>"),
-                (f'        <td class="num span" colspan="2">best at recall {best["recall"]:.4f}, '
-                 f'falling to {top["ratio"]:,.2f}x at {top["recall"]:.4f}</td>'),
+                (f'        <td class="num span" colspan="2">best at recall {best["recall"]:.4f}'
+                 f'{anchor_tail(best, top, low)}</td>'),
                 "        " + landing_ratio_cell(f"{best['ratio']:,.2f}x"),
                 "      </tr>"]
     ndcg = {}
@@ -2208,9 +2208,11 @@ def column_title(label: str) -> str:
     return f"{name} {'.'.join(str(v).split('.')[:2])}" if v else name
 
 
-def matched_anchors(a_label: str, b_label: str) -> tuple[dict, dict, int] | None:
-    """The equal-recall frontier's best anchor, its top-of-curve anchor, and
-    how many anchors there were; `None` when the pair cannot license one.
+def matched_anchors(a_label: str, b_label: str) -> tuple[dict, dict, dict, int] | None:
+    """The equal-recall frontier's best anchor, its top-of-curve anchor, its
+    lowest anchor, and how many anchors there were; `None` when the pair cannot
+    license one, or when the report refuses its frontier (a drifted W10 row:
+    sm/qd-sift-perf-1109 published the refused point as its headline).
 
     Shared by `matched_line` and `landing_block`, whose docstrings say why
     each refusal below is there."""
@@ -2219,6 +2221,8 @@ def matched_anchors(a_label: str, b_label: str) -> tuple[dict, dict, int] | None
     try:
         import report_data as rd
         a, b = rd.load_run(a_label), rd.load_run(b_label)
+        if rd.matched_recall_refusal([a, b]):
+            return None
         rows = rd.matched_ratios(rd.frontier_points(a, bfb_only=True),
                                  rd.frontier_points(b, bfb_only=True))
     except (Exception, SystemExit):  # noqa: BLE001  (no anchor line, never a failed compare)
@@ -2226,7 +2230,18 @@ def matched_anchors(a_label: str, b_label: str) -> tuple[dict, dict, int] | None
     if len(rows) < 2:
         return None
     rows = sorted(rows, key=lambda r: r["recall"])
-    return max(rows, key=lambda r: r["ratio"]), rows[-1], len(rows)
+    return (max(rows, key=lambda r: r["ratio"]), rows[-1],
+            min(rows, key=lambda r: r["ratio"]), len(rows))
+
+
+def anchor_tail(best: dict, top: dict, low: dict) -> str:
+    """What follows the best anchor. "Falling to" the top of the curve is
+    false when the best *is* the top: sm/qd-hnm-perf-1109 read `best at recall
+    0.9989, falling to 2.22x at 0.9989` and never named its low, 1.70x."""
+    if best is top:
+        return (f", the top of the curve; lowest {low['ratio']:,.2f}x "
+                f"at {low['recall']:.4f}")
+    return f", falling to {top['ratio']:,.2f}x at {top['recall']:.4f}"
 
 
 def matched_line(a_label: str, b_label: str) -> str | None:
@@ -2257,15 +2272,14 @@ def matched_line(a_label: str, b_label: str) -> str | None:
     anchors = matched_anchors(a_label, b_label)
     if anchors is None:
         return None
-    best, top, n = anchors
+    best, top, low, n = anchors
     # Best and top-of-curve rather than a bare range, because the range's own
     # endpoints hide the shape: on `rel-0921` the minimum *is* the highest-recall
     # anchor, so "1.48x to 2.12x" and "narrowing to 1.48x" said the same thing
     # twice and neither said that the frontier falls where recall is tightest.
     return (f"at equal recall (§7.4's comparison, not equal ef): "
-            f"{best['ratio']:,.2f}x at recall {best['recall']:.4f}, falling to "
-            f"{top['ratio']:,.2f}x at {top['recall']:.4f}, over "
-            f"{n} anchors")
+            f"{best['ratio']:,.2f}x at recall {best['recall']:.4f}"
+            f"{anchor_tail(best, top, low)}, over {n} anchors")
 
 
 def header_block(a_label: str, b_label: str,
