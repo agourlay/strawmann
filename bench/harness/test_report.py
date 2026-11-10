@@ -790,6 +790,15 @@ class ReportHostTests(unittest.TestCase):
             self.assertNotIn("<code>W4-sat50/70/90</code>", html)
             self.assertNotIn("<dt>ef</dt>", html)
             self.assertNotIn("Storage datatype", html)
+            # 1109's BM25 pages still carried vector and writer prose: the W11
+            # tiles, T3 and an fp64 search in the glossary, the kernel-width
+            # caveat, and `relevance --ef` / `differ --base` to reproduce it.
+            for vector_only in ("(W11)", "concurrent-write", "T3 licenses comparing",
+                                "exhaustive fp64 search", "kernel width", "--ef 32", "--base "):
+                self.assertNotIn(vector_only, html)
+            self.assertIn("text-differ", html)
+            self.assertIn("text-relevance", html)
+            self.assertIn("T2 (tie-aware rank)", html)
             self.assertTrue(sys.modules["compare"].text_index_note("a", "b").startswith(
                 "**Which Qdrant text index.** b served BM25 from its appendable segment"))
             # A vector pair is untouched: its licence still speaks of T3.
@@ -3210,6 +3219,17 @@ class ReportReadabilityTests(unittest.TestCase):
         only = [report.Run(x, [_row("W11", 1, rss_peak_bytes=G, background_s=1.0)], "", True, "h")
                 for x in ("a", "b")]
         self.assertEqual(report.memory_kpi(only)["cells"], [procstat.human_bytes(G)] * 2)
+
+    def test_a_run_with_no_writers_does_not_name_them(self):
+        """The 1109 BM25 pages read `largest before the concurrent-write rows
+        (W11)` on a pair that has no W11 row."""
+        report = self.report
+        G = 1 << 30
+        runs = [report.Run(x, [_row("W15", 100, rss_peak_bytes=G, disk_write_bytes=G)],
+                           "", True, "h") for x in ("a", "b")]
+        self.assertEqual(report.memory_kpi(runs)["sub"], "largest over the run")
+        self.assertEqual(report.disk_kpi(runs)["sub"], "summed over every row")
+        self.assertNotIn("W11", report.storage_table(runs, compact=True))
 
     def test_bytes_written_are_read_before_the_writers_and_the_rest_is_named(self):
         """0925's tile read Qdrant 259.3 GiB, 125.4 of it W11-steady and W11

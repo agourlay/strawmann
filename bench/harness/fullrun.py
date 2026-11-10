@@ -1734,17 +1734,6 @@ def invocations_per_arm() -> int:
             + any(r in mutators for r in rows))
 
 
-def text_tokenizer_flags(name: str) -> list[str]:
-    """`name`'s text index options as the conformance binary's flags."""
-    o = paths.text_index(name)
-    for k in ("stopwords", "stemmer"):
-        if o.get(k) not in (None, "english"):
-            raise SystemExit(f"{name}: {k} {o[k]!r}; the oracle has English only (decisions.md)")
-    return ["--lowercase", str(o["lowercase"]).lower(),
-            *(["--english-stopwords"] if o.get("stopwords") else []),
-            *(["--english-stemmer"] if o.get("stemmer") else [])]
-
-
 def text_files(name: str) -> list[Path]:
     """What a text arm reads: the oracle's corpus and queries, bfb's layout."""
     tc = paths.text_dataset(name)
@@ -1758,7 +1747,7 @@ def text_relevance_argv(uri: str, label: str, v: workloads.TextVariant, out: Pat
             "--engine", uri, "--label", label,
             "--collection", workloads.W15_COLLECTION, "--field", workloads.TEXT_FIELD,
             "--corpus", str(tc.corpus), "--queries", str(tc.queries),
-            *text_tokenizer_flags(DATASET),
+            *paths.text_tokenizer_flags(DATASET),
             "--k1", str(v.k1), "--b", str(v.b),
             *(["--parity", v.parity] if v.parity else []),
             *(["--qrels", str(tc.qrels)] if tc.qrels else []),
@@ -1902,7 +1891,7 @@ def text_differ_argv(strawmann_uri: str, qdrant_uri: str, out: Path) -> list[str
     return ["cargo", "run", "--release", "--quiet", "--", "text-differ",
             "--strawmann", strawmann_uri, "--qdrant", qdrant_uri,
             "--corpus", str(tc.corpus), "--queries", str(tc.queries),
-            *text_tokenizer_flags(DATASET),
+            *paths.text_tokenizer_flags(DATASET),
             *(["--qrels", str(tc.qrels)] if tc.qrels else []),
             "--dataset", DATASET, "--json", str(out)]
 

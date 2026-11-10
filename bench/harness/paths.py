@@ -313,6 +313,17 @@ class TextCorpus(NamedTuple):
     bfb: Path
 
 
+def text_tokenizer_flags(name: str) -> list[str]:
+    """`name`'s text index options as the conformance binary's flags."""
+    o = text_index(name)
+    for k in ("stopwords", "stemmer"):
+        if o.get(k) not in (None, "english"):
+            raise SystemExit(f"{name}: {k} {o[k]!r}; the oracle has English only (decisions.md)")
+    return ["--lowercase", str(o["lowercase"]).lower(),
+            *(["--english-stopwords"] if o.get("stopwords") else []),
+            *(["--english-stemmer"] if o.get("stemmer") else [])]
+
+
 def text_dataset(name: str) -> TextCorpus:
     """`name`'s text files, resolved on call so `use_data_dir` reaches them."""
     if not is_text(name):

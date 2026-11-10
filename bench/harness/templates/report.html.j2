@@ -232,9 +232,15 @@
       {#- Terms the page uses and does not define inline. Near the top, closed,
           so it costs one line until a reader needs it. -#}
       <dl class="terms">
+        {%- if is_text %}
+        <dt>recall@10</dt><dd>Of the ten documents the f64 BM25 oracle ranks first
+          for a query, the share the engine returned. 1.0 is a perfect answer. The
+          oracle decides, not the other engine.</dd>
+        {%- else %}
         <dt>recall@10</dt><dd>Of the ten nearest neighbours a query really has,
           the share the engine returned. 1.0 is a perfect answer. "Really has" is
           settled by an exhaustive fp64 search, not by the other engine.</dd>
+        {%- endif %}
         {%- if not is_text %}
         <dt>ef</dt><dd>The candidate-list size: how many nodes the index keeps in
           play while searching. Larger is slower and more accurate. It does
@@ -255,10 +261,16 @@
         <dt>noise floor</dt><dd>How much a number moves between identical runs on
           this machine. A ratio inside it is shown grey with &asymp;: no measured
           difference. Hover a ratio to see its band.</dd>
+        {%- if is_text %}
+        <dt>conformance tier</dt><dd>What the two engines were shown to agree on
+          before any speed was quoted. T1 (scores) and T2 (tie-aware rank) against
+          the BM25 oracle license comparing the two.</dd>
+        {%- else %}
         <dt>conformance tier</dt><dd>What the two engines were shown to agree on
           before any speed was quoted. T1 licenses a single engine's own numbers;
           T3 licenses comparing the two, and requires their recall to be
           statistically indistinguishable.</dd>
+        {%- endif %}
         <dt>§ numbers</dt><dd>Sections of <code>docs/spec.md</code>, the written
           rule each claim in the appendix is measured against. §7.1 is the host
           gate, §7.4 the comparison rules, §8 what may be published.</dd>
@@ -776,11 +788,13 @@
     quiet through a refactor. <code>bench/harness/qdrant_ab.py</code> exists to run two
     of your commits through it blind, and that experiment has not been done.</p>
 
+    {%- if not is_text %}
     <p><b>Part of the measured throughput gap is kernel width, not architecture.</b>
     Read from a <code>dev</code> checkout: Qdrant's distance path tops out at four
     256-bit accumulators and has no AVX-512, while these kernels use 512-bit ones on a
     machine that has them. That is a real difference and it is not the same claim as
     "the design is faster".</p>
+    {%- endif %}
 
     <p><b>The engines are not equivalent, by construction.</b> §1 removes sharding,
     replication, consensus, snapshots, sparse vectors, multivectors and disk-resident
@@ -812,6 +826,17 @@ bench/harness/workloads.py run http://localhost:6334 strawmann --sink --report
 
 # the other half of every number: recall, and the licence to compare at all
 cd conformance
+{%- if is_text %}
+cargo run --release -- text-relevance --engine http://localhost:6334 --label strawmann \
+  --collection {{ repro.collection }} --field {{ repro.field }} \
+  --corpus {{ repro.corpus }} --queries {{ repro.queries }} \
+  {{ repro.tokenizer }}{{ repro.qrels }} --skip-upload \
+  --json ../bench/results/strawmann/text-recall.json
+cargo run --release -- text-differ --strawmann http://localhost:6334 --qdrant http://localhost:6434 \
+  --corpus {{ repro.corpus }} --queries {{ repro.queries }} \
+  {{ repro.tokenizer }}{{ repro.qrels }} --dataset {{ repro.name }} \
+  --json ../bench/results/strawmann/conformance.json
+{%- else %}
 cargo run --release -- relevance --engine http://localhost:6334 --label strawmann \
   --base {{ repro.base }} --queries {{ repro.queries }} \
   --ground-truth {{ repro.gt }} --metric {{ repro.metric }} \
@@ -820,6 +845,7 @@ cargo run --release -- differ --strawmann http://localhost:6334 --qdrant http://
   --base {{ repro.base }} --queries {{ repro.queries }} \
   --ground-truth {{ repro.gt }} \
   --json ../bench/results/strawmann/conformance.json
+{%- endif %}
 
 uv run --project bench bench/harness/report.py strawmann qdrant</code></pre>
     <p>Disagreements are the point. <code>docs/spec.md</code> is what all of this is

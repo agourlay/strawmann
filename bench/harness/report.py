@@ -718,6 +718,13 @@ def repro_paths(runs) -> dict[str, str]:
     import paths
     name = next(((r.meta.get("dataset") or {}).get("name") for r in runs
                  if (r.meta.get("dataset") or {}).get("name")), None) or "sift1m"
+    if paths.is_text(name):
+        tc = paths.text_dataset(name)
+        return {"name": name, "corpus": f"$DATA/{name}/text/{tc.corpus.name}",
+                "queries": f"$DATA/{name}/text/{tc.queries.name}",
+                "qrels": f" --qrels $DATA/{name}/text/{tc.qrels.name}" if tc.qrels else "",
+                "tokenizer": " ".join(paths.text_tokenizer_flags(name)),
+                "collection": workloads.W15_COLLECTION, "field": workloads.TEXT_FIELD}
     try:
         c = paths.dataset(name)
         metric = paths.metric(name)
@@ -2166,10 +2173,18 @@ def memory_kpi(runs: list[Run]) -> dict | None:
         anon.append(max(got) if got else None)
     if any(v is None for v in peaks):
         return None
-    sub = "largest before the concurrent-write rows (W11)"
+    sub = ("largest before the concurrent-write rows (W11)" if has_writers(runs)
+           else "largest over the run")
     if all(v is not None for v in anon):
         sub += "; of it, anonymous " + " / ".join(procstat.human_bytes(v) for v in anon)
     return _kpi("peak memory (RSS)", [procstat.human_bytes(v) for v in peaks], sub, peaks)
+
+
+def has_writers(runs: list[Run]) -> bool:
+    """Whether any run has a concurrent-write row, so a tile may name W11:
+    the 1109 BM25 pages said "before the concurrent-write rows (W11)" on a
+    pair with none."""
+    return any(len(procstat.settled_rows(r.rows)) < len(r.rows) for r in runs)
 
 
 def written_before_writers(run: Run) -> tuple[int | None, int]:
@@ -2194,7 +2209,8 @@ def disk_kpi(runs: list[Run]) -> dict | None:
     vals = [v for v, _ in parts]
     if any(v is None for v in vals):
         return None
-    sub = "before the concurrent-write rows (W11)"
+    sub = ("before the concurrent-write rows (W11)" if has_writers(runs)
+           else "summed over every row")
     if any(extra for _, extra in parts):
         sub += "; they wrote " + " / ".join(procstat.human_bytes(x) for _, x in parts) + " more"
     return _kpi("written to disk", [procstat.human_bytes(v) for v in vals], sub, vals)
@@ -2894,6 +2910,8 @@ def storage_table(runs: list[Run], compact: bool = False) -> str:
     head = "<th></th>" + "".join(f'<th class="num">{r.label}</th>' for r in runs)
     table = (f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
              f'<tbody>{"".join(body)}</tbody></table></div>')
+    if compact and not has_writers(runs):
+        return warn + table
     if compact:
         return (warn + table + '<p class="note">Peak memory and storage on disk are '
                 'read before the concurrent-write rows (W11): an engine rewriting '
