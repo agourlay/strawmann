@@ -3797,6 +3797,33 @@ class PlannerAbTests(unittest.TestCase):
                       self.pa.fit_line("laion", 512, {"scan": {32: 1.0}}, 1))
 
 
+class AbChain1110Tests(unittest.TestCase):
+    """The 1109 fixes' A/Bs: each fix against its parent, on its own rows."""
+
+    def test_each_fix_runs_against_its_parent_on_its_rows(self):
+        ch = importlib.import_module("ab_chain_1110")
+        ab = importlib.import_module("commit_ab")
+        chain = {s.name: s.argv for s in ch.steps("t")}
+        self.assertEqual(list(chain), [
+            "bm25-arguana", "bm25-fiqa", "bm25-quora", "planner-sift1m",
+            "planner-laion-small-clip", "batch-laion-small-clip", "batch-sift1m"])
+
+        def arms(argv):
+            end = argv.index("--flags") if "--flags" in argv else len(argv)
+            return [(a.name, a.source, a.flags) for a in ab.parse_arms(
+                argv[argv.index("--commits") + 1:end], argv[end + 1:])]
+
+        self.assertEqual(arms(chain["bm25-arguana"]), [
+            ("base", ch.REPORT_FIX, ()), ("late", ch.LATE_FILTER, ())])
+        self.assertIn("W15-filtered", chain["bm25-arguana"])
+        self.assertEqual(arms(chain["planner-sift1m"]), [
+            ("walk200k", ch.LATE_FILTER, ()), ("walk350k", ch.WALK_TERM, ())])
+        self.assertIn("W12-sel10-ef128", chain["planner-sift1m"])
+        # One build, two arms: only the flag differs.
+        self.assertEqual(arms(chain["batch-laion-small-clip"]), [
+            ("fanout", ch.FANOUT_FLAG, ()), ("serial", ch.FANOUT_FLAG, ("--no-batch-fanout",))])
+
+
 class Phase1ChainTests(unittest.TestCase):
     """The 1102 plan's phase 1, three drivers in one quiet stretch."""
 
