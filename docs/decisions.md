@@ -2476,6 +2476,27 @@ against 0.9678 [0.9642,0.9711] at ef 128, T2 Kendall τ 1.0000). A dbpedia
 pair may run on this binary. The 1102 vector pairs are the first on it,
 STALE against 1012 by design.
 
+Both pins move on 2026-11-09, at the user's request, to a `release` build of
+`dev` b4ebd966f (sha256 8550a49c, `qdrant-ab/bin/qdrant-dev-b4ebd966f`,
+reporting 1.20.1-dev; the user's clean `~/Workspace/qdrant` build), 41
+commits past e5fa1f3ce. The protos only gain `require_tenant_filter` on
+strict mode, so bfb d2a6b6c stays. The span carries the third filter postings
+PR (#11354), the graph builder fallback (#11307), Grid SIMD for Turbo8 and 16
+(#11429) and full-text tokens cut at 1,024 characters (#11401), which no
+token of the four text corpora reaches. Unlike the moves above, no standalone
+differ ran first: the 1109 night's own §8 phase, against strawmANN 515eeb4 on
+this binary (sha256 in every night.log), is the evidence. text-differ reached
+T2 on scifact, fiqa, arguana and quora, T1 6.0e-7 at most (ArguAna). The
+vector differ reached T4 on sift1m (T3 recall@10 0.9888 [0.9866,0.9907]
+against 0.9881 [0.9858,0.9901] at ef 128), laion-small-clip (0.9940
+[0.9914,0.9958] against 0.9907 [0.9877,0.9930] at ef 128) and
+h-and-m-2048-angular-filters (strawmANN ef 128, 0.9988 [0.9979,0.9993],
+against Qdrant ef 256, 0.9985 [0.9975,0.9991]; at the shared ef 128 the
+intervals did not overlap, which T3 at matched recall allows). Qdrant's rows
+moved by about 2% at most against e5fa1f3ce, with flat counters, so the 1109
+ratio moves are strawmANN's. dbpedia-openai-1m is not checked against this
+binary, and its differ must pass before a dbpedia pair runs on it.
+
 The first end-to-end pass, scifact at `--reps 1` (a smoke run, so nothing
 published): every W15 row measured on both engines, every variant's recall@10
 1.0 on both, nDCG@10 equal to the oracle's per variant (0.6886 at the
