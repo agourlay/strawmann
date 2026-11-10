@@ -2106,8 +2106,12 @@ fn filteredPlan(selected: usize, bound: usize, ef: usize, m0: usize, dim: usize)
         // - the two-hop walk costs ~1.3 us per unit of ef *at every width*
         //   (1,150 to 1,600 ns), because it scores only admitted points and
         //   most of a hop is neighbour lists and the filter, not distances.
-        //   560 per `ef · m0` is that slope at m0 = 32; 200,000 is the fixed
-        //   part of a walk (entry descent, heap setup).
+        //   560 per `ef · m0` is that slope at m0 = 32; 350,000 is the fixed
+        //   part of a walk (entry descent, heap setup). The fit put it at
+        //   200,000 through the *mean* selection, 19,124 on sift1m, which no
+        //   query selects; at the 20,000 its ten-keyword queries do, that
+        //   walked sift1m at ef 128 (1109: W12-sel10 -4.6%). 350,000 scans
+        //   them by 3.2% and still walks laion's at ef 256 by 3.7%.
         //
         // The 0929 model priced a walked row at ~4x a d=512 scanned row from
         // ladders run at 2 requests in flight, and so scanned laion from
@@ -2115,9 +2119,10 @@ fn filteredPlan(selected: usize, bound: usize, ef: usize, m0: usize, dim: usize)
         // 1102 pairs' 0.63x and 0.52x. The walk's cost grows as ~ef^0.8, so
         // a line through it is slightly pessimistic at wide ef; the two
         // near-ties (sift1m ef 128 at 0.92x, laion ef 256 at 1.52x) cost at
-        // most 8% when they fall the wrong way.
+        // most 8% when they fall the wrong way, except laion's nine-keyword
+        // queries, which scan at ef 256 under either constant.
         const per_walk = std.math.mul(usize, @max(ef, 1), @max(m0, 1)) catch std.math.maxInt(usize);
-        const walk_cost = (std.math.mul(usize, per_walk, 560) catch std.math.maxInt(usize)) +| 200_000;
+        const walk_cost = (std.math.mul(usize, per_walk, 560) catch std.math.maxInt(usize)) +| 350_000;
         const scan_cost = std.math.mul(usize, selected, dim) catch std.math.maxInt(usize);
         return if (scan_cost < walk_cost) .scan else .two_hop;
     }
@@ -2217,15 +2222,26 @@ test "an indexed filter scans below 1/m0, walks two-hop above it, and scans agai
 test "the scan-or-walk crossover follows the dimension" {
     // The 1103 forced-plan ladders, W12-sel10 at W4's client, m0 = 32: the
     // faster plan measured at each point, with two-hop's q/s over the scan's.
-    // sift1m (d=128, ~19,124 of 200,000): the walk to ef 64, the scan from 128.
-    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(19_124, 200_000, 64, 32, 128)); // 1.63
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(19_124, 200_000, 128, 32, 128)); // 0.92
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(19_124, 200_000, 256, 32, 128)); // 0.51
-    // laion (d=512, ~9,562 of 100,000): the walk to ef 256, the scan at 512.
+    // Asserted at the sizes a query selects, not their mean: bfb draws ten
+    // keywords with replacement, so 63% of queries match all ten (10% of
+    // the corpus) and 31% match nine. The fit's mean, 19,124 on sift1m,
+    // selected by no query, and the 1109 pair walked its ten-keyword
+    // queries at ef 128 (0.92x, recall 0.9966): W12-sel10 -4.6%.
+    // sift1m (d=128, 20,000 of 200,000; 20,423 at +3 sigma): the walk to
+    // ef 64, the scan from 128.
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(18_000, 200_000, 64, 32, 128)); // 1.63
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(20_000, 200_000, 64, 32, 128));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(20_000, 200_000, 128, 32, 128)); // 0.92
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(20_423, 200_000, 128, 32, 128));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(20_000, 200_000, 256, 32, 128)); // 0.51
+    // laion (d=512, 10,000 of 100,000): the walk to ef 256, the scan at 512.
     // The 0929 model scanned from ef 128, the 1102 pair's W12-sel10 0.63x.
-    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(9_562, 100_000, 128, 32, 512)); // 2.68
-    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(9_562, 100_000, 256, 32, 512)); // 1.52
-    try testing.expectEqual(FilteredPlan.scan, filteredPlan(9_562, 100_000, 512, 32, 512)); // 0.87
+    // Its nine-keyword queries (9,000) scan at ef 256, where the walk is
+    // 1.52x: the model's scan cost is not proportional to d (0.111 ns per
+    // value at 512, ~0.075 elsewhere), which a constant cannot fix.
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(10_000, 100_000, 128, 32, 512)); // 2.68
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(10_000, 100_000, 256, 32, 512)); // 1.52
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(10_000, 100_000, 512, 32, 512)); // 0.87
     // dbpedia-100K (d=1536) and h-and-m (d=2048): the walk at every width,
     // ef 512 included, which the 0929 model scanned (h-and-m 1102: 0.52x).
     try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(9_562, 100_000, 512, 32, 1536)); // 1.15
