@@ -734,8 +734,20 @@ test "e2e: a QueryBatch fanned out across workers answers exactly what one query
     // queue and run wherever they are picked up (`handlers.BatchJob`), so
     // the property to pin is that nothing about the answer changed: same
     // ids, same scores, same order per query, and the batches in wire order.
+    try batchAnswersAsSingles(true);
+}
+
+test "e2e: a QueryBatch with --no-batch-fanout runs on one worker and answers the same" {
+    // The A/B arm for laion W5 at 0.86x (1109): under W4's load the fan-out
+    // spreads a batch over every worker's cache, and Qdrant runs one
+    // segment's batch on one thread.
+    try batchAnswersAsSingles(false);
+}
+
+fn batchAnswersAsSingles(fan_out: bool) !void {
     var h = try Harness.start(testing.allocator);
     defer h.stop();
+    h.engine.batch_fanout = fan_out;
     var c = try Client.connect(h.port);
     defer c.close();
 
@@ -768,11 +780,11 @@ test "e2e: a QueryBatch fanned out across workers answers exactly what one query
         try testing.expectEqual(@as(u64, (qi * 13 + 5) % n), ref_ids[qi][0]);
     }
 
-    // The same 64 as one batch, fanned out.
+    // The same 64 as one batch, fanned out unless the engine says not to.
     const before = api.batches_fanned_out.load(.monotonic);
     const resp = try c.call("/qdrant.Points/QueryBatch", try buildQueryBatch(&req_buf, "fan", &qs, k), &out);
     try testing.expectEqual(grpc.Status.ok, resp.status);
-    try testing.expectEqual(before + 1, api.batches_fanned_out.load(.monotonic));
+    try testing.expectEqual(before + @intFromBool(fan_out), api.batches_fanned_out.load(.monotonic));
     var got_ids: [nq][k]u64 = undefined;
     var got_scores: [nq][k]f32 = undefined;
     var got_counts: [nq]usize = undefined;

@@ -97,6 +97,12 @@ pub const Engine = struct {
     /// client, so refitting it needs each plan measured on the same query set.
     /// `null` is the model. `params.exact` still scans either way.
     filtered_plan: ?FilteredPlan = null,
+    /// Whether a QueryBatch spreads its queries over the worker queue
+    /// (`BatchJob`). `--no-batch-fanout` runs every batch on its dispatching
+    /// worker, the A/B arm for laion W5 at 0.86x (1109): under W4's load the
+    /// fan-out spreads one batch over every worker's cache, where Qdrant runs
+    /// a segment's share of the batch on one thread.
+    batch_fanout: bool = true,
     /// Largest vector dimension any worker's scratch can hold.
     ///
     /// §6.3 forbids allocating on the query path, so `Workspace.query` is sized
@@ -1231,8 +1237,8 @@ fn queryBatch(ctx: *Context, req: *const server.Request, body: []const u8, out: 
 
     // Fan out when there is more than one query and room to hold the
     // results; otherwise the plain sequential path below.
-    if (BatchJob.plan(req, qb, coll)) |job| {
-        return runBatchJob(ctx, req, job, held);
+    if (ctx.engine.batch_fanout) {
+        if (BatchJob.plan(req, qb, coll)) |job| return runBatchJob(ctx, req, job, held);
     }
     defer held.release();
 

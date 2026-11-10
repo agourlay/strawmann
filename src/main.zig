@@ -44,6 +44,7 @@ const Flag = enum {
     build_threads,
     build_mode,
     no_drain,
+    no_batch_fanout,
     filtered_plan,
 
     /// The text each flag is spelled with.
@@ -73,6 +74,7 @@ const Flag = enum {
             .build_threads => "--build-threads",
             .build_mode => "--build-mode",
             .no_drain => "--no-drain",
+            .no_batch_fanout => "--no-batch-fanout",
             .filtered_plan => "--filtered-plan",
         };
     }
@@ -245,6 +247,7 @@ const Options = struct {
     build_threads: usize = engineDefault(.build_threads),
     build_mode: core.collection.BuildMode = engineDefault(.build_mode),
     drain_tail: bool = engineDefault(.drain_tail),
+    batch_fanout: bool = engineDefault(.batch_fanout),
     filtered_plan: ?api.FilteredPlan = engineDefault(.filtered_plan),
     pin: bool = false,
     /// §5.5. Declared, never ambient, §7.1's rule, so a result row can state
@@ -277,6 +280,9 @@ fn usage(w: *Io.Writer) !void {
         \\  --no-drain           leave appends to a built graph in the pending tail
         \\                       until a rebuild, instead of linking them in the
         \\                       background (the A/B arm for the drainer)
+        \\  --no-batch-fanout    run each QueryBatch on its dispatching worker
+        \\                       instead of spreading it over the queue
+        \\                       (the A/B arm for batched search)
         \\  --filtered-plan      auto|scan|two_hop|walk for a counted filter
         \\                       (default auto, the cost model; the others are
         \\                       calibration arms)
@@ -382,6 +388,7 @@ pub fn main(init: std.process.Init) !void {
             .pin => opts.pin = true,
             .no_huge_pages => opts.huge_pages = false,
             .no_drain => opts.drain_tail = false,
+            .no_batch_fanout => opts.batch_fanout = false,
             .no_bandwidth_probe => opts.bandwidth_probe = false,
             .probe => opts.probe_only = true,
             .host => opts.host = next(args, &i) orelse return error.MissingValue,
@@ -451,6 +458,7 @@ pub fn main(init: std.process.Init) !void {
     engine.build_threads = opts.build_threads;
     engine.build_mode = opts.build_mode;
     engine.drain_tail = opts.drain_tail;
+    engine.batch_fanout = opts.batch_fanout;
     engine.filtered_plan = opts.filtered_plan;
     if (opts.default_placement.isMapped() and opts.data_dir == null) {
         try w.print("error: --default-placement {s} needs --data-dir <path>\n", .{opts.default_placement.name()});
@@ -652,6 +660,11 @@ pub fn main(init: std.process.Init) !void {
         try w.print("  appends                : linked into the built graph in the background on {d} threads, until {d}% pending asks for a rebuild\n", .{ engine.build_threads, @as(u32, @intFromFloat(core.collection.rebuild_ratio * 100)) });
     } else {
         try w.print("  appends                : pending tail until a rebuild (--no-drain)\n", .{});
+    }
+    if (engine.batch_fanout) {
+        try w.print("  batched search         : spread over the worker queue\n", .{});
+    } else {
+        try w.print("  batched search         : on the dispatching worker (--no-batch-fanout)\n", .{});
     }
     if (engine.filtered_plan) |p| {
         try w.print("  filtered plan          : forced {s} (--filtered-plan), not the cost model\n", .{@tagName(p)});
