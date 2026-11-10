@@ -1131,6 +1131,36 @@ class ResultsSinkTests(unittest.TestCase):
                              "engine": "qdrant"})
         self.assertEqual(db.execute("SELECT count(*) FROM perf").fetchone()[0], 2)
 
+    def test_two_qdrant_builds_of_one_version_are_not_the_same_build(self):
+        """0beaf512a, e5fa1f3ce and b4ebd966f all report `1.20.1-dev`, and a
+        conformance row named Qdrant by that string alone, so one build's
+        differ could license another build's perf rows. sha256 is the identity
+        (§8.9)."""
+        res = self.res
+        new = res.qdrant_identity({"version": "1.20.1-dev", "binary_sha256": "8550a49c1f46a3ba"})
+        old = res.qdrant_identity({"version": "1.20.1-dev", "binary_sha256": "f20f43946a15ed10"})
+        self.assertEqual(new, "1.20.1-dev+sha256:8550a49c1f46a3ba")
+        # A container names a release, and has no binary of its own here.
+        self.assertEqual(res.qdrant_identity({"version": "1.19.0", "binary_sha256": None}), "1.19.0")
+        db = res.connect(":memory:")
+        res.insert_conformance(db, {**self.CONF, "qdrant_version": new})
+        good = {"workload": "W0", "engine": "qdrant", "dataset": "sift1m", "isa_build": "avx512",
+                "env_hash": "e", "conformance_hash": "c1", "qps": 1.0, "strawmann_commit": None}
+        with self.assertRaisesRegex(res.RejectedRow, "f20f43946a15ed10"):
+            res.insert_perf(db, {**good, "qdrant_version": old})
+        res.insert_perf(db, {**good, "qdrant_version": new})
+
+    def test_a_conformance_row_from_before_the_sha_still_matches_by_version(self):
+        """Every conformance.json recorded before the sha names Qdrant by version
+        only; re-ingesting those runs must not refuse them."""
+        res = self.res
+        db = res.connect(":memory:")
+        res.insert_conformance(db, {**self.CONF, "qdrant_version": "1.19.0"})
+        res.insert_perf(db, {"workload": "W0", "engine": "qdrant", "dataset": "sift1m",
+                             "isa_build": "avx512", "env_hash": "e", "conformance_hash": "c1",
+                             "qps": 1.0, "strawmann_commit": None,
+                             "qdrant_version": "1.19.0+sha256:8550a49c1f46a3ba"})
+
     def _label(self, name: str, meta: dict, conf: dict) -> Path:
         d = Path(self.tmp.name) / "bench/results" / name
         d.mkdir(parents=True, exist_ok=True)

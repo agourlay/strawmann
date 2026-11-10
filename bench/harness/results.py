@@ -155,6 +155,22 @@ def connect(path):
     return db
 
 
+def qdrant_identity(qd: dict) -> str | None:
+    """Qdrant as §8 names a build: its version, and the binary's sha256 when it
+    ran natively. `1.20.1-dev` alone is three pinned builds (0beaf512a,
+    e5fa1f3ce, b4ebd966f), so one's differ licensed another's perf rows. The
+    same spelling reaches the differ (`fullrun.conformance_qdrant`) and the
+    perf rows (`ingest_run`), so `insert_perf` compares like with like."""
+    version, sha = qd.get("version"), qd.get("binary_sha256")
+    return f"{version}+sha256:{sha}" if version and sha else version
+
+
+def same_qdrant(row: str, conf: str) -> bool:
+    """A conformance row recorded before the sha names Qdrant by version
+    only, and still matches on it, so older runs re-ingest as they did."""
+    return row == conf if "+" in conf else row.partition("+")[0] == conf
+
+
 def insert_conformance(db, row):
     db.execute(
         """INSERT OR REPLACE INTO conformance
@@ -232,7 +248,7 @@ def insert_perf(db, row):
             f"perf row is from strawmann commit '{sm_commit}' but its conformance "
             f"run is from '{c_commit}'. §8 requires the same build."
         )
-    if qd_version is not None and qd_version != c_qdrant:
+    if qd_version is not None and not same_qdrant(qd_version, c_qdrant):
         raise RejectedRow(
             f"perf row is from Qdrant '{qd_version}' but its conformance run "
             f"is from '{c_qdrant}'. §8 requires the same build."
@@ -512,10 +528,11 @@ def ingest_run(db, label: str, root: Path) -> int:
             "measured_at": r.get("when", ""),
             "version": sm.get("commit") or qd.get("version"),
             # As the differ spells them (`fullrun.build_identity`): the short
-            # commit with `-dirty` when the tree was, and Qdrant's own version.
+            # commit with `-dirty` when the tree was, and Qdrant's version with
+            # its binary's sha256 (`qdrant_identity`).
             "strawmann_commit": (sm["commit"] + ("-dirty" if sm.get("dirty") else "")
                                  if sm.get("commit") else None),
-            "qdrant_version": qd.get("version"),
+            "qdrant_version": qdrant_identity(qd),
         }
         try:
             insert_perf(db, row)

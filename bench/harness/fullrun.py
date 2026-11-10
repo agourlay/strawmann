@@ -64,6 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import paths
 import procstat
 import provenance
+import results
 import setup
 import workloads
 
@@ -1384,6 +1385,15 @@ def build_identity(qdrant_version: str | None) -> dict:
     if qdrant_version:
         env["QDRANT_VERSION"] = qdrant_version
     return env
+
+
+def conformance_qdrant(version: str | None) -> str | None:
+    """The Qdrant the differ is told it tested, spelled as the perf rows spell
+    it (`results.qdrant_identity`): a native binary's sha256 is what run.json
+    records, cut to the same 16 digits."""
+    sha = provenance.file_digest(QDRANT_BINARY) if QDRANT_BINARY else None
+    return results.qdrant_identity({"version": version,
+                                    "binary_sha256": sha[:16] if sha else None})
 
 
 def _run_out(argv: list[str]) -> str | None:
@@ -2723,7 +2733,7 @@ def main(argv: list[str]) -> int:
                 rc |= run_conformance(f"http://localhost:{STRAWMANN_CONF_PORT}",
                                       f"http://localhost:{QDRANT_GRPC}",
                                       labels, args.client_cpus,
-                                      build_identity(version))
+                                      build_identity(conformance_qdrant(version)))
         finally:
             finish_conformance(p)
 

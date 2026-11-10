@@ -2225,6 +2225,20 @@ class FullrunPreflightTests(unittest.TestCase):
             self.f.start_strawmann("4-11", 6344, log, 8, 1_000_000)
         self.assertTrue(log.exists())
 
+    def test_the_differ_is_told_which_qdrant_binary_it_tested(self):
+        """The differ hashed Qdrant as `1.20.1-dev`, which three pinned builds
+        share. A native binary is named by the sha256 run.json records for
+        the perf rows, so the two can be matched (`results.qdrant_identity`)."""
+        with tempfile.TemporaryDirectory() as td:
+            binary = Path(td) / "qdrant-dev-b4ebd966f"
+            binary.write_bytes(b"not really qdrant")
+            sha = self.f.provenance.file_digest(binary)[:16]
+            with mock.patch.object(self.f, "QDRANT_BINARY", binary):
+                self.assertEqual(self.f.conformance_qdrant("1.20.1-dev"),
+                                 f"1.20.1-dev+sha256:{sha}")
+            with mock.patch.object(self.f, "QDRANT_BINARY", None):
+                self.assertEqual(self.f.conformance_qdrant("1.19.0"), "1.19.0")
+
     def test_the_storage_directory_is_made_before_the_engine_maps_into_it(self):
         """Nothing made `--data-dir`: Qdrant's storage is made at its start and
         strawmANN's was assumed. With it gone (2026-11-07), the engine refused
