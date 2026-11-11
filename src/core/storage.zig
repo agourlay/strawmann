@@ -209,8 +209,9 @@ pub const Header = extern struct {
     magic: u64,
     format_version: u32,
     /// What this file holds, so a mismatched pair is caught at open rather
-    /// than producing plausible garbage.
-    kind: u32,
+    /// than producing plausible garbage. Open, so a file of a kind this build
+    /// does not know reads as `BadKind` rather than as illegal behaviour.
+    kind: Kind,
     dim: u64,
     count: u64,
     capacity: u64,
@@ -275,6 +276,7 @@ pub const Header = extern struct {
         payload = 6,
         /// The field indexes' schema, rebuilt into postings on load.
         payload_schema = 7,
+        _,
     };
 
     pub const Flags = struct {
@@ -286,13 +288,13 @@ pub const Header = extern struct {
     /// `kind_field` read as what a `.vectors` header stores in it: the metric,
     /// as a `Distance` proto value for `Metric.fromProto`.
     pub fn metricField(self: *const Header) u32 {
-        std.debug.assert(self.kind == @backingInt(Kind.vectors));
+        std.debug.assert(self.kind == .vectors);
         return self.kind_field;
     }
 
     /// `kind_field` read as what a `.graph` header stores in it.
     pub fn entryPointField(self: *const Header) u32 {
-        std.debug.assert(self.kind == @backingInt(Kind.graph));
+        std.debug.assert(self.kind == .graph);
         return self.kind_field;
     }
 
@@ -319,7 +321,7 @@ pub const Header = extern struct {
         // Its own error. Reporting `BadMagic` for a well-formed header of the
         // wrong kind names the wrong failure: the magic matched, the file is
         // ours, it is the pairing that is wrong.
-        if (self.kind != @backingInt(expect_kind)) return Error.BadKind;
+        if (self.kind != expect_kind) return Error.BadKind;
     }
 };
 
@@ -691,7 +693,7 @@ test "header round-trips and the CRC covers only the header" {
     var h = Header{
         .magic = 0,
         .format_version = 0,
-        .kind = @backingInt(Header.Kind.vectors),
+        .kind = .vectors,
         .dim = 768,
         .count = 1000,
         .capacity = 1_100_000,
@@ -716,6 +718,13 @@ test "header round-trips and the CRC covers only the header" {
     // arena and produce plausible garbage, and it is reported as its own error
     // rather than as a bad magic: the magic was fine.
     try testing.expectError(Error.BadKind, h.validate(.graph));
+    // A kind this build does not know, as a newer one might write: the same.
+    var unknown = h;
+    unknown.kind = @fromBackingInt(@intCast(99));
+    unknown.header_crc = unknown.computeCrc();
+    try testing.expectError(Error.BadKind, unknown.validate(.vectors));
+    // The field's bytes are the u32 they always were.
+    try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, std.mem.asBytes(&h)[@offsetOf(Header, "kind")..][0..4], .little));
 
     // A different format version must be refused rather than reinterpreted.
     var old = h;
@@ -751,7 +760,7 @@ test "write then read a file under every placement" {
         var h = Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @backingInt(Header.Kind.vectors),
+            .kind = .vectors,
             .dim = 16,
             .count = capacity,
             .capacity = capacity,
@@ -804,7 +813,7 @@ test "§5.5: the pinned placement requests huge pages, the mapped ones do not" {
     var h = Header{
         .magic = 0,
         .format_version = 0,
-        .kind = @backingInt(Header.Kind.vectors),
+        .kind = .vectors,
         .dim = 1024,
         .count = 64,
         .capacity = 64,
@@ -852,7 +861,7 @@ test "§5.5: the pinned placement is actually huge-backed when THP allows it" {
     var h = Header{
         .magic = 0,
         .format_version = 0,
-        .kind = @backingInt(Header.Kind.vectors),
+        .kind = .vectors,
         .dim = 1024,
         .count = rows,
         .capacity = rows,
@@ -928,7 +937,7 @@ test "a mapped placement is writable and changes are visible through a fresh rea
     var h = Header{
         .magic = 0,
         .format_version = 0,
-        .kind = @backingInt(Header.Kind.vectors),
+        .kind = .vectors,
         .dim = 16,
         .count = 16,
         .capacity = 16,
@@ -1010,7 +1019,7 @@ test "cached prefaults its pages and cold does not" {
         var h = Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @backingInt(Header.Kind.vectors),
+            .kind = .vectors,
             .dim = 1024,
             .count = capacity,
             .capacity = capacity,

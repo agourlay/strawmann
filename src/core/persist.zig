@@ -131,7 +131,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         var h = storage.Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @backingInt(storage.Header.Kind.vectors),
+            .kind = .vectors,
             .dim = coll.config.dim,
             .count = n,
             .capacity = coll.config.capacity,
@@ -164,7 +164,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         var h = storage.Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @backingInt(storage.Header.Kind.ids),
+            .kind = .ids,
             .dim = 0,
             .count = n,
             .capacity = coll.config.capacity,
@@ -192,7 +192,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         var h = storage.Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @backingInt(storage.Header.Kind.deleted),
+            .kind = .deleted,
             .dim = 0,
             .count = coll.deleted_count,
             .capacity = coll.config.capacity,
@@ -231,7 +231,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         var h = storage.Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @backingInt(storage.Header.Kind.payload),
+            .kind = .payload,
             .dim = 0,
             .count = n,
             .capacity = coll.config.capacity,
@@ -274,7 +274,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         var h = storage.Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @backingInt(storage.Header.Kind.payload_schema),
+            .kind = .payload_schema,
             .dim = 0,
             .count = coll.payload.fields.items.len,
             .capacity = coll.config.capacity,
@@ -319,7 +319,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         var h = storage.Header{
             .magic = 0,
             .format_version = 0,
-            .kind = @backingInt(storage.Header.Kind.graph),
+            .kind = .graph,
             .dim = g.params.m,
             .count = g.count,
             .capacity = g.capacity,
