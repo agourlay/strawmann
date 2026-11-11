@@ -81,14 +81,17 @@ pub const Persistence = struct {
 /// format.
 const id_record_size = 1 + @sizeOf(u128);
 
+/// A record's tag byte.
+const IdTag = enum(u8) { num = 0, uuid = 1 };
+
 fn encodeId(id: ids.ExternalId, out: *[id_record_size]u8) void {
     switch (id) {
         .num => |v| {
-            out[0] = 0;
+            out[0] = @backingInt(IdTag.num);
             std.mem.writeInt(u128, out[1..], v, .little);
         },
         .uuid => |v| {
-            out[0] = 1;
+            out[0] = @backingInt(IdTag.uuid);
             std.mem.writeInt(u128, out[1..], v, .little);
         },
     }
@@ -96,10 +99,9 @@ fn encodeId(id: ids.ExternalId, out: *[id_record_size]u8) void {
 
 fn decodeId(in: *const [id_record_size]u8) !ids.ExternalId {
     const payload = std.mem.readInt(u128, in[1..], .little);
-    return switch (in[0]) {
-        0 => .{ .num = std.math.cast(u64, payload) orelse return error.BadId },
-        1 => .{ .uuid = payload },
-        else => error.BadId,
+    return switch (std.enums.fromInt(IdTag, in[0]) orelse return error.BadId) {
+        .num => .{ .num = std.math.cast(u64, payload) orelse return error.BadId },
+        .uuid => .{ .uuid = payload },
     };
 }
 
@@ -663,6 +665,18 @@ pub fn load(alloc: std.mem.Allocator, name: []const u8, dir: []const u8, placeme
     }
 
     return coll;
+}
+
+test "an id record's tag byte is 0 for a number and 1 for a UUID, and any other is refused" {
+    var rec: [id_record_size]u8 = undefined;
+    encodeId(.{ .num = 42 }, &rec);
+    try testing.expectEqual(@as(u8, 0), rec[0]);
+    try testing.expect((try decodeId(&rec)).eql(.{ .num = 42 }));
+    encodeId(.{ .uuid = 7 }, &rec);
+    try testing.expectEqual(@as(u8, 1), rec[0]);
+    try testing.expect((try decodeId(&rec)).eql(.{ .uuid = 7 }));
+    rec[0] = 2;
+    try testing.expectError(error.BadId, decodeId(&rec));
 }
 
 test "a data dir longer than the path buffer is an error, not illegal behaviour" {
