@@ -375,17 +375,17 @@ class FilteredTests(NamedTuple):
 #: rows join its table. laion's conditions are float ranges and never needed it.
 BFB_SENDS_KEYWORD_MATCH = False
 
-#: The corpora W16 runs on, keyed as `_CORPUS`. Written down rather than read
-#: from `datasets.json`: its `extract.dir` for h-and-m is `h-and-m-2048-angular/hnm`,
-#: an older extraction beside the one bfb is pointed at, and its
-#: `payload_schema` lists all 24 h-and-m fields where the tests filter on ten.
+#: The corpora W16 runs on, keyed as `_CORPUS`. The bundle directories are
+#: `datasets.json`'s `extract.dir`. The fields are written down rather than read
+#: from there: its `payload_schema` lists all 24 h-and-m fields where the tests
+#: filter on ten.
 #: Those ten are `filters.json`'s `name`s, the fields the query generator drew
 #: its conditions from.
 FILTERED_TESTS = {
     "laion-small-clip": FilteredTests(
         "laion-small-clip/laion-small-clip", (("similarity", "float"),), 10),
     "h-and-m-2048-angular-filters": FilteredTests(
-        "h-and-m-2048-angular-filters/hnm",
+        "h-and-m-2048-angular/hnm",
         tuple((f, "keyword") for f in (
             "index_group_name", "colour_group_name", "department_name",
             "garment_group_name", "graphical_appearance_name",

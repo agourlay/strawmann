@@ -225,39 +225,33 @@ against our own filtered oracle, as `ground-truth.md` §6 did for the
 unconditional sets). This is also the workload vector-db-benchmark runs on
 these two datasets.
 
-Looked at on 2026-11-11. bfb already does the client side: `bfb upload` takes
-a vector-db-benchmark tar layout (`vectors.npy`, `payloads.jsonl`) as both the
-vector and the whole-payload source, with field indexes declared, and `bfb
-search` with a `type: dataset` source applies each test's own `conditions`
-and reports precision@k against its `closest_ids`. h-and-m is extracted beside
-its archive (`h-and-m-2048-angular-filters/hnm/`), laion already was. Three
-things stand between that and a row:
+Built on 2026-11-11; what is left is measuring it.
 
-- **bfb sends whitespace values as full-text matches.** qdrant-client's
-  `From<String> for MatchValue` makes "Light Orange" a `text` match; strawmANN
-  refuses it (§1), and on Qdrant it is a substring match on a keyword field,
-  not the dataset's query. 4,255 of h-and-m's
-  10,000 test queries carry such a value. Fixed in qdrant/bfb#193 (open,
-  against `dev`, with a test); a 3,000-point smoke through it ran 300 of
-  h-and-m's filtered queries on strawmANN without an error. The pin moves
-  once it merges.
-- **laion needs a float range.** Its 2,530 conditioned queries are `range
-  {gt}` on `similarity`. Since 2026-11-11 the engine decodes `range` (its
-  bounds folded in Qdrant's OrderedFloat order, NaN largest) and builds a
-  float index (`Kind.float = 3`): a sorted `(value, point)` array plus a
-  tail merged every 4,096 writes, counted for the planner and selected
-  under the same trusted and verified rules as the postings. A range on an
-  integer-indexed field is the verified scan.
-- **The harness has no row for it.** An upload row and a search row on bfb's
-  dataset path, and a recall that comes from the row (bfb's precision)
-  rather than from a joined sweep, which `compare.py` and the report do not
-  read yet; plus the ε-tie check against our filtered oracle. The
-  conformance side is built: `relevance --dataset-tests <tests.jsonl>`
-  sends each query under its own condition and scores it against the
-  shipped `closest_ids` with the tie rule, and `dataset-truth-check` checks
-  those ids against our filtered fp64 top-k. On the first 200 tests of each,
-  all 200 shipped sets are our exact sets (laion 86 conditioned, max score
-  delta 2.6e-7; h-and-m 200 conditioned, 4.4e-7).
+- **Rows:** W16-upload loads the dataset's own bundle (vectors, the whole
+  payload, the fields the tests filter on indexed) into `bench16` through bfb's
+  dataset path, and W16-ef32 to ef512 search it with each test's own
+  conditions on W4's client (`workloads.tests_table`, `paths.FILTERED_TESTS`).
+  recall@10, from a sweep joined on (dataset, collection, ef) like W12's
+  grades.
+- **Recall:** `conformance relevance --dataset-tests <tests.jsonl>` sends each
+  query under its own condition and scores it against the shipped
+  `closest_ids` with the ε-tie rule; `recall.py --collections bench16` runs it.
+  `dataset-truth-check` checks those ids against our filtered fp64 top-k: on
+  the first 200 tests of each corpus, all 200 shipped sets are our exact sets
+  (laion 86 conditioned, max score delta 2.6e-7; h-and-m 200 conditioned,
+  4.4e-7).
+- **Engine:** laion's 2,530 conditioned tests are `range {gt}` on
+  `similarity`; the engine decodes `range` and builds a float index
+  (`Kind.float = 3`) since 2026-11-11.
+- **h-and-m waits on bfb.** qdrant-client's `From<String> for MatchValue`
+  sends a value with whitespace ("Light Orange", 4,255 of the 10,000 tests)
+  as a full-text `text` match: strawmANN refuses it (§1), and Qdrant answers it
+  by token rather than by equality, which is not the dataset's query.
+  qdrant/bfb#193 fixes it; `paths.BFB_SENDS_KEYWORD_MATCH` turns h-and-m's
+  rows on in the commit that moves the pin past it.
+
+What it needs: a laion pair with W16 (a quiet machine), then h-and-m's once
+the pin moves.
 
 ## Next
 

@@ -4552,7 +4552,7 @@ class DatasetTestsTableTests(unittest.TestCase):
         self.assertEqual((laion.tar_dir, laion.fields, laion.k),
                          ("laion-small-clip/laion-small-clip", (("similarity", "float"),), 10))
         hnm = p.FILTERED_TESTS["h-and-m-2048-angular-filters"]
-        self.assertEqual(hnm.tar_dir, "h-and-m-2048-angular-filters/hnm")
+        self.assertEqual(hnm.tar_dir, "h-and-m-2048-angular/hnm")
         self.assertEqual(hnm.k, 25)
         self.assertEqual(len(hnm.fields), 10)
         self.assertEqual({t for _, t in hnm.fields}, {"keyword"})
