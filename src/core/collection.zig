@@ -2913,6 +2913,217 @@ fn releaseScanSlot() void {
     exact_scan_gate.release();
 }
 
+/// How long the first exact query of a group waits for others to join, at
+/// most. Not measured: an upper bound by arithmetic. A scan this applies to
+/// reads at least `exact_scan_large_bytes`, and 4 GiB at even 200 GB/s is
+/// 20 ms, so a window of 1 ms costs a query that nobody joins at most 5%.
+/// The window needs to cover only the request round trip, not the arrival
+/// gaps of independent clients: a group's members return together, so their
+/// clients' next requests arrive together and re-form it.
+pub const exact_gather_window_ns: u64 = std.time.ns_per_ms;
+
+/// Exact queries from separate requests sharing one pass of the arena
+/// (`--exact-gather`, findings 10).
+///
+/// At d=1536 concurrent scans share no cache lines, so seven workers each
+/// scanning 6 GB read 9.74 q/s on dbpedia-openai-1m where one pass carrying 8
+/// queries read 51.06. The 2026-09 gather (decisions.md, "Gathering exact
+/// queries is not the fix for W9, measured") put every gathered query on one
+/// worker; here every member worker scans a disjoint slice of the rows for
+/// all of the group's queries, so the pass is shared and still parallel.
+///
+/// A group forms on the first worker to arrive (the leader, whose stack holds
+/// the group). Workers arriving for the same collection join it until it
+/// closes. The leader closes it once it has `max_gather` members, or once
+/// `window_ns` has passed *and* it holds a `gate` slot: the group stays open
+/// while it waits for the slot, so the time a scan would spend queued anyway
+/// is spent gathering. A group takes one slot, being one pass of the bus.
+/// Then each member scans `[total * i / n, total * (i + 1) / n)` into per-query
+/// partial heaps, and after a barrier each member merges every member's
+/// partial for its own query. The §8.7 total order makes the top-k of the
+/// union of slice top-ks the top-k of the whole range, the same argument that
+/// makes `bruteForceRange` independent of partitioning, so the answer is the
+/// ungathered scan's. A second barrier keeps every partial alive until all
+/// merges are done; the leader then waits for every member to leave before its
+/// frame (the group) goes away. Every barrier wakes all sleepers: the
+/// `ScanGate` hang (dbpedia 1006) was a wake-one reaching the wrong sleeper.
+///
+/// Unfiltered only: the handler sends a filtered exact query the ordinary way.
+/// A member's query is validated before it joins, so nothing a member does
+/// after joining can fail.
+pub const ExactGather = struct {
+    /// The scan size from which queries gather; a parameter so a test can
+    /// gather on a small collection.
+    threshold_bytes: usize = exact_scan_large_bytes,
+    window_ns: u64 = exact_gather_window_ns,
+    gate: *ScanGate,
+    mutex: lock.Mutex = .{},
+    /// The open group, if any. Written under `mutex`.
+    forming: ?*Group = null,
+
+    /// A member's scratch: probes for up to `max_gather` queries, and
+    /// `max_gather` partial heaps of `parts.len / max_gather` candidates each.
+    pub const Scratch = struct {
+        probe: []u8,
+        parts: []Candidate,
+    };
+
+    const Group = struct {
+        coll: *const Collection,
+        /// Members joined. Written under the mutex; the leader sleeps on it.
+        count: std.atomic.Value(u32) = .init(1),
+        queries: [max_gather][]const f32 = undefined,
+        wants: [max_gather]usize = undefined,
+        parts: [max_gather]*[max_gather]heap.TopK = undefined,
+        /// Every member's partial for query `q` holds `wants[q]`, so a member
+        /// joins only if its heaps fit every query and its query fits every
+        /// member's heaps.
+        max_want: usize,
+        min_cap: usize,
+        /// Set by the leader before `phase` is released.
+        n: u32 = 0,
+        total: u32 = 0,
+        /// 0 while open, 1 once closed and `n`, `total` are final.
+        phase: std.atomic.Value(u32) = .init(0),
+        scanned: std.atomic.Value(u32) = .init(0),
+        merged: std.atomic.Value(u32) = .init(0),
+        left: std.atomic.Value(u32) = .init(0),
+    };
+
+    /// Whether an exact scan of `coll` gathers at all.
+    pub fn applies(self: *const ExactGather, coll: *const Collection) bool {
+        return @as(usize, coll.id_space.count()) * coll.space.stride >= self.threshold_bytes;
+    }
+
+    /// Answer `query` exactly into `out` (capacity `out.k`), sharing the
+    /// pass with whatever group it joins or leads. Returns the group's size,
+    /// or null without touching `out` when this query does not gather: below
+    /// the threshold, or a group is open that it cannot join (another
+    /// collection, or heaps that do not fit). The caller then scans the
+    /// ordinary way, which is what it would have done without the flag.
+    pub fn search(self: *ExactGather, coll: *const Collection, query: []const f32, scratch: Scratch, out: *heap.TopK) ?u32 {
+        if (!self.applies(coll)) return null;
+        std.debug.assert(query.len == coll.config.dim);
+        std.debug.assert(scratch.probe.len >= max_gather * probeScratchStride(coll));
+        const cap = scratch.parts.len / max_gather;
+        const want = out.k;
+        if (want > cap) return null;
+
+        // Before joining: the leader reads `total` under its own guard, and
+        // this member scans it under this one.
+        const guard = SearchGuard.begin(coll);
+        defer guard.end();
+
+        var parts: [max_gather]heap.TopK = undefined;
+        var own: Group = undefined;
+        var g: *Group = undefined;
+        var slot: u32 = 0;
+        var full = false;
+        self.mutex.lock();
+        if (self.forming) |f| {
+            if (f.coll != coll or want > f.min_cap or f.max_want > cap) {
+                self.mutex.unlock();
+                return null;
+            }
+            slot = f.count.load(.monotonic);
+            f.queries[slot] = query;
+            f.wants[slot] = want;
+            f.parts[slot] = &parts;
+            f.max_want = @max(f.max_want, want);
+            f.min_cap = @min(f.min_cap, cap);
+            f.count.store(slot + 1, .release);
+            if (slot + 1 == max_gather) {
+                self.forming = null;
+                full = true;
+            }
+            g = f;
+        } else {
+            own = .{ .coll = coll, .max_want = want, .min_cap = cap };
+            own.queries[0] = query;
+            own.wants[0] = want;
+            own.parts[0] = &parts;
+            self.forming = &own;
+            g = &own;
+        }
+        self.mutex.unlock();
+        const leader = slot == 0;
+
+        if (leader) {
+            const deadline = monotonicNs() + self.window_ns;
+            while (true) {
+                const seen = g.count.load(.acquire);
+                if (seen >= max_gather) break;
+                const now = monotonicNs();
+                if (now >= deadline) break;
+                lock.futexWaitTimeout(&g.count, seen, deadline - now);
+            }
+            _ = self.gate.acquire();
+            self.mutex.lock();
+            if (self.forming == g) self.forming = null;
+            g.n = g.count.load(.monotonic);
+            self.mutex.unlock();
+            g.total = @intCast(coll.id_space.count());
+            g.phase.store(1, .release);
+            lock.futexWake(&g.phase, lock.wake_all);
+        } else {
+            if (full) lock.futexWake(&g.count, lock.wake_all);
+            while (g.phase.load(.acquire) == 0) lock.futexWait(&g.phase, 0);
+        }
+
+        const n = g.n;
+        const total = g.total;
+        if (n == 1) {
+            // Nobody joined: today's scan, under the slot it already holds.
+            bruteForceRangeFiltered(coll, query, 0, total, null, out);
+            self.gate.release();
+            return 1;
+        }
+
+        var ptrs: [max_gather]*heap.TopK = undefined;
+        for (0..n) |q| {
+            parts[q] = heap.TopK.init(scratch.parts[q * cap ..][0..g.wants[q]], g.wants[q]);
+            ptrs[q] = &parts[q];
+        }
+        const from: u32 = @intCast(@as(u64, total) * slot / n);
+        const to: u32 = @intCast(@as(u64, total) * (slot + 1) / n);
+        bruteForceRangeMulti(coll, g.queries[0..n], from, to, null, scratch.probe, ptrs[0..n]);
+
+        arriveAndWait(&g.scanned, n);
+        // The pass is over; only merging is left, which reads no arena.
+        if (leader) self.gate.release();
+        for (g.parts[0..n]) |member| {
+            const p = &member[slot];
+            for (p.items[0..p.len]) |c| out.push(c);
+        }
+        arriveAndWait(&g.merged, n);
+
+        if (leader) {
+            // `own` is this frame's: every member must be done reading it.
+            while (g.left.load(.acquire) < n - 1) std.Thread.yield() catch {};
+        } else {
+            // The last touch of the group.
+            _ = g.left.fetchAdd(1, .release);
+        }
+        return n;
+    }
+
+    /// A barrier for `n`: the last arrival wakes every sleeper.
+    fn arriveAndWait(counter: *std.atomic.Value(u32), n: u32) void {
+        if (counter.fetchAdd(1, .acq_rel) + 1 == n) {
+            lock.futexWake(counter, lock.wake_all);
+            return;
+        }
+        while (true) {
+            const seen = counter.load(.acquire);
+            if (seen >= n) return;
+            lock.futexWait(counter, seen);
+        }
+    }
+};
+
+/// The process-wide gather, on the process-wide gate.
+pub var exact_gather: ExactGather = .{ .gate = &exact_scan_gate };
+
 test "the scan gate admits in ticket order and never more than its cap at once" {
     const G = struct {
         var gate: ScanGate = .{ .cap = 3 };
@@ -2975,6 +3186,246 @@ test "the scan gate wakes the admissible ticket when it is not first in the fute
     }
     // Detached rather than joined: on a regression ticket 1 never returns.
     try testing.expectEqual(@as(u32, 2), G.done.load(.acquire));
+}
+
+/// Per-thread scratch for the gather tests, sized as a worker's would be but
+/// with 64-candidate partial heaps.
+const GatherTestScratch = struct {
+    probe: []align(Probe.buffer_align) u8,
+    parts: []Candidate,
+    const part_cap = 64;
+
+    fn init(coll: *const Collection) !GatherTestScratch {
+        const probe = try testing.allocator.alignedAlloc(u8, .fromByteUnits(Probe.buffer_align), max_gather * probeScratchStride(coll));
+        errdefer testing.allocator.free(probe);
+        const parts = try testing.allocator.alloc(Candidate, max_gather * part_cap);
+        return .{ .probe = probe, .parts = parts };
+    }
+
+    fn deinit(self: GatherTestScratch) void {
+        testing.allocator.free(self.probe);
+        testing.allocator.free(self.parts);
+    }
+
+    fn view(self: GatherTestScratch) ExactGather.Scratch {
+        return .{ .probe = self.probe, .parts = self.parts };
+    }
+};
+
+fn makeGatherCollection(dim: usize, n: usize, seed: u64) !Collection {
+    var c = try makeCollection(dim, .dot, n + 16);
+    errdefer c.deinit();
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rnd = prng.random();
+    const v = try testing.allocator.alloc(f32, dim);
+    defer testing.allocator.free(v);
+    for (0..n) |i| {
+        // A coarse grid, so equal scores happen and the §8.7 id tie-break
+        // decides between members' partials.
+        for (v) |*x| x.* = @floatFromInt(rnd.intRangeAtMost(i32, -2, 2));
+        _ = try c.upsert(.{ .num = i }, v);
+    }
+    _ = c.delete(.{ .num = 7 });
+    _ = c.delete(.{ .num = n / 2 });
+    return c;
+}
+
+/// Many threads querying through one gather, each answer checked against the
+/// ungathered exact scan. Threads start together so groups form.
+const GatherStress = struct {
+    coll: *const Collection,
+    gather: *ExactGather,
+    rounds: usize,
+    max_jitter_us: u32,
+    go: std.atomic.Value(u32) = .init(0),
+    done: std.atomic.Value(u32) = .init(0),
+    mismatches: std.atomic.Value(u32) = .init(0),
+    fallbacks: std.atomic.Value(u32) = .init(0),
+    largest: std.atomic.Value(u32) = .init(0),
+
+    fn run(self: *GatherStress, t: usize) void {
+        defer _ = self.done.fetchAdd(1, .acq_rel);
+        const s = GatherTestScratch.init(self.coll) catch {
+            _ = self.mismatches.fetchAdd(1, .monotonic);
+            return;
+        };
+        defer s.deinit();
+        var prng = std.Random.DefaultPrng.init(0x6a7 + t);
+        const rnd = prng.random();
+        const dim = self.coll.config.dim;
+        var q: [32]f32 = undefined;
+        while (self.go.load(.acquire) == 0) std.atomic.spinLoopHint();
+        for (0..self.rounds) |_| {
+            for (q[0..dim]) |*x| x.* = @floatFromInt(rnd.intRangeAtMost(i32, -2, 2));
+            // Limits differ across members of one group.
+            const want = rnd.intRangeAtMost(usize, 1, GatherTestScratch.part_cap);
+            var got_store: [GatherTestScratch.part_cap]Candidate = undefined;
+            var got = heap.TopK.init(&got_store, want);
+            if (self.max_jitter_us > 0) {
+                var ts = std.os.linux.timespec{ .sec = 0, .nsec = @as(isize, rnd.uintAtMost(u32, self.max_jitter_us)) * std.time.ns_per_us };
+                _ = std.os.linux.nanosleep(&ts, null);
+            }
+            if (self.gather.search(self.coll, q[0..dim], s.view(), &got)) |size| {
+                _ = self.largest.fetchMax(size, .monotonic);
+            } else {
+                _ = self.fallbacks.fetchAdd(1, .monotonic);
+                continue;
+            }
+            var ref_store: [GatherTestScratch.part_cap]Candidate = undefined;
+            var ref = heap.TopK.init(&ref_store, want);
+            bruteForce(self.coll, q[0..dim], &ref);
+            const w = ref.finish();
+            const g = got.finish();
+            var same = w.len == g.len;
+            if (same) for (w, g) |a, b| {
+                if (a.id != b.id or a.score != b.score) same = false;
+            };
+            if (!same) _ = self.mismatches.fetchAdd(1, .monotonic);
+        }
+    }
+
+    /// Run `threads` workers to completion, or fail after `limit_ms` rather
+    /// than hang the suite (detached for that reason).
+    fn runAll(self: *GatherStress, threads: usize, limit_ms: u32) !void {
+        for (0..threads) |t| (try std.Thread.spawn(.{}, run, .{ self, t })).detach();
+        self.go.store(1, .release);
+        var waited: u32 = 0;
+        while (self.done.load(.acquire) < threads and waited < limit_ms) : (waited += 10) sleepMs(10);
+        try testing.expectEqual(@as(u32, @intCast(threads)), self.done.load(.acquire));
+    }
+};
+
+test "gathered exact queries from many threads each return the ungathered scan's answer" {
+    var c = try makeGatherCollection(24, 3000, 0x9a71);
+    defer c.deinit();
+    var gate: ScanGate = .{ .cap = exact_scan_cap };
+    var gather: ExactGather = .{ .threshold_bytes = 0, .window_ns = 2 * std.time.ns_per_ms, .gate = &gate };
+    var st: GatherStress = .{ .coll = &c, .gather = &gather, .rounds = 40, .max_jitter_us = 0 };
+    try st.runAll(8, 60_000);
+    try testing.expectEqual(@as(u32, 0), st.mismatches.load(.acquire));
+    try testing.expectEqual(@as(u32, 0), st.fallbacks.load(.acquire));
+    // Non-vacuous: groups larger than one formed, so slices were merged.
+    try testing.expect(st.largest.load(.acquire) > 1);
+    try testing.expect(gather.forming == null);
+    try testing.expectEqual(gate.next.load(.acquire), gate.served.load(.acquire));
+}
+
+test "gather arrivals jittered around a short window neither hang nor change an answer" {
+    // The window edge: a member arriving as the leader closes either joined
+    // before the close (and is scanned) or opens the next group, both under
+    // the mutex. 20 us windows against 0-60 us jitter put many arrivals there.
+    var c = try makeGatherCollection(8, 1500, 0xed6e);
+    defer c.deinit();
+    var gate: ScanGate = .{ .cap = 2 };
+    var gather: ExactGather = .{ .threshold_bytes = 0, .window_ns = 20 * std.time.ns_per_us, .gate = &gate };
+    var st: GatherStress = .{ .coll = &c, .gather = &gather, .rounds = 150, .max_jitter_us = 60 };
+    try st.runAll(8, 60_000);
+    try testing.expectEqual(@as(u32, 0), st.mismatches.load(.acquire));
+    try testing.expectEqual(@as(u32, 0), st.fallbacks.load(.acquire));
+    try testing.expect(gather.forming == null);
+    try testing.expectEqual(gate.next.load(.acquire), gate.served.load(.acquire));
+}
+
+test "a gather of one is today's exact scan, under one gate slot" {
+    var c = try makeGatherCollection(16, 500, 0x0e1);
+    defer c.deinit();
+    var gate: ScanGate = .{ .cap = exact_scan_cap };
+    var gather: ExactGather = .{ .threshold_bytes = 0, .window_ns = 0, .gate = &gate };
+    const s = try GatherTestScratch.init(&c);
+    defer s.deinit();
+    var q: [16]f32 = undefined;
+    for (&q, 0..) |*x, i| x.* = @floatFromInt(@as(i32, @intCast(i % 5)) - 2);
+    var got_store: [10]Candidate = undefined;
+    var got = heap.TopK.init(&got_store, 10);
+    try testing.expectEqual(@as(?u32, 1), gather.search(&c, &q, s.view(), &got));
+    var ref_store: [10]Candidate = undefined;
+    var ref = heap.TopK.init(&ref_store, 10);
+    bruteForce(&c, &q, &ref);
+    try testing.expectEqualSlices(Candidate, ref.finish(), got.finish());
+    try testing.expectEqual(@as(u32, 1), gate.served.load(.acquire));
+
+    // Below the threshold it does nothing at all, which is the caller's cue
+    // to scan the ordinary way.
+    gather.threshold_bytes = std.math.maxInt(usize);
+    var untouched = heap.TopK.init(&got_store, 10);
+    try testing.expectEqual(@as(?u32, null), gather.search(&c, &q, s.view(), &untouched));
+    try testing.expectEqual(@as(usize, 0), untouched.len);
+    try testing.expectEqual(@as(u32, 1), gate.next.load(.acquire));
+}
+
+test "a full gather closes without waiting out its window" {
+    // A window of 30 s: the group must close on its `max_gather`th member,
+    // which wakes the leader, or this test takes the whole window.
+    var c = try makeGatherCollection(8, 400, 0xf011);
+    defer c.deinit();
+    var gate: ScanGate = .{ .cap = 1 };
+    var gather: ExactGather = .{ .threshold_bytes = 0, .window_ns = 30 * std.time.ns_per_s, .gate = &gate };
+    var st: GatherStress = .{ .coll = &c, .gather = &gather, .rounds = 1, .max_jitter_us = 0 };
+    const t0 = monotonicNs();
+    try st.runAll(max_gather, 20_000);
+    try testing.expect(monotonicNs() - t0 < 10 * std.time.ns_per_s);
+    try testing.expectEqual(@as(u32, max_gather), st.largest.load(.acquire));
+    try testing.expectEqual(@as(u32, 0), st.mismatches.load(.acquire));
+    try testing.expectEqual(@as(u32, 1), gate.served.load(.acquire));
+}
+
+test "a gather stays open while its leader waits for a gate slot, and wakes everyone after" {
+    var c = try makeGatherCollection(8, 400, 0x6a7e);
+    defer c.deinit();
+    var gate: ScanGate = .{ .cap = 1 };
+    var gather: ExactGather = .{ .threshold_bytes = 0, .window_ns = 0, .gate = &gate };
+    _ = gate.acquire(); // another scan holds the only slot
+    var st: GatherStress = .{ .coll = &c, .gather = &gather, .rounds = 1, .max_jitter_us = 0 };
+    for (0..3) |t| (try std.Thread.spawn(.{}, GatherStress.run, .{ &st, t })).detach();
+    st.go.store(1, .release);
+    sleepMs(100);
+    try testing.expectEqual(@as(u32, 0), st.done.load(.acquire));
+    gate.release();
+    var waited: u32 = 0;
+    while (st.done.load(.acquire) < 3 and waited < 20_000) : (waited += 10) sleepMs(10);
+    try testing.expectEqual(@as(u32, 3), st.done.load(.acquire));
+    try testing.expectEqual(@as(u32, 3), st.largest.load(.acquire));
+    try testing.expectEqual(@as(u32, 0), st.mismatches.load(.acquire));
+}
+
+test "a query that cannot join the open group falls through instead of waiting" {
+    // Another collection, or a limit past the leader's partial heaps: the
+    // caller scans the ordinary way, and the open group is unaffected.
+    var a = try makeGatherCollection(8, 300, 0xa);
+    defer a.deinit();
+    var b = try makeGatherCollection(8, 300, 0xb);
+    defer b.deinit();
+    var gate: ScanGate = .{ .cap = exact_scan_cap };
+    var gather: ExactGather = .{ .threshold_bytes = 0, .window_ns = 400 * std.time.ns_per_ms, .gate = &gate };
+    var st: GatherStress = .{ .coll = &a, .gather = &gather, .rounds = 1, .max_jitter_us = 0 };
+    (try std.Thread.spawn(.{}, GatherStress.run, .{ &st, 0 })).detach();
+    st.go.store(1, .release);
+    sleepMs(50); // the leader's window is open
+
+    const s = try GatherTestScratch.init(&a);
+    defer s.deinit();
+    var q: [8]f32 = .{ 1, 0, -1, 2, 0, 1, -2, 1 };
+    var store: [2 * GatherTestScratch.part_cap]Candidate = undefined;
+    var other = heap.TopK.init(&store, 5);
+    try testing.expectEqual(@as(?u32, null), gather.search(&b, &q, s.view(), &other));
+    // Wider than every member's partial heap can hold.
+    var wide = heap.TopK.init(&store, GatherTestScratch.part_cap + 1);
+    const big = try testing.allocator.alloc(Candidate, max_gather * (GatherTestScratch.part_cap + 1));
+    defer testing.allocator.free(big);
+    try testing.expectEqual(@as(?u32, null), gather.search(&a, &q, .{ .probe = s.probe, .parts = big }, &wide));
+    // A compatible one joins.
+    var fits = heap.TopK.init(&store, 5);
+    try testing.expectEqual(@as(?u32, 2), gather.search(&a, &q, s.view(), &fits));
+    var ref_store: [5]Candidate = undefined;
+    var ref = heap.TopK.init(&ref_store, 5);
+    bruteForce(&a, &q, &ref);
+    try testing.expectEqualSlices(Candidate, ref.finish(), fits.finish());
+
+    var waited: u32 = 0;
+    while (st.done.load(.acquire) < 1 and waited < 20_000) : (waited += 10) sleepMs(10);
+    try testing.expectEqual(@as(u32, 1), st.done.load(.acquire));
+    try testing.expectEqual(@as(u32, 0), st.mismatches.load(.acquire));
+    try testing.expectEqual(@as(u32, 2), st.largest.load(.acquire));
 }
 
 test "a quantized build searches on codes, SQ8 choosing its edges on fp32, and the SQ8 code score is sound" {

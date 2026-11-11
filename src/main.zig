@@ -45,6 +45,7 @@ const Flag = enum {
     build_mode,
     no_drain,
     no_batch_fanout,
+    exact_gather,
     filtered_plan,
     rescore_prefetch,
     probe_prefetch_bytes,
@@ -77,6 +78,7 @@ const Flag = enum {
             .build_mode => "--build-mode",
             .no_drain => "--no-drain",
             .no_batch_fanout => "--no-batch-fanout",
+            .exact_gather => "--exact-gather",
             .filtered_plan => "--filtered-plan",
             .rescore_prefetch => "--rescore-prefetch",
             .probe_prefetch_bytes => "--probe-prefetch-bytes",
@@ -252,6 +254,7 @@ const Options = struct {
     build_mode: core.collection.BuildMode = engineDefault(.build_mode),
     drain_tail: bool = engineDefault(.drain_tail),
     batch_fanout: bool = engineDefault(.batch_fanout),
+    exact_gather: bool = engineDefault(.exact_gather),
     filtered_plan: ?api.FilteredPlan = engineDefault(.filtered_plan),
     rescore_prefetch: core.quantized_search.RescorePrefetch = engineDefault(.rescore_prefetch),
     probe_prefetch_bytes: ?usize = null,
@@ -289,6 +292,9 @@ fn usage(w: *Io.Writer) !void {
         \\  --no-batch-fanout    run each QueryBatch on its dispatching worker
         \\                       instead of spreading it over the queue
         \\                       (the A/B arm for batched search)
+        \\  --exact-gather       let exact queries of separate requests share one
+        \\                       pass of a collection of 4 GiB or more, split
+        \\                       across their workers (an A/B arm, findings 10)
         \\  --filtered-plan      auto|scan|two_hop|walk for a counted filter
         \\                       (default auto, the cost model; the others are
         \\                       calibration arms)
@@ -401,6 +407,7 @@ pub fn main(init: std.process.Init) !void {
             .no_huge_pages => opts.huge_pages = false,
             .no_drain => opts.drain_tail = false,
             .no_batch_fanout => opts.batch_fanout = false,
+            .exact_gather => opts.exact_gather = true,
             .no_bandwidth_probe => opts.bandwidth_probe = false,
             .probe => opts.probe_only = true,
             .host => opts.host = next(args, &i) orelse return error.MissingValue,
@@ -480,6 +487,7 @@ pub fn main(init: std.process.Init) !void {
     engine.build_mode = opts.build_mode;
     engine.drain_tail = opts.drain_tail;
     engine.batch_fanout = opts.batch_fanout;
+    engine.exact_gather = opts.exact_gather;
     engine.filtered_plan = opts.filtered_plan;
     engine.rescore_prefetch = opts.rescore_prefetch;
     core.collection.Probe.prefetch_bytes_override = opts.probe_prefetch_bytes;
@@ -688,6 +696,11 @@ pub fn main(init: std.process.Init) !void {
         try w.print("  batched search         : spread over the worker queue\n", .{});
     } else {
         try w.print("  batched search         : on the dispatching worker (--no-batch-fanout)\n", .{});
+    }
+    if (engine.exact_gather) {
+        try w.print("  exact scans >= 4 GiB   : gathered across requests, one pass split over their workers (--exact-gather)\n", .{});
+    } else {
+        try w.print("  exact scans >= 4 GiB   : one pass per query, at most {d} at once\n", .{core.collection.exact_scan_cap});
     }
     if (engine.filtered_plan) |p| {
         try w.print("  filtered plan          : forced {s} (--filtered-plan), not the cost model\n", .{@tagName(p)});

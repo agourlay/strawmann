@@ -106,6 +106,11 @@ pub const Engine = struct {
     /// `--rescore-prefetch`: how quantized search's stage 2 asks for its fp32
     /// rows. An A/B arm (findings 74); off is the measured default.
     rescore_prefetch: core.quantized_search.RescorePrefetch = .off,
+    /// `--exact-gather`: exact queries from separate requests on a collection
+    /// past `exact_scan_large_bytes` share one pass, split across their
+    /// workers (`collection.ExactGather`, findings 10). Off is the default
+    /// until the A/B measures it.
+    exact_gather: bool = false,
     /// Largest vector dimension any worker's scratch can hold.
     ///
     /// §6.3 forbids allocating on the query path, so `Workspace.query` is sized
@@ -393,7 +398,9 @@ pub const Workspace = struct {
     /// `ensureGather`'s buffers, and what they are currently sized for.
     gather_queries: []f32 = &.{},
     gather_results: []index.Candidate = &.{},
-    gather_probe: []u8 = &.{},
+    /// Aligned in its type, or `free` passes alignment 1 and the allocator
+    /// refuses it (a mismatch the SafeAllocator panics on).
+    gather_probe: []align(core.collection.Probe.buffer_align) u8 = &.{},
     gather_dim: usize = 0,
     gather_stride: usize = 0,
     /// The text query's scoring scratch, created on a worker's first text
@@ -1509,6 +1516,24 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
         }
     }
 
+    // findings 10: concurrent exact scans of a 6 GB arena share no cache
+    // lines, so separate requests' queries share one pass instead. Unfiltered
+    // only; a filtered exact query scans the ordinary way.
+    if (exact and filter_opt == null and ctx.engine.exact_gather and
+        core.collection.exact_gather.applies(coll))
+    {
+        ctx.workspace.ensureGather(ctx.engine.alloc, coll) catch
+            return refuse(fail, .internal, "workspace allocation failed");
+        const scratch: core.collection.ExactGather.Scratch = .{
+            .probe = ctx.workspace.gather_probe,
+            .parts = ctx.workspace.gather_results,
+        };
+        if (core.collection.exact_gather.search(coll, raw, scratch, &top)) |_| {
+            _ = exact_queries_gathered.fetchAdd(1, .monotonic);
+            return top.finish();
+        }
+    }
+
     if (coll.quant.load(.acquire) != null and !exact) {
         // §6.7's two-stage path. `rescore` absent means the collection
         // default, which is on: silently skipping it would report a recall
@@ -1813,6 +1838,9 @@ const BatchJob = struct {
 /// Batches that were fanned out (not those that took the sequential path).
 /// A test reads it to prove the parallel path ran; nothing else does.
 pub var batches_fanned_out: std.atomic.Value(u64) = .init(0);
+/// Exact queries answered through `collection.exact_gather`, for the tests
+/// that pin `--exact-gather` on and off.
+pub var exact_queries_gathered: std.atomic.Value(u64) = .init(0);
 
 /// The dispatching worker: submit queries 1..n-1, run query 0, detach.
 fn runBatchJob(ctx: *Context, req: *const server.Request, job: *BatchJob, held: Engine.Handle) server.Completion {

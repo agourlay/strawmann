@@ -24,6 +24,16 @@ pub fn futexWait(addr: *const std.atomic.Value(u32), expect: u32) void {
     _ = linux.futex_4arg(&addr.raw, wait_op, expect, null);
 }
 
+/// `futexWait`, giving up after `timeout_ns` (relative). The caller re-checks
+/// its predicate and its deadline either way.
+pub fn futexWaitTimeout(addr: *const std.atomic.Value(u32), expect: u32, timeout_ns: u64) void {
+    const ts: linux.timespec = .{
+        .sec = @intCast(timeout_ns / std.time.ns_per_s),
+        .nsec = @intCast(timeout_ns % std.time.ns_per_s),
+    };
+    _ = linux.futex_4arg(&addr.raw, wait_op, expect, &ts);
+}
+
 pub fn futexWake(addr: *const std.atomic.Value(u32), n: u32) void {
     _ = linux.futex_3arg(&addr.raw, wake_op, n);
 }

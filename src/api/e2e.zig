@@ -4250,6 +4250,55 @@ test "e2e: an exact query does not start a background build, an approximate one 
     try testing.expect(coll.index_state.load(.acquire) != .absent);
 }
 
+test "e2e: --exact-gather answers exact queries as before, and without it nothing gathers" {
+    // The gather's threshold is lowered for the test (a 4 GiB collection is
+    // not a unit test); the engine flag is what decides whether it is used.
+    const saved = core.collection.exact_gather.threshold_bytes;
+    core.collection.exact_gather.threshold_bytes = 0;
+    defer core.collection.exact_gather.threshold_bytes = saved;
+    var off_ids: [6][5]u64 = undefined;
+    var off_scores: [6][5]f32 = undefined;
+    try exactAnswersWithGather(false, &off_ids, &off_scores);
+    var on_ids: [6][5]u64 = undefined;
+    var on_scores: [6][5]f32 = undefined;
+    try exactAnswersWithGather(true, &on_ids, &on_scores);
+    for (0..6) |qi| {
+        try testing.expectEqualSlices(u64, &off_ids[qi], &on_ids[qi]);
+        try testing.expectEqualSlices(f32, &off_scores[qi], &on_scores[qi]);
+        // Each query is a stored vector, so it leads its own result.
+        try testing.expectEqual(@as(u64, qi * 37), off_ids[qi][0]);
+    }
+}
+
+/// Six exact queries on the same seeded collection, answered with the
+/// gather on or off; counts what went through the gather.
+fn exactAnswersWithGather(on: bool, ids: *[6][5]u64, scores: *[6][5]f32) !void {
+    var h = try Harness.start(testing.allocator);
+    defer h.stop();
+    h.engine.exact_gather = on;
+    var c = try Client.connect(h.port);
+    defer c.close();
+    var req_buf: [1 << 16]u8 = undefined;
+    var out: [1 << 16]u8 = undefined;
+
+    _ = try c.call("/qdrant.Collections/Create", try buildCreateCollection(&req_buf, "xg", 8, 1), &out);
+    var prng = std.Random.DefaultPrng.init(0x96a7);
+    const rnd = prng.random();
+    const stored = try testing.allocator.alloc(f32, 300 * 8);
+    defer testing.allocator.free(stored);
+    for (stored) |*x| x.* = rnd.floatNorm(f32);
+    try uploadRandom(&c, "xg", 8, stored, &req_buf, &out);
+
+    const before = api.exact_queries_gathered.load(.monotonic);
+    for (0..6) |qi| {
+        const q = stored[qi * 37 * 8 ..][0..8];
+        const resp = try c.call("/qdrant.Points/QueryBatch", try buildQuery(&req_buf, "xg", q, .{ .limit = 5, .exact = true }), &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+        try testing.expectEqual(@as(usize, 5), try readFirstBatch(resp.body, &ids[qi], &scores[qi]));
+    }
+    try testing.expectEqual(before + @as(u64, if (on) 6 else 0), api.exact_queries_gathered.load(.monotonic));
+}
+
 test "e2e: below full_scan_threshold, an approximate query does not start a build either" {
     // The trigger keys on the computed `exact`: a collection Qdrant would
     // plain-scan is one whose graph would never be consulted, so building it
