@@ -3859,7 +3859,10 @@ class AbChain1112Tests(unittest.TestCase):
         ch = importlib.import_module("ab_chain_1112")
         ab = importlib.import_module("commit_ab")
         chain = {s.name: s.argv for s in ch.steps("t", "abc1234")}
-        self.assertEqual(list(chain), ["sq8-dbpedia", "probe-laion", "probe-dbpedia"])
+        self.assertEqual(list(chain), ["sq8-dbpedia", "probe-laion", "probe-dbpedia",
+                                       "reclaim-dbpedia"])
+        self.assertEqual(chain["reclaim-dbpedia"][0], "reclaim_ab.py")
+        self.assertEqual(chain["reclaim-dbpedia"][-1], str(ab.build_path("abc1234")))
 
         def arms(argv):
             commits, flags, i = [], [], argv.index("--commits") + 1
@@ -3878,6 +3881,31 @@ class AbChain1112Tests(unittest.TestCase):
                          ["rule", "pf512", "pf2048", "w8"])
         self.assertEqual(arms(chain["probe-dbpedia"])[1],
                          ("pf512", "abc1234", ("--probe-prefetch-bytes", "512")))
+
+
+class ReclaimAbTests(unittest.TestCase):
+    """findings 62: a resident collection against one reclaimed and re-read."""
+
+    def test_resident_rounds_then_a_reclaim_a_warm_round_and_reread_rounds(self):
+        r = importlib.import_module("reclaim_ab")
+        self.assertEqual(r.phases(2), [("resident", 1), ("resident", 2), ("reclaim", 0),
+                                       ("warm", 1), ("reread", 1), ("reread", 2)])
+
+    def test_reclaim_writes_the_request_and_reports_memory_current(self):
+        r = importlib.import_module("reclaim_ab")
+        with tempfile.TemporaryDirectory() as tmp:
+            cg = Path(tmp) / "eng.scope"
+            cg.mkdir()
+            (cg / "memory.current").write_text(str(8 << 30))
+            (cg / "memory.reclaim").write_text("")
+            self.assertIn("eng.scope: ", r.reclaim(cg, 1 << 50))
+            self.assertEqual((cg / "memory.reclaim").read_text(), str(1 << 50))
+            # The kernel's EAGAIN for a partial reclaim is said, not raised.
+            (cg / "memory.reclaim").unlink()
+            (cg / "memory.reclaim").mkdir()
+            self.assertIn("(Is a directory)", r.reclaim(cg, 1))
+            (cg / "memory.current").unlink()
+            self.assertIn("memory.current unreadable", r.reclaim(cg, 1))
 
 
 class Phase1ChainTests(unittest.TestCase):

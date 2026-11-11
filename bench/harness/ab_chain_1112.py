@@ -13,6 +13,8 @@
 3. The same traversal knob on dbpedia-100K's 6 KiB rows (IPC 0.30 on 1M W4),
    at 512 bytes only: the whole row lost on h-and-m (decisions.md,
    2026-09-29), and `--workers 8` beside it.
+4. findings 62 (`reclaim_ab.py`): dbpedia-1m's W10 with the collection as
+   written, then reclaimed through the engine's cgroup and read back.
 
 Development-grade, like `ab_chain_1110.py`, whose runner this reuses: no
 Qdrant, no publication, every arm one commit. Scheduled, not run from a
@@ -30,6 +32,7 @@ import subprocess
 import sys
 import time
 
+import commit_ab
 import nightrun
 import phase1_chain
 from phase1_chain import BFB, CPUS, RESULTS, Step
@@ -58,6 +61,9 @@ def steps(tag: str, commit: str) -> list[Step]:
                "pf2048": "--probe-prefetch-bytes 2048", "w8": "--workers 8"}),
         _step("probe-dbpedia", tag, DBPEDIA, commit, "W2", ["W4", "W10-ef128"],
               {"rule": "", "pf512": "--probe-prefetch-bytes 512", "w8": "--workers 8"}),
+        # The build the steps above made, not the checkout's own.
+        Step("reclaim-dbpedia", ["reclaim_ab.py", *CPUS, "--tag", f"{tag}-reclaim-dbpedia",
+                                 "--binary", str(commit_ab.build_path(commit))]),
     ]
 
 

@@ -121,7 +121,12 @@ def build(commit: str) -> Path | None:
     if code != 0:
         print(out.rstrip(), file=sys.stderr)
         return None
-    return wt / "zig-out/bin/strawmann"
+    return build_path(commit)
+
+
+def build_path(commit: str) -> Path:
+    """Where `build` leaves a commit's engine."""
+    return worktree_dir(commit) / "zig-out/bin/strawmann"
 
 
 def drain_lines(log: Path) -> list[str]:

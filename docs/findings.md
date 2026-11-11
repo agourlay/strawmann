@@ -174,10 +174,12 @@ ones whose pages stayed resident since the engine wrote them; h-and-m 1109's
 slow pass 3 is its most resident (4.3 against 3.6 and 3.4 GB file RSS).
 Qdrant's W10 is flat at 31.2 GB file RSS every pass. Since 2026-11-11 each row
 records the host's `MemAvailable` and used swap and the engine's `VmSwap`
-(`procstat.memory_state`). What it needs: an in-process A/B on one built
-bench2, W10-ef32 three times, the arena files evicted (`posix_fadvise
-DONTNEED`) and re-read, W10-ef32 three times more. If eviction buys the 5 to
-7%, every pass should start from the same page-cache state.
+(`procstat.memory_state`). What it needs: `reclaim_ab.py` (in `ab_chain_1112.py`),
+on one built bench2: W10 with the collection as written, then the engine's
+cgroup reclaimed through `memory.reclaim` (a running engine's mapped pages are
+out of `posix_fadvise`'s reach, and the server does not reload collections on
+a restart), one warming round, and W10 again on the pages read back. If that
+buys the 5 to 7%, every pass should start from the same page-cache state.
 
 **73. The filtered planner's constants at saturation.** The walk's fixed
 term moved to 350,000 (4c08d9d) after bfb's with-replacement keyword draw put
