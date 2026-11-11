@@ -236,11 +236,11 @@ things stand between that and a row:
 - **bfb sends whitespace values as full-text matches.** qdrant-client's
   `From<String> for MatchValue` makes "Light Orange" a `text` match; strawmANN
   refuses it (§1), and on Qdrant it is a substring match on a keyword field,
-  not the dataset's query. Fixed on a local bfb branch
-  (`~/.cache/strawmann/bfb-keyword`, `fix/dataset-keyword-match`, a2d9e72 on
-  the pinned d2a6b6c, with a test); a 3,000-point smoke through it ran 300 of
-  h-and-m's filtered queries on strawmANN without an error. Moving bfb's pin
-  to it, and offering it upstream, is the operator's call.
+  not the dataset's query. 4,255 of h-and-m's
+  10,000 test queries carry such a value. Fixed in qdrant/bfb#193 (open,
+  against `dev`, with a test); a 3,000-point smoke through it ran 300 of
+  h-and-m's filtered queries on strawmANN without an error. The pin moves
+  once it merges.
 - **laion needs a float range.** Its 2,530 conditioned queries are `range
   {gt}` on `similarity`, and the engine has keyword and integer indexes and
   `match` conditions only.
@@ -280,11 +280,11 @@ things stand between that and a row:
 
 ### Waiting on a decision
 
-- **bfb's keyword match (findings 55).** A local branch,
-  `~/.cache/strawmann/bfb-keyword` (`fix/dataset-keyword-match`, a2d9e72 on the
-  pinned d2a6b6c), sends dataset `match` strings as keyword matches. Offering
-  it upstream and moving the pin is the operator's call; a pin move is a new
-  stamp, so the next pairs are STALE by design.
+- **bfb's keyword match (findings 55).** qdrant/bfb#193 (branch
+  `fix/dataset-keyword-match`, 95aa8b5 on `dev` 820eaf9) sends dataset
+  `match` strings as keyword matches; 4,255 of h-and-m's 10,000 test queries
+  went out as full-text matches. Once it merges, moving the pin is a new
+  stamp, so it belongs with the next full republish.
 - **Occupancy at 1% selectivity (findings 7):** splitting one query's scan
   across idle workers is an occupancy choice, not a cheaper scan.
 
