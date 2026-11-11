@@ -843,6 +843,21 @@ class WorkloadTests(unittest.TestCase):
                              {"anon_huge_bytes": 4096 * 1024, "file_pmd_bytes": 2048 * 1024})
         self.assertEqual(procstat.huge_pages(None), dict.fromkeys(procstat.HUGE_FIELDS))
 
+    def test_memory_state_reads_meminfo_and_the_engines_swap(self):
+        """findings 62: the fast first pass was the one under memory pressure,
+        and no row said what the host's memory was."""
+        import procstat
+        files = {"/proc/meminfo": "MemTotal: 64000000 kB\nMemAvailable: 1000 kB\n"
+                                  "SwapTotal: 8000 kB\nSwapFree: 3000 kB\n",
+                 "/proc/7/status": "Name: strawmann\nVmSwap:     12 kB\n"}
+        with mock.patch.object(procstat, "_read", files.get):
+            self.assertEqual(procstat.memory_state(7), {"mem_available_bytes": 1000 * 1024,
+                                                        "swap_used_bytes": 5000 * 1024,
+                                                        "engine_swap_bytes": 12 * 1024})
+            self.assertEqual(procstat.memory_state(None)["engine_swap_bytes"], None)
+        with mock.patch.object(procstat, "_read", lambda p: None):
+            self.assertEqual(procstat.memory_state(7), dict.fromkeys(procstat.MEMORY_FIELDS))
+
     def test_search_completions_reads_bfbs_timestamps_and_skips_the_rest(self):
         p = Path(self.tmp.name) / "s.jsonl"
         p.write_text('{"timestamp": 1.5, "request_latency": 0.1}\n'
@@ -3835,6 +3850,34 @@ class AbChain1110Tests(unittest.TestCase):
         # One build, two arms: only the flag differs.
         self.assertEqual(arms(chain["batch-laion-small-clip"]), [
             ("fanout", ch.FANOUT_FLAG, ()), ("serial", ch.FANOUT_FLAG, ("--no-batch-fanout",))])
+
+
+class AbChain1112Tests(unittest.TestCase):
+    """findings 74 and 75's arms: one build, the flags the only difference."""
+
+    def test_every_arm_is_one_build_with_its_flags(self):
+        ch = importlib.import_module("ab_chain_1112")
+        ab = importlib.import_module("commit_ab")
+        chain = {s.name: s.argv for s in ch.steps("t", "abc1234")}
+        self.assertEqual(list(chain), ["sq8-dbpedia", "probe-laion", "probe-dbpedia"])
+
+        def arms(argv):
+            commits, flags, i = [], [], argv.index("--commits") + 1
+            while i < len(argv) and not argv[i].startswith("--"):
+                commits.append(argv[i])
+                i += 1
+            flags = [argv[j + 1] for j in range(i, len(argv)) if argv[j] == "--flags"]
+            return [(a.name, a.source, a.flags) for a in ab.parse_arms(commits, flags)]
+
+        self.assertEqual(arms(chain["sq8-dbpedia"]), [
+            ("off", "abc1234", ()), ("first", "abc1234", ("--rescore-prefetch", "first")),
+            ("whole", "abc1234", ("--rescore-prefetch", "whole")),
+            ("w8", "abc1234", ("--workers", "8"))])
+        self.assertIn("W6-upload", chain["sq8-dbpedia"])
+        self.assertEqual([a[0] for a in arms(chain["probe-laion"])],
+                         ["rule", "pf512", "pf2048", "w8"])
+        self.assertEqual(arms(chain["probe-dbpedia"])[1],
+                         ("pf512", "abc1234", ("--probe-prefetch-bytes", "512")))
 
 
 class Phase1ChainTests(unittest.TestCase):

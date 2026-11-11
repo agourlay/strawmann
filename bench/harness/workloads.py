@@ -2989,6 +2989,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
     banked = sampler.stop() if sampler is not None else None
     io = procstat.delta(io0, procstat.snapshot(storage), banked)
     huge = procstat.huge_pages(io0.pid if io0 is not None else None)
+    huge |= procstat.memory_state(io0.pid if io0 is not None else None)
     stdout_path.write_text(proc.stdout + proc.stderr)
     # Every number bracketing the row is closed here, ambient ones included,
     # because `foreign_between` divides foreign CPU by `after.t - before.t`: a

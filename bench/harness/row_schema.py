@@ -270,6 +270,11 @@ class MemoryFields:
     #: read outside the bracket: the walk takes the engine's `mmap_lock`.
     anon_huge_bytes: int | None = None
     file_pmd_bytes: int | None = None
+    #: The host's `MemAvailable` and used swap, and the engine's `VmSwap`,
+    #: after the row (`procstat.memory_state`, findings 62).
+    mem_available_bytes: int | None = None
+    swap_used_bytes: int | None = None
+    engine_swap_bytes: int | None = None
     rss_shmem_bytes: int | None = None
 
 

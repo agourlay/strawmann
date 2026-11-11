@@ -848,6 +848,40 @@ def huge_pages(pid: int | None) -> dict[str, int | None]:
     return out
 
 
+#: `memory_state`'s fields: the host's free memory and swap, and the engine's
+#: swapped-out bytes, after the row.
+MEMORY_FIELDS = ("mem_available_bytes", "swap_used_bytes", "engine_swap_bytes")
+
+
+def memory_state(pid: int | None) -> dict[str, int | None]:
+    """How much memory the host had and the engine had swapped, after a row.
+
+    findings 62 and 3: strawmANN's first pass of a night ran dbpedia's W10
+    and W11-steady 5 to 9% faster at the same instructions per query, the one
+    pass that started under memory pressure (about 10 GB less file RSS, the
+    only major faults), and nothing in the row said what the host's memory
+    was. `/proc/meminfo` and the engine's `VmSwap`, both cheap reads.
+    """
+    out: dict[str, int | None] = dict.fromkeys(MEMORY_FIELDS)
+    info = _read("/proc/meminfo")
+    if info is not None:
+        kib = {}
+        for line in info.splitlines():
+            name, _, rest = line.partition(":")
+            with contextlib.suppress(IndexError, ValueError):
+                kib[name] = int(rest.split()[0])
+        if "MemAvailable" in kib:
+            out["mem_available_bytes"] = kib["MemAvailable"] * 1024
+        if "SwapTotal" in kib and "SwapFree" in kib:
+            out["swap_used_bytes"] = (kib["SwapTotal"] - kib["SwapFree"]) * 1024
+    status = _read(f"/proc/{pid}/status") if pid else None
+    for line in (status or "").splitlines():
+        if line.startswith("VmSwap:"):
+            with contextlib.suppress(IndexError, ValueError):
+                out["engine_swap_bytes"] = int(line.split()[1]) * 1024
+    return out
+
+
 def dir_bytes(path: str | os.PathLike) -> int | None:
     """Bytes on disk under `path`, following no symlinks out of it.
 
