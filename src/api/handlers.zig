@@ -1259,17 +1259,13 @@ fn queryBatch(ctx: *Context, req: *const server.Request, body: []const u8, out: 
 
     var it = qb.queryIterator();
     while (it.next() catch |e| return decodeErr(req, e)) |q| {
-        var fail: ?QueryFailure = null;
         const want = pageWant(q.limit, q.offset) orelse
             return err(req, .invalid_argument, "limit + offset exceeds this server's maximum of " ++ max_limit_text);
-        const results = searchOne(ctx, coll, q, want, &fail) orelse {
-            const f = fail.?;
-            return err(req, f.status, f.message);
+        const results = switch (searchOne(ctx, coll, q, want)) {
+            .hits => |hits| hits,
+            .refused => |f| return err(req, f.status, f.message),
         };
-        encodeOne(coll, q, results, &w, &resp, &fail) catch {
-            const f = fail.?;
-            return err(req, f.status, f.message);
-        };
+        if (encodeOne(coll, q, results, &w, &resp)) |f| return err(req, f.status, f.message);
     }
 
     // `time` is filled in by the I/O thread from the measured elapsed time
@@ -1283,6 +1279,12 @@ fn queryBatch(ctx: *Context, req: *const server.Request, body: []const u8, out: 
 const QueryFailure = struct {
     status: Status,
     message: []const u8,
+};
+
+/// One query's answer: its ranked candidates, or why it was refused.
+const Searched = union(enum) {
+    hits: []index.Candidate,
+    refused: QueryFailure,
 };
 
 /// Answer an all-exact, unfiltered `QueryBatch` in one pass of the arena.
@@ -1380,55 +1382,51 @@ fn runGatheredExact(
     i = 0;
     it = qb.queryIterator();
     while (it.next() catch |e| return decodeErr(req, e)) |q| {
-        var fail: ?QueryFailure = null;
-        encodeOne(coll, q, tops[i].finish(), &w, &resp, &fail) catch {
-            const f = fail.?;
-            return err(req, f.status, f.message);
-        };
+        if (encodeOne(coll, q, tops[i].finish(), &w, &resp)) |f| return err(req, f.status, f.message);
         i += 1;
     }
     return ok(req, out.commit(w.pos));
 }
 
 /// Validate one query and search it into this worker's result heap. Returns
-/// the ranked candidates, or null with `fail` set. Everything about the query
-/// but the response encoding, so a fanned-out batch and the sequential path
-/// answer a query identically.
+/// the ranked candidates, or why the query was refused. Everything about the
+/// query but the response encoding, so a fanned-out batch and the sequential
+/// path answer a query identically.
 ///
 /// Aligned because the graph walk is inlined here: see `dot_f32.Dot.call`.
-fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: usize, fail: *?QueryFailure) align(64) ?[]index.Candidate {
+fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: usize) align(64) Searched {
     // An *empty* `Filter{}` is a filter with no conditions, which Qdrant
     // answers as no filter at all (`QueryPoints.filter`); a condition this
     // engine cannot evaluate is refused by name at decode.
     const filter_opt = q.filter() catch |e| return switch (e) {
-        msg.DecodeError.Unimplemented => refuse(fail, .unimplemented, msg.unimplemented_detail),
+        msg.DecodeError.Unimplemented => refuse(.unimplemented, msg.unimplemented_detail),
         msg.DecodeError.InvalidArgument => blk: {
             const detail = msg.takeInvalidDetail();
-            break :blk refuse(fail, .invalid_argument, if (detail.len > 0) detail else "malformed filter");
+            break :blk refuse(.invalid_argument, if (detail.len > 0) detail else "malformed filter");
         },
-        else => refuse(fail, .invalid_argument, "malformed filter"),
+        else => refuse(.invalid_argument, "malformed filter"),
     };
     // Honouring it would mean skipping the unindexed tail, which this
     // engine has no way to do; ignoring it would return points the client
     // asked not to see. Same rule as `hnsw_config.on_disk`: refused by
     // name rather than silently degraded.
-    if (q.params.indexed_only) return refuse(fail, .unimplemented, "params.indexed_only");
-    if (q.with_vectors) return refuse(fail, .unimplemented, "vector retrieval in results (phase 2)");
+    if (q.params.indexed_only) return refuse(.unimplemented, "params.indexed_only");
+    if (q.with_vectors) return refuse(.unimplemented, "vector retrieval in results (phase 2)");
 
-    const query = q.query orelse return refuse(fail, .invalid_argument, "query is required");
+    const query = q.query orelse return refuse(.invalid_argument, "query is required");
     const nearest = switch (query) {
         .nearest => |near| near,
-        .text => |tq| return textSearchOne(ctx, coll, q, tq, filter_opt, want, fail),
+        .text => |tq| return textSearchOne(ctx, coll, q, tq, filter_opt, want),
     };
     if (q.using) |name| {
-        if (name.len > 0) return refuse(fail, .unimplemented, "named vector spaces (phase 2)");
+        if (name.len > 0) return refuse(.unimplemented, "named vector spaces (phase 2)");
     }
     const dense = nearest.dense orelse {
-        if (nearest.id != null) return refuse(fail, .unimplemented, "query by point id (phase 2)");
-        return refuse(fail, .invalid_argument, "query.nearest.dense is required");
+        if (nearest.id != null) return refuse(.unimplemented, "query by point id (phase 2)");
+        return refuse(.invalid_argument, "query.nearest.dense is required");
     };
     if (dense.dim() != coll.config.dim) {
-        return refuse(fail, .invalid_argument, "query dimension does not match collection");
+        return refuse(.invalid_argument, "query dimension does not match collection");
     }
 
     // Decode into workspace, then preprocess exactly as ingest did.
@@ -1442,11 +1440,11 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
     // (or NaN-guarded to 0). `Collection.prepareQuery` is the same funnel
     // for the in-process callers.
     const raw = ctx.workspace.query[0..coll.config.dim];
-    _ = dense.copyInto(raw) catch return refuse(fail, .invalid_argument, "query vector too large");
+    _ = dense.copyInto(raw) catch return refuse(.invalid_argument, "query vector too large");
     // A NaN score compares false both ways in the heaps (`heap.zig`
     // `better`), so one non-finite component poisons the whole result
     // set. Qdrant refuses these too.
-    if (!allFinite(raw)) return refuse(fail, .invalid_argument, "query vector contains a NaN or infinite component");
+    if (!allFinite(raw)) return refuse(.invalid_argument, "query vector contains a NaN or infinite component");
     if (coll.config.datatype.normalisesAtIngest(coll.config.metric)) {
         _ = dist.norm.preprocessInPlace(coll.config.metric, raw);
     }
@@ -1510,7 +1508,7 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
             switch (plan) {
                 .scan => {
                     core.collection.searchSelected(coll, raw, ctx.workspace.filter_bits, @intCast(prepared.bound), &top);
-                    return top.finish();
+                    return .{ .hits = top.finish() };
                 },
                 .two_hop => pred.?.two_hop = true,
                 .walk => {},
@@ -1525,14 +1523,14 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
         core.collection.exact_gather.applies(coll))
     {
         ctx.workspace.ensureGather(ctx.engine.alloc, coll) catch
-            return refuse(fail, .internal, "workspace allocation failed");
+            return refuse(.internal, "workspace allocation failed");
         const scratch: core.collection.ExactGather.Scratch = .{
             .probe = ctx.workspace.gather_probe,
             .parts = ctx.workspace.gather_results,
         };
         if (core.collection.exact_gather.search(coll, raw, scratch, &top)) |_| {
             _ = exact_queries_gathered.fetchAdd(1, .monotonic);
-            return top.finish();
+            return .{ .hits = top.finish() };
         }
     }
 
@@ -1548,17 +1546,17 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
             .rescore_prefetch = ctx.engine.rescore_prefetch,
         };
         ctx.workspace.ensureQuant(ctx.engine.alloc, coll.config.dim) catch
-            return refuse(fail, .internal, "workspace allocation failed");
+            return refuse(.internal, "workspace allocation failed");
         core.quantized_search.searchQuantized(
             coll,
             .{ .query = raw, .ef = ef, .limit = want, .quant = qp, .filter = pred },
             ctx.workspace.searchScratch(ctx.engine.alloc),
             &top,
-        ) catch return refuse(fail, .internal, "quantized search failed");
+        ) catch return refuse(.internal, "quantized search failed");
     } else {
         core.collection.searchFiltered(coll, raw, ef, if (exact) .exact else .approximate, ctx.workspace.hnsw, pred, &top);
     }
-    return top.finish();
+    return .{ .hits = top.finish() };
 }
 
 /// Qdrant dev's `text` query: BM25 over the text index of the payload field
@@ -1572,28 +1570,27 @@ fn textSearchOne(
     tq: msg.TextQuery,
     filter_opt: ?core.payload.Filter,
     want: usize,
-    fail: *?QueryFailure,
-) ?[]index.Candidate {
+) Searched {
     const field = q.using orelse "";
-    if (field.len == 0) return refuse(fail, .invalid_argument, "A text query needs `using` to name the payload field to search");
+    if (field.len == 0) return refuse(.invalid_argument, "A text query needs `using` to name the payload field to search");
     const k1 = tq.k orelse text_mod.index.default_k1;
     const b = tq.b orelse text_mod.index.default_b;
-    if (!std.math.isFinite(k1) or k1 < 0) return refuse(fail, .invalid_argument, "`k` must be non-negative");
-    if (!std.math.isFinite(b) or b < 0 or b > 1) return refuse(fail, .invalid_argument, "`b` must be within [0, 1]");
+    if (!std.math.isFinite(k1) or k1 < 0) return refuse(.invalid_argument, "`k` must be non-negative");
+    if (!std.math.isFinite(b) or b < 0 or b > 1) return refuse(.invalid_argument, "`b` must be within [0, 1]");
 
     var pred_state: PredicateState = undefined;
     var pred: ?index.hnsw.Index.Filter = null;
     if (filter_opt) |*f| pred = preparePredicate(ctx, coll, f, &pred_state).filter;
 
     const scratch = ctx.workspace.ensureText(ctx.engine.alloc) catch
-        return refuse(fail, .internal, "workspace allocation failed");
+        return refuse(.internal, "workspace allocation failed");
     var top = index.TopK.init(ctx.workspace.results, want);
     coll.textSearch(scratch, field, tq.query, k1, b, pred, &top) catch |e| return switch (e) {
-        error.NoTextIndex => refuse(fail, .invalid_argument, "A text query needs a scoring text index on the field `using` names, which has none"),
-        error.InvalidUtf8 => refuse(fail, .invalid_argument, "text query is not valid UTF-8"),
-        error.OutOfMemory => refuse(fail, .resource_exhausted, "out of memory scoring a text query"),
+        error.NoTextIndex => refuse(.invalid_argument, "A text query needs a scoring text index on the field `using` names, which has none"),
+        error.InvalidUtf8 => refuse(.invalid_argument, "text query is not valid UTF-8"),
+        error.OutOfMemory => refuse(.resource_exhausted, "out of memory scoring a text query"),
     };
-    return top.finish();
+    return .{ .hits = top.finish() };
 }
 
 /// Where a query's predicate keeps its context: the two shapes outlive the
@@ -1644,21 +1641,20 @@ fn reportedScore(coll: *const core.Collection, q: msg.QueryPoints, internal: f32
     return if (isTextQuery(q)) internal else coll.config.metric.postprocess(internal);
 }
 
-pub fn refuse(fail: *?QueryFailure, status: Status, message: []const u8) ?[]index.Candidate {
-    fail.* = .{ .status = status, .message = message };
-    return null;
+pub fn refuse(status: Status, message: []const u8) Searched {
+    return .{ .refused = .{ .status = status, .message = message } };
 }
 
 /// Encode one query's ranked candidates as its `BatchResult`, applying the
-/// query's `offset` and `score_threshold`. On failure `fail` names it.
+/// query's `offset` and `score_threshold`. Null when it was written, else
+/// why it was not.
 fn encodeOne(
     coll: *core.Collection,
     q: msg.QueryPoints,
     results: []const index.Candidate,
     w: *wire.Writer,
     resp: *msg.QueryBatchResponseWriter,
-    fail: *?QueryFailure,
-) error{Refused}!void {
+) ?QueryFailure {
     const offset: usize = @intCast(q.offset);
     const start = @min(offset, results.len);
 
@@ -1674,15 +1670,11 @@ fn encodeOne(
         for (results[start..]) |c| payload_bytes += msg.payloadEncodedBound(coll.payload.get(c.id));
     }
     if (!queryBatchFits(w.buf.len - w.pos, results.len - start, payload_bytes)) {
-        fail.* = .{ .status = .resource_exhausted, .message = "QueryBatch response would exceed the response buffer; lower limit or batch size, or raise the server's response_buffer" };
-        return error.Refused;
+        return .{ .status = .resource_exhausted, .message = "QueryBatch response would exceed the response buffer; lower limit or batch size, or raise the server's response_buffer" };
     }
 
     const overflow = QueryFailure{ .status = .internal, .message = "response buffer overflow" };
-    const batch = resp.beginBatch() catch {
-        fail.* = overflow;
-        return error.Refused;
-    };
+    const batch = resp.beginBatch() catch return overflow;
     // Hoisted out of the loop: `ScoredPoint.encode` copies the text into
     // the response buffer, but the slice must still be live at the moment
     // it is read, so it cannot be scoped to the expression that builds it.
@@ -1722,14 +1714,11 @@ fn encodeOne(
             .version = 0,
             .payload = if (q.with_payload) coll.payload.get(c.id) else &.{},
         }) catch {
-            fail.* = overflow;
-            return error.Refused;
+            return overflow;
         };
     }
-    resp.endBatch(batch) catch {
-        fail.* = overflow;
-        return error.Refused;
-    };
+    resp.endBatch(batch) catch return overflow;
+    return null;
 }
 
 /// A `QueryBatch` fanned out across the worker pool.
@@ -1901,10 +1890,12 @@ fn runBatchSub(ctx: *Context, req: *const server.Request) void {
             job.fail(.{ .status = .invalid_argument, .message = "malformed protobuf" });
             break :blk;
         };
-        var f: ?QueryFailure = null;
-        const results = searchOne(ctx, coll, q, slot.want, &f) orelse {
-            job.fail(f.?);
-            break :blk;
+        const results = switch (searchOne(ctx, coll, q, slot.want)) {
+            .hits => |hits| hits,
+            .refused => |f| {
+                job.fail(f);
+                break :blk;
+            },
         };
         std.debug.assert(results.len <= slot.want);
         @memcpy(job.candidates[slot.off..][0..results.len], results);
@@ -1939,8 +1930,7 @@ fn finishBatchJob(req: *const server.Request, job: *BatchJob) void {
             std.debug.assert(i < job.n);
             const slot = job.slots[i];
             const results = job.candidates[slot.off..][0..slot.len];
-            var f: ?QueryFailure = null;
-            encodeOne(coll, q, results, &w, &resp, &f) catch break :blk err(&parent, f.?.status, f.?.message);
+            if (encodeOne(coll, q, results, &w, &resp)) |f| break :blk err(&parent, f.status, f.message);
         }
         break :blk ok(&parent, rb.commit(w.pos));
     };
