@@ -98,29 +98,28 @@ pub const Mode = union(enum) {
     /// useless".
     pub fn parse(s: []const u8) ParseResult {
         if (s.len == 0) return .{ .mode = .none };
-        // The unparameterised modes are spelled exactly as they are tagged, so
-        // they are walked rather than listed: a mode added to the union has to
-        // be answered for in the switch below, instead of quietly parsing as
+        // The unparameterised modes are spelled exactly as they are tagged,
+        // and the binary and turbo ones as `name` spells them, so they are
+        // walked rather than listed: a mode added to the union has to be
+        // answered for in the switch below, instead of quietly parsing as
         // "unknown quantization mode".
         inline for (comptime std.enums.values(Encoding)) |e| {
             switch (e) {
                 .none, .scalar => {
                     if (std.mem.eql(u8, s, @tagName(e))) return .{ .mode = @unionInit(Mode, @tagName(e), {}) };
                 },
-                // Parameterised by an encoding and by a compression ratio;
-                // handled below.
-                .binary, .product, .turbo => {},
+                // bfb's spellings (`--quantization binary2bit`, `turbo1p5bit`),
+                // one per payload value, as `name` spells them.
+                .binary, .turbo => {
+                    inline for (comptime std.enums.values(@FieldType(Mode, @tagName(e)))) |v| {
+                        const m = @unionInit(Mode, @tagName(e), v);
+                        if (std.mem.eql(u8, s, m.name())) return .{ .mode = m };
+                    }
+                },
+                // Parameterised by a compression ratio; handled below.
+                .product => {},
             }
         }
-        // bfb's spellings (`--quantization binary2bit`, `binary1p5bit`).
-        if (std.mem.eql(u8, s, "binary")) return .{ .mode = .{ .binary = .one } };
-        if (std.mem.eql(u8, s, "binary2bit")) return .{ .mode = .{ .binary = .two } };
-        if (std.mem.eql(u8, s, "binary1p5bit")) return .{ .mode = .{ .binary = .one_half } };
-        // bfb's spellings (`--quantization turbo1bit` ... `turbo4bit`).
-        if (std.mem.eql(u8, s, "turbo1bit")) return .{ .mode = .{ .turbo = .b1 } };
-        if (std.mem.eql(u8, s, "turbo1p5bit")) return .{ .mode = .{ .turbo = .b1_5 } };
-        if (std.mem.eql(u8, s, "turbo2bit")) return .{ .mode = .{ .turbo = .b2 } };
-        if (std.mem.eql(u8, s, "turbo4bit")) return .{ .mode = .{ .turbo = .b4 } };
         if (std.mem.startsWith(u8, s, "product-x")) {
             const n = std.fmt.parseInt(usize, s["product-x".len..], 10) catch {
                 return .{ .rejected = "malformed product quantization ratio" };
@@ -207,6 +206,15 @@ test "§6.7: bfb's turbo spellings parse, and nothing near them does" {
         switch (Mode.parse(s)) {
             .rejected => {},
             .mode => return error.ShouldBeRejected,
+        }
+    }
+}
+
+test "every binary and turbo mode parses from its name" {
+    inline for (.{ binary.Encoding, turbo.Bits }, .{ "binary", "turbo" }) |T, tag| {
+        inline for (comptime std.enums.values(T)) |v| {
+            const m = @unionInit(Mode, tag, v);
+            try std.testing.expectEqual(m, Mode.parse(m.name()).mode);
         }
     }
 }
