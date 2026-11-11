@@ -1578,6 +1578,26 @@ def text_index_note(a_label: str, b_label: str) -> str:
     return f"**Which Qdrant text index.** {note}" if note else ""
 
 
+def dataset_tests_note(a: dict[str, dict], b: dict[str, dict]) -> str:
+    """What W16 is, on a pair that measured it; "" otherwise.
+
+    Said in the block rather than left to the row names: W16 and W12 both read
+    "filtered search", and only one of them filters on the dataset's own
+    question. h-and-m's absence is said too, since a reader comparing the two
+    filtered corpora would otherwise look for rows that were never run.
+    """
+    if not any(k.startswith("W16-") for k in [*a, *b]):
+        return ""
+    return ("**W16, the dataset's own filters.** Each query of the corpus's "
+            "`tests.jsonl` is sent with the condition it ships, and recall@10 is "
+            "scored against the neighbours shipped under that condition "
+            "(`recall.<dataset>.bench16.tests.json`, which records how many tests "
+            "carry one); bfb's own precision is on each row as `bfb_precision`, a "
+            "check rather than the recall. W12 filters bfb's synthetic keywords "
+            "instead. h-and-m's W16 rows are off until the bfb pin sends "
+            "whitespace values as keyword matches (qdrant/bfb#193).")
+
+
 def relevance(a_label: str, b_label: str | None) -> list[dict]:
     """nDCG@10 and MRR@10 of each W15 variant, per engine, against the corpus's
     relevance judgements (`recall.load_text_recall`), or [] where no label has
@@ -2391,6 +2411,8 @@ def full_block(a_label: str, b_label: str,
 
     note = text_index_note(a_label, b_label)
     if note:
+        rows += ["", note]
+    if note := dataset_tests_note(a, b):
         rows += ["", note]
     rel = relevance_block(a_label, b_label)
     if rel:

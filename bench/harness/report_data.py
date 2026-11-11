@@ -59,7 +59,7 @@ FALLBACK = ("#4C9AFF", "#2EA44F", "#A970FF")
 UPLOAD_ROWS = ("W0-upload", "W1", "W2", "W6-upload", "W7-upload", "W7-2bit-upload",
                "W7-1p5bit-upload", "W8-upload", "W14-1bit-upload", "W14-1p5bit-upload",
                "W14-2bit-upload", "W14-4bit-upload",
-               "W12-upload", "W15-upload")
+               "W12-upload", "W15-upload", "W16-upload")
 
 def colour(label: str, i: int = 0) -> str:
     return SERIES.get(label.lower(), FALLBACK[i % len(FALLBACK)])
@@ -900,6 +900,7 @@ DESCRIPTIONS = {
     "W12-sel1": "filtered search (payload), 1% selectivity",
     "W12-sel10": "filtered search (payload), 10% selectivity",
     "W13": "scroll, id-ordered pagination",
+    "W16": "filtered search under the dataset's own conditions",
 }
 
 def purposes() -> dict[str, str]:
@@ -933,7 +934,7 @@ def ratio_value(rs: str | None) -> float | None:
 #: when it has something to show.
 BUILD_ROWS = ["W0-upload", "W1", "W2", "W6-upload", "W7-upload", "W7-2bit-upload",
               "W7-1p5bit-upload", "W8-upload", "W14-1bit-upload", "W14-1p5bit-upload",
-              "W14-2bit-upload", "W14-4bit-upload", "W12-upload"]
+              "W14-2bit-upload", "W14-4bit-upload", "W12-upload", "W16-upload"]
 
 #: The encodings §4 measures, the collection each lives in, and a hue.
 #:

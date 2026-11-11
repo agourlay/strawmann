@@ -2587,3 +2587,27 @@ class UnarchivedReportTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertIsNone(compare.warn_unarchived("scifact", "sm-y", "qd-y"))
         self.assertEqual("", err.getvalue())
+
+
+class DatasetTestsNoteTests(unittest.TestCase):
+    """W16's paragraph: what the row is, where its filters come from, and
+    why h-and-m has none yet; only on a pair that measured it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = _reload(Path(self.tmp.name))
+
+    def test_the_note_is_said_only_beside_w16_rows(self):
+        compare = self.m["compare"]
+        self.assertEqual(compare.dataset_tests_note({"W12-sel10": {}}, {"W3": {}}), "")
+        note = compare.dataset_tests_note({"W16-ef64": {}}, {})
+        self.assertIn("tests.jsonl", note)
+        self.assertIn("bench16.tests.json", note)
+        self.assertIn("bfb_precision", note)
+        self.assertIn("qdrant/bfb#193", note)
+        for dash in (chr(0x2013), chr(0x2014)):
+            self.assertNotIn(dash, note, "no em or en dashes")
+        import report
+        self.assertIn("own conditions", report.CAVEATS["W16-ef128"])
+        self.assertIn("W16-upload", report.UPLOAD_ROWS)

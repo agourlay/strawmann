@@ -590,6 +590,41 @@ load-bearing:
   refused in practice while this was being built, the second by the
   `query_checksum` guard catching a truth computed over a truncated query set.
 
+### W16, filtered search under the dataset's own conditions, **added 2026-11-11**
+
+```
+bfb upload --file W16-upload.upload.yaml -n <bundle n> -b 100 -t 8 -p 8
+bfb search --file W16-ef<ef>.search.yaml -n 50k --search-limit 10 --search-hnsw-ef <ef> -p 64 -t 16 -c 2 --acorn
+```
+
+Findings 55. W12 filters bfb's synthetic keywords over `bench12`; laion-small-clip
+and h-and-m-2048-angular-filters ship real filtered queries, and W16 runs them.
+`W16-upload` loads the vector-db-benchmark bundle (`vectors.npy`, the whole
+`payloads.jsonl`) into `bench16` and indexes the fields the tests filter on:
+`similarity` as a float on laion, the ten `filters.json` keyword fields on h-and-m.
+The ladder `W16-ef32` to `W16-ef512` searches it with a `type: dataset` source,
+so every query of `tests.jsonl` goes out with the condition it ships (laion: a
+`range {gt}` on `similarity`, on 2,530 of 5,000; h-and-m: one keyword `match`, on
+all 10,000). W12's client and ACORN, and W12's full-scan threshold on the
+collection, for the reason W12 takes it. `limit` is the tests' k capped at 10,
+because every published recall is recall@10; h-and-m's first ten of 25 are its
+top ten under the condition.
+
+Recall is the conformance binary's (`relevance --dataset-tests`), scored against
+the shipped `closest_ids` with the ε-tie rule, written as
+`recall.<dataset>.bench16.tests.json` with the tests file and how many carried a
+condition, and joined on (dataset, collection, ef) and the `tests` grade as W12's
+sweeps are. bfb's own precision@10 is on each row as `bfb_precision`, a sanity
+check: it counts no ties. Both phases run in `fullrun`'s isolated stage, rows then
+sweep then drop, like the W7 and W14 encodings.
+
+**h-and-m is off until the bfb pin moves.** The pinned bfb sends a `match` value
+with whitespace ("Light Orange", 4,255 of h-and-m's tests) as a full-text match,
+which strawmANN refuses and Qdrant answers as a substring match. qdrant/bfb#193
+fixes it; the commit that moves the pin past it sets
+`paths.BFB_SENDS_KEYWORD_MATCH`, and h-and-m's table gains the rows. Every
+other corpus's table and stamp is unchanged by W16.
+
 ### W13, scroll / pagination, **new**
 
 ```

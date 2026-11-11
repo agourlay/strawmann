@@ -141,6 +141,14 @@ from report_noise import (  # noqa: F401  re-exported
 )
 from workloads import Direction, Gate, Status
 
+#: W16's caveat: its filters are not ours, and its recall is not bfb's.
+W16_CAVEAT = ("filtered search under the dataset's own conditions: each query of "
+              "tests.jsonl is sent with the condition it ships (laion: a similarity "
+              "range on about half of them; h-and-m: a keyword match, off until the "
+              "bfb pin sends whitespace values as keywords, qdrant/bfb#193). Recall "
+              "is scored against the neighbours the dataset ships under each "
+              "condition; bfb's own precision is on the row as a check only")
+
 #: Rows that produce a number which should not be read as a like-for-like
 #: comparison, and why. Printing the ratio without this reads as a result.
 CAVEATS = {
@@ -170,6 +178,8 @@ CAVEATS = {
                  "and refused beside the row when it did not. Recall is measured "
                  "under the filter, against ground truth restricted to the "
                  "matching set",
+    # W16 at every rung: what makes it W16 is the same at each `ef`.
+    **{f"W16-ef{ef}": W16_CAVEAT for ef in (32, 64, 128, 256, 512)},
 }
 
 
