@@ -2496,6 +2496,11 @@ intervals did not overlap, which T3 at matched recall allows). Qdrant's rows
 moved by about 2% at most against e5fa1f3ce, with flat counters, so the 1109
 ratio moves are strawmANN's. dbpedia-openai-1m is not checked against this
 binary, and its differ must pass before a dbpedia pair runs on it.
+It did on 2026-11-11: the 1110 night's §8 phase, against strawmANN 31fe897
+on this binary, reached T4 on dbpedia-openai-1m (T1 3.6e-7 against ε
+9.5e-7, T2 Kendall τ 1.0000, T3 recall@10 0.9666 [0.9629,0.9700] against
+0.9692 [0.9656,0.9724] at ef 128), so every published corpus is now
+checked against b4ebd966f.
 
 The first end-to-end pass, scifact at `--reps 1` (a smoke run, so nothing
 published): every W15 row measured on both engines, every variant's recall@10
