@@ -905,9 +905,9 @@ fn createFieldIndex(ctx: *Context, req: *const server.Request, body: []const u8,
     const kind = core.payload.Kind.fromFieldType(cf.field_type) orelse
         return err(req, .unimplemented, "field index types other than keyword, integer and text");
     const built = if (kind == .text) blk: {
-        const opts = textIndexOptions(cf.text_params) catch |e| return switch (e) {
-            error.UnknownTokenizer => err(req, .invalid_argument, "unknown tokenizer type"),
-            error.Unsupported => err(req, .unimplemented, text_refusal),
+        const opts = switch (textIndexOptions(cf.text_params)) {
+            .options => |o| o,
+            .rejected => |rj| return err(req, rj.status, rj.why),
         };
         break :blk coll.createPayloadTextIndex(cf.field_name, opts);
     } else coll.createPayloadIndex(cf.field_name, kind);
@@ -929,8 +929,15 @@ fn createFieldIndex(ctx: *Context, req: *const server.Request, body: []const u8,
     return ok(req, out.commit(w.pos));
 }
 
-/// Why the last `textIndexOptions` refused, for the UNIMPLEMENTED it becomes.
-threadlocal var text_refusal: []const u8 = "";
+/// `textIndexOptions`'s answer: the options to build, or the refusal.
+const TextIndexParse = union(enum) {
+    options: text_mod.tokenizer.Options,
+    rejected: struct { status: Status, why: []const u8 },
+};
+
+fn unsupportedText(why: []const u8) TextIndexParse {
+    return .{ .rejected = .{ .status = .unimplemented, .why = why } };
+}
 
 /// The text index decisions.md (2026-10-07) puts in scope, from Qdrant's
 /// `TextIndexParams`: the `word` tokenizer, `lowercase`, English stopwords
@@ -938,60 +945,34 @@ threadlocal var text_refusal: []const u8 = "";
 /// would change what the index computes is refused by name; placement
 /// (`on_disk`, `memory`, `enable_hnsw`) and `phrase_matching`, which
 /// `scoring` forces on, do not change a score and are accepted.
-fn textIndexOptions(params: ?msg.TextIndexParams) error{ UnknownTokenizer, Unsupported }!text_mod.tokenizer.Options {
-    const p = params orelse {
-        text_refusal = "a text index without `scoring` (full-text filters are a §1 non-goal)";
-        return error.Unsupported;
-    };
+fn textIndexOptions(params: ?msg.TextIndexParams) TextIndexParse {
+    const p = params orelse
+        return unsupportedText("a text index without `scoring` (full-text filters are a §1 non-goal)");
     switch (p.tokenizer) {
         3 => {},
-        0 => return error.UnknownTokenizer,
-        else => {
-            text_refusal = "text index tokenizers other than `word`";
-            return error.Unsupported;
-        },
+        0 => return .{ .rejected = .{ .status = .invalid_argument, .why = "unknown tokenizer type" } },
+        else => return unsupportedText("text index tokenizers other than `word`"),
     }
-    if (p.scoring == null) {
-        text_refusal = "a text index without `scoring` (full-text filters are a §1 non-goal)";
-        return error.Unsupported;
-    }
-    if (p.scoring.? != 0) {
-        text_refusal = "text index scoring other than BM25";
-        return error.Unsupported;
-    }
-    if (p.token_len_bounds) {
-        text_refusal = "text index `min_token_len` and `max_token_len`";
-        return error.Unsupported;
-    }
-    if (p.ascii_folding orelse false) {
-        text_refusal = "text index `ascii_folding`";
-        return error.Unsupported;
-    }
-    if (p.custom_stopwords) {
-        text_refusal = "custom text index stopwords";
-        return error.Unsupported;
-    }
+    if (p.scoring == null) return unsupportedText("a text index without `scoring` (full-text filters are a §1 non-goal)");
+    if (p.scoring.? != 0) return unsupportedText("text index scoring other than BM25");
+    if (p.token_len_bounds) return unsupportedText("text index `min_token_len` and `max_token_len`");
+    if (p.ascii_folding orelse false) return unsupportedText("text index `ascii_folding`");
+    if (p.custom_stopwords) return unsupportedText("custom text index stopwords");
     var english_stopwords = false;
     for (p.stopwordLanguages()) |lang| {
-        if (!std.mem.eql(u8, lang, "english")) {
-            text_refusal = "text index stopwords other than `english`";
-            return error.Unsupported;
-        }
+        if (!std.mem.eql(u8, lang, "english")) return unsupportedText("text index stopwords other than `english`");
         english_stopwords = true;
     }
     var english_stemmer = false;
     if (p.snowball_language) |lang| {
-        if (!std.mem.eql(u8, lang, "english")) {
-            text_refusal = "text index stemmers other than Snowball `english`";
-            return error.Unsupported;
-        }
+        if (!std.mem.eql(u8, lang, "english")) return unsupportedText("text index stemmers other than Snowball `english`");
         english_stemmer = true;
     }
-    return .{
+    return .{ .options = .{
         .lowercase = p.lowercase orelse true,
         .english_stopwords = english_stopwords,
         .english_stemmer = english_stemmer,
-    };
+    } };
 }
 
 /// `/qdrant.Points/Delete` by a list of ids. A deleted point leaves search at
@@ -2203,6 +2184,23 @@ fn effectiveEf(requested: ?u64, ef_construct: usize, want: usize) usize {
 // -------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "textIndexOptions builds the word/BM25 index and names each refusal with its status" {
+    const bm25: msg.TextIndexParams = .{ .tokenizer = 3, .scoring = 0 };
+    try testing.expectEqual(text_mod.tokenizer.Options{}, textIndexOptions(bm25).options);
+    const Case = struct { p: ?msg.TextIndexParams, status: Status, why: []const u8 };
+    for ([_]Case{
+        .{ .p = null, .status = .unimplemented, .why = "a text index without `scoring` (full-text filters are a §1 non-goal)" },
+        .{ .p = .{ .tokenizer = 0, .scoring = 0 }, .status = .invalid_argument, .why = "unknown tokenizer type" },
+        .{ .p = .{ .tokenizer = 2, .scoring = 0 }, .status = .unimplemented, .why = "text index tokenizers other than `word`" },
+        .{ .p = .{ .tokenizer = 3 }, .status = .unimplemented, .why = "a text index without `scoring` (full-text filters are a §1 non-goal)" },
+        .{ .p = .{ .tokenizer = 3, .scoring = 1 }, .status = .unimplemented, .why = "text index scoring other than BM25" },
+    }) |c| {
+        const rj = textIndexOptions(c.p).rejected;
+        try testing.expectEqual(c.status, rj.status);
+        try testing.expectEqualStrings(c.why, rj.why);
+    }
+}
 
 test "a selective filter scores its matching set; a permissive one traverses" {
     // The regime W12 measured: 200 of 200,000 at ef=128, m0=32. It traversed,
