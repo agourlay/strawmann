@@ -268,7 +268,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
     if (coll.payload.fields.items.len > 0) {
         const p = try Persistence.path(&pbuf, dir, "payload.schema");
         var total: usize = 0;
-        for (coll.payload.fields.items) |f| total += 3 + f.name.len + @intFromBool(f.kind == .text);
+        for (coll.payload.fields.items) |f| total += 3 + f.name.len + @intFromBool(f.index == .text);
         const fd = try storage.openSized(p, storage.header_size + total, true);
         defer storage.closeFd(fd);
         var h = storage.Header{
@@ -290,11 +290,12 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         defer coll.alloc.free(buf);
         var w: usize = 0;
         for (coll.payload.fields.items) |f| {
-            buf[w] = @backingInt(f.kind);
+            buf[w] = @backingInt(f.kind());
             std.mem.writeInt(u16, buf[w + 1 ..][0..2], @intCast(f.name.len), .little);
             @memcpy(buf[w + 3 ..][0..f.name.len], f.name);
             w += 3 + f.name.len;
-            if (f.text_index) |ti| {
+            if (f.index == .text) {
+                const ti = f.index.text;
                 buf[w] = @as(u8, @intFromBool(ti.opts.lowercase)) |
                     @as(u8, @intFromBool(ti.opts.english_stopwords)) << 1 |
                     @as(u8, @intFromBool(ti.opts.english_stemmer)) << 2;
@@ -822,8 +823,8 @@ test "a text index keeps exact BM25 statistics through delete and the round-trip
     var reloaded = try load(testing.allocator, "test", dir, .pinned);
     defer reloaded.deinit();
     const f = reloaded.payload.field("body").?;
-    try testing.expectEqual(payload_mod.Kind.text, f.kind);
-    try testing.expectEqual(opts, f.text_index.?.opts);
+    try testing.expectEqual(payload_mod.Kind.text, f.kind());
+    try testing.expectEqual(opts, f.index.text.opts);
     // Rebuilt from the blobs without the deleted point: the same score.
     var storage_c: [4]heap.Candidate = undefined;
     var again = heap.TopK.init(&storage_c, 4);

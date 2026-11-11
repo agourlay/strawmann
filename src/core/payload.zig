@@ -421,38 +421,52 @@ const Postings = struct {
 
 pub const Field = struct {
     name: []u8,
-    kind: Kind,
-    keywords: std.StringHashMapUnmanaged(Postings) = .empty,
-    integers: std.AutoHashMapUnmanaged(i64, Postings) = .empty,
-    /// The BM25 index of a `.text` field. Unlike the postings above it is
-    /// exact: a rewrite replaces the point's document and a delete removes it.
-    text_index: ?*text.TextIndex = null,
+    index: Index,
     /// Postings written, which over-counts overwritten points the same way
     /// the postings do. Reported as `PayloadSchemaInfo.points`.
     points: usize = 0,
     /// The store's capacity, which a dense posting's bitset spans.
     capacity: usize = 0,
 
+    /// The one index a field holds, by its kind.
+    pub const Index = union(Kind) {
+        keyword: std.StringHashMapUnmanaged(Postings),
+        integer: std.AutoHashMapUnmanaged(i64, Postings),
+        /// The BM25 index. Unlike the postings it is exact: a rewrite
+        /// replaces the point's document and a delete removes it.
+        text: *text.TextIndex,
+    };
+
+    pub fn kind(self: *const Field) Kind {
+        return self.index;
+    }
+
     fn deinit(self: *Field, alloc: std.mem.Allocator) void {
-        var ki = self.keywords.iterator();
-        while (ki.next()) |e| {
-            alloc.free(e.key_ptr.*);
-            e.value_ptr.deinit(alloc);
-        }
-        self.keywords.deinit(alloc);
-        var ii = self.integers.iterator();
-        while (ii.next()) |e| e.value_ptr.deinit(alloc);
-        self.integers.deinit(alloc);
-        if (self.text_index) |ti| {
-            ti.deinit();
-            alloc.destroy(ti);
+        switch (self.index) {
+            .keyword => |*m| {
+                var ki = m.iterator();
+                while (ki.next()) |e| {
+                    alloc.free(e.key_ptr.*);
+                    e.value_ptr.deinit(alloc);
+                }
+                m.deinit(alloc);
+            },
+            .integer => |*m| {
+                var ii = m.iterator();
+                while (ii.next()) |e| e.value_ptr.deinit(alloc);
+                m.deinit(alloc);
+            },
+            .text => |ti| {
+                ti.deinit();
+                alloc.destroy(ti);
+            },
         }
         alloc.free(self.name);
     }
 
     /// The point's string values under this field (one string, or a list's
     /// strings), as the text index's document.
-    fn setText(self: *Field, alloc: std.mem.Allocator, offset: u32, value: []const u8) !void {
+    fn setText(ti: *text.TextIndex, alloc: std.mem.Allocator, offset: u32, value: []const u8) !void {
         var values: std.ArrayList([]const u8) = .empty;
         defer values.deinit(alloc);
         var r = wire.Reader.init(value);
@@ -480,7 +494,7 @@ pub const Field = struct {
                 else => try r.skip(t.wire_type),
             }
         }
-        try self.text_index.?.set(offset, values.items);
+        try ti.set(offset, values.items);
     }
 
     /// Index one point's value(s) for this field.
@@ -491,11 +505,11 @@ pub const Field = struct {
             switch (t.field) {
                 value_string => {
                     const s = try r.bytes();
-                    if (self.kind == .keyword) try self.addKeyword(alloc, offset, s);
+                    if (self.index == .keyword) try self.addKeyword(alloc, offset, s);
                 },
                 value_integer => {
                     const v: i64 = @bitCast(try r.varint());
-                    if (self.kind == .integer) try self.addInteger(alloc, offset, v);
+                    if (self.index == .integer) try self.addInteger(alloc, offset, v);
                 },
                 value_list => {
                     var list = try r.nested();
@@ -512,11 +526,11 @@ pub const Field = struct {
                             switch (it.field) {
                                 value_string => {
                                     const s = try inner.bytes();
-                                    if (self.kind == .keyword) try self.addKeyword(alloc, offset, s);
+                                    if (self.index == .keyword) try self.addKeyword(alloc, offset, s);
                                 },
                                 value_integer => {
                                     const v: i64 = @bitCast(try inner.varint());
-                                    if (self.kind == .integer) try self.addInteger(alloc, offset, v);
+                                    if (self.index == .integer) try self.addInteger(alloc, offset, v);
                                 },
                                 else => try inner.skip(it.wire_type),
                             }
@@ -535,14 +549,14 @@ pub const Field = struct {
         while (it.next()) |entry| {
             const kv = splitEntry(entry) orelse continue;
             if (!std.mem.eql(u8, self.name, kv.key)) continue;
-            if (self.kind == .text) return self.setText(alloc, offset, kv.value);
+            if (self.index == .text) return setText(self.index.text, alloc, offset, kv.value);
             try self.add(alloc, offset, kv.value);
         }
-        if (self.kind == .text) self.text_index.?.remove(offset);
+        if (self.index == .text) self.index.text.remove(offset);
     }
 
     fn addKeyword(self: *Field, alloc: std.mem.Allocator, offset: u32, s: []const u8) !void {
-        const gop = try self.keywords.getOrPut(alloc, s);
+        const gop = try self.index.keyword.getOrPut(alloc, s);
         if (!gop.found_existing) {
             // The map borrows its key: own it, and repoint the entry at the
             // copy before anything can look it up.
@@ -555,7 +569,7 @@ pub const Field = struct {
     }
 
     fn addInteger(self: *Field, alloc: std.mem.Allocator, offset: u32, v: i64) !void {
-        const gop = try self.integers.getOrPut(alloc, v);
+        const gop = try self.index.integer.getOrPut(alloc, v);
         if (!gop.found_existing) gop.value_ptr.* = .{};
         try gop.value_ptr.append(alloc, offset, self.capacity);
         self.points += 1;
@@ -812,7 +826,7 @@ pub const Store = struct {
         if (self.fields.items.len == 0) return;
         self.index_lock.lock();
         defer self.index_lock.unlock();
-        for (self.fields.items) |*f| if (f.text_index) |ti| ti.remove(offset);
+        for (self.fields.items) |*f| if (f.index == .text) f.index.text.remove(offset);
     }
 
     /// `CreateFieldIndex` for a BM25 text field: tokenized with `opts`, over
@@ -828,17 +842,17 @@ pub const Store = struct {
     ) !void {
         for (self.fields.items) |f| {
             if (std.mem.eql(u8, f.name, name)) {
-                if (f.kind != .text) return error.IndexKindMismatch;
-                if (!std.meta.eql(f.text_index.?.opts, opts)) return error.IndexKindMismatch;
+                if (f.index != .text) return error.IndexKindMismatch;
+                if (!std.meta.eql(f.index.text.opts, opts)) return error.IndexKindMismatch;
                 return;
             }
         }
         const owned = try alloc.dupe(u8, name);
-        var f = Field{ .name = owned, .kind = .text, .capacity = self.slots.len };
-        errdefer f.deinit(alloc);
+        errdefer alloc.free(owned);
         const ti = try alloc.create(text.TextIndex);
         ti.* = text.TextIndex.init(alloc, opts);
-        f.text_index = ti;
+        var f = Field{ .name = owned, .index = .{ .text = ti }, .capacity = self.slots.len };
+        errdefer f.deinit(alloc);
         // Populated before it is published, as `createIndex` does.
         var off: u32 = 0;
         while (off < count) : (off += 1) {
@@ -875,12 +889,18 @@ pub const Store = struct {
     pub fn createIndex(self: *Store, alloc: std.mem.Allocator, name: []const u8, kind: Kind, count: usize) !void {
         for (self.fields.items) |f| {
             if (std.mem.eql(u8, f.name, name)) {
-                if (f.kind != kind) return error.IndexKindMismatch;
+                if (f.kind() != kind) return error.IndexKindMismatch;
                 return;
             }
         }
+        const index: Field.Index = switch (kind) {
+            .keyword => .{ .keyword = .empty },
+            .integer => .{ .integer = .empty },
+            // `createTextIndex` builds a text field, with its options.
+            .text => unreachable,
+        };
         const owned = try alloc.dupe(u8, name);
-        var f = Field{ .name = owned, .kind = kind, .capacity = self.slots.len };
+        var f = Field{ .name = owned, .index = index, .capacity = self.slots.len };
         errdefer f.deinit(alloc);
         // Populate first, publish second. The field is private until it is
         // appended, so the backfill needs no lock; appending it under the
@@ -928,28 +948,28 @@ pub const Store = struct {
     fn postingLen(f: *const Field, m: Match) ?usize {
         switch (m) {
             .keyword => |k| {
-                if (f.kind != .keyword) return null;
-                return if (f.keywords.get(k)) |p| p.list.items.len else 0;
+                if (f.index != .keyword) return null;
+                return if (f.index.keyword.get(k)) |p| p.list.items.len else 0;
             },
             .integer => |i| {
-                if (f.kind != .integer) return null;
-                return if (f.integers.get(i)) |p| p.list.items.len else 0;
+                if (f.index != .integer) return null;
+                return if (f.index.integer.get(i)) |p| p.list.items.len else 0;
             },
             .keywords => |list| {
-                if (f.kind != .keyword) return null;
+                if (f.index != .keyword) return null;
                 var n: usize = 0;
                 var r = wire.Reader.init(list);
                 while (!r.atEnd()) {
                     const t = r.tag() catch return null;
                     if (t.field == 1 and t.wire_type == .length_delimited) {
                         const s = r.bytes() catch return null;
-                        if (f.keywords.get(s)) |p| n += p.list.items.len;
+                        if (f.index.keyword.get(s)) |p| n += p.list.items.len;
                     } else r.skip(t.wire_type) catch return null;
                 }
                 return n;
             },
             .integers => |list| {
-                if (f.kind != .integer) return null;
+                if (f.index != .integer) return null;
                 var n: usize = 0;
                 var r = wire.Reader.init(list);
                 while (!r.atEnd()) {
@@ -962,13 +982,13 @@ pub const Store = struct {
                     switch (t.wire_type) {
                         .varint => {
                             const v: i64 = @bitCast(r.varint() catch return null);
-                            if (f.integers.get(v)) |p| n += p.list.items.len;
+                            if (f.index.integer.get(v)) |p| n += p.list.items.len;
                         },
                         .length_delimited => {
                             var pr = r.nested() catch return null;
                             while (!pr.atEnd()) {
                                 const v: i64 = @bitCast(pr.varint() catch return null);
-                                if (f.integers.get(v)) |p| n += p.list.items.len;
+                                if (f.index.integer.get(v)) |p| n += p.list.items.len;
                             }
                         },
                         else => r.skip(t.wire_type) catch return null,
@@ -1048,6 +1068,7 @@ pub const Store = struct {
         packed_r: ?wire.Reader = null,
         done: bool = false,
 
+        /// `postingLen` picked `f` for `m`, so its index is of `m`'s kind.
         fn init(f: *const Field, m: Match) PostingLists {
             const raw: []const u8 = switch (m) {
                 .keywords, .integers => |l| l,
@@ -1061,12 +1082,12 @@ pub const Store = struct {
                 .keyword => |k| {
                     if (self.done) return null;
                     self.done = true;
-                    return if (self.f.keywords.getPtr(k)) |p| p else null;
+                    return if (self.f.index.keyword.getPtr(k)) |p| p else null;
                 },
                 .integer => |i| {
                     if (self.done) return null;
                     self.done = true;
-                    return if (self.f.integers.getPtr(i)) |p| p else null;
+                    return if (self.f.index.integer.getPtr(i)) |p| p else null;
                 },
                 .boolean => return null,
                 .keywords => {
@@ -1074,7 +1095,7 @@ pub const Store = struct {
                         const t = self.r.tag() catch return null;
                         if (t.field == 1 and t.wire_type == .length_delimited) {
                             const s = self.r.bytes() catch return null;
-                            if (self.f.keywords.getPtr(s)) |p| return p;
+                            if (self.f.index.keyword.getPtr(s)) |p| return p;
                         } else self.r.skip(t.wire_type) catch return null;
                     }
                     return null;
@@ -1084,7 +1105,7 @@ pub const Store = struct {
                         if (self.packed_r) |*pr| {
                             while (!pr.atEnd()) {
                                 const v: i64 = @bitCast(pr.varint() catch return null);
-                                if (self.f.integers.getPtr(v)) |p| return p;
+                                if (self.f.index.integer.getPtr(v)) |p| return p;
                             }
                             self.packed_r = null;
                         }
@@ -1093,7 +1114,7 @@ pub const Store = struct {
                         switch (t.wire_type) {
                             .varint => {
                                 const v: i64 = @bitCast(self.r.varint() catch return null);
-                                if (t.field == 1) if (self.f.integers.getPtr(v)) |p| return p;
+                                if (t.field == 1) if (self.f.index.integer.getPtr(v)) |p| return p;
                             },
                             .length_delimited => {
                                 if (t.field == 1) {
@@ -1322,6 +1343,25 @@ test "the index selects exactly the matching points, whether built before or aft
     try testing.expectEqual(@as(usize, 1), store.fields.items.len);
 }
 
+test "a text field and a keyword field refuse each other's name, and a text field selects nothing" {
+    var store = try Store.init(testing.allocator, 8);
+    defer store.deinit(testing.allocator);
+    var deleted = try std.bit_set.Dynamic.initEmpty(testing.allocator, 8);
+    defer deleted.deinit(testing.allocator);
+    var m: [64]u8 = undefined;
+    var e: [32]u8 = undefined;
+    try store.set(testing.allocator, 0, mapBytes(&m, &.{entryBytes(&e, "t", value_string, "k1")}), 3);
+    try store.createTextIndex(testing.allocator, "t", .{}, 1, &deleted);
+    try store.createIndex(testing.allocator, "a", .keyword, 1);
+    try testing.expectError(error.IndexKindMismatch, store.createIndex(testing.allocator, "t", .keyword, 1));
+    try testing.expectError(error.IndexKindMismatch, store.createTextIndex(testing.allocator, "a", .{}, 1, &deleted));
+    try testing.expectEqual(Kind.text, store.field("t").?.kind());
+    try testing.expectEqual(Kind.keyword, store.field("a").?.kind());
+    // A keyword match on the text field has no posting list to read.
+    var bits: [1]u64 = undefined;
+    try testing.expect(store.select(&keywordFilter("t", "k1"), &bits, 1) == null);
+}
+
 test "an overwrite leaves a stale posting that verification drops" {
     var store = try Store.init(testing.allocator, 8);
     defer store.deinit(testing.allocator);
@@ -1391,8 +1431,8 @@ test "a dense posting answers as its list does, and only for published points" {
         try store.set(testing.allocator, off, mapBytes(&m, &.{entryBytes(&e, "a", value_string, v)}), 3);
     }
     const field = &store.fields.items[0];
-    try testing.expect(field.keywords.get("dense").?.dense.len != 0);
-    try testing.expectEqual(@as(usize, 0), field.keywords.get("sparse").?.dense.len);
+    try testing.expect(field.index.keyword.get("dense").?.dense.len != 0);
+    try testing.expectEqual(@as(usize, 0), field.index.keyword.get("sparse").?.dense.len);
     var bits: [64]u64 = undefined;
     try testing.expectEqual(@as(usize, 200), store.select(&keywordFilter("a", "dense"), &bits, 204).?.count);
     try testing.expectEqual(~@as(u64, 0), bits[0]);

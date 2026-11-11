@@ -362,7 +362,7 @@ fn writePayloadSchema(w: *wire.Writer, coll: *core.Collection) wire.Writer.Error
         const entry = try w.beginNested(8, 2);
         try w.writeStringField(1, f.name);
         const info = try w.beginNested(2, 2);
-        try w.writeVarintField(1, f.kind.schemaType());
+        try w.writeVarintField(1, f.kind().schemaType());
         try w.writeVarintFieldAlways(3, f.points); // `optional uint64 points`
         try w.endNested(info);
         try w.endNested(entry);

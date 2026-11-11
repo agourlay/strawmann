@@ -999,7 +999,10 @@ pub const Collection = struct {
         self.payload.lockFields();
         defer self.payload.unlockFields();
         const f = self.payload.field(field) orelse return error.NoTextIndex;
-        const ti = f.text_index orelse return error.NoTextIndex;
+        const ti = switch (f.index) {
+            .text => |ti| ti,
+            else => return error.NoTextIndex,
+        };
         const Allowed = struct {
             coll: *const Collection,
             filter: ?hnsw.Index.Filter,
