@@ -134,6 +134,22 @@ pub fn populated_segments(doc: &serde_json::Value, collection: &str) -> Option<u
     )
 }
 
+/// The filter each query of a batch carries: one for all, or one each.
+#[derive(Clone, Copy)]
+enum Filters<'a> {
+    One(&'a Filter),
+    Each(&'a [Option<Filter>]),
+}
+
+impl<'a> Filters<'a> {
+    fn for_query(self, qi: usize) -> Option<&'a Filter> {
+        match self {
+            Filters::One(f) => Some(f),
+            Filters::Each(fs) => fs.get(qi).and_then(Option::as_ref),
+        }
+    }
+}
+
 pub fn to_distance(m: Metric) -> Distance {
     match m {
         Metric::Dot => Distance::Dot,
@@ -809,7 +825,45 @@ impl Engine {
             hnsw_ef,
             None,
             None,
-            Some((filter, acorn)),
+            Some((Filters::One(filter), acorn)),
+        )
+        .await
+    }
+
+    /// `query_filtered` with a filter per query, `None` for a query that
+    /// carries none: a vector-db-benchmark `tests.jsonl` gives each query its
+    /// own condition (findings 55). ACORN goes only on the queries that carry
+    /// a filter, as on the single-filter path.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn query_filtered_each(
+        &self,
+        name: &str,
+        queries: &[f32],
+        n_queries: usize,
+        dim: usize,
+        limit: u64,
+        exact: bool,
+        hnsw_ef: Option<u64>,
+        filters: &[Option<Filter>],
+        acorn: bool,
+    ) -> anyhow::Result<Vec<Returned>> {
+        anyhow::ensure!(
+            filters.len() >= n_queries,
+            "{} filters for {n_queries} queries",
+            filters.len()
+        );
+        self.query_full(
+            name,
+            queries,
+            n_queries,
+            dim,
+            limit,
+            0,
+            exact,
+            hnsw_ef,
+            None,
+            None,
+            Some((Filters::Each(filters), acorn)),
         )
         .await
     }
@@ -829,7 +883,7 @@ impl Engine {
         hnsw_ef: Option<u64>,
         quant: Option<(bool, bool)>,
         oversampling: Option<f64>,
-        filter: Option<(&Filter, bool)>,
+        filter: Option<(Filters<'_>, bool)>,
     ) -> anyhow::Result<Vec<Returned>> {
         let mut out = Vec::with_capacity(n_queries);
 
@@ -855,9 +909,10 @@ impl Engine {
                     }
                     params = params.quantization(qp);
                 }
+                let this_filter = filter.and_then(|(f, _)| f.for_query(qi));
                 // ACORN as bfb's `--acorn` asks for it: enabled, at Qdrant's
                 // default `max_selectivity`. Only a filtered search carries it.
-                if let Some((_, true)) = filter {
+                if this_filter.is_some() && filter.is_some_and(|(_, acorn)| acorn) {
                     params = params
                         .acorn(qdrant_client::qdrant::AcornSearchParamsBuilder::new(true).build());
                 }
@@ -871,7 +926,7 @@ impl Engine {
                 // W12: the same condition the ground truth was restricted to.
                 // A search that does not carry it is answering a different
                 // question from the one it is about to be scored against.
-                if let Some((f, _)) = filter {
+                if let Some(f) = this_filter {
                     qb = qb.filter(f.clone());
                 }
                 batch.push(qb.build());
