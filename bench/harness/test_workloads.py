@@ -4527,3 +4527,172 @@ class TextArmTests(unittest.TestCase):
             {"collection": "bench15", "points_count": 5183, "indexed_vectors_count": 0}]}))
         rows = [{"id": "W15-sat", "collection": "bench15", "n_queries": 50000}]
         self.assertEqual(self.f.unindexed_remainders("lab", rows), [])
+
+
+class DatasetTestsTableTests(unittest.TestCase):
+    """W16: the dataset's own filtered queries, on the corpora that ship them
+    (findings 55), and on no other corpus's table or stamp."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        saved = os.environ.get("STRAWMANN_DATASET")
+        self.addCleanup(lambda: os.environ.__setitem__("STRAWMANN_DATASET", saved)
+                        if saved is not None else os.environ.pop("STRAWMANN_DATASET", None))
+        self.m = _reload(Path(self.tmp.name))
+        self.w = self.m["workloads"]
+        self.w.use_dataset("laion-small-clip")
+
+    def ids(self) -> list[str]:
+        return [r.id for r in self.w.table()]
+
+    def test_the_descriptor_names_each_bundle_its_fields_and_k(self):
+        p = self.w.paths
+        laion = p.FILTERED_TESTS["laion-small-clip"]
+        self.assertEqual((laion.tar_dir, laion.fields, laion.k),
+                         ("laion-small-clip/laion-small-clip", (("similarity", "float"),), 10))
+        hnm = p.FILTERED_TESTS["h-and-m-2048-angular-filters"]
+        self.assertEqual(hnm.tar_dir, "h-and-m-2048-angular-filters/hnm")
+        self.assertEqual(hnm.k, 25)
+        self.assertEqual(len(hnm.fields), 10)
+        self.assertEqual({t for _, t in hnm.fields}, {"keyword"})
+        self.assertTrue(hnm.needs_keyword_match)
+        self.assertEqual(p.tests_dir("laion-small-clip"),
+                         p.DATA / "laion-small-clip/laion-small-clip")
+        self.assertEqual([f.name for f in p.tests_files("laion-small-clip")],
+                         ["vectors.npy", "payloads.jsonl", "tests.jsonl"])
+        self.assertEqual(p.tests_files("sift1m"), [])
+        self.assertEqual(p.tests_n("laion-small-clip"), 100_000)
+        self.assertEqual(p.tests_n("h-and-m-2048-angular-filters"), 105_100)
+
+    def test_the_hnm_fields_are_its_filters_json(self):
+        """The ten fields the query generator drew from, where the bundle is
+        on this disk to say so; skipped where it is not."""
+        p = self.w.paths
+        f = p.tests_dir("h-and-m-2048-angular-filters") / "filters.json"
+        if not f.exists():
+            self.skipTest(f"{f} not on this disk")
+        names = [x["name"] for x in json.loads(f.read_text())]
+        want = [n for n, _ in p.FILTERED_TESTS["h-and-m-2048-angular-filters"].fields]
+        self.assertEqual(sorted(names), sorted(want))
+
+    def test_laion_gains_the_w16_rows_and_runs_them_on_their_own(self):
+        ids = self.ids()
+        w16 = ["W16-upload", "W16-ef32", "W16-ef64", "W16-ef128", "W16-ef256", "W16-ef512"]
+        self.assertEqual([i for i in ids if i.startswith("W16")], w16)
+        self.assertEqual(ids[-2:], ["W11-steady", "W11"], "W11 still runs last")
+        self.assertIn((w16, "bench16"), self.w.isolated_groups())
+        self.assertIn("bench16", self.w.isolated_collections())
+        t = {r.id: r for r in self.w.table()}
+        self.assertTrue(t["W16-upload"].upload_only)
+        for rid in w16[1:]:
+            r = t[rid]
+            self.assertTrue(r.needs_payload_index)
+            self.assertEqual(self.w.collection_of(r), "bench16")
+            self.assertEqual(self.w.load_mode_of(r), self.w.LoadMode.closed_loop)
+            self.assertEqual(self.w.client_concurrency(r)["client_parallel"], 64)
+        self.assertEqual(self.w.ef_of(t["W16-ef128"]), 128)
+        self.assertEqual(self.w.w16_limit(), 10)
+        # The whole bundle, whatever `UPLOAD_N` asks of the fbin rows.
+        with mock.patch.object(self.w, "UPLOAD_N", 1000):
+            up = {r.id: r for r in self.w.table()}["W16-upload"]
+            self.assertEqual(self.w.n_of(up), 100_000)
+            self.assertGreaterEqual(self.w.required_capacity(), 100_000)
+
+    def test_hnm_is_off_until_the_bfb_pin_sends_keyword_matches(self):
+        self.w.use_dataset("h-and-m-2048-angular-filters")
+        self.assertFalse(self.w.paths.BFB_SENDS_KEYWORD_MATCH)
+        self.assertIsNone(self.w.paths.filtered_tests("h-and-m-2048-angular-filters"))
+        self.assertFalse([i for i in self.ids() if i.startswith("W16")])
+        self.assertEqual(self.w.paths.tests_files("h-and-m-2048-angular-filters"), [])
+        self.assertNotIn("w16_fields", self.w.collection_settings())
+        with mock.patch.object(self.w.paths, "BFB_SENDS_KEYWORD_MATCH", True):
+            self.assertIn("W16-ef128", self.ids())
+            # k=25 capped at the harness's recall@10.
+            self.assertEqual(self.w.w16_limit(), 10)
+            cfg = self.w.tests_upload_config("bench16")
+            self.assertIn("    - { name: colour_group_name, type: keyword }\n", cfg)
+            self.assertEqual(cfg.count("type: keyword"), 10)
+            self.assertIn("      distance: cosine\n", cfg)
+
+    def test_the_upload_config_loads_the_bundle_and_indexes_the_tested_fields(self):
+        cfg = self.w.tests_upload_config("bench16", "cached")
+        tar = self.w.paths.tests_dir("laion-small-clip")
+        src = f"name: laion-small-clip, format: tar, path: {tar}"
+        self.assertTrue(str(tar).startswith("/"), "absolute, so no BFB_DATASETS_DIR is needed")
+        self.assertIn("  name: bench16\n", cfg)
+        self.assertIn(f"      source: {{ type: dataset, {src} }}\n", cfg)
+        self.assertIn(f"    source: {{ type: dataset, dataset: {{ {src} }} }}\n", cfg)
+        self.assertIn("  fields:\n    - { name: similarity, type: float }\n", cfg)
+        self.assertIn("    - size: 512\n      distance: cosine\n      memory: cached\n", cfg)
+        self.assertIn(f"    full_scan_threshold: {self.w.W12_FULL_SCAN_THRESHOLD_KB}\n", cfg)
+        self.assertIn(f"    indexing_threshold: {self.w.INDEXING_THRESHOLD_KB}\n", cfg)
+        self.assertIn("    default_segment_number: 1\n", cfg)
+        self.assertIn(f"  on_disk_payload: {self.w.ON_DISK_PAYLOAD}\n", cfg)
+        # Qdrant's own segment count under as-deployed, as `collection_flags`.
+        with mock.patch.object(self.w, "SEGMENT_POLICY", self.w.SegmentPolicy.as_deployed):
+            cfg = self.w.tests_upload_config("bench16")
+        self.assertNotIn("default_segment_number", cfg)
+        self.assertNotIn("max_segment_size", cfg)
+        self.assertNotIn("memory:", cfg)
+
+    def test_the_search_config_reads_the_tests_and_nothing_else(self):
+        cfg = self.w.tests_search_config("bench16")
+        tar = self.w.paths.tests_dir("laion-small-clip")
+        self.assertEqual(cfg, "collection:\n  name: bench16\nrequests:\n  - kind: dense\n"
+                              f"    source: {{ type: dataset, name: laion-small-clip, "
+                              f"format: tar, path: {tar} }}\n")
+        self.assertNotIn("filters", cfg, "the dataset's conditions, not ours")
+
+    def test_the_rows_run_bfbs_config_subcommands(self):
+        t = {r.id: r for r in self.w.table()}
+        out = Path(self.tmp.name)
+        row = self.w.with_placement(t["W16-ef128"], "cached")
+        cmd = [str(a) for a in self.w.command_for(row, "http://localhost:6334", out, [])]
+        i = cmd.index("search")
+        self.assertEqual(cmd[i + 1:], ["--file", str(out / "W16-ef128.search.yaml"),
+                                       "-n", str(self.w.FILTERED_QUERIES),
+                                       "--search-limit", "10", "--search-hnsw-ef", "128",
+                                       "-p", "64", "-t", "16", "-c", str(self.w.W4_CONNS),
+                                       *self.w.W12_SEARCH_FLAGS])
+        self.assertEqual((out / "W16-ef128.search.yaml").read_text(),
+                         self.w.tests_search_config("bench16"))
+        row = self.w.with_placement(t["W16-upload"], "cached")
+        cmd = [str(a) for a in self.w.command_for(row, "http://localhost:6334", out, [])]
+        i = cmd.index("upload")
+        self.assertEqual(cmd[i + 1:], ["--file", str(out / "W16-upload.upload.yaml"),
+                                       "-n", "100000", "-b", "100", "-t", "8", "-p", "8"])
+        self.assertIn("      memory: cached\n", (out / "W16-upload.upload.yaml").read_text())
+        self.assertEqual(self.w.static_notes(t["W16-ef64"]),
+                         ["queries and their conditions: the dataset's own tests.jsonl"])
+
+    def test_bfbs_precision_is_recorded_as_a_sanity_field(self):
+        out = Path(self.tmp.name)
+        (out / "W16-ef64.json").write_text(json.dumps(
+            {"results": {"search": {"precision": {"avg": 0.912345, "p50": 1.0}}}}))
+        self.assertEqual(self.w.precision_of(out, "W16-ef64"), {"bfb_precision": 0.9123})
+        (out / "W3.json").write_text(json.dumps({"results": {"search": {}}}))
+        self.assertEqual(self.w.precision_of(out, "W3"), {})
+        self.assertEqual(self.w.precision_of(out, "missing"), {})
+        self.assertIsNone(self.w.Result("W3", self.w.Status.ok, 1, 0, 0, "", 1.0, 1.0,
+                                        "").bfb_precision)
+
+    def test_no_other_corpus_s_table_or_stamp_moves(self):
+        """W16 enters a stamp only where it runs: with `FILTERED_TESTS` emptied
+        every other corpus hashes as it did, and laion does not."""
+        def stamp(name):
+            self.w.use_dataset(name)
+            return self.w.stamp_hash(self.w.harness_stamp())
+
+        for name in ("sift1m", "dbpedia-openai-100K-1536-angular",
+                     "h-and-m-2048-angular-filters"):
+            with_w16 = stamp(name)
+            self.assertFalse([i for i in self.ids() if i.startswith("W16")], name)
+            with mock.patch.object(self.w.paths, "FILTERED_TESTS", {}):
+                self.assertEqual(stamp(name), with_w16, name)
+        with_w16 = stamp("laion-small-clip")
+        with mock.patch.object(self.w.paths, "FILTERED_TESTS", {}):
+            self.assertNotEqual(stamp("laion-small-clip"), with_w16)
+        s = self.w.collection_settings()
+        self.assertEqual(s["w16_fields"], [["similarity", "float"]])
+        self.assertEqual((s["w16_limit"], s["w16_n"]), (10, 100_000))

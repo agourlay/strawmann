@@ -122,6 +122,28 @@ def wall_qps_of(results: Path, wid: str, batch: int = 1) -> dict:
 
 
 
+def precision_of(results: Path, wid: str) -> dict:
+    """bfb's own precision@k for a row whose queries came with ground truth
+    (W16's `tests.jsonl`), as `bfb_precision`, or {}.
+
+    A sanity figure, not the row's recall: bfb scores `|found & expected[:k]|
+    / k` with no allowance for ties at the k-th distance, and the published
+    recall is the conformance sweep's (`recall.py`), as for every other row.
+    The two far apart is worth a look; close is expected.
+    """
+    p = results / f"{wid}.json"
+    if not p.exists():
+        return {}
+    try:
+        d = json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    prec = ((d.get("results") or {}).get("search") or {}).get("precision") or {}
+    v = prec.get("avg") if isinstance(prec, dict) else None
+    return {"bfb_precision": round(float(v), 4)} if isinstance(v, (int, float)) else {}
+
+
+
 def background_of(results: Path, wid: str) -> dict:
     """The upload phase of a row's concurrent bfb, from its own JSON."""
     p = results / f"{wid}-write.json"

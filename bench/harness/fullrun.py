@@ -2591,7 +2591,10 @@ def main(argv: list[str]) -> int:
               "the report will refuse to read their latency percentiles across the "
               "two columns")
 
-    for f in (text_files(DATASET) if paths.is_text(DATASET) else paths.dataset(DATASET)):
+    # W16's bundle too, where the corpus ships filtered tests: its rows would
+    # otherwise fail hours in, after every other row had run.
+    for f in (text_files(DATASET) if paths.is_text(DATASET)
+              else [*paths.dataset(DATASET), *paths.tests_files(DATASET)]):
         if not f.exists():
             # Named separately from the fetch: for every dataset but SIFT1M the
             # missing file is the converted corpus or the fp64 ground truth,

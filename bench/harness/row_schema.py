@@ -177,6 +177,10 @@ class SearchFields:
     #: (`run_search_until`), so its query count is an outcome; `""` when bfb
     #: ran its `-n` to the end.
     search_stop: str = ""
+    #: bfb's own mean precision@k against the dataset's shipped neighbours,
+    #: on a row whose queries carry them (W16, `bfb_output.precision_of`). A
+    #: sanity check beside the joined recall, never in its place.
+    bfb_precision: float | None = None
     #: `Workload.ratio_policy`, written into the row.
     ratio_policy: str = ""
     #: `Workload.needs_payload_index`, written into the row.

@@ -82,6 +82,7 @@ from bfb_output import (  # noqa: F401  re-exported
     latency_of,
     percentiles_us,
     phases_of,
+    precision_of,
     wall_qps_of,
 )
 from host_load import (  # noqa: F401  re-exported
@@ -600,10 +601,23 @@ def required_capacity() -> int:
     Both W11 rows count. They append to the same collection in sequence, so
     leaving W11-steady out here left `bench2` 50,000 points short of what the
     last row needs, and the server refuses the row rather than growing.
+
+    W16's `bench16` holds the whole bundle (`w16_n`). At full scale that is
+    `upload_n()`, which `bench2` exceeds by its appends, so this figure, and
+    the `max_segment_size` stamped from it, is the same with W16 as without;
+    at a reduced `UPLOAD_N` it is the term that binds.
     """
     if paths.is_text(DATASET):
         return paths.text_n(DATASET)
-    return max(upload_n() + w11_n() + w11_steady_n(), w12_n())
+    return max(upload_n() + w11_n() + w11_steady_n(), w12_n(), w16_n())
+
+
+def w16_n() -> int:
+    """Points W16 loads: every row of the bundle where the corpus ships
+    filtered tests (`paths.tests_n`), else 0. Not capped by `UPLOAD_N`: a
+    test's neighbours may be any row, so a prefix would score real hits as
+    misses."""
+    return paths.tests_n(DATASET) if paths.filtered_tests(DATASET) is not None else 0
 
 def _cmdline_int(cmdline: str | None, flag: str) -> int | None:
     """The integer after `flag` in an engine's command line, or None."""
@@ -656,7 +670,8 @@ def strawmann_start_requirements(comm: str, wanted: set[str],
     # message used to explain the requirement with W11's arithmetic
     # regardless, so at a smoke scale it printed a correct number beside a
     # reason that did not produce it.
-    if runs(lambda r: r in ("W2", "W11", "W11-steady", "W12-upload", "W15-upload")):
+    if runs(lambda r: r in ("W2", "W11", "W11-steady", "W12-upload", "W15-upload",
+                            "W16-upload")):
         need = required_capacity()
         # A text run loads its corpus and appends nothing: 1014's BEIR runs
         # explained 5,183 with W11's append arithmetic.
@@ -786,6 +801,8 @@ W9_PARALLEL = int(os.environ.get("W9_PARALLEL", 8))
 #: 2. A Qdrant before 1cb0f1800 holds field 2 reserved and drops it, so this
 #: pin needs a BM25 Qdrant at or after that commit, or the k1/b ladder runs at
 #: the defaults with no error, as under qdrant#11012. No other request moves.
+#: The pin that includes qdrant/bfb#193 also flips `paths.BFB_SENDS_KEYWORD_MATCH`,
+#: which is what puts h-and-m's W16 rows in its table.
 BFB_PIN = ("dev @ d2a6b6c (qdrant/bfb#189, TextQuery's scoring oneof at field 2 for "
            "qdrant#11112; carries #187's dependency update, #185's text requests and "
            "#172, findings 32's --rps reaping fix)")
@@ -1255,6 +1272,10 @@ class Workload:
     #: W15: a row on bfb's config path for a text corpus, uploaded from its
     #: `bfb/` layout or searched with `kind: text` (`TextSpec`).
     text: TextSpec | None = None
+    #: W16: a row on bfb's config path over the dataset's own vector-db-benchmark
+    #: bundle, `upload` (vectors, whole payload, field indexes) or `search` (each
+    #: query under its own test's condition). See `tests_table`.
+    dataset_tests: str | None = None
 
 
 def flags(*parts: object) -> list[str]:
@@ -1435,6 +1456,12 @@ def collection_settings() -> dict:
             "w15_ladder": [list(x) for x in W15_LADDER],
             "w15_indexing_threshold_kb": w15_indexing_threshold_kb()}
            if paths.is_text(DATASET) else {}),
+        # Only for a corpus W16 runs on, so no other corpus's stamp moves: the
+        # indexes W16 declares, the `limit` its searches send and the points it
+        # loads. The bundle's path is not here: it is where the data sits, not what it is.
+        **({"w16_fields": [list(f) for f in spec.fields], "w16_limit": w16_limit(),
+            "w16_n": w16_n()}
+           if (spec := paths.filtered_tests(DATASET)) is not None else {}),
     }
 
 
@@ -1565,8 +1592,16 @@ def isolated_groups() -> list[tuple[list[str], str]]:
     group's rows, then that collection's own sweep, read-back and drop, so no
     two of them are ever alive together or beside the table's own quantized
     collections (dropped before this phase). `(row ids, collection)`."""
-    ids = {w.id for w in table()}
-    return [([f"{rid}-upload", rid], coll) for rid, _, _, coll in ISOLATED_ENCODINGS if rid in ids]
+    rows = table()
+    ids = {w.id for w in rows}
+    groups = [([f"{rid}-upload", rid], coll) for rid, _, _, coll in ISOLATED_ENCODINGS
+              if rid in ids]
+    # W16 too: its collection holds the corpus a second time, with a payload,
+    # beside `bench2` and the quantized ones, and nothing else reads it.
+    tests = [w.id for w in rows if w.dataset_tests]
+    if tests:
+        groups.append((tests, W16_COLLECTION))
+    return groups
 
 
 def isolated_collections() -> set[str]:
@@ -1734,6 +1769,126 @@ def text_table() -> list[Workload]:
             f"W15-{suffix}", f"text: BM25 query at k1 {k1}, b {b}, saturating",
             flags("-n", QUERIES, "--search-limit", 10, *SATURATING_CLIENT),
             query_collection=coll, text=TextSpec("search", k1=k1, b=b)))
+    return rows
+
+
+# =========================================================================
+# W16: the dataset's own filtered queries (findings 55)
+# =========================================================================
+
+#: W16's collection: the corpus with its whole payload, uploaded from the
+#: dataset's bundle rather than from the fbin, since the payload rides in it.
+W16_COLLECTION = "bench16"
+
+#: W16's ladder, W10's and W12's: a filtered recall moves with `ef` as W12-sel10's
+#: did (findings 48), so one point would say nothing about either curve.
+W16_EF = (32, 64, 128, 256, 512)
+
+#: The widest `limit` a W16 search sends. Every recall this harness publishes
+#: is recall@10 (`recall.DEFAULT_LIMIT`, the sweeps' unsuffixed files, every
+#: table's column), and h-and-m's tests ship 25 neighbours: its first ten are
+#: the top ten under the condition, which is the same question at k=10.
+W16_MAX_LIMIT = 10
+
+
+def w16_limit() -> int:
+    """The `limit` W16 sends on this corpus: its tests' k, capped at ten."""
+    spec = paths.filtered_tests(DATASET)
+    return min(spec.k, W16_MAX_LIMIT) if spec is not None else W16_MAX_LIMIT
+
+
+def _tests_source() -> str:
+    """bfb's dataset reference for the bundle, inline.
+
+    The absolute path, as W15's `bfb/` source is given: bfb joins `path` onto
+    `$BFB_DATASETS_DIR` and an absolute path replaces it, so the directory
+    `paths.DATA` resolved (config file, `--data-dir`) is the one bfb reads
+    without a variable having to reach its environment. No `link`, so a
+    missing bundle is an error rather than a download.
+    """
+    return f"name: {DATASET}, format: tar, path: {paths.tests_dir(DATASET)}"
+
+
+def tests_upload_config(collection: str, memory: str | None = None) -> str:
+    """bfb's upload config for W16: the bundle's vectors under the corpus's
+    metric, its whole `payloads.jsonl`, and an index on every field the tests
+    filter (`paths.FilteredTests.fields`).
+
+    The collection settings every other collection is created with
+    (`collection_flags`), spelled as the config path takes them, and W12's
+    full-scan threshold rather than the 10 KB floor: Qdrant chooses a filtered
+    query's path by its cardinality against it, as for W12, and at 10 KB every
+    condition would walk the graph, which is not how Qdrant ships. `memory` is
+    the run's placement (`with_placement`), as in `text_upload_config`.
+    """
+    spec = paths.filtered_tests(DATASET)
+    if spec is None:
+        raise SystemExit(f"{DATASET}: no filtered tests W16 can run "
+                         f"(paths.FILTERED_TESTS, BFB_SENDS_KEYWORD_MATCH)")
+    src = _tests_source()
+    seg, ceiling = segments(), max_segment_size_kb()
+    opt = ([f"    default_segment_number: {seg}"] if seg is not None else []) + (
+        [f"    max_segment_size: {ceiling}"] if ceiling is not None else []) + [
+        f"    indexing_threshold: {INDEXING_THRESHOLD_KB}"]
+    return (
+        "collection:\n"
+        f"  name: {collection}\n"
+        f"  on_disk_payload: {ON_DISK_PAYLOAD}\n"
+        "  hnsw:\n"
+        f"    full_scan_threshold: {W12_FULL_SCAN_THRESHOLD_KB}\n"
+        "  optimizers:\n" + "".join(f"{x}\n" for x in opt) +
+        "  vectors:\n"
+        f"    - size: {DIM}\n"
+        f"      distance: {METRIC.lower()}\n"
+        + (f"      memory: {memory}\n" if memory else "") +
+        f"      source: {{ type: dataset, {src} }}\n"
+        "  payload:\n"
+        f"    source: {{ type: dataset, dataset: {{ {src} }} }}\n"
+        "  fields:\n"
+        + "".join(f"    - {{ name: {name}, type: {kind} }}\n" for name, kind in spec.fields)
+    )
+
+
+def tests_search_config(collection: str) -> str:
+    """bfb's search config for W16: dense queries from the bundle's
+    `tests.jsonl`, each sent under its own `conditions` (bfb applies them when
+    a query set carries them, and reports precision@k against `closest_ids`).
+
+    No `strategy`: a dataset source walks its query set in order from one
+    shared cursor (`QueryDataset::next`, `% num_queries`), so every query is
+    sent equally often when `-n` is a multiple of the set, which
+    `FILTERED_QUERIES`' 50,000 is of laion's 5,000 and h-and-m's 10,000.
+    """
+    return (
+        "collection:\n"
+        f"  name: {collection}\n"
+        "requests:\n"
+        "  - kind: dense\n"
+        f"    source: {{ type: dataset, {_tests_source()} }}\n"
+    )
+
+
+def tests_table() -> list[Workload]:
+    """W16 on a corpus that ships filtered tests, or [] (`paths.filtered_tests`).
+
+    Only on those corpora, so no other corpus's table, stamp or row set moves.
+    The search rows take W12's client and ACORN, the filtered rows' settings:
+    the same search under a different filter is the comparison W16 adds.
+    """
+    if paths.filtered_tests(DATASET) is None:
+        return []
+    fields = ", ".join(n for n, _ in paths.filtered_tests(DATASET).fields)
+    rows = [Workload("W16-upload", f"real filters: load the corpus with its whole payload, "
+                                   f"indexing {fields}",
+                     flags("-n", w16_n(), "-b", 100, "-t", 8, "-p", 8),
+                     upload_only=True, dataset_tests="upload")]
+    for ef in W16_EF:
+        rows.append(Workload(
+            f"W16-ef{ef}", f"filtered search under each test's own condition, ef={ef}",
+            flags("-n", FILTERED_QUERIES, "--search-limit", w16_limit(),
+                  "--search-hnsw-ef", ef, *SATURATING_CLIENT, *W12_SEARCH_FLAGS),
+            query_collection=W16_COLLECTION, query_strategy="tests",
+            needs_payload_index=True, dataset_tests="search"))
     return rows
 
 
@@ -2004,6 +2159,10 @@ def table() -> list[Workload]:
             query_collection=f"{C}12", needs_payload_index=True,
             keyword_filter=("a", W12_KEYWORDS, W12_MATCH_ANY))
           for ef in (32, 64, 128, 256, 512)],
+
+        # W16, the dataset's own filters, on the corpora that ship them; run
+        # in a phase of their own (`isolated_groups`).
+        *tests_table(),
 
         Workload("W13", "scroll / pagination",
                  flags("--collection-name", f"{C}2", "--skip-setup", "--scroll",
@@ -2397,7 +2556,8 @@ def load_mode_of(w: Workload) -> LoadMode:
     # this function exists to prevent.
     if "--rps" in w.args or w.rps_fraction is not None:
         return LoadMode.open_loop
-    if "--search" in w.args or "--scroll" in w.args:
+    # W16 searches on the config path, which spells no `--search`.
+    if "--search" in w.args or "--scroll" in w.args or w.dataset_tests == "search":
         return LoadMode.closed_loop
     return LoadMode.upload
 
@@ -2427,7 +2587,9 @@ def static_notes(w: Workload) -> list[str]:
         # bfb times the batch request, so p50/p99 are per 16 queries, not per
         # query; the table would otherwise read them as a 16x slower engine.
         out.append(f"per-batch latency ({batch_size_of(w)} queries/request)")
-    if w.query_collection and w.query_strategy != "from-start":
+    if w.dataset_tests == "search":
+        out.append("queries and their conditions: the dataset's own tests.jsonl")
+    elif w.query_collection and w.query_strategy != "from-start":
         out.append(f"queries: dataset, {w.query_strategy}")
     if w.background:
         out.append("concurrent append of synthetic vectors; recall not measured")
@@ -2450,6 +2612,17 @@ _RPS = re.compile(r"Median rps: ([0-9.]+)")
 _UNIMPL = "Operation is not implemented or not supported"
 
 
+def _placement_of(args: list) -> tuple[str | None, list[str]]:
+    """`--memory-vectors`'s value and the args without it. bfb's config
+    subcommands take no such flag: the placement moves into the upload
+    config, and a search creates nothing."""
+    out = [str(a) for a in args]
+    if "--memory-vectors" not in out:
+        return None, out
+    i = out.index("--memory-vectors")
+    return out[i + 1], out[:i] + out[i + 2:]
+
+
 def command_for(w: Workload, uri: str, results: Path, common: list[str]) -> list[str]:
     """The bfb invocation for one row.
 
@@ -2465,17 +2638,17 @@ def command_for(w: Workload, uri: str, results: Path, common: list[str]) -> list
     """
     base = [str(BFB), *common, "--uri", uri, "--json", str(results / f"{w.id}.json")]
     if w.text is not None:
-        # bfb's config subcommands take no `--memory-vectors`: the placement
-        # moves into the upload config, and a search creates nothing.
-        args = [str(a) for a in w.args]
-        memory = None
-        if "--memory-vectors" in args:
-            i = args.index("--memory-vectors")
-            memory, args = args[i + 1], args[:i] + args[i + 2:]
+        memory, args = _placement_of(w.args)
         cfg = results / f"{w.id}.{w.text.kind}.yaml"
         cfg.write_text(text_upload_config(W15_COLLECTION, memory) if w.text.kind == "upload"
                        else text_search_config(W15_COLLECTION, w.text))
         return [*base, w.text.kind, "--file", str(cfg), *args]
+    if w.dataset_tests is not None:
+        memory, args = _placement_of(w.args)
+        cfg = results / f"{w.id}.{w.dataset_tests}.yaml"
+        cfg.write_text(tests_upload_config(W16_COLLECTION, memory)
+                       if w.dataset_tests == "upload" else tests_search_config(W16_COLLECTION))
+        return [*base, w.dataset_tests, "--file", str(cfg), *args]
     if w.query_collection is None:
         return base + w.args
     cfg = results / f"{w.id}.search.yaml"
@@ -3132,6 +3305,7 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
         warmup_s=warmup_s,
         **quant_of(w),
         acorn="--acorn" in w.args,
+        **precision_of(results, w.id),
         search_stop="clock" if getattr(proc, "clock_stopped", False) else "",
         **bgd,
         **settled,
