@@ -797,6 +797,51 @@ test "§6.4: payloads and the field indexes survive the round-trip" {
     for (0..30) |i| try testing.expectEqual(i % 3 == 1, payload_mod.testBit(&bits, @intCast(i)));
 }
 
+test "§6.4: a float index survives the round-trip as its kind, rebuilt from the blobs" {
+    var c = try makeCollection(4, .euclid, 64);
+    defer c.deinit();
+    var v = [_]f32{ 1, 0, 0, 0 };
+    try c.createPayloadIndex("s", .float);
+    // `{ "s": i / 4 }`, a double, with every third point an integer instead.
+    var ebuf: [64]u8 = undefined;
+    for (0..40) |i| {
+        var w = wire.Writer.init(&ebuf);
+        const entry = try w.beginNested(3, 2);
+        try w.writeStringField(1, "s");
+        const val = try w.beginNested(2, 2);
+        if (i % 3 == 0) {
+            try w.writeVarintFieldAlways(payload_mod.value_integer, i);
+        } else {
+            try w.tag(payload_mod.value_double, .fixed64);
+            try w.fixed64(@bitCast(@as(f64, @floatFromInt(i)) / 4));
+        }
+        try w.endNested(val);
+        try w.endNested(entry);
+        _ = try c.upsertWithPayload(.{ .num = i }, &v, w.written(), 3);
+    }
+
+    const dir = "/tmp/strawmann-test-payload-float";
+    try save(&c, dir);
+    var reloaded = try load(testing.allocator, "test", dir, .pinned);
+    defer reloaded.deinit();
+
+    try testing.expectEqual(@as(usize, 1), reloaded.payload.fields.items.len);
+    try testing.expectEqual(payload_mod.Kind.float, reloaded.payload.fields.items[0].kind());
+    try testing.expectEqual(c.payload.fields.items[0].points, reloaded.payload.fields.items[0].points);
+    var f = payload_mod.Filter{};
+    try f.add(.must, .{ .key = "s", .match = .{ .range = payload_mod.Range.fromBounds(null, 2, null, 9) } });
+    var a_bits: [1]u64 = undefined;
+    var b_bits: [1]u64 = undefined;
+    const a = c.payload.select(&f, &a_bits, 40).?;
+    const b = reloaded.payload.select(&f, &b_bits, 40).?;
+    try testing.expectEqual(a.count, b.count);
+    try testing.expectEqual(a_bits[0], b_bits[0]);
+    for (0..40) |i| {
+        const s: f64 = if (i % 3 == 0) @floatFromInt(i) else @as(f64, @floatFromInt(i)) / 4;
+        try testing.expectEqual(s > 2 and s <= 9, payload_mod.testBit(&b_bits, @intCast(i)));
+    }
+}
+
 test "a text index keeps exact BM25 statistics through delete and the round-trip" {
     var c = try makeCollection(4, .dot, 64);
     defer c.deinit();
