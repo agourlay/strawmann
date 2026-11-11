@@ -55,6 +55,7 @@ const text = @import("../text/text.zig");
 //   Struct struct_value = 6; ListValue list_value = 7; } }` (VERIFIED,
 // json_with_int.proto in qdrant-client 1.19.0). `ListValue { repeated Value
 // values = 1; }`.
+pub const value_null: u32 = 1;
 pub const value_double: u32 = 2;
 pub const value_integer: u32 = 3;
 pub const value_string: u32 = 4;
@@ -87,6 +88,16 @@ pub const Match = union(enum) {
     /// `FieldCondition.range`, which is not a `Match` on the wire but
     /// evaluates like one: per value, any list element matching.
     range: Range,
+    /// `FieldCondition.datetime_range`: per value, any list element that is
+    /// a string Qdrant parses as a datetime and falls in the range.
+    datetime: DatetimeRange,
+    /// `FieldCondition.values_count`. This and the two below look at a
+    /// value's shape, not at its elements, and decide a missing field too.
+    values_count: ValuesCount,
+    /// `FieldCondition.is_empty`, and `Condition.is_empty` as `true`.
+    is_empty: bool,
+    /// `FieldCondition.is_null`, and `Condition.is_null` as `true`.
+    is_null: bool,
 };
 
 /// `Range { optional double lt = 1; gt = 2; gte = 3; lte = 4; }` (VERIFIED,
@@ -170,14 +181,241 @@ fn orderedCmp(a: f64, b: f64) std.math.Order {
     return std.math.order(a, b);
 }
 
+/// `ValuesCount { optional uint64 lt = 1; gt = 2; gte = 3; lte = 4; }`
+/// (VERIFIED, qdrant_common.proto), folded into `[lo, hi)`. `u65` so that
+/// `gt = 2^64 - 1` and `lte = 2^64 - 1` fold without overflow; the count it
+/// is compared with is a `usize`, as Qdrant's (`ValuesCount::check_count`,
+/// lib/segment/src/types.rs, every bound ANDed).
+pub const ValuesCount = struct {
+    lo: u65 = 0,
+    hi: u65 = std.math.maxInt(u65),
+
+    pub fn fromBounds(lt: ?u64, gt: ?u64, gte: ?u64, lte: ?u64) ValuesCount {
+        var v = ValuesCount{};
+        if (gt) |x| v.lo = @max(v.lo, @as(u65, x) + 1);
+        if (gte) |x| v.lo = @max(v.lo, x);
+        if (lt) |x| v.hi = @min(v.hi, x);
+        if (lte) |x| v.hi = @min(v.hi, @as(u65, x) + 1);
+        return v;
+    }
+
+    pub fn contains(self: ValuesCount, n: usize) bool {
+        return n >= self.lo and n < self.hi;
+    }
+};
+
+/// A UTC instant at Qdrant's precision. Qdrant truncates every datetime it
+/// compares to whole microseconds, a payload string and a filter bound alike
+/// (`From<DateTime<Utc>> for DateTimeWrapper`, `trunc_subsecs(6)`,
+/// lib/segment/src/types.rs). `micros` reaches past 999_999 only for a leap
+/// second, which chrono keeps as second 59 with the excess in the fraction,
+/// so the pair compares in chrono's order where a single count would not.
+pub const Instant = struct {
+    secs: i64,
+    micros: u32,
+
+    pub const min: Instant = .{ .secs = std.math.minInt(i64), .micros = 0 };
+    pub const max: Instant = .{ .secs = std.math.maxInt(i64), .micros = std.math.maxInt(u32) };
+
+    pub fn order(a: Instant, b: Instant) std.math.Order {
+        const o = std.math.order(a.secs, b.secs);
+        return if (o != .eq) o else std.math.order(a.micros, b.micros);
+    }
+};
+
+/// `DatetimeRange { optional google.protobuf.Timestamp lt = 1; gt = 2;
+/// gte = 3; lte = 4; }` (VERIFIED, qdrant_common.proto), folded as `Range`
+/// is. Instants are totally ordered, so the strictest bound on each side
+/// is exactly Qdrant's four ANDed comparisons (`Range::check_range`); the
+/// absent ends are sentinels no parsed instant reaches.
+pub const DatetimeRange = struct {
+    lo: Instant = Instant.min,
+    lo_strict: bool = false,
+    hi: Instant = Instant.max,
+    hi_strict: bool = false,
+
+    pub fn fromBounds(lt: ?Instant, gt: ?Instant, gte: ?Instant, lte: ?Instant) DatetimeRange {
+        var r = DatetimeRange{};
+        if (gt) |x| r.tightenLo(x, true);
+        if (gte) |x| r.tightenLo(x, false);
+        if (lt) |x| r.tightenHi(x, true);
+        if (lte) |x| r.tightenHi(x, false);
+        return r;
+    }
+
+    fn tightenLo(self: *DatetimeRange, x: Instant, strict: bool) void {
+        switch (x.order(self.lo)) {
+            .gt => {
+                self.lo = x;
+                self.lo_strict = strict;
+            },
+            .eq => self.lo_strict = self.lo_strict or strict,
+            .lt => {},
+        }
+    }
+
+    fn tightenHi(self: *DatetimeRange, x: Instant, strict: bool) void {
+        switch (x.order(self.hi)) {
+            .lt => {
+                self.hi = x;
+                self.hi_strict = strict;
+            },
+            .eq => self.hi_strict = self.hi_strict or strict,
+            .gt => {},
+        }
+    }
+
+    pub fn contains(self: DatetimeRange, v: Instant) bool {
+        const above = switch (v.order(self.lo)) {
+            .gt => true,
+            .eq => !self.lo_strict,
+            .lt => false,
+        };
+        const below = switch (v.order(self.hi)) {
+            .lt => true,
+            .eq => !self.hi_strict,
+            .gt => false,
+        };
+        return above and below;
+    }
+};
+
+/// Days from 1970-01-01 to a proleptic Gregorian date (Hinnant's
+/// `days_from_civil`), the calendar chrono uses.
+pub fn daysFromCivil(year: i64, month: u32, day: u32) i64 {
+    const y = if (month <= 2) year - 1 else year;
+    const era = @divFloor(y, 400);
+    const yoe = y - era * 400;
+    const m: i64 = month;
+    const doy = @divFloor(153 * (if (m > 2) m - 3 else m + 9) + 2, 5) + day - 1;
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+    return era * 146097 + doe - 719468;
+}
+
+fn daysInMonth(year: i64, month: u32) u32 {
+    return switch (month) {
+        2 => if (@mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0)) 29 else 28,
+        4, 6, 9, 11 => 30,
+        else => 31,
+    };
+}
+
+/// The seconds a `google.protobuf.Timestamp` bound may hold: chrono's
+/// `DateTime::from_timestamp` refuses a date outside `NaiveDate`'s years,
+/// `(i32::MIN >> 13) + 1` to `(i32::MAX >> 13) - 1` (chrono 0.4.45,
+/// naive/date/mod.rs `MIN_YEAR`/`MAX_YEAR`), and Qdrant answers that
+/// `invalid_argument` (`try_date_time_from_proto`, lib/api/src/grpc/conversions.rs).
+pub const timestamp_min_secs: i64 = daysFromCivil(-262143, 1, 1) * 86_400;
+pub const timestamp_max_secs: i64 = daysFromCivil(262142, 12, 31) * 86_400 + 86_399;
+
+/// A `Timestamp { int64 seconds = 1; int32 nanos = 2; }` bound as Qdrant
+/// reads it, or null where Qdrant refuses it. A negative `nanos` is read as
+/// 0 (`nanos.try_into().unwrap_or(0)`); `nanos` of a second or more is a leap
+/// second, valid only on second 59 of a minute and below two seconds
+/// (chrono `NaiveTime::from_num_seconds_from_midnight_opt`).
+pub fn instantFromTimestamp(seconds: i64, nanos: i32) ?Instant {
+    if (seconds < timestamp_min_secs or seconds > timestamp_max_secs) return null;
+    const n: u32 = if (nanos < 0) 0 else @intCast(nanos);
+    if (n >= 2_000_000_000) return null;
+    if (n >= 1_000_000_000 and @mod(seconds, 60) != 59) return null;
+    return .{ .secs = seconds, .micros = n / 1000 };
+}
+
+/// A payload string as Qdrant's `DateTimePayloadType::from_str` reads it
+/// (lib/segment/src/types.rs), restricted to the forms below, every one of
+/// which Qdrant accepts with the same instant:
+///
+///   `YYYY-MM-DD`                                  midnight UTC
+///   `YYYY-MM-DD[T ]HH:MM`                         UTC
+///   `YYYY-MM-DD[T ]HH:MM:SS[.f]`                  UTC
+///   `YYYY-MM-DD[Tt ]HH:MM:SS[.f](Z|z|+HH:MM|+HHMM)`
+///   `YYYY-MM-DD[T ]HH:MM:SS[.f]+HH`
+///
+/// with `-` for `+` too, any number of fraction digits (beyond six they are
+/// truncated away, as Qdrant's microseconds are), second 60 a leap second,
+/// and an offset below 24 hours. The first three are its `NaiveDateTime`
+/// formats; the rest are `parse_from_rfc3339`, chrono's relaxed `FromStr`
+/// and `%Y-%m-%dT%H:%M:%S%.f%#z`. What chrono also takes and this does not
+/// (whitespace around the parts, a `UTC` suffix, U+2212 as the minus, a year
+/// that is not four digits) is null, so such a value never matches a
+/// datetime range here where Qdrant's would.
+pub fn parseDatetime(s: []const u8) ?Instant {
+    if (s.len < 10 or s[4] != '-' or s[7] != '-') return null;
+    const year = digitsAt(s, 0, 4) orelse return null;
+    const month = digitsAt(s, 5, 2) orelse return null;
+    const day = digitsAt(s, 8, 2) orelse return null;
+    if (month < 1 or month > 12 or day < 1 or day > daysInMonth(year, month)) return null;
+    var secs: i64 = daysFromCivil(year, month, day) * 86_400;
+    if (s.len == 10) return .{ .secs = secs, .micros = 0 };
+
+    const sep = s[10];
+    if (sep != 'T' and sep != 't' and sep != ' ') return null;
+    if (s.len < 16 or s[13] != ':') return null;
+    const hour = digitsAt(s, 11, 2) orelse return null;
+    const minute = digitsAt(s, 14, 2) orelse return null;
+    if (hour > 23 or minute > 59) return null;
+    secs += @as(i64, hour) * 3600 + @as(i64, minute) * 60;
+    // `HH:MM` is only a naive format, and a naive format has a literal `T`.
+    if (s.len == 16) return if (sep == 't') null else .{ .secs = secs, .micros = 0 };
+
+    if (s.len < 19 or s[16] != ':') return null;
+    var second = digitsAt(s, 17, 2) orelse return null;
+    if (second > 60) return null;
+    var micros: u32 = 0;
+    if (second == 60) {
+        second = 59;
+        micros = 1_000_000;
+    }
+    secs += second;
+    var pos: usize = 19;
+    if (pos < s.len and s[pos] == '.') {
+        pos += 1;
+        const start = pos;
+        var frac: u32 = 0;
+        while (pos < s.len and std.ascii.isDigit(s[pos])) : (pos += 1) {
+            if (pos - start < 6) frac = frac * 10 + (s[pos] - '0');
+        }
+        if (pos == start) return null;
+        var scale = pos - start;
+        while (scale < 6) : (scale += 1) frac *= 10;
+        micros += frac;
+    }
+    if (pos == s.len) return if (sep == 't') null else .{ .secs = secs, .micros = micros };
+
+    const rest = s[pos..];
+    if (rest.len == 1 and (rest[0] == 'Z' or rest[0] == 'z')) return .{ .secs = secs, .micros = micros };
+    if (rest[0] != '+' and rest[0] != '-') return null;
+    const oh = digitsAt(rest, 1, 2) orelse return null;
+    const om: u32 = switch (rest.len) {
+        3 => if (sep == 't') return null else 0,
+        5 => digitsAt(rest, 3, 2) orelse return null,
+        6 => if (rest[3] != ':') return null else digitsAt(rest, 4, 2) orelse return null,
+        else => return null,
+    };
+    if (oh > 23 or om > 59) return null;
+    const offset: i64 = @as(i64, oh) * 3600 + @as(i64, om) * 60;
+    return .{ .secs = if (rest[0] == '+') secs - offset else secs + offset, .micros = micros };
+}
+
+fn digitsAt(s: []const u8, at: usize, n: usize) ?u32 {
+    if (at + n > s.len) return null;
+    var v: u32 = 0;
+    for (s[at..][0..n]) |c| {
+        if (!std.ascii.isDigit(c)) return null;
+        v = v * 10 + (c - '0');
+    }
+    return v;
+}
+
 pub const Condition = struct {
     key: []const u8,
     match: Match,
-    /// A `FieldCondition` carrying both a `match` and a `range`: Qdrant
-    /// admits a value either satisfies (`ValueChecker for FieldCondition`,
-    /// condition_checker.rs, ORs them). Rare enough that no index answers
-    /// it; `cheapestMust` passes over it and the blobs decide.
-    or_range: ?Range = null,
+    /// A `FieldCondition` carrying a `match` and a `range` or a
+    /// `datetime_range` too: Qdrant admits a value any of them admits
+    /// (`ValueChecker for FieldCondition`, condition_checker.rs, ORs them).
+    /// Only a `range` or a `datetime_range`. Rare enough that no index
+    /// answers it; `cheapestMust` passes over it and the blobs decide.
+    or_match: ?Match = null,
 };
 
 /// Conditions per clause. bfb's W12 sends one; the bound exists so a
@@ -239,23 +477,113 @@ pub const Filter = struct {
 
 /// Whether any entry under `c.key` in the blob matches `c.match`.
 ///
-/// A key absent from the payload matches nothing, which is what makes
-/// `must_not` on an absent key true and `must` on one false, as in Qdrant.
+/// A key absent from the payload matches only what `missingMatches` says,
+/// which for a value match is nothing: that is what makes `must_not` on an
+/// absent key true and `must` on one false, as in Qdrant.
 fn conditionMatches(blob: []const u8, c: Condition) bool {
     var it = BlobIterator.init(blob);
+    var present = false;
     while (it.next()) |entry| {
         const kv = splitEntry(entry) orelse continue;
         if (!std.mem.eql(u8, kv.key, c.key)) continue;
+        present = true;
         if (valueMatches(kv.value, c.match)) return true;
-        if (c.or_range) |r| if (valueMatches(kv.value, .{ .range = r })) return true;
+        if (c.or_match) |m| if (valueMatches(kv.value, m)) return true;
     }
-    return false;
+    return !present and missingMatches(c.match);
+}
+
+/// A missing field, as Qdrant's `FieldCondition::check_empty`
+/// (condition_checker.rs) answers it: zero values, empty, and not null.
+fn missingMatches(m: Match) bool {
+    return switch (m) {
+        .values_count => |vc| vc.contains(0),
+        .is_empty => |want| want,
+        .is_null => |want| !want,
+        else => false,
+    };
 }
 
 /// Whether one `Value` matches, descending one level into a `ListValue` so a
-/// multi-valued keyword field (`["a", "b"]`) matches either.
+/// multi-valued keyword field (`["a", "b"]`) matches either. The shape
+/// conditions look at the whole value instead: Qdrant's
+/// `FieldCondition::check` tests them on the value before (and instead of)
+/// the per-element `_check`.
 fn valueMatches(value: []const u8, m: Match) bool {
-    return valueMatchesAt(value, m, true);
+    switch (m) {
+        .values_count, .is_empty, .is_null => {
+            const s = valueShape(value) orelse return false;
+            return switch (m) {
+                .values_count => |vc| vc.contains(s.count),
+                .is_empty => |want| s.empty == want,
+                .is_null => |want| s.has_null == want,
+                else => unreachable,
+            };
+        },
+        else => return valueMatchesAt(value, m, true),
+    }
+}
+
+/// What the shape conditions read from a `Value`, as Qdrant's
+/// `check_count_from` (types.rs), `check_is_empty` and `check_is_null`
+/// (condition_checker.rs) read the JSON it becomes: null counts 0 values
+/// and is empty and null; a list counts its elements, is empty when it has
+/// none and null when one of them is; anything else (a struct included)
+/// counts 1 and is neither. So `[null]` is null but not empty.
+const Shape = struct { count: usize, empty: bool, has_null: bool };
+
+/// Null on malformed bytes, which then match no shape condition, as a
+/// malformed value matches no value condition in `valueMatchesAt`.
+fn valueShape(value: []const u8) ?Shape {
+    const k = valueKind(value) orelse return null;
+    switch (k.kind) {
+        0, value_null => return .{ .count = 0, .empty = true, .has_null = true },
+        value_list => {
+            var n: usize = 0;
+            var has_null = false;
+            var r = wire.Reader.init(k.body);
+            while (!r.atEnd()) {
+                const t = r.tag() catch return null;
+                if (t.field != 1 or t.wire_type != .length_delimited) {
+                    r.skip(t.wire_type) catch return null;
+                    continue;
+                }
+                const elem = r.bytes() catch return null;
+                n += 1;
+                if (!has_null) {
+                    const ek = valueKind(elem) orelse return null;
+                    has_null = ek.kind == 0 or ek.kind == value_null;
+                }
+            }
+            return .{ .count = n, .empty = n == 0, .has_null = has_null };
+        },
+        else => return .{ .count = 1, .empty = false, .has_null = false },
+    }
+}
+
+/// A `Value`'s `kind`: the last oneof member on the wire, protobuf's rule
+/// for a oneof set more than once, with the bytes of a length-delimited
+/// one. Kind 0 is none set, which Qdrant reads as JSON null (`proto_to_json`,
+/// lib/api/src/conversions/json.rs: no `kind` is `Value::default()`).
+fn valueKind(value: []const u8) ?struct { kind: u32, body: []const u8 } {
+    var r = wire.Reader.init(value);
+    var kind: u32 = 0;
+    var body: []const u8 = &.{};
+    while (!r.atEnd()) {
+        const t = r.tag() catch return null;
+        if (t.field < value_null or t.field > value_list) {
+            r.skip(t.wire_type) catch return null;
+            continue;
+        }
+        kind = t.field;
+        if (t.wire_type == .length_delimited) {
+            body = r.bytes() catch return null;
+        } else {
+            body = &.{};
+            r.skip(t.wire_type) catch return null;
+        }
+    }
+    return .{ .kind = kind, .body = body };
 }
 
 /// One walk over a `Value`'s scalar arms, with the list descent as a flag
@@ -271,6 +599,9 @@ fn valueMatchesAt(value: []const u8, m: Match, descend: bool) bool {
                 switch (m) {
                     .keyword => |k| if (std.mem.eql(u8, s, k)) return true,
                     .keywords => |list| if (repeatedStringsContain(list, s)) return true,
+                    // `Range<DateTimePayloadType>::check_match`: a string
+                    // that does not parse is no match.
+                    .datetime => |dr| if (parseDatetime(s)) |v| if (dr.contains(v)) return true,
                     else => {},
                 }
             },
@@ -1170,7 +1501,7 @@ pub const Store = struct {
         var best: ?Pick = null;
         var best_len: usize = std.math.maxInt(usize);
         for (filter.musts()) |c| {
-            if (c.or_range != null) continue;
+            if (c.or_match != null) continue;
             const f = self.field(c.key) orelse continue;
             const n = postingLen(f, c.match) orelse continue;
             if (n < best_len) {
@@ -1240,7 +1571,9 @@ pub const Store = struct {
                 if (f.index != .float) return null;
                 return f.index.float.count(r);
             },
-            .boolean => return null,
+            // No index holds what these ask: the blobs decide, as for an
+            // unindexed field.
+            .boolean, .datetime, .values_count, .is_empty, .is_null => return null,
         }
     }
 
@@ -1347,7 +1680,7 @@ pub const Store = struct {
                 },
                 // A float field's entries are not postings; `select` reads
                 // them before this runs.
-                .boolean, .range => return null,
+                .boolean, .range, .datetime, .values_count, .is_empty, .is_null => return null,
                 .keywords => {
                     while (!self.r.atEnd()) {
                         const t = self.r.tag() catch return null;
@@ -1958,10 +2291,275 @@ test "a range matches double and integer payloads, any list element, never a mis
     }
     // A FieldCondition with both a match and a range admits either.
     var both = Filter{};
-    try both.add(.must, .{ .key = "x", .match = .{ .keyword = "4" }, .or_range = Range.fromBounds(null, null, null, 0.5) });
+    try both.add(.must, .{ .key = "x", .match = .{ .keyword = "4" }, .or_match = .{ .range = Range.fromBounds(null, null, null, 0.5) } });
     for ([_]bool{ true, false, true, true, false, false, false }, 0..) |want, off| {
         try testing.expectEqual(want, store.matches(@intCast(off), &both));
     }
+}
+
+/// `{ key: value }`, the value given as its encoded `Value` bytes.
+fn rawEntry(buf: []u8, key: []const u8, value: []const u8) []const u8 {
+    var w = wire.Writer.init(buf);
+    w.writeStringField(entry_key, key) catch unreachable;
+    w.tag(entry_value, .length_delimited) catch unreachable;
+    w.varint(value.len) catch unreachable;
+    w.raw(value) catch unreachable;
+    return w.written();
+}
+
+/// Encoded `Value`s, by hand: `null_value = 1` (varint), `integer_value =
+/// 3`, `string_value = 4`, `struct_value = 6`, `list_value = 7`, a list's
+/// elements at `ListValue.values = 1`.
+const shape_values = [_][]const u8{
+    "\x08\x00", // null
+    "", // no kind set: null to Qdrant
+    "\x3a\x00", // []
+    "\x3a\x04\x0a\x02\x08\x00", // [null]
+    "\x3a\x08\x0a\x02\x18\x01\x0a\x02\x08\x00", // [1, null]
+    "\x3a\x08\x0a\x02\x18\x01\x0a\x02\x18\x02", // [1, 2]
+    "\x22\x01s", // "s"
+    "\x32\x09\x0a\x07\x0a\x01b\x12\x02\x08\x00", // {"b": null}
+    "\x18\x00", // 0
+    "\x3a\x04\x0a\x02\x3a\x00", // [[]]
+    "\x3a\x02\x0a\x00", // [<no kind>]
+};
+
+/// A store whose point `i < shape_values.len` holds `t` = `shape_values[i]`
+/// beside an unrelated key; the next point has only the unrelated key, and
+/// the one after it no payload at all.
+fn shapeStore() !Store {
+    var store = try Store.init(testing.allocator, 16);
+    errdefer store.deinit(testing.allocator);
+    var e1: [64]u8 = undefined;
+    var e2: [64]u8 = undefined;
+    var m: [256]u8 = undefined;
+    const other = entryBytes(&e2, "o", value_integer, 1);
+    for (shape_values, 0..) |v, i| {
+        try store.set(testing.allocator, @intCast(i), mapBytes(&m, &.{ rawEntry(&e1, "t", v), other }), 3);
+    }
+    try store.set(testing.allocator, shape_values.len, mapBytes(&m, &.{other}), 3);
+    return store;
+}
+
+fn expectAdmits(store: *const Store, clause: Filter.Clause, c: Condition, want: [shape_values.len + 2]bool) !void {
+    var f = Filter{};
+    try f.add(clause, c);
+    for (want, 0..) |w, off| {
+        testing.expectEqual(w, store.matches(@intCast(off), &f)) catch |e| {
+            std.debug.print("point {d}\n", .{off});
+            return e;
+        };
+    }
+}
+
+test "is_empty, is_null and values_count read a value as Qdrant's checks do, a missing field included" {
+    var store = try shapeStore();
+    defer store.deinit(testing.allocator);
+    const T = true;
+    const F = false;
+    // Columns: null, no kind, [], [null], [1, null], [1, 2], "s", {"b": null},
+    // 0, [[]], [<no kind>], `t` missing, no payload.
+    //
+    // `check_is_empty`: null or an empty list; missing is empty (`check_empty`
+    // returns `is_empty`). `[null]` has an element, so it is not.
+    try expectAdmits(&store, .must, .{ .key = "t", .match = .{ .is_empty = true } }, .{ T, T, T, F, F, F, F, F, F, F, F, T, T });
+    // `is_empty: false` is the complement on a present field, and false on a
+    // missing one.
+    try expectAdmits(&store, .must, .{ .key = "t", .match = .{ .is_empty = false } }, .{ F, F, F, T, T, T, T, T, T, T, T, F, F });
+    // `check_is_null`: null, or a list holding a null; a struct holding one
+    // is an object, and a missing field is not null.
+    try expectAdmits(&store, .must, .{ .key = "t", .match = .{ .is_null = true } }, .{ T, T, F, T, T, F, F, F, F, F, T, F, F });
+    // `is_null: false` on a missing field holds (`check_empty` returns
+    // `!is_null`).
+    try expectAdmits(&store, .must, .{ .key = "t", .match = .{ .is_null = false } }, .{ F, F, T, F, F, T, T, T, T, T, F, T, T });
+    // Counts: 0, 0, 0, 1, 2, 2, 1, 1, 1, 1, 1, 0, 0.
+    try expectAdmits(&store, .must, .{ .key = "t", .match = .{ .values_count = ValuesCount.fromBounds(1, null, null, null) } }, .{ T, T, T, F, F, F, F, F, F, F, F, T, T });
+    try expectAdmits(&store, .must, .{ .key = "t", .match = .{ .values_count = ValuesCount.fromBounds(null, null, 2, null) } }, .{ F, F, F, F, T, T, F, F, F, F, F, F, F });
+    try expectAdmits(&store, .must, .{ .key = "t", .match = .{ .values_count = ValuesCount.fromBounds(null, 0, null, 1) } }, .{ F, F, F, T, F, F, T, T, T, T, T, F, F });
+    // No bounds: every count, so every point.
+    try expectAdmits(&store, .must, .{ .key = "t", .match = .{ .values_count = .{} } }, .{ T, T, T, T, T, T, T, T, T, T, T, T, T });
+    // must_not negates per point, missing field and absent payload alike.
+    try expectAdmits(&store, .must_not, .{ .key = "t", .match = .{ .is_empty = true } }, .{ F, F, F, T, T, T, T, T, T, T, T, F, F });
+    try expectAdmits(&store, .must_not, .{ .key = "t", .match = .{ .is_null = true } }, .{ F, F, T, F, F, T, T, T, T, T, F, T, T });
+    // should ORs a shape condition with a value match.
+    var sh = Filter{};
+    try sh.add(.should, .{ .key = "t", .match = .{ .is_null = true } });
+    try sh.add(.should, .{ .key = "t", .match = .{ .keyword = "s" } });
+    for ([_]bool{ T, T, F, T, T, F, T, F, F, F, T, F, F }, 0..) |want, off| {
+        try testing.expectEqual(want, store.matches(@intCast(off), &sh));
+    }
+}
+
+test "values_count folds its bounds, the u64 ends included" {
+    const max = std.math.maxInt(u64);
+    try testing.expect(!ValuesCount.fromBounds(null, 2, null, null).contains(2));
+    try testing.expect(ValuesCount.fromBounds(null, 2, null, null).contains(3));
+    try testing.expect(ValuesCount.fromBounds(null, null, 2, null).contains(2));
+    try testing.expect(!ValuesCount.fromBounds(2, null, null, null).contains(2));
+    try testing.expect(ValuesCount.fromBounds(null, null, null, 2).contains(2));
+    try testing.expect(!ValuesCount.fromBounds(null, null, null, 2).contains(3));
+    // `lt: 0` admits nothing, `gt: max` nothing, `lte: max` everything.
+    try testing.expect(!ValuesCount.fromBounds(0, null, null, null).contains(0));
+    try testing.expect(!ValuesCount.fromBounds(null, max, null, null).contains(max));
+    try testing.expect(ValuesCount.fromBounds(null, null, null, max).contains(max));
+    // The strictest of each side.
+    const both = ValuesCount.fromBounds(5, 1, 0, 9);
+    try testing.expect(!both.contains(1) and both.contains(2) and both.contains(4) and !both.contains(5));
+}
+
+test "a datetime string parses to Qdrant's instant in the forms it accepts, and to null otherwise" {
+    try testing.expectEqual(@as(i64, 0), daysFromCivil(1970, 1, 1));
+    try testing.expectEqual(@as(i64, -1), daysFromCivil(1969, 12, 31));
+    try testing.expectEqual(@as(i64, 11017), daysFromCivil(2000, 3, 1));
+    const midnight: i64 = 1_704_067_200; // 2024-01-01T00:00:00Z
+    const Case = struct { s: []const u8, want: ?Instant };
+    const at = struct {
+        fn f(secs: i64, micros: u32) ?Instant {
+            return .{ .secs = secs, .micros = micros };
+        }
+    }.f;
+    const cases = [_]Case{
+        // The naive forms are UTC.
+        .{ .s = "2024-01-01", .want = at(midnight, 0) },
+        .{ .s = "2024-01-01T10:20", .want = at(midnight + 37_200, 0) },
+        .{ .s = "2024-01-01 10:20", .want = at(midnight + 37_200, 0) },
+        .{ .s = "2024-01-01T10:20:30", .want = at(midnight + 37_230, 0) },
+        .{ .s = "2024-01-01 10:20:30.5", .want = at(midnight + 37_230, 500_000) },
+        // Fraction digits past six are truncated, not rounded.
+        .{ .s = "2024-01-01T10:20:30.1234567", .want = at(midnight + 37_230, 123_456) },
+        .{ .s = "2024-01-01T10:20:30.9999999999Z", .want = at(midnight + 37_230, 999_999) },
+        // Offsets: the instant is UTC.
+        .{ .s = "2024-01-01T10:20:30Z", .want = at(midnight + 37_230, 0) },
+        .{ .s = "2024-01-01t10:20:30z", .want = at(midnight + 37_230, 0) },
+        .{ .s = "2024-01-01T01:00:00+01:00", .want = at(midnight, 0) },
+        .{ .s = "2023-12-31 22:30:00-0130", .want = at(midnight, 0) },
+        .{ .s = "2024-01-01T05:00:00+05", .want = at(midnight, 0) },
+        .{ .s = "2024-01-01t01:00:00+0100", .want = at(midnight, 0) },
+        .{ .s = "2024-01-01T00:00:00+23:59", .want = at(midnight - 86_340, 0) },
+        // A leap second sorts after :59.999999 and before the next minute.
+        .{ .s = "2016-12-31T23:59:60Z", .want = at(1_483_228_799, 1_000_000) },
+        .{ .s = "2016-12-31 23:59:60.25", .want = at(1_483_228_799, 1_250_000) },
+        // Calendar checks.
+        .{ .s = "2024-02-29", .want = at(daysFromCivil(2024, 2, 29) * 86_400, 0) },
+        .{ .s = "2000-02-29", .want = at(daysFromCivil(2000, 2, 29) * 86_400, 0) },
+        .{ .s = "2023-02-29", .want = null },
+        .{ .s = "1900-02-29", .want = null },
+        .{ .s = "2024-04-31", .want = null },
+        .{ .s = "2024-13-01", .want = null },
+        .{ .s = "2024-00-10", .want = null },
+        .{ .s = "2024-01-01T24:00:00", .want = null },
+        .{ .s = "2024-01-01T10:60", .want = null },
+        .{ .s = "2024-01-01T10:20:61", .want = null },
+        // Not forms Qdrant accepts: an offset without seconds, a naive time
+        // with a lowercase `t`, `+HH` after a lowercase `t`, an empty
+        // fraction, an offset of a day or more, trailing bytes.
+        .{ .s = "2024-01-01T10:20Z", .want = null },
+        .{ .s = "2024-01-01t10:20:30", .want = null },
+        .{ .s = "2024-01-01t10:20:30+01", .want = null },
+        .{ .s = "2024-01-01T10:20:30.", .want = null },
+        .{ .s = "2024-01-01T10:20:30+24:00", .want = null },
+        .{ .s = "2024-01-01T10:20:30+01:60", .want = null },
+        .{ .s = "2024-01-01T10:20:30+1", .want = null },
+        .{ .s = "2024-01-01T10:20:30Zx", .want = null },
+        .{ .s = "2024-01-01x", .want = null },
+        // Forms chrono takes that this does not (doc comment): never a match.
+        .{ .s = "2024-01-01T10:20:30 Z", .want = null },
+        .{ .s = "2024-01-01T10:20:30UTC", .want = null },
+        .{ .s = " 2024-01-01", .want = null },
+        .{ .s = "+12024-01-01", .want = null },
+        .{ .s = "keyword", .want = null },
+        .{ .s = "", .want = null },
+    };
+    for (cases) |c| {
+        const got = parseDatetime(c.s);
+        testing.expectEqual(c.want, got) catch |e| {
+            std.debug.print("parsing \"{s}\"\n", .{c.s});
+            return e;
+        };
+    }
+}
+
+test "a Timestamp bound is read as Qdrant reads it: microseconds, leap seconds, chrono's range" {
+    try testing.expectEqual(Instant{ .secs = 10, .micros = 123_456 }, instantFromTimestamp(10, 123_456_789).?);
+    // A negative `nanos` is 0.
+    try testing.expectEqual(Instant{ .secs = 10, .micros = 0 }, instantFromTimestamp(10, -5).?);
+    // A leap second only on second 59, and below two seconds.
+    try testing.expectEqual(Instant{ .secs = 59, .micros = 1_500_000 }, instantFromTimestamp(59, 1_500_000_000).?);
+    try testing.expectEqual(Instant{ .secs = -1, .micros = 1_000_000 }, instantFromTimestamp(-1, 1_000_000_000).?);
+    try testing.expect(instantFromTimestamp(58, 1_000_000_000) == null);
+    try testing.expect(instantFromTimestamp(59, 2_000_000_000) == null);
+    // `NaiveDate::MIN` is -262143-01-01 (chrono's own serde test).
+    try testing.expect(instantFromTimestamp(timestamp_min_secs, 0) != null);
+    try testing.expect(instantFromTimestamp(timestamp_min_secs - 1, 0) == null);
+    try testing.expect(instantFromTimestamp(timestamp_max_secs, 0) != null);
+    try testing.expect(instantFromTimestamp(timestamp_max_secs + 1, 0) == null);
+    try testing.expectEqual(@as(i64, 86_399), @mod(timestamp_max_secs, 86_400));
+}
+
+test "a datetime range matches parsed strings and any list element, never a number or a missing field" {
+    var store = try Store.init(testing.allocator, 16);
+    defer store.deinit(testing.allocator);
+    var e1: [128]u8 = undefined;
+    var m: [256]u8 = undefined;
+    const strs = [_][]const u8{
+        "2024-01-01T00:00:00Z",
+        "2024-01-01T01:00:00+01:00", // the same instant
+        "2024-01-01", // the same instant
+        "", // replaced by a list below
+        "not a date",
+        "", // an integer below
+        "", // missing below
+        "2023-12-31T23:59:59.9999999Z",
+    };
+    for (strs, 0..) |s, i| {
+        const entry = switch (i) {
+            // ["garbage", "2024-06-01T12:00:00.500000Z"]
+            3 => rawEntry(&e1, "d", "\x3a\x2a\x0a\x09\x22\x07garbage\x0a\x1d\x22\x1b2024-06-01T12:00:00.500000Z"),
+            5 => entryBytes(&e1, "d", value_integer, 1_704_067_200),
+            6 => entryBytes(&e1, "x", value_string, "2024-01-01"),
+            else => entryBytes(&e1, "d", value_string, s),
+        };
+        try store.set(testing.allocator, @intCast(i), mapBytes(&m, &.{entry}), 3);
+    }
+    const midnight = Instant{ .secs = 1_704_067_200, .micros = 0 };
+    const last_micro = Instant{ .secs = 1_704_067_199, .micros = 999_999 };
+    const Case = struct { clause: Filter.Clause, r: DatetimeRange, want: [8]bool };
+    const cases = [_]Case{
+        .{ .clause = .must, .r = DatetimeRange.fromBounds(null, null, midnight, null), .want = .{ true, true, true, true, false, false, false, false } },
+        .{ .clause = .must, .r = DatetimeRange.fromBounds(null, midnight, null, null), .want = .{ false, false, false, true, false, false, false, false } },
+        .{ .clause = .must, .r = DatetimeRange.fromBounds(midnight, null, null, null), .want = .{ false, false, false, false, false, false, false, true } },
+        // The payload's seventh fraction digit is truncated: it equals the
+        // bound, which `lt` excludes and `lte` admits.
+        .{ .clause = .must, .r = DatetimeRange.fromBounds(last_micro, null, null, null), .want = .{ false, false, false, false, false, false, false, false } },
+        .{ .clause = .must, .r = DatetimeRange.fromBounds(null, null, null, last_micro), .want = .{ false, false, false, false, false, false, false, true } },
+        // No bounds: every value that parses.
+        .{ .clause = .must, .r = .{}, .want = .{ true, true, true, true, false, false, false, true } },
+        // must_not: the rest, the unparsable, the number and the missing.
+        .{ .clause = .must_not, .r = DatetimeRange.fromBounds(null, null, midnight, null), .want = .{ false, false, false, false, true, true, true, true } },
+    };
+    for (cases) |cs| {
+        var f = Filter{};
+        try f.add(cs.clause, .{ .key = "d", .match = .{ .datetime = cs.r } });
+        for (cs.want, 0..) |want, off| {
+            try testing.expectEqual(want, store.matches(@intCast(off), &f));
+        }
+    }
+    // A match ORed with a datetime range, as one FieldCondition.
+    var mo = Filter{};
+    try mo.add(.must, .{ .key = "d", .match = .{ .keyword = "not a date" }, .or_match = .{ .datetime = DatetimeRange.fromBounds(null, midnight, null, null) } });
+    for ([_]bool{ false, false, false, true, true, false, false, false }, 0..) |want, off| {
+        try testing.expectEqual(want, store.matches(@intCast(off), &mo));
+    }
+    // No index answers a datetime or a shape condition, even on an indexed
+    // field: the blobs decide.
+    try store.createIndex(testing.allocator, "d", .keyword, 8);
+    var bits: [1]u64 = undefined;
+    var sel = Filter{};
+    try sel.add(.must, .{ .key = "d", .match = .{ .datetime = .{} } });
+    try testing.expect(store.select(&sel, &bits, 8) == null);
+    var se = Filter{};
+    try se.add(.must, .{ .key = "d", .match = .{ .is_empty = false } });
+    try testing.expect(store.select(&se, &bits, 8) == null);
 }
 
 test "a range on an integer field is not read from its postings, and a float field answers it" {
@@ -1991,7 +2589,7 @@ test "a range on an integer field is not read from its postings, and a float fie
     try k.add(.must, .{ .key = "f", .match = .{ .integer = 2 } });
     try testing.expect(store.select(&k, &bits, 4) == null);
     var mr = Filter{};
-    try mr.add(.must, .{ .key = "f", .match = .{ .integer = 2 }, .or_range = Range{} });
+    try mr.add(.must, .{ .key = "f", .match = .{ .integer = 2 }, .or_match = .{ .range = Range{} } });
     try testing.expect(store.select(&mr, &bits, 4) == null);
     try testing.expectEqual(Kind.float, store.field("f").?.kind());
     try testing.expectEqual(@as(u32, 3), Kind.float.schemaType());

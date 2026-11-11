@@ -461,10 +461,10 @@ pub const PointStruct = struct {
 /// min_should = 4; }` (VERIFIED, points.proto) into the shape the payload
 /// store evaluates. Borrows the bytes.
 ///
-/// Every construct outside the keyword/integer/boolean `Match` on a
-/// `FieldCondition` is refused *by name* rather than ignored: a filter
-/// condition the engine skipped would return points the client asked not to
-/// see, which is the silent degradation §1 forbids. Nested `Filter`s in a
+/// Every construct this engine does not evaluate is refused *by name*
+/// rather than ignored: a filter condition the engine skipped would return
+/// points the client asked not to see, which is the silent degradation §1
+/// forbids. Nested `Filter`s in a
 /// `Condition` are flattened one level when they carry only `must`, since
 /// `must(must(a), must(b))` is `must(a, b)`.
 pub fn decodeFilter(bytes: []const u8) DecodeError!payload.Filter {
@@ -507,14 +507,24 @@ fn decodeCondition(r: *Reader, out: *payload.Filter, clause: payload.Filter.Clau
                 const c = try decodeFieldCondition(&fc);
                 out.add(clause, c) catch return invalidArgument("more than 16 conditions in one clause");
             },
-            2 => return unimplemented("is_empty conditions"),
+            // `IsEmptyCondition { string key = 1; }` and `IsNullCondition`,
+            // the same shape. On one top-level key, which holds one value,
+            // Qdrant's `check_is_empty`/`check_is_null` over the key's
+            // values (lib/segment/src/common/utils.rs) agree with the
+            // `FieldCondition` forms set to `true` on a present and on a
+            // missing key alike, so they decode to those.
+            2, 5 => {
+                var kc = try r.nested();
+                const key = try decodeConditionKey(&kc);
+                const m: payload.Match = if (t.field == 2) .{ .is_empty = true } else .{ .is_null = true };
+                out.add(clause, .{ .key = key, .match = m }) catch return invalidArgument("more than 16 conditions in one clause");
+            },
             3 => return unimplemented("has_id conditions"),
             4 => {
                 if (clause != .must) return unimplemented("a nested Filter under should/must_not");
                 var inner = try r.nested();
                 try decodeFilterInto(&inner, out, .must);
             },
-            5 => return unimplemented("is_null conditions"),
             6 => return unimplemented("nested (array element) conditions"),
             7 => return unimplemented("has_vector conditions"),
             8 => return unimplemented("slice conditions"),
@@ -523,12 +533,27 @@ fn decodeCondition(r: *Reader, out: *payload.Filter, clause: payload.Filter.Clau
     }
 }
 
-/// `FieldCondition { key = 1; Match match = 2; Range range = 3; ... }`
-/// (VERIFIED, qdrant_common.proto).
+/// `FieldCondition { string key = 1; Match match = 2; Range range = 3;
+/// GeoBoundingBox geo_bounding_box = 4; GeoRadius geo_radius = 5;
+/// ValuesCount values_count = 6; GeoPolygon geo_polygon = 7;
+/// DatetimeRange datetime_range = 8; optional bool is_empty = 9;
+/// optional bool is_null = 10; }` (VERIFIED, qdrant_common.proto).
+///
+/// Which parts count is Qdrant's. The gRPC conversion keeps
+/// `datetime_range` only when `range` is absent (`TryFrom<FieldCondition>`,
+/// lib/api/src/grpc/conversions.rs: both become the one `range` field).
+/// Evaluation then takes `values_count`, else `is_empty`, else `is_null`,
+/// alone, for a present field and a missing one (`FieldCondition::check` and
+/// `check_empty`, condition_checker.rs); only without any of them are
+/// `match` and the range ORed, per element.
 fn decodeFieldCondition(r: *Reader) DecodeError!payload.Condition {
     var key: ?[]const u8 = null;
     var match: ?payload.Match = null;
     var range: ?payload.Range = null;
+    var datetime_raw: ?[]const u8 = null;
+    var values_count: ?payload.ValuesCount = null;
+    var is_empty: ?bool = null;
+    var is_null: ?bool = null;
     while (!r.atEnd()) {
         const t = try r.tag();
         switch (t.field) {
@@ -542,20 +567,123 @@ fn decodeFieldCondition(r: *Reader) DecodeError!payload.Condition {
                 range = try decodeRange(&rg);
             },
             4, 5, 7 => return unimplemented("geo conditions (§1 non-goal)"),
-            6 => return unimplemented("values_count conditions"),
-            8 => return unimplemented("datetime_range conditions"),
-            9 => return unimplemented("FieldCondition.is_empty"),
-            10 => return unimplemented("FieldCondition.is_null"),
+            6 => {
+                var vc = try r.nested();
+                values_count = try decodeValuesCount(&vc);
+            },
+            8 => datetime_raw = try r.bytes(),
+            9 => is_empty = try r.boolean(),
+            10 => is_null = try r.boolean(),
             else => try r.skip(t.wire_type),
         }
     }
     const k = key orelse return invalidArgument("FieldCondition without a key");
+    // Converted, and so validated, only when there is no `range`.
+    var datetime: ?payload.DatetimeRange = null;
+    if (range == null) {
+        if (datetime_raw) |raw| {
+            var dr = Reader.init(raw);
+            datetime = try decodeDatetimeRange(&dr);
+        }
+    }
+    const shape: ?payload.Match = if (values_count) |vc|
+        .{ .values_count = vc }
+    else if (is_empty) |b|
+        .{ .is_empty = b }
+    else if (is_null) |b|
+        .{ .is_null = b }
+    else
+        null;
+    if (shape) |m| {
+        try requireTopLevelKey(k);
+        return .{ .key = k, .match = m };
+    }
+    if (datetime != null) try requireTopLevelKey(k);
+    const ranged: ?payload.Match = if (range) |rg|
+        .{ .range = rg }
+    else if (datetime) |dr|
+        .{ .datetime = dr }
+    else
+        null;
     // Qdrant's validation asks for at least one condition and accepts
-    // several, ORed (`ValueChecker for FieldCondition`); `or_range` carries
+    // several, ORed (`ValueChecker for FieldCondition`); `or_match` carries
     // the second.
-    if (match) |m| return .{ .key = k, .match = m, .or_range = range };
-    if (range) |rg| return .{ .key = k, .match = .{ .range = rg } };
-    return invalidArgument("FieldCondition without a match or a range (only these are implemented)");
+    if (match) |m| return .{ .key = k, .match = m, .or_match = ranged };
+    if (ranged) |m| return .{ .key = k, .match = m };
+    return invalidArgument("FieldCondition without a match or any other condition (at least one must be specified)");
+}
+
+/// The key of an `IsEmptyCondition`/`IsNullCondition { string key = 1; }`.
+fn decodeConditionKey(r: *Reader) DecodeError![]const u8 {
+    var key: []const u8 = &.{};
+    while (!r.atEnd()) {
+        const t = try r.tag();
+        if (t.field == 1) key = try r.bytes() else try r.skip(t.wire_type);
+    }
+    // Qdrant parses the key as a JSON path, and an empty one does not parse
+    // (`json_path_from_proto`, lib/api/src/conversions/json.rs).
+    if (key.len == 0) return invalidArgument("Invalid json path: ''");
+    try requireTopLevelKey(key);
+    return key;
+}
+
+/// Qdrant reads a condition key as a JSON path (`a.b`, `a[]`, `a[0]`,
+/// `"a.b"`; lib/segment/src/json_path/parse.rs) and this store matches a
+/// top-level key byte for byte. For a value match the two agree on a key
+/// without path syntax and only miss on one with it. The conditions added
+/// with this check refuse such a key by name rather than inherit that miss,
+/// which for the ones a *missing* field satisfies (`is_empty`,
+/// `values_count` with 0 in range, `is_null: false`) would be the opposite
+/// miss: a path read as a plain key admits every point.
+fn requireTopLevelKey(key: []const u8) DecodeError!void {
+    if (std.mem.indexOfAny(u8, key, ".[]\"") != null)
+        return unimplemented("a nested payload path in is_empty, is_null, values_count or datetime_range");
+}
+
+/// `ValuesCount { optional uint64 lt = 1; optional uint64 gt = 2; optional
+/// uint64 gte = 3; optional uint64 lte = 4; }` (VERIFIED, qdrant_common.proto).
+fn decodeValuesCount(r: *Reader) DecodeError!payload.ValuesCount {
+    var b: [4]?u64 = .{ null, null, null, null };
+    while (!r.atEnd()) {
+        const t = try r.tag();
+        if (t.field < 1 or t.field > 4) {
+            try r.skip(t.wire_type);
+            continue;
+        }
+        if (t.wire_type != .varint) return invalidArgument("ValuesCount bound is not a uint64");
+        b[t.field - 1] = try r.varint();
+    }
+    return payload.ValuesCount.fromBounds(b[0], b[1], b[2], b[3]);
+}
+
+/// `DatetimeRange { optional google.protobuf.Timestamp lt = 1; gt = 2;
+/// gte = 3; lte = 4; }` (VERIFIED, qdrant_common.proto), each a
+/// `Timestamp { int64 seconds = 1; int32 nanos = 2; }`.
+fn decodeDatetimeRange(r: *Reader) DecodeError!payload.DatetimeRange {
+    var b: [4]?payload.Instant = .{ null, null, null, null };
+    while (!r.atEnd()) {
+        const t = try r.tag();
+        if (t.field < 1 or t.field > 4) {
+            try r.skip(t.wire_type);
+            continue;
+        }
+        if (t.wire_type != .length_delimited) return invalidArgument("DatetimeRange bound is not a Timestamp");
+        var ts = try r.nested();
+        var seconds: i64 = 0;
+        var nanos: i32 = 0;
+        while (!ts.atEnd()) {
+            const tt = try ts.tag();
+            switch (tt.field) {
+                1 => seconds = @bitCast(try ts.varint()),
+                2 => nanos = @bitCast(try ts.varint32()),
+                else => try ts.skip(tt.wire_type),
+            }
+        }
+        // Qdrant's message (`try_date_time_from_proto`).
+        b[t.field - 1] = payload.instantFromTimestamp(seconds, nanos) orelse
+            return invalidArgument("Unable to parse timestamp");
+    }
+    return payload.DatetimeRange.fromBounds(b[0], b[1], b[2], b[3]);
 }
 
 /// `Range { optional double lt = 1; optional double gt = 2; optional double
@@ -2458,7 +2586,7 @@ test "a FieldCondition with a match and a range keeps both, and a bound must be 
     try writeRangeCondition(&w, 2, "a", &.{.{ 3, 7 }}, "x");
     const f = try decodeFilter(w.written());
     try testing.expectEqualStrings("x", f.must[0].match.keyword);
-    try testing.expectEqual(@as(f64, 7), f.must[0].or_range.?.lo);
+    try testing.expectEqual(@as(f64, 7), f.must[0].or_match.?.range.lo);
 
     // `lt` sent as a varint is not a double.
     var w2 = Writer.init(&buf);
@@ -2474,4 +2602,185 @@ test "a FieldCondition with a match and a range keeps both, and a bound must be 
     }
     try testing.expectError(DecodeError.InvalidArgument, decodeFilter(w2.written()));
     try testing.expectEqualStrings("Range bound is not a double", takeInvalidDetail());
+}
+
+/// The parts of one `FieldCondition` a test sets; each absent part is not
+/// written.
+const FieldParts = struct {
+    keyword: ?[]const u8 = null,
+    /// `Range { gte = 1 }` of this value.
+    range_gte: ?f64 = null,
+    /// `ValuesCount` bounds by field number.
+    values_count: ?[]const struct { u32, u64 } = null,
+    /// `DatetimeRange` bounds by field number, as `Timestamp { seconds, nanos }`.
+    datetime: ?[]const struct { u32, i64, i32 } = null,
+    is_empty: ?bool = null,
+    is_null: ?bool = null,
+};
+
+fn writeFieldCondition(w: *Writer, clause: u32, key: []const u8, p: FieldParts) !void {
+    const cond = try w.beginNested(clause, 2);
+    const fc = try w.beginNested(1, 2);
+    try w.writeStringField(1, key);
+    if (p.keyword) |k| {
+        const m = try w.beginNested(2, 2);
+        try w.writeStringField(1, k);
+        try w.endNested(m);
+    }
+    if (p.range_gte) |x| {
+        const rg = try w.beginNested(3, 2);
+        try w.tag(3, .fixed64);
+        try w.fixed64(@bitCast(x));
+        try w.endNested(rg);
+    }
+    if (p.values_count) |bounds| {
+        const vc = try w.beginNested(6, 2);
+        for (bounds) |b| try w.writeVarintFieldAlways(b[0], b[1]);
+        try w.endNested(vc);
+    }
+    if (p.datetime) |bounds| {
+        const dr = try w.beginNested(8, 2);
+        for (bounds) |b| {
+            const ts = try w.beginNested(b[0], 2);
+            try w.writeVarintFieldAlways(1, @bitCast(b[1]));
+            // int32 on the wire: a negative value sign-extends to 64 bits.
+            try w.writeVarintFieldAlways(2, @bitCast(@as(i64, b[2])));
+            try w.endNested(ts);
+        }
+        try w.endNested(dr);
+    }
+    // `optional bool`: present when written, `false` included.
+    if (p.is_empty) |b| try w.writeVarintFieldAlways(9, @intFromBool(b));
+    if (p.is_null) |b| try w.writeVarintFieldAlways(10, @intFromBool(b));
+    try w.endNested(fc);
+    try w.endNested(cond);
+}
+
+/// `Condition { IsEmptyCondition is_empty = 2 }` or `{ IsNullCondition
+/// is_null = 5 }` under `clause`.
+fn writeKeyCondition(w: *Writer, clause: u32, which: u32, key: []const u8) !void {
+    const cond = try w.beginNested(clause, 2);
+    const kc = try w.beginNested(which, 2);
+    try w.writeStringField(1, key);
+    try w.endNested(kc);
+    try w.endNested(cond);
+}
+
+test "Condition.is_empty and Condition.is_null decode as the FieldCondition forms set to true" {
+    var buf: [256]u8 = undefined;
+    var w = Writer.init(&buf);
+    try writeKeyCondition(&w, 2, 2, "a");
+    try writeKeyCondition(&w, 3, 5, "b");
+    try writeKeyCondition(&w, 1, 2, "c");
+    const f = try decodeFilter(w.written());
+    try testing.expectEqualStrings("a", f.must[0].key);
+    try testing.expect(f.must[0].match.is_empty);
+    try testing.expectEqualStrings("b", f.must_not[0].key);
+    try testing.expect(f.must_not[0].match.is_null);
+    try testing.expect(f.should[0].match.is_empty);
+
+    // An empty key is not a JSON path Qdrant parses.
+    var w2 = Writer.init(&buf);
+    try writeKeyCondition(&w2, 2, 5, "");
+    try testing.expectError(DecodeError.InvalidArgument, decodeFilter(w2.written()));
+    try testing.expectEqualStrings("Invalid json path: ''", takeInvalidDetail());
+    // A path into the payload is refused by name.
+    for ([_][]const u8{ "a.b", "a[]", "a[0]", "\"a\"" }) |key| {
+        var w3 = Writer.init(&buf);
+        try writeKeyCondition(&w3, 2, 2, key);
+        try testing.expectError(DecodeError.Unimplemented, decodeFilter(w3.written()));
+        try testing.expectEqualStrings("a nested payload path in is_empty, is_null, values_count or datetime_range", unimplemented_detail);
+    }
+}
+
+test "FieldCondition.is_empty, is_null and values_count decode, and override a match beside them as Qdrant's check does" {
+    var buf: [512]u8 = undefined;
+    var w = Writer.init(&buf);
+    try writeFieldCondition(&w, 2, "a", .{ .is_empty = false });
+    try writeFieldCondition(&w, 2, "b", .{ .is_null = true });
+    try writeFieldCondition(&w, 3, "c", .{ .values_count = &.{ .{ 2, 1 }, .{ 4, 3 } } });
+    // A match and a range beside `is_null` do not count.
+    try writeFieldCondition(&w, 1, "d", .{ .keyword = "x", .range_gte = 1, .is_null = false });
+    // `values_count` before `is_empty`, `is_empty` before `is_null`.
+    try writeFieldCondition(&w, 1, "e", .{ .values_count = &.{.{ 1, 1 }}, .is_empty = true, .is_null = true });
+    try writeFieldCondition(&w, 1, "f", .{ .is_empty = true, .is_null = true });
+    const f = try decodeFilter(w.written());
+    try testing.expectEqual(@as(usize, 2), f.must_len);
+    try testing.expect(f.must[0].match == .is_empty and !f.must[0].match.is_empty);
+    try testing.expect(f.must[1].match == .is_null and f.must[1].match.is_null);
+    // gt 1, lte 3: counts 2 and 3.
+    const vc = f.must_not[0].match.values_count;
+    try testing.expect(!vc.contains(1) and vc.contains(2) and vc.contains(3) and !vc.contains(4));
+    try testing.expect(f.should[0].match == .is_null and !f.should[0].match.is_null);
+    try testing.expect(f.should[0].or_match == null);
+    // lt 1: a count of 0.
+    try testing.expect(f.should[1].match.values_count.contains(0));
+    try testing.expect(!f.should[1].match.values_count.contains(1));
+    try testing.expect(f.should[2].match == .is_empty);
+
+    // A `ValuesCount` bound must be a varint.
+    var w2 = Writer.init(&buf);
+    {
+        const cond = try w2.beginNested(2, 2);
+        const fc = try w2.beginNested(1, 2);
+        try w2.writeStringField(1, "a");
+        const vcm = try w2.beginNested(6, 2);
+        try w2.tag(1, .fixed64);
+        try w2.fixed64(1);
+        try w2.endNested(vcm);
+        try w2.endNested(fc);
+        try w2.endNested(cond);
+    }
+    try testing.expectError(DecodeError.InvalidArgument, decodeFilter(w2.written()));
+    try testing.expectEqualStrings("ValuesCount bound is not a uint64", takeInvalidDetail());
+    // A key alone is no condition.
+    var w3 = Writer.init(&buf);
+    try writeFieldCondition(&w3, 2, "a", .{});
+    try testing.expectError(DecodeError.InvalidArgument, decodeFilter(w3.written()));
+    _ = takeInvalidDetail();
+    // A path key is refused for these, as for the Condition forms.
+    var w4 = Writer.init(&buf);
+    try writeFieldCondition(&w4, 3, "a.b", .{ .values_count = &.{} });
+    try testing.expectError(DecodeError.Unimplemented, decodeFilter(w4.written()));
+}
+
+test "FieldCondition.datetime_range decodes its Timestamp bounds, ORs with a match, and yields to a range" {
+    const midnight: i64 = 1_704_067_200; // 2024-01-01T00:00:00Z
+    var buf: [512]u8 = undefined;
+    var w = Writer.init(&buf);
+    // gte midnight + 0.5 s, lt one day later (nanos below a microsecond
+    // truncated away).
+    try writeFieldCondition(&w, 2, "d", .{ .datetime = &.{ .{ 3, midnight, 500_000_999 }, .{ 1, midnight + 86_400, 0 } } });
+    // With a match: ORed.
+    try writeFieldCondition(&w, 3, "d", .{ .keyword = "x", .datetime = &.{.{ 2, midnight, 0 }} });
+    // With a range: the range alone, the datetime not even validated
+    // (an out-of-range `seconds`).
+    try writeFieldCondition(&w, 1, "d", .{ .range_gte = 1, .datetime = &.{.{ 2, std.math.maxInt(i64), 0 }} });
+    const f = try decodeFilter(w.written());
+    const dr = f.must[0].match.datetime;
+    try testing.expectEqual(payload.Instant{ .secs = midnight, .micros = 500_000 }, dr.lo);
+    try testing.expect(!dr.lo_strict);
+    try testing.expectEqual(payload.Instant{ .secs = midnight + 86_400, .micros = 0 }, dr.hi);
+    try testing.expect(dr.hi_strict);
+    try testing.expect(dr.contains(payload.parseDatetime("2024-01-01T00:00:00.5Z").?));
+    try testing.expect(!dr.contains(payload.parseDatetime("2024-01-01T00:00:00.499999Z").?));
+    try testing.expect(!dr.contains(payload.parseDatetime("2024-01-02").?));
+    try testing.expectEqualStrings("x", f.must_not[0].match.keyword);
+    try testing.expect(f.must_not[0].or_match.?.datetime.lo_strict);
+    try testing.expect(f.should[0].match == .range);
+    try testing.expect(f.should[0].or_match == null);
+
+    // Out of chrono's range, or a leap second off second 59: refused with
+    // Qdrant's message.
+    for ([_]struct { i64, i32 }{ .{ std.math.maxInt(i64), 0 }, .{ midnight, 1_000_000_000 } }) |bad| {
+        var w2 = Writer.init(&buf);
+        try writeFieldCondition(&w2, 2, "d", .{ .datetime = &.{.{ 4, bad[0], bad[1] }} });
+        try testing.expectError(DecodeError.InvalidArgument, decodeFilter(w2.written()));
+        try testing.expectEqualStrings("Unable to parse timestamp", takeInvalidDetail());
+    }
+    // A negative `nanos` reads as 0.
+    var w3 = Writer.init(&buf);
+    try writeFieldCondition(&w3, 2, "d", .{ .datetime = &.{.{ 4, midnight, -7 }} });
+    const g = try decodeFilter(w3.written());
+    try testing.expectEqual(payload.Instant{ .secs = midnight, .micros = 0 }, g.must[0].match.datetime.hi);
 }

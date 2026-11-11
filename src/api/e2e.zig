@@ -3771,7 +3771,7 @@ test "e2e: filter constructs outside the keyword/integer match are refused by na
     var out: [1 << 16]u8 = undefined;
     _ = try c.call("/qdrant.Collections/Create", try buildCreateCollection(&req_buf, "rf", 2, 3), &out);
 
-    // A `DatetimeRange` condition (`FieldCondition.datetime_range = 8`).
+    // A `GeoRadius` condition (`FieldCondition.geo_radius = 5`).
     var w = wire.Writer.init(&req_buf);
     try w.writeStringField(1, "rf");
     const qp = try w.beginNested(2, 3);
@@ -3790,8 +3790,8 @@ test "e2e: filter constructs outside the keyword/integer match are refused by na
         const cond = try w.beginNested(2, 2);
         const fc = try w.beginNested(1, 2);
         try w.writeStringField(1, "n");
-        const range = try w.beginNested(8, 2);
-        try w.endNested(range);
+        const gr = try w.beginNested(5, 2);
+        try w.endNested(gr);
         try w.endNested(fc);
         try w.endNested(cond);
         try w.endNested(fl);
@@ -3799,7 +3799,7 @@ test "e2e: filter constructs outside the keyword/integer match are refused by na
     try w.endNested(qp);
     const resp = try c.call("/qdrant.Points/QueryBatch", w.written(), &out);
     try testing.expectEqual(grpc.Status.unimplemented, resp.status);
-    try testing.expectEqualStrings("datetime_range conditions", resp.message);
+    try testing.expectEqualStrings("geo conditions (§1 non-goal)", resp.message);
 
     // A geo field index.
     const geo = try c.call("/qdrant.Points/CreateFieldIndex", try buildCreateFieldIndex(&req_buf, "rf", "loc", 3), &out);
