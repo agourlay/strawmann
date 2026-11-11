@@ -111,6 +111,12 @@ pub const Engine = struct {
     /// workers (`collection.ExactGather`, findings 10). Off is the default
     /// until the A/B measures it.
     exact_gather: bool = false,
+    /// `--prune-memo`: built graphs record each level-0 list's selection, so
+    /// a back-link into a full list re-decides only the new edge
+    /// (`build.Builder.pruneFromMemo`): the same list for about a quarter of
+    /// the scores, in-process. Findings 8's drainer cost at d=1536; off until
+    /// the A/B measures it.
+    prune_memo: bool = false,
     /// Largest vector dimension any worker's scratch can hold.
     ///
     /// §6.3 forbids allocating on the query path, so `Workspace.query` is sized
@@ -265,6 +271,7 @@ pub const Engine = struct {
             prev.join();
             coll.build_thread = null;
         }
+        coll.prune_memo = self.prune_memo;
         const t = std.Thread.spawn(.{}, Task.run, .{ coll, self.build_mode, self.build_threads, self.build_cpus }) catch {
             coll.index_state.store(.absent, .release);
             return;
@@ -2466,6 +2473,28 @@ test "a poll on a built collection with a tail starts the drainer, and --no-drai
         }
         // Either way the collection stays on the graph it has.
         try testing.expectEqual(core.collection.IndexState.ready, c.index_state.load(.acquire));
+    }
+}
+
+test "--prune-memo reaches the graph the engine's build publishes, and only with the flag" {
+    // An arm whose flag never reached the graph would measure nothing.
+    const dim = 8;
+    var v: [dim]f32 = undefined;
+    for ([_]bool{ true, false }) |memo| {
+        var e = Engine.init(testing.allocator);
+        defer e.deinit();
+        e.build_threads = 2;
+        e.prune_memo = memo;
+        const c = try e.create("c", .{ .dim = dim, .metric = .dot, .capacity = 300 });
+        for (0..300) |i| {
+            for (&v, 0..) |*x, j| x.* = @floatFromInt((i * 7 + j * 13) % 17);
+            _ = try c.upsert(.{ .num = i }, &v);
+        }
+        e.ensureIndexBuilding(c);
+        c.build_thread.?.join();
+        c.build_thread = null;
+        try testing.expectEqual(core.collection.IndexState.ready, c.index_state.load(.acquire));
+        try testing.expectEqual(memo, c.graph.?.prune_memo != null);
     }
 }
 
