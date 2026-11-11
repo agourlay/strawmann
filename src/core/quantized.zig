@@ -528,41 +528,42 @@ fn encodeAllProduct(alloc: std.mem.Allocator, cb: *const quant.pq.Codebook, code
 /// Built once per query and pointed at by the traversal's score callback, so
 /// the encoding cost is paid once rather than per distance evaluation.
 pub const Query = struct {
-    store: *const Store,
     kernel: dist.Kernel,
-
-    // Scalar: the query quantised once (`SymmetricQuery`), so stage 1 is
-    // integer throughout. The fp32 query stays for the rescore stage.
-    sym: ?quant.scalar.SymmetricQuery = null,
+    /// The fp32 query, kept for the rescore stage.
     fp32: []const f32 = &.{},
+    /// The query in the store's encoding, tagged as `Store` is, with the
+    /// store's own half alongside so `score` and `prefetch` switch once.
+    prepared: Prepared = .none,
 
-    // Binary
-    bin_codes: []u64 = &.{},
-
-    // Product
-    table: ?*quant.pq.QueryTable = null,
-
-    // TurboQuant: the rotated, corrected query and its scalars.
-    turbo: ?quant.turbo.PreparedQuery = null,
+    pub const Prepared = union(enum) {
+        none,
+        // Scalar: the query quantised once (`SymmetricQuery`), so stage 1 is
+        // integer throughout.
+        scalar: struct { store: *const Store.Scalar, sym: quant.scalar.SymmetricQuery },
+        binary: struct { store: *const Store.Binary, codes: []u64 },
+        product: struct { store: *const Store.Product, table: *quant.pq.QueryTable },
+        // TurboQuant: the rotated, corrected query and its scalars.
+        turbo: struct { store: *const Store.Turbo, query: quant.turbo.PreparedQuery },
+    };
 
     /// Score one node with the quantized representation.
     pub fn score(ctx: *const anyopaque, node: u32) f32 {
         const self: *const Query = @ptrCast(@alignCast(ctx));
-        return switch (self.store.*) {
+        return switch (self.prepared) {
             .none => 0,
-            .scalar => |s| switch (self.kernel) {
-                .dot => self.sym.?.dot(s.row(node), s.stats[node]),
-                .euclid => self.sym.?.euclid(s.row(node), s.stats[node]),
+            .scalar => |*p| switch (self.kernel) {
+                .dot => p.sym.dot(p.store.row(node), p.store.stats[node]),
+                .euclid => p.sym.euclid(p.store.row(node), p.store.stats[node]),
                 // L1, not L2. Sharing the Euclid arm returned a *squared
                 // Euclidean* distance to a client that asked for Manhattan -
                 // and with `rescore = false` that value goes out on the wire as
                 // the score. §8.3 fixes what each metric returns; a quantized
                 // path is not licensed to return a different quantity.
-                .manhattan => self.sym.?.manhattan(s.row(node)),
+                .manhattan => p.sym.manhattan(p.store.row(node)),
             },
-            .binary => |b| quant.binary.signDot(b.dim, self.bin_codes, b.codes.rowConst(node)),
-            .product => |p| self.table.?.score(p.row(node)),
-            .turbo => |*t| t.model.score(&self.turbo.?, t.row(node), t.scalars[node]),
+            .binary => |p| quant.binary.signDot(p.store.dim, p.codes, p.store.codes.rowConst(node)),
+            .product => |p| p.table.score(p.store.row(node)),
+            .turbo => |*p| p.store.model.score(&p.query, p.store.row(node), p.store.scalars[node]),
         };
     }
 
@@ -598,23 +599,25 @@ pub const Query = struct {
         const self: *const Query = @ptrCast(@alignCast(ctx));
         const hint: std.lang.PrefetchOptions = .{ .rw = .read, .locality = 3, .cache = .data };
         const pf = dist.common.prefetchRow;
-        switch (self.store.*) {
+        switch (self.prepared) {
             .none => {},
-            .scalar => |s| {
+            .scalar => |*p| {
+                const s = p.store;
                 const row = s.row(node);
                 if (row.len <= sq8_whole_row_bytes) pf(row.ptr, row.len) else @prefetch(row.ptr, hint);
                 @prefetch(&s.stats[node], hint);
             },
-            .binary => |b| {
-                const row = b.codes.rowConst(node);
+            .binary => |p| {
+                const row = p.store.codes.rowConst(node);
                 pf(@ptrCast(row.ptr), row.len * @sizeOf(u64));
             },
             .product => |p| {
-                const row = p.row(node);
+                const row = p.store.row(node);
                 pf(row.ptr, row.len);
             },
             // Whole: a row is 1,032 bytes at most (4 bits, d=2048).
-            .turbo => |t| {
+            .turbo => |*p| {
+                const t = p.store;
                 const row = t.row(node);
                 pf(row.ptr, row.len);
                 @prefetch(&t.scalars[node], hint);
@@ -632,8 +635,7 @@ pub const QueryScratch = struct {
     /// The scalar query's codes, biased for `vpdpbusd` and plain for L1.
     sq_signed: []i8,
     sq_unsigned: []u8,
-    table: quant.pq.QueryTable,
-    table_valid: bool = false,
+    table: ?quant.pq.QueryTable = null,
     /// Candidate ids surviving the first stage.
     candidates: []u32,
     /// Rescored results.
@@ -669,7 +671,6 @@ pub const QueryScratch = struct {
             .bin_codes = bin_codes,
             .sq_signed = sq_signed,
             .sq_unsigned = sq_unsigned,
-            .table = .{ .table = &.{}, .m = 0, .centroids = 0 },
             .candidates = candidates,
             .rescored = rescored,
         };
@@ -679,7 +680,7 @@ pub const QueryScratch = struct {
         alloc.free(self.bin_codes);
         alloc.free(self.sq_signed);
         alloc.free(self.sq_unsigned);
-        if (self.table_valid) self.table.deinit(alloc);
+        if (self.table) |*t| t.deinit(alloc);
         alloc.free(self.candidates);
         alloc.free(self.rescored);
         alloc.free(self.tq_query);
@@ -687,11 +688,14 @@ pub const QueryScratch = struct {
         alloc.free(self.tq_planes);
     }
 
-    pub fn ensureTable(self: *QueryScratch, alloc: std.mem.Allocator, cb: *const quant.pq.Codebook) !void {
-        if (self.table_valid and self.table.m == cb.m and self.table.centroids == cb.centroids) return;
-        if (self.table_valid) self.table.deinit(alloc);
+    pub fn ensureTable(self: *QueryScratch, alloc: std.mem.Allocator, cb: *const quant.pq.Codebook) !*quant.pq.QueryTable {
+        if (self.table) |*t| {
+            if (t.m == cb.m and t.centroids == cb.centroids) return t;
+            t.deinit(alloc);
+            self.table = null;
+        }
         self.table = try quant.pq.QueryTable.init(alloc, cb);
-        self.table_valid = true;
+        return &self.table.?;
     }
 };
 
@@ -703,31 +707,31 @@ pub fn prepareQuery(
     scratch: *QueryScratch,
     alloc: std.mem.Allocator,
 ) !Query {
-    var q = Query{ .store = store, .kernel = kernel, .fp32 = query };
+    var q = Query{ .kernel = kernel, .fp32 = query };
     switch (store.*) {
         .none => {},
-        .scalar => |s| q.sym = quant.scalar.SymmetricQuery.init(
+        .scalar => |*s| q.prepared = .{ .scalar = .{ .store = s, .sym = quant.scalar.SymmetricQuery.init(
             s.params,
             scratch.sq_signed[0..query.len],
             scratch.sq_unsigned[0..query.len],
             query,
-        ),
+        ) } },
         .binary => |*b| {
             // Padded, so the query and the stored rows are the same length and
             // the kernel is fully vectorised on both. Encoded as the rows are
             // (Qdrant's `SameAsStorage`), against the same statistics.
             const words = quant.binary.paddedWordsFor(b.encoding.bits(query.len));
             quant.binary.encodeWith(b.encoding, if (b.stats) |*st| st else null, scratch.bin_codes[0..words], query);
-            q.bin_codes = scratch.bin_codes[0..words];
+            q.prepared = .{ .binary = .{ .store = b, .codes = scratch.bin_codes[0..words] } };
         },
-        .product => |p| {
-            try scratch.ensureTable(alloc, &p.codebook);
-            scratch.table.build(&p.codebook, kernel, query);
-            q.table = &scratch.table;
+        .product => |*p| {
+            const table = try scratch.ensureTable(alloc, &p.codebook);
+            table.build(&p.codebook, kernel, query);
+            q.prepared = .{ .product = .{ .store = p, .table = table } };
         },
         .turbo => |*t| {
-            q.turbo = t.model.prepareQuery(query, scratch.tq_query, scratch.tq_work);
-            quant.turbo.prepareInt(&q.turbo.?, t.model.bits, scratch.tq_planes);
+            q.prepared = .{ .turbo = .{ .store = t, .query = t.model.prepareQuery(query, scratch.tq_query, scratch.tq_work) } };
+            quant.turbo.prepareInt(&q.prepared.turbo.query, t.model.bits, scratch.tq_planes);
         },
     }
     return q;
