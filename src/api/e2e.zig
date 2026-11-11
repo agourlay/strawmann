@@ -3591,7 +3591,7 @@ test "e2e: filter constructs outside the keyword/integer match are refused by na
     var out: [1 << 16]u8 = undefined;
     _ = try c.call("/qdrant.Collections/Create", try buildCreateCollection(&req_buf, "rf", 2, 3), &out);
 
-    // A `Range` condition (`FieldCondition.range = 3`).
+    // A `DatetimeRange` condition (`FieldCondition.datetime_range = 8`).
     var w = wire.Writer.init(&req_buf);
     try w.writeStringField(1, "rf");
     const qp = try w.beginNested(2, 3);
@@ -3610,8 +3610,7 @@ test "e2e: filter constructs outside the keyword/integer match are refused by na
         const cond = try w.beginNested(2, 2);
         const fc = try w.beginNested(1, 2);
         try w.writeStringField(1, "n");
-        const range = try w.beginNested(3, 2);
-        try w.writeDoubleField(2, 1.5); // gt
+        const range = try w.beginNested(8, 2);
         try w.endNested(range);
         try w.endNested(fc);
         try w.endNested(cond);
@@ -3620,12 +3619,12 @@ test "e2e: filter constructs outside the keyword/integer match are refused by na
     try w.endNested(qp);
     const resp = try c.call("/qdrant.Points/QueryBatch", w.written(), &out);
     try testing.expectEqual(grpc.Status.unimplemented, resp.status);
-    try testing.expectEqualStrings("range conditions", resp.message);
+    try testing.expectEqualStrings("datetime_range conditions", resp.message);
 
     // A geo field index.
     const geo = try c.call("/qdrant.Points/CreateFieldIndex", try buildCreateFieldIndex(&req_buf, "rf", "loc", 3), &out);
     try testing.expectEqual(grpc.Status.unimplemented, geo.status);
-    try testing.expect(std.mem.indexOf(u8, geo.message, "keyword, integer and text") != null);
+    try testing.expect(std.mem.indexOf(u8, geo.message, "keyword, integer, float and text") != null);
 
     // `UpsertPoints.update_mode = 8` (`update_only`): used to be skipped and
     // answered with an unconditional upsert, which inserts the points the

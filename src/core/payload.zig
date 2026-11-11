@@ -55,6 +55,7 @@ const text = @import("../text/text.zig");
 //   Struct struct_value = 6; ListValue list_value = 7; } }` (VERIFIED,
 // json_with_int.proto in qdrant-client 1.19.0). `ListValue { repeated Value
 // values = 1; }`.
+pub const value_double: u32 = 2;
 pub const value_integer: u32 = 3;
 pub const value_string: u32 = 4;
 pub const value_bool: u32 = 5;
@@ -83,11 +84,100 @@ pub const Match = union(enum) {
     keywords: []const u8,
     /// The bytes of a `RepeatedIntegers { repeated int64 integers = 1; }`.
     integers: []const u8,
+    /// `FieldCondition.range`, which is not a `Match` on the wire but
+    /// evaluates like one: per value, any list element matching.
+    range: Range,
 };
+
+/// `Range { optional double lt = 1; gt = 2; gte = 3; lte = 4; }` (VERIFIED,
+/// qdrant_common.proto), normalized to one lower and one upper bound.
+///
+/// Qdrant compares in `OrderedFloat` (`Range<OrderedFloat<f64>>::check_range`,
+/// lib/segment/src/types.rs), a total order with every NaN equal and above
+/// every number, and `-0.0 == 0.0`. In that order the bounds a request gives
+/// fold exactly into the strictest lower and the strictest upper bound, and
+/// the absent ones are the order's ends: `>= -inf` and `<= NaN` hold for
+/// every number. So a range with no bounds matches every numeric value, as
+/// Qdrant's does, and a NaN bound behaves as Qdrant's does (`lt: NaN` admits
+/// every number, `gt: NaN` none). A NaN *value* never matches: Qdrant cannot
+/// hold one (`proto_to_json` refuses a NaN `double_value` at upsert,
+/// lib/api/src/conversions/json.rs), and the float index does not store it.
+pub const Range = struct {
+    lo: f64 = -std.math.inf(f64),
+    lo_strict: bool = false,
+    hi: f64 = std.math.nan(f64),
+    hi_strict: bool = false,
+
+    pub fn fromBounds(lt: ?f64, gt: ?f64, gte: ?f64, lte: ?f64) Range {
+        var r = Range{};
+        if (gt) |x| r.tightenLo(x, true);
+        if (gte) |x| r.tightenLo(x, false);
+        if (lt) |x| r.tightenHi(x, true);
+        if (lte) |x| r.tightenHi(x, false);
+        return r;
+    }
+
+    fn tightenLo(self: *Range, x: f64, strict: bool) void {
+        switch (orderedCmp(x, self.lo)) {
+            .gt => {
+                self.lo = x;
+                self.lo_strict = strict;
+            },
+            .eq => self.lo_strict = self.lo_strict or strict,
+            .lt => {},
+        }
+    }
+
+    fn tightenHi(self: *Range, x: f64, strict: bool) void {
+        switch (orderedCmp(x, self.hi)) {
+            .lt => {
+                self.hi = x;
+                self.hi_strict = strict;
+            },
+            .eq => self.hi_strict = self.hi_strict or strict,
+            .gt => {},
+        }
+    }
+
+    /// `v` clears the lower bound. Monotone in `v`, which the float index's
+    /// binary search relies on.
+    fn aboveLo(self: Range, v: f64) bool {
+        return switch (orderedCmp(v, self.lo)) {
+            .gt => true,
+            .eq => !self.lo_strict,
+            .lt => false,
+        };
+    }
+
+    fn belowHi(self: Range, v: f64) bool {
+        return switch (orderedCmp(v, self.hi)) {
+            .lt => true,
+            .eq => !self.hi_strict,
+            .gt => false,
+        };
+    }
+
+    pub fn contains(self: Range, v: f64) bool {
+        if (std.math.isNan(v)) return false;
+        return self.aboveLo(v) and self.belowHi(v);
+    }
+};
+
+/// `OrderedFloat`'s order: NaN equal to NaN and above everything else.
+fn orderedCmp(a: f64, b: f64) std.math.Order {
+    if (std.math.isNan(a)) return if (std.math.isNan(b)) .eq else .gt;
+    if (std.math.isNan(b)) return .lt;
+    return std.math.order(a, b);
+}
 
 pub const Condition = struct {
     key: []const u8,
     match: Match,
+    /// A `FieldCondition` carrying both a `match` and a `range`: Qdrant
+    /// admits a value either satisfies (`ValueChecker for FieldCondition`,
+    /// condition_checker.rs, ORs them). Rare enough that no index answers
+    /// it; `cheapestMust` passes over it and the blobs decide.
+    or_range: ?Range = null,
 };
 
 /// Conditions per clause. bfb's W12 sends one; the bound exists so a
@@ -157,6 +247,7 @@ fn conditionMatches(blob: []const u8, c: Condition) bool {
         const kv = splitEntry(entry) orelse continue;
         if (!std.mem.eql(u8, kv.key, c.key)) continue;
         if (valueMatches(kv.value, c.match)) return true;
+        if (c.or_range) |r| if (valueMatches(kv.value, .{ .range = r })) return true;
     }
     return false;
 }
@@ -188,6 +279,19 @@ fn valueMatchesAt(value: []const u8, m: Match, descend: bool) bool {
                 switch (m) {
                     .integer => |i| if (v == i) return true,
                     .integers => |list| if (repeatedIntegersContain(list, v)) return true,
+                    // `as_f64`, as Qdrant compares an integer to a range.
+                    .range => |rg| if (rg.contains(@floatFromInt(v))) return true,
+                    else => {},
+                }
+            },
+            value_double => {
+                if (t.wire_type != .fixed64) {
+                    r.skip(t.wire_type) catch return false;
+                    continue;
+                }
+                const v = r.double() catch return false;
+                switch (m) {
+                    .range => |rg| if (rg.contains(v)) return true,
                     else => {},
                 }
             },
@@ -364,12 +468,15 @@ pub fn frameInto(out: *std.ArrayList(u8), alloc: std.mem.Allocator, entry: []con
 // =========================================================================
 
 /// `FieldType` values this engine indexes (`FieldTypeKeyword = 0`,
-/// `FieldTypeInteger = 1`, VERIFIED collections.proto). Stored as the
-/// `PayloadSchemaType` the collection info reports them as (`Keyword = 1`,
-/// `Integer = 2`), which is a different enum with different numbers.
+/// `FieldTypeInteger = 1`, `FieldTypeFloat = 2`, VERIFIED points.proto).
+/// Stored as the `PayloadSchemaType` the collection info reports them as
+/// (`Keyword = 1`, `Integer = 2`, `Float = 3`, collections.proto), which is a
+/// different enum with different numbers.
 pub const Kind = enum(u8) {
     keyword = 1,
     integer = 2,
+    /// A sorted `(value, offset)` array (`FloatIndex`), answering `range`.
+    float = 3,
     /// A text index scored with BM25 (`FieldTypeText = 4`, `Text = 5`), the
     /// only text index this engine builds (decisions.md, 2026-10-07).
     text = 5,
@@ -378,6 +485,7 @@ pub const Kind = enum(u8) {
         return switch (v) {
             0 => .keyword,
             1 => .integer,
+            2 => .float,
             4 => .text,
             else => null,
         };
@@ -419,6 +527,103 @@ const Postings = struct {
     }
 };
 
+/// A float field's index: every numeric value (doubles, and integers as
+/// `f64`) with its point's offset, sorted by value, plus an unsorted tail of
+/// the writes since the last merge. A range is a binary search into the
+/// sorted part and a scan of the tail.
+///
+/// Entries are hints like the postings (the module doc): an overwrite leaves
+/// the old value's entry, and `select` verifies what it admits by the same
+/// rules. A NaN value is not stored, since no range admits it.
+const FloatIndex = struct {
+    sorted: std.ArrayList(FloatEntry) = .empty,
+    tail: std.ArrayList(FloatEntry) = .empty,
+
+    /// The tail is merged once it reaches this many entries. Every range
+    /// query scans the whole tail and every merge moves the whole sorted
+    /// part, so the bound trades one against the other: a fixed bound keeps
+    /// the per-query scan a constant, the price of the binary search's
+    /// neighbourhood rather than of the corpus, and costs one pass over the
+    /// sorted part per `tail_max` writes. Proportional to the sorted part it
+    /// would make the merges amortized constant but the scan grow with the
+    /// corpus, and the scan is on the query path.
+    const tail_max = 4096;
+
+    fn deinit(self: *FloatIndex, alloc: std.mem.Allocator) void {
+        self.sorted.deinit(alloc);
+        self.tail.deinit(alloc);
+    }
+
+    /// Under the index's exclusive lock, which also covers the merge.
+    fn add(self: *FloatIndex, alloc: std.mem.Allocator, v: f64, offset: u32) !void {
+        if (std.math.isNan(v)) return;
+        try self.tail.append(alloc, .{ .v = v, .off = offset });
+        if (self.tail.items.len >= tail_max) try self.merge(alloc);
+    }
+
+    /// Sort the tail and merge it into the sorted part, back to front and in
+    /// place. A failure to grow leaves both parts as they were, which still
+    /// answers correctly, with a longer tail.
+    fn merge(self: *FloatIndex, alloc: std.mem.Allocator) !void {
+        const t = self.tail.items;
+        try self.sorted.ensureUnusedCapacity(alloc, t.len);
+        std.mem.sort(FloatEntry, t, {}, FloatEntry.lessThan);
+        var i = self.sorted.items.len;
+        var j = t.len;
+        self.sorted.items.len += t.len;
+        const out = self.sorted.items;
+        var k = out.len;
+        while (j > 0) {
+            k -= 1;
+            if (i > 0 and out[i - 1].v > t[j - 1].v) {
+                i -= 1;
+                out[k] = out[i];
+            } else {
+                j -= 1;
+                out[k] = t[j];
+            }
+        }
+        self.tail.clearRetainingCapacity();
+    }
+
+    /// The sorted entries `r` admits: a contiguous run, since `aboveLo` and
+    /// `belowHi` are monotone in the value.
+    fn span(self: *const FloatIndex, r: Range) []const FloatEntry {
+        const items = self.sorted.items;
+        const lo = std.sort.partitionPoint(FloatEntry, items, r, belowLo);
+        const hi = std.sort.partitionPoint(FloatEntry, items, r, withinHi);
+        return items[lo..@max(lo, hi)];
+    }
+
+    fn belowLo(r: Range, e: FloatEntry) bool {
+        return !r.aboveLo(e.v);
+    }
+
+    fn withinHi(r: Range, e: FloatEntry) bool {
+        return r.belowHi(e.v);
+    }
+
+    /// Entries `r` admits, for the planner. Over-counts as `points` does: a
+    /// point with several values in range, or an overwritten one, counts
+    /// once per entry.
+    fn count(self: *const FloatIndex, r: Range) usize {
+        var n = self.span(r).len;
+        for (self.tail.items) |e| {
+            if (r.contains(e.v)) n += 1;
+        }
+        return n;
+    }
+};
+
+const FloatEntry = struct {
+    v: f64,
+    off: u32,
+
+    fn lessThan(_: void, a: FloatEntry, b: FloatEntry) bool {
+        return a.v < b.v;
+    }
+};
+
 pub const Field = struct {
     name: []u8,
     index: Index,
@@ -432,6 +637,7 @@ pub const Field = struct {
     pub const Index = union(Kind) {
         keyword: std.StringHashMapUnmanaged(Postings),
         integer: std.AutoHashMapUnmanaged(i64, Postings),
+        float: FloatIndex,
         /// The BM25 index. Unlike the postings it is exact: a rewrite
         /// replaces the point's document and a delete removes it.
         text: *text.TextIndex,
@@ -456,6 +662,7 @@ pub const Field = struct {
                 while (ii.next()) |e| e.value_ptr.deinit(alloc);
                 m.deinit(alloc);
             },
+            .float => |*fi| fi.deinit(alloc),
             .text => |ti| {
                 ti.deinit();
                 alloc.destroy(ti);
@@ -509,8 +716,9 @@ pub const Field = struct {
                 },
                 value_integer => {
                     const v: i64 = @bitCast(try r.varint());
-                    if (self.index == .integer) try self.addInteger(alloc, offset, v);
+                    try self.addNumber(alloc, offset, v);
                 },
+                value_double => try self.addDouble(alloc, offset, &r, t.wire_type),
                 value_list => {
                     var list = try r.nested();
                     while (!list.atEnd()) {
@@ -530,8 +738,9 @@ pub const Field = struct {
                                 },
                                 value_integer => {
                                     const v: i64 = @bitCast(try inner.varint());
-                                    if (self.index == .integer) try self.addInteger(alloc, offset, v);
+                                    try self.addNumber(alloc, offset, v);
                                 },
+                                value_double => try self.addDouble(alloc, offset, &inner, it.wire_type),
                                 else => try inner.skip(it.wire_type),
                             }
                         }
@@ -565,6 +774,31 @@ pub const Field = struct {
             gop.value_ptr.* = .{};
         }
         try gop.value_ptr.append(alloc, offset, self.capacity);
+        self.points += 1;
+    }
+
+    /// An integer value: a posting on an integer field, an `f64` entry on a
+    /// float field (Qdrant's float index takes integers too, and a range
+    /// compares them as `f64`).
+    fn addNumber(self: *Field, alloc: std.mem.Allocator, offset: u32, v: i64) !void {
+        switch (self.index) {
+            .integer => try self.addInteger(alloc, offset, v),
+            .float => try self.addFloat(alloc, offset, @floatFromInt(v)),
+            else => {},
+        }
+    }
+
+    /// A `double_value`, which only a float field indexes. Read the way
+    /// `valueMatchesAt` reads it, so the index holds what a range admits.
+    fn addDouble(self: *Field, alloc: std.mem.Allocator, offset: u32, r: *wire.Reader, wt: wire.WireType) !void {
+        if (wt != .fixed64) return r.skip(wt);
+        const v = try r.double();
+        if (self.index == .float) try self.addFloat(alloc, offset, v);
+    }
+
+    fn addFloat(self: *Field, alloc: std.mem.Allocator, offset: u32, v: f64) !void {
+        if (std.math.isNan(v)) return;
+        try self.index.float.add(alloc, v, offset);
         self.points += 1;
     }
 
@@ -896,6 +1130,7 @@ pub const Store = struct {
         const index: Field.Index = switch (kind) {
             .keyword => .{ .keyword = .empty },
             .integer => .{ .integer = .empty },
+            .float => .{ .float = .{} },
             // `createTextIndex` builds a text field, with its options.
             .text => unreachable,
         };
@@ -935,6 +1170,7 @@ pub const Store = struct {
         var best: ?Pick = null;
         var best_len: usize = std.math.maxInt(usize);
         for (filter.musts()) |c| {
+            if (c.or_range != null) continue;
             const f = self.field(c.key) orelse continue;
             const n = postingLen(f, c.match) orelse continue;
             if (n < best_len) {
@@ -996,6 +1232,14 @@ pub const Store = struct {
                 }
                 return n;
             },
+            // Only a float field answers a range. An integer field's
+            // postings hold no `double_value`, which a range admits, so
+            // reading a range from them could miss points (the module doc:
+            // the index may over-approximate, never miss); the blobs decide.
+            .range => |r| {
+                if (f.index != .float) return null;
+                return f.index.float.count(r);
+            },
             .boolean => return null,
         }
     }
@@ -1031,6 +1275,14 @@ pub const Store = struct {
         const words = (bound + 63) / 64;
         std.debug.assert(words <= bits.len);
         @memset(bits[0..words], 0);
+        if (pick.f.index == .float) {
+            const r = pick.c.match.range;
+            const fi = &pick.f.index.float;
+            for (fi.span(r)) |e| self.admit(filter, bits, bound, trusted, e.off);
+            for (fi.tail.items) |e| {
+                if (r.contains(e.v)) self.admit(filter, bits, bound, trusted, e.off);
+            }
+        }
         var lists = PostingLists.init(pick.f, pick.c.match);
         while (lists.next()) |p| {
             // A trusted dense posting is its own answer, masked to the
@@ -1041,22 +1293,26 @@ pub const Store = struct {
                 }
                 continue;
             }
-            for (p.list.items) |off| {
-                if (off >= bound) continue;
-                const w = off / 64;
-                const m = @as(u64, 1) << @intCast(off % 64);
-                if (bits[w] & m != 0) continue;
-                if (trusted) {
-                    if (!self.has(off)) continue;
-                } else if (!self.matches(off, filter)) continue;
-                bits[w] |= m;
-            }
+            for (p.list.items) |off| self.admit(filter, bits, bound, trusted, off);
         }
         // The words cover `bound` rounded up: nothing past it is admitted.
         if (bound % 64 != 0) bits[words - 1] &= (@as(u64, 1) << @intCast(bound % 64)) - 1;
         var count: usize = 0;
         for (bits[0..words]) |w| count += @popCount(w);
         return .{ .count = count };
+    }
+
+    /// Set `off`'s bit if the filter admits it: a trusted index entry needs
+    /// only a published blob, any other is verified against the blob.
+    inline fn admit(self: *const Store, filter: *const Filter, bits: []u64, bound: usize, trusted: bool, off: u32) void {
+        if (off >= bound) return;
+        const w = off / 64;
+        const m = @as(u64, 1) << @intCast(off % 64);
+        if (bits[w] & m != 0) return;
+        if (trusted) {
+            if (!self.has(off)) return;
+        } else if (!self.matches(off, filter)) return;
+        bits[w] |= m;
     }
 
     /// The posting lists one `Match` reads: one for a scalar, several for a
@@ -1089,7 +1345,9 @@ pub const Store = struct {
                     self.done = true;
                     return if (self.f.index.integer.getPtr(i)) |p| p else null;
                 },
-                .boolean => return null,
+                // A float field's entries are not postings; `select` reads
+                // them before this runs.
+                .boolean, .range => return null,
                 .keywords => {
                     while (!self.r.atEnd()) {
                         const t = self.r.tag() catch return null;
@@ -1183,6 +1441,10 @@ fn entryBytes(buf: []u8, key: []const u8, comptime value_field: u32, value: anyt
         w.writeVarintFieldAlways(value_integer, @bitCast(@as(i64, value))) catch unreachable;
     } else if (comptime value_field == value_bool) {
         w.writeBoolField(value_bool, value) catch unreachable;
+    } else if (comptime value_field == value_double) {
+        // Always written: `writeDoubleField` drops a 0.0, which is a value.
+        w.tag(value_double, .fixed64) catch unreachable;
+        w.fixed64(@bitCast(@as(f64, value))) catch unreachable;
     } else {
         @compileError("unsupported value kind");
     }
@@ -1552,4 +1814,343 @@ test "blobs cross chunk boundaries without moving what readers hold" {
     try testing.expectEqual(first.ptr, store.get(0).ptr);
     var it = BlobIterator.init(store.get(2));
     try testing.expectEqualSlices(u8, entry, it.next().?);
+}
+
+const Num = union(enum) { int: i64, dbl: f64 };
+
+/// `{ key: n }`, or `{ key: [n, ...] }` when `as_list`.
+fn numEntry(buf: []u8, key: []const u8, nums: []const Num, as_list: bool) []const u8 {
+    var w = wire.Writer.init(buf);
+    w.writeStringField(entry_key, key) catch unreachable;
+    const val = w.beginNested(entry_value, 2) catch unreachable;
+    if (as_list) {
+        const list = w.beginNested(value_list, 2) catch unreachable;
+        for (nums) |n| {
+            const v = w.beginNested(1, 2) catch unreachable;
+            writeNum(&w, n);
+            w.endNested(v) catch unreachable;
+        }
+        w.endNested(list) catch unreachable;
+    } else writeNum(&w, nums[0]);
+    w.endNested(val) catch unreachable;
+    return w.written();
+}
+
+fn writeNum(w: *wire.Writer, n: Num) void {
+    switch (n) {
+        .int => |i| w.writeVarintFieldAlways(value_integer, @bitCast(i)) catch unreachable,
+        .dbl => |d| {
+            w.tag(value_double, .fixed64) catch unreachable;
+            w.fixed64(@bitCast(d)) catch unreachable;
+        },
+    }
+}
+
+fn rangeFilter(key: []const u8, r: Range) Filter {
+    var f = Filter{};
+    f.add(.must, .{ .key = key, .match = .{ .range = r } }) catch unreachable;
+    return f;
+}
+
+test "a range folds its bounds into Qdrant's OrderedFloat order" {
+    const nan = std.math.nan(f64);
+    const inf = std.math.inf(f64);
+    // Inclusive and exclusive ends.
+    const gt = Range.fromBounds(null, 1, null, null);
+    try testing.expect(!gt.contains(1));
+    try testing.expect(gt.contains(1.0000001));
+    const gte = Range.fromBounds(null, null, 1, null);
+    try testing.expect(gte.contains(1));
+    try testing.expect(!gte.contains(0.999));
+    const lt = Range.fromBounds(2, null, null, null);
+    try testing.expect(!lt.contains(2));
+    try testing.expect(lt.contains(1.999));
+    const lte = Range.fromBounds(null, null, null, 2);
+    try testing.expect(lte.contains(2));
+    try testing.expect(!lte.contains(2.001));
+    // Combined: the strictest of each side holds, whichever order they came.
+    const both = Range.fromBounds(5, 1, 1, 6);
+    try testing.expect(!both.contains(1));
+    try testing.expect(both.contains(4.5));
+    try testing.expect(!both.contains(5));
+    const looser_strict = Range.fromBounds(null, 0, 1, null);
+    try testing.expect(looser_strict.contains(1));
+    // An empty interval admits nothing.
+    try testing.expect(!Range.fromBounds(1, 2, null, null).contains(1.5));
+    // No bounds: every number, infinities included, as `check_range` with
+    // every bound `None`.
+    const all = Range{};
+    try testing.expect(all.contains(-inf));
+    try testing.expect(all.contains(inf));
+    try testing.expect(all.contains(0));
+    // A NaN value never matches; a NaN bound is OrderedFloat's maximum.
+    try testing.expect(!all.contains(nan));
+    try testing.expect(Range.fromBounds(nan, null, null, null).contains(1e300));
+    try testing.expect(!Range.fromBounds(null, nan, null, null).contains(inf));
+    try testing.expect(!Range.fromBounds(null, null, nan, null).contains(inf));
+    // `-0.0 == 0.0`.
+    try testing.expect(!Range.fromBounds(null, 0.0, null, null).contains(-0.0));
+    try testing.expect(Range.fromBounds(null, null, -0.0, null).contains(0.0));
+}
+
+test "a range matches double and integer payloads, any list element, never a missing field" {
+    var store = try Store.init(testing.allocator, 8);
+    defer store.deinit(testing.allocator);
+    var e1: [64]u8 = undefined;
+    var e2: [128]u8 = undefined;
+    var m: [256]u8 = undefined;
+    // 0: double 0.5; 1: integer 3; 2: [string, 10, 0.25]; 3: string "4";
+    // 4: no `x`; 5: NaN; 6: bool.
+    try store.set(testing.allocator, 0, mapBytes(&m, &.{entryBytes(&e1, "x", value_double, 0.5)}), 3);
+    try store.set(testing.allocator, 1, mapBytes(&m, &.{entryBytes(&e1, "x", value_integer, 3)}), 3);
+    {
+        var w = wire.Writer.init(&e2);
+        try w.writeStringField(entry_key, "x");
+        const val = try w.beginNested(entry_value, 2);
+        const list = try w.beginNested(value_list, 2);
+        const s = try w.beginNested(1, 2);
+        try w.writeStringField(value_string, "7");
+        try w.endNested(s);
+        for ([_]Num{ .{ .int = 10 }, .{ .dbl = 0.25 } }) |n| {
+            const v = try w.beginNested(1, 2);
+            writeNum(&w, n);
+            try w.endNested(v);
+        }
+        try w.endNested(list);
+        try w.endNested(val);
+        try store.set(testing.allocator, 2, mapBytes(&m, &.{w.written()}), 3);
+    }
+    try store.set(testing.allocator, 3, mapBytes(&m, &.{entryBytes(&e1, "x", value_string, "4")}), 3);
+    try store.set(testing.allocator, 4, mapBytes(&m, &.{entryBytes(&e1, "y", value_double, 0.5)}), 3);
+    try store.set(testing.allocator, 5, mapBytes(&m, &.{entryBytes(&e1, "x", value_double, std.math.nan(f64))}), 3);
+    try store.set(testing.allocator, 6, mapBytes(&m, &.{entryBytes(&e1, "x", value_bool, true)}), 3);
+
+    const Case = struct { r: Range, want: [7]bool };
+    const cases = [_]Case{
+        // Below 1: the double, and the list's 0.25.
+        .{ .r = Range.fromBounds(1, null, null, null), .want = .{ true, false, true, false, false, false, false } },
+        // At least 3: the integer, and the list's 10.
+        .{ .r = Range.fromBounds(null, null, 3, null), .want = .{ false, true, true, false, false, false, false } },
+        .{ .r = Range.fromBounds(null, 3, null, null), .want = .{ false, false, true, false, false, false, false } },
+        // `(0.5, 3]`: an integer compared as f64, the double's bound excluded.
+        .{ .r = Range.fromBounds(null, 0.5, null, 3), .want = .{ false, true, false, false, false, false, false } },
+        // No bounds: every numeric value; a string, a bool, NaN and a missing
+        // field are not numbers.
+        .{ .r = .{}, .want = .{ true, true, true, false, false, false, false } },
+    };
+    for (cases) |cs| {
+        for (cs.want, 0..) |want, off| {
+            try testing.expectEqual(want, store.matches(@intCast(off), &rangeFilter("x", cs.r)));
+        }
+    }
+    // must_not on a range holds for the missing field and the NaN; should
+    // ORs a range with a keyword match.
+    var mn = Filter{};
+    try mn.add(.must_not, .{ .key = "x", .match = .{ .range = .{} } });
+    for ([_]bool{ false, false, false, true, true, true, true }, 0..) |want, off| {
+        try testing.expectEqual(want, store.matches(@intCast(off), &mn));
+    }
+    var sh = Filter{};
+    try sh.add(.should, .{ .key = "x", .match = .{ .range = Range.fromBounds(null, 5, null, null) } });
+    try sh.add(.should, .{ .key = "x", .match = .{ .keyword = "4" } });
+    for ([_]bool{ false, false, true, true, false, false, false }, 0..) |want, off| {
+        try testing.expectEqual(want, store.matches(@intCast(off), &sh));
+    }
+    // A FieldCondition with both a match and a range admits either.
+    var both = Filter{};
+    try both.add(.must, .{ .key = "x", .match = .{ .keyword = "4" }, .or_range = Range.fromBounds(null, null, null, 0.5) });
+    for ([_]bool{ true, false, true, true, false, false, false }, 0..) |want, off| {
+        try testing.expectEqual(want, store.matches(@intCast(off), &both));
+    }
+}
+
+test "a range on an integer field is not read from its postings, and a float field answers it" {
+    var store = try Store.init(testing.allocator, 4);
+    defer store.deinit(testing.allocator);
+    try store.createIndex(testing.allocator, "n", .integer, 0);
+    var e: [64]u8 = undefined;
+    var m: [128]u8 = undefined;
+    // A double under an integer field has no posting, and a range admits it.
+    try store.set(testing.allocator, 0, mapBytes(&m, &.{entryBytes(&e, "n", value_double, 2.5)}), 3);
+    try store.set(testing.allocator, 1, mapBytes(&m, &.{entryBytes(&e, "n", value_integer, 2)}), 3);
+    var bits: [1]u64 = undefined;
+    const f = rangeFilter("n", Range.fromBounds(null, null, 2, null));
+    try testing.expect(store.select(&f, &bits, 2) == null);
+    try testing.expect(store.matches(0, &f));
+    try testing.expect(store.matches(1, &f));
+    // A float field answers it, and ingests both.
+    try store.createIndex(testing.allocator, "f", .float, 2);
+    try store.set(testing.allocator, 2, mapBytes(&m, &.{entryBytes(&e, "f", value_double, 2.5)}), 3);
+    try store.set(testing.allocator, 3, mapBytes(&m, &.{entryBytes(&e, "f", value_integer, 2)}), 3);
+    const g = rangeFilter("f", Range.fromBounds(null, null, 2, null));
+    try testing.expectEqual(@as(usize, 2), store.select(&g, &bits, 4).?.count);
+    try testing.expectEqual(@as(u64, 0b1100), bits[0]);
+    // A match on a float field, or a match-or-range condition, reads no
+    // entries either.
+    var k = Filter{};
+    try k.add(.must, .{ .key = "f", .match = .{ .integer = 2 } });
+    try testing.expect(store.select(&k, &bits, 4) == null);
+    var mr = Filter{};
+    try mr.add(.must, .{ .key = "f", .match = .{ .integer = 2 }, .or_range = Range{} });
+    try testing.expect(store.select(&mr, &bits, 4) == null);
+    try testing.expectEqual(Kind.float, store.field("f").?.kind());
+    try testing.expectEqual(@as(u32, 3), Kind.float.schemaType());
+    try testing.expectEqual(Kind.float, Kind.fromFieldType(2).?);
+}
+
+/// The float index against two references: a scan of the blobs (what an
+/// unindexed filter answers) and a model of each point's current values.
+const FloatModel = struct {
+    const n = 6000;
+    /// Up to three values per point, `lens` of them in use.
+    vals: [][3]f64,
+    lens: []u8,
+    /// Every non-NaN value the index was given, stale ones included.
+    entries: std.ArrayList(FloatEntry) = .empty,
+    store: Store,
+    indexed: bool = false,
+    rnd: std.Random,
+
+    fn init(rnd: std.Random) !FloatModel {
+        const vals = try testing.allocator.alloc([3]f64, n);
+        errdefer testing.allocator.free(vals);
+        const lens = try testing.allocator.alloc(u8, n);
+        errdefer testing.allocator.free(lens);
+        @memset(lens, 0);
+        return .{ .vals = vals, .lens = lens, .store = try Store.init(testing.allocator, n), .rnd = rnd };
+    }
+
+    fn deinit(self: *FloatModel) void {
+        testing.allocator.free(self.vals);
+        testing.allocator.free(self.lens);
+        self.entries.deinit(testing.allocator);
+        self.store.deinit(testing.allocator);
+    }
+
+    /// A value from a small domain, so ties, integer/double equality, the
+    /// bounds' edges, `-0.0` and NaN all occur.
+    fn value(self: *FloatModel) Num {
+        const base: i64 = self.rnd.intRangeAtMost(i64, -40, 40);
+        return switch (self.rnd.uintLessThan(u8, 10)) {
+            0...4 => .{ .int = base },
+            5...7 => .{ .dbl = @as(f64, @floatFromInt(base)) + 0.5 },
+            8 => .{ .dbl = @floatFromInt(base) },
+            else => .{ .dbl = if (base == 0) std.math.nan(f64) else -0.0 },
+        };
+    }
+
+    fn write(self: *FloatModel, off: u32) !void {
+        var nums: [3]Num = undefined;
+        const count = self.rnd.uintLessThan(u8, 4);
+        var e1: [128]u8 = undefined;
+        var e2: [64]u8 = undefined;
+        var m: [256]u8 = undefined;
+        if (count == 0) {
+            // A cleared payload, or one without the field.
+            if (self.rnd.boolean()) {
+                try self.store.set(testing.allocator, off, &.{}, 3);
+            } else {
+                try self.store.set(testing.allocator, off, mapBytes(&m, &.{entryBytes(&e2, "s", value_string, "z")}), 3);
+            }
+            self.lens[off] = 0;
+            return;
+        }
+        for (nums[0..count], 0..) |*x, i| {
+            x.* = self.value();
+            self.vals[off][i] = switch (x.*) {
+                .int => |v| @floatFromInt(v),
+                .dbl => |v| v,
+            };
+            if (self.indexed and !std.math.isNan(self.vals[off][i])) {
+                try self.entries.append(testing.allocator, .{ .v = self.vals[off][i], .off = off });
+            }
+        }
+        self.lens[off] = count;
+        const as_list = count > 1 or self.rnd.boolean();
+        const entry = numEntry(&e1, "x", nums[0..count], as_list);
+        try self.store.set(testing.allocator, off, mapBytes(&m, &.{ entryBytes(&e2, "s", value_string, "z"), entry }), 3);
+    }
+
+    fn createIndex(self: *FloatModel, written: u32) !void {
+        try self.store.createIndex(testing.allocator, "x", .float, written);
+        self.indexed = true;
+        for (0..written) |off| {
+            for (self.vals[off][0..self.lens[off]]) |v| {
+                if (!std.math.isNan(v)) try self.entries.append(testing.allocator, .{ .v = v, .off = @intCast(off) });
+            }
+        }
+    }
+
+    fn modelMatches(self: *const FloatModel, off: usize, r: Range) bool {
+        for (self.vals[off][0..self.lens[off]]) |v| if (r.contains(v)) return true;
+        return false;
+    }
+
+    fn randomRange(self: *FloatModel) Range {
+        var b: [4]?f64 = .{ null, null, null, null };
+        for (&b) |*x| {
+            if (self.rnd.uintLessThan(u8, 3) == 0) {
+                const base: f64 = @floatFromInt(self.rnd.intRangeAtMost(i64, -45, 45));
+                x.* = if (self.rnd.boolean()) base else base + 0.5;
+            }
+        }
+        if (self.rnd.uintLessThan(u8, 50) == 0) b[self.rnd.uintLessThan(usize, 4)] = std.math.nan(f64);
+        return Range.fromBounds(b[0], b[1], b[2], b[3]);
+    }
+
+    fn check(self: *FloatModel, written: u32, queries: usize) !void {
+        var bits: [(n + 63) / 64]u64 = undefined;
+        const field = self.store.field("x").?;
+        const middle = Range.fromBounds(null, null, -10, 10);
+        for (0..queries) |q| {
+            const r = self.randomRange();
+            const bound: usize = if (q % 4 == 0) self.rnd.uintAtMost(usize, written) else written;
+            // The planner's count is the index's entries in range.
+            var want_entries: usize = 0;
+            for (self.entries.items) |e| {
+                if (r.contains(e.v)) want_entries += 1;
+            }
+            try testing.expectEqual(want_entries, Store.postingLen(field, .{ .range = r }).?);
+            // One condition (the trusted path while nothing was rewritten),
+            // then the same range with a must_not beside it (verified).
+            var f = rangeFilter("x", r);
+            for (0..2) |pass| {
+                if (pass == 1) try f.add(.must_not, .{ .key = "x", .match = .{ .range = middle } });
+                const sel = self.store.select(&f, &bits, bound).?;
+                var want: usize = 0;
+                for (0..bound) |off| {
+                    const scan = self.store.matches(@intCast(off), &f);
+                    const model = self.modelMatches(off, r) and
+                        (pass == 0 or !self.modelMatches(off, middle));
+                    try testing.expectEqual(model, scan);
+                    try testing.expectEqual(scan, testBit(&bits, @intCast(off)));
+                    want += @intFromBool(scan);
+                }
+                try testing.expectEqual(want, sel.count);
+            }
+        }
+    }
+};
+
+test "the float index counts and selects what a blob scan admits, across merges, overwrites and clears" {
+    var prng = std.Random.DefaultPrng.init(0xf10a7);
+    var model = try FloatModel.init(prng.random());
+    defer model.deinit();
+    const n = FloatModel.n;
+    // A backfilled first part, then appends: past `tail_max` entries, so
+    // the tail has been merged at least once and holds the latest writes.
+    for (0..1000) |off| try model.write(@intCast(off));
+    try model.createIndex(1000);
+    for (1000..n) |off| try model.write(@intCast(off));
+    const fi = &model.store.field("x").?.index.float;
+    try testing.expect(fi.sorted.items.len >= FloatIndex.tail_max);
+    try testing.expect(fi.tail.items.len > 0);
+    try testing.expect(std.sort.isSorted(FloatEntry, fi.sorted.items, {}, FloatEntry.lessThan));
+    try testing.expect(model.store.exact_postings.load(.acquire));
+    try model.check(n, 150);
+    // Overwrites and clears leave stale entries the verification drops.
+    for (0..1500) |_| try model.write(model.rnd.uintLessThan(u32, n));
+    try testing.expect(!model.store.exact_postings.load(.acquire));
+    try testing.expect(std.sort.isSorted(FloatEntry, fi.sorted.items, {}, FloatEntry.lessThan));
+    try model.check(n, 150);
 }

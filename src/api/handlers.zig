@@ -891,7 +891,7 @@ fn upsert(ctx: *Context, req: *const server.Request, body: []const u8, out: *ser
 /// answer — which is why W12 carried `--skip-field-indices` for as long as
 /// this returned UNIMPLEMENTED, and why Qdrant's W12 was a full scan.
 ///
-/// Keyword and integer indexes; the rest (`float`, `geo`, `text`, `bool`,
+/// Keyword, integer, float and text indexes; the rest (`geo`, `bool`,
 /// `datetime`, `uuid`) are refused by name, since a filter over them is not
 /// evaluated either.
 fn createFieldIndex(ctx: *Context, req: *const server.Request, body: []const u8, out: *server.ResponseBuf) server.Completion {
@@ -903,7 +903,7 @@ fn createFieldIndex(ctx: *Context, req: *const server.Request, body: []const u8,
     const coll = held.coll;
 
     const kind = core.payload.Kind.fromFieldType(cf.field_type) orelse
-        return err(req, .unimplemented, "field index types other than keyword, integer and text");
+        return err(req, .unimplemented, "field index types other than keyword, integer, float and text");
     const built = if (kind == .text) blk: {
         const opts = switch (textIndexOptions(cf.text_params)) {
             .options => |o| o,

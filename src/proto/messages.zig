@@ -523,10 +523,12 @@ fn decodeCondition(r: *Reader, out: *payload.Filter, clause: payload.Filter.Clau
     }
 }
 
-/// `FieldCondition { key = 1; Match match = 2; Range range = 3; ... }`.
+/// `FieldCondition { key = 1; Match match = 2; Range range = 3; ... }`
+/// (VERIFIED, qdrant_common.proto).
 fn decodeFieldCondition(r: *Reader) DecodeError!payload.Condition {
     var key: ?[]const u8 = null;
     var match: ?payload.Match = null;
+    var range: ?payload.Range = null;
     while (!r.atEnd()) {
         const t = try r.tag();
         switch (t.field) {
@@ -535,7 +537,10 @@ fn decodeFieldCondition(r: *Reader) DecodeError!payload.Condition {
                 var m = try r.nested();
                 match = try decodeMatch(&m);
             },
-            3 => return unimplemented("range conditions"),
+            3 => {
+                var rg = try r.nested();
+                range = try decodeRange(&rg);
+            },
             4, 5, 7 => return unimplemented("geo conditions (§1 non-goal)"),
             6 => return unimplemented("values_count conditions"),
             8 => return unimplemented("datetime_range conditions"),
@@ -544,10 +549,30 @@ fn decodeFieldCondition(r: *Reader) DecodeError!payload.Condition {
             else => try r.skip(t.wire_type),
         }
     }
-    return .{
-        .key = key orelse return invalidArgument("FieldCondition without a key"),
-        .match = match orelse return invalidArgument("FieldCondition without a match (only match conditions are implemented)"),
-    };
+    const k = key orelse return invalidArgument("FieldCondition without a key");
+    // Qdrant's validation asks for at least one condition and accepts
+    // several, ORed (`ValueChecker for FieldCondition`); `or_range` carries
+    // the second.
+    if (match) |m| return .{ .key = k, .match = m, .or_range = range };
+    if (range) |rg| return .{ .key = k, .match = .{ .range = rg } };
+    return invalidArgument("FieldCondition without a match or a range (only these are implemented)");
+}
+
+/// `Range { optional double lt = 1; optional double gt = 2; optional double
+/// gte = 3; optional double lte = 4; }` (VERIFIED, qdrant_common.proto).
+/// `optional`, so a bound is present when it is on the wire, zero included.
+fn decodeRange(r: *Reader) DecodeError!payload.Range {
+    var b: [4]?f64 = .{ null, null, null, null };
+    while (!r.atEnd()) {
+        const t = try r.tag();
+        if (t.field < 1 or t.field > 4) {
+            try r.skip(t.wire_type);
+            continue;
+        }
+        if (t.wire_type != .fixed64) return invalidArgument("Range bound is not a double");
+        b[t.field - 1] = try r.double();
+    }
+    return payload.Range.fromBounds(b[0], b[1], b[2], b[3]);
 }
 
 /// `Match { keyword = 1; integer = 2; boolean = 3; text = 4; keywords = 5;
@@ -2352,4 +2377,101 @@ test "PointStruct.payload_raw spans every map entry, not the last one" {
         try testing.expectEqualStrings(want, kv.key);
     }
     try testing.expectEqual(@as(usize, 3), n);
+}
+
+/// One `Condition { FieldCondition field = 1 }` under `clause`, keyed `key`,
+/// with a `Range` of the given bounds (field number to value) and, when
+/// `keyword` is given, a `Match.keyword` beside it.
+fn writeRangeCondition(w: *Writer, clause: u32, key: []const u8, bounds: []const struct { u32, f64 }, keyword: ?[]const u8) !void {
+    const cond = try w.beginNested(clause, 2);
+    const fc = try w.beginNested(1, 2);
+    try w.writeStringField(1, key);
+    if (keyword) |k| {
+        const m = try w.beginNested(2, 2);
+        try w.writeStringField(1, k);
+        try w.endNested(m);
+    }
+    const rg = try w.beginNested(3, 2);
+    // Written by hand: `writeDoubleField` drops a 0.0, which `optional`
+    // makes a bound.
+    for (bounds) |b| {
+        try w.tag(b[0], .fixed64);
+        try w.fixed64(@bitCast(b[1]));
+    }
+    try w.endNested(rg);
+    try w.endNested(fc);
+    try w.endNested(cond);
+}
+
+test "a Range decodes each bound by field number, in every clause" {
+    var buf: [512]u8 = undefined;
+    var w = Writer.init(&buf);
+    // must: a > 1.5; must_not: b in [0, 2]; should: c < -1, d with no bounds.
+    try writeRangeCondition(&w, 2, "a", &.{.{ 2, 1.5 }}, null);
+    try writeRangeCondition(&w, 3, "b", &.{ .{ 3, 0.0 }, .{ 4, 2 } }, null);
+    try writeRangeCondition(&w, 1, "c", &.{.{ 1, -1 }}, null);
+    try writeRangeCondition(&w, 1, "d", &.{}, null);
+    const f = try decodeFilter(w.written());
+    try testing.expectEqual(@as(usize, 1), f.must_len);
+    try testing.expectEqual(@as(usize, 1), f.must_not_len);
+    try testing.expectEqual(@as(usize, 2), f.should_len);
+
+    const a = f.must[0].match.range;
+    try testing.expectEqual(@as(f64, 1.5), a.lo);
+    try testing.expect(a.lo_strict);
+    try testing.expect(std.math.isNan(a.hi));
+    try testing.expect(!a.contains(1.5) and a.contains(1.6));
+
+    const b = f.must_not[0].match.range;
+    try testing.expectEqual(@as(f64, 0), b.lo);
+    try testing.expect(!b.lo_strict);
+    try testing.expectEqual(@as(f64, 2), b.hi);
+    try testing.expect(!b.hi_strict);
+    try testing.expect(b.contains(0) and b.contains(2) and !b.contains(-0.1));
+
+    const c = f.should[0].match.range;
+    try testing.expectEqual(@as(f64, -1), c.hi);
+    try testing.expect(c.hi_strict);
+    try testing.expect(!c.contains(-1) and c.contains(-1.5));
+
+    // A range with no bounds admits every number, as Qdrant's.
+    const d = f.should[1].match.range;
+    try testing.expect(d.lo == -std.math.inf(f64) and !d.lo_strict);
+    try testing.expect(std.math.isNan(d.hi) and !d.hi_strict);
+
+    // A nested `must` filter carries its range through.
+    var w2 = Writer.init(&buf);
+    {
+        const cond = try w2.beginNested(2, 2);
+        const inner = try w2.beginNested(4, 2);
+        try writeRangeCondition(&w2, 2, "a", &.{.{ 4, 3 }}, null);
+        try w2.endNested(inner);
+        try w2.endNested(cond);
+    }
+    const nested = try decodeFilter(w2.written());
+    try testing.expectEqual(@as(f64, 3), nested.must[0].match.range.hi);
+}
+
+test "a FieldCondition with a match and a range keeps both, and a bound must be a double" {
+    var buf: [256]u8 = undefined;
+    var w = Writer.init(&buf);
+    try writeRangeCondition(&w, 2, "a", &.{.{ 3, 7 }}, "x");
+    const f = try decodeFilter(w.written());
+    try testing.expectEqualStrings("x", f.must[0].match.keyword);
+    try testing.expectEqual(@as(f64, 7), f.must[0].or_range.?.lo);
+
+    // `lt` sent as a varint is not a double.
+    var w2 = Writer.init(&buf);
+    {
+        const cond = try w2.beginNested(2, 2);
+        const fc = try w2.beginNested(1, 2);
+        try w2.writeStringField(1, "a");
+        const rg = try w2.beginNested(3, 2);
+        try w2.writeVarintFieldAlways(1, 5);
+        try w2.endNested(rg);
+        try w2.endNested(fc);
+        try w2.endNested(cond);
+    }
+    try testing.expectError(DecodeError.InvalidArgument, decodeFilter(w2.written()));
+    try testing.expectEqualStrings("Range bound is not a double", takeInvalidDetail());
 }
