@@ -680,13 +680,22 @@ fn diskPath(buf: []u8, name: []const u8) ?[]const u8 {
     @memcpy(z[0..dir.len], dir);
     z[dir.len] = 0;
     _ = linux.mkdir(@ptrCast(&z), 0o755); // EEXIST is fine
-    return std.mem.print(buf, "{s}/strawmann-{s}", .{ dir, name }) catch null;
+    // Per process, as `testPath` is: two runs in one tree share this cache.
+    return std.mem.print(buf, "{s}/strawmann-{d}-{s}", .{ dir, linux.getpid(), name }) catch null;
 }
 
 /// A scratch path under `/tmp`, which is enough for a header round-trip and
 /// nothing that needs a real block device (`diskPath` is for that).
 fn tmpPath(buf: []u8, name: []const u8) []const u8 {
-    return std.mem.print(buf, "/tmp/strawmann-test-{s}", .{name}) catch unreachable;
+    return testPath(buf, name);
+}
+
+/// A test's scratch path under `/tmp`, unique to this process. A fixed
+/// `/tmp/strawmann-test-<name>` was shared by every test run on the machine,
+/// so two runs at once (two worktrees, two sessions) wrote the same file and
+/// one failed "write then read a file under every placement" on 2026-11-11.
+pub fn testPath(buf: []u8, name: []const u8) []const u8 {
+    return std.mem.print(buf, "/tmp/strawmann-test-{d}-{s}", .{ linux.getpid(), name }) catch unreachable;
 }
 
 test "header round-trips and the CRC covers only the header" {

@@ -1841,7 +1841,7 @@ const TmpDir = struct {
 
     fn make(tag: []const u8) !TmpDir {
         var d = TmpDir{};
-        const p = try std.mem.print(&d.path, "/tmp/strawmann-place-{s}\x00", .{tag});
+        const p = try std.mem.print(&d.path, "/tmp/strawmann-place-{d}-{s}\x00", .{ std.os.linux.getpid(), tag });
         d.len = p.len - 1;
         // The linux syscalls directly, as `storage.zig`'s own tests do: this
         // has to work the same way the code under test opens its files.

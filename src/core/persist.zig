@@ -709,7 +709,9 @@ test "§6.4: a collection round-trips through save and load" {
     _ = c.delete(.{ .num = 9 });
     try buildIndex(&c, .serial, 1);
 
-    const dir = "/tmp/strawmann-test-collection";
+    var dir_buf: [128]u8 = undefined;
+
+    const dir = storage.testPath(&dir_buf, "collection");
     try save(&c, dir);
 
     var reloaded = try load(testing.allocator, "test", dir, .pinned);
@@ -776,7 +778,9 @@ test "§6.4: payloads and the field indexes survive the round-trip" {
     _ = try c.upsert(.{ .num = 5 }, &v);
     try c.createPayloadIndex("a", .keyword);
 
-    const dir = "/tmp/strawmann-test-payload";
+    var dir_buf: [128]u8 = undefined;
+
+    const dir = storage.testPath(&dir_buf, "payload");
     try save(&c, dir);
     var reloaded = try load(testing.allocator, "test", dir, .pinned);
     defer reloaded.deinit();
@@ -820,7 +824,9 @@ test "§6.4: a float index survives the round-trip as its kind, rebuilt from the
         _ = try c.upsertWithPayload(.{ .num = i }, &v, w.written(), 3);
     }
 
-    const dir = "/tmp/strawmann-test-payload-float";
+    var dir_buf: [128]u8 = undefined;
+
+    const dir = storage.testPath(&dir_buf, "payload-float");
     try save(&c, dir);
     var reloaded = try load(testing.allocator, "test", dir, .pinned);
     defer reloaded.deinit();
@@ -877,7 +883,9 @@ test "a text index keeps exact BM25 statistics through delete and the round-trip
     try c.textSearch(&scratch, "body", "run", 1.2, 0.75, null, &none);
     try testing.expectEqual(@as(usize, 0), none.finish().len);
 
-    const dir = "/tmp/strawmann-test-text-index";
+    var dir_buf: [128]u8 = undefined;
+
+    const dir = storage.testPath(&dir_buf, "text-index");
     try save(&c, dir);
     var reloaded = try load(testing.allocator, "test", dir, .pinned);
     defer reloaded.deinit();
@@ -918,7 +926,9 @@ test "§6.4: hnsw_m, ef_construct and both id kinds survive the round-trip" {
     try buildIndex(&c, .serial, 1);
     try testing.expectEqual(@as(usize, 24), c.graph.?.params.m);
 
-    const dir = "/tmp/strawmann-test-config";
+    var dir_buf: [128]u8 = undefined;
+
+    const dir = storage.testPath(&dir_buf, "config");
     try save(&c, dir);
     var reloaded = try load(testing.allocator, "cfg", dir, .pinned);
     defer reloaded.deinit();
@@ -948,7 +958,9 @@ test "§6.4: a truncated deleted.bits is refused, not read as random tombstones"
     for (0..10) |i| _ = try c.upsert(.{ .num = i }, &v);
     _ = c.delete(.{ .num = 3 });
 
-    const dir = "/tmp/strawmann-test-short-deleted";
+    var dir_buf: [128]u8 = undefined;
+
+    const dir = storage.testPath(&dir_buf, "short-deleted");
     try save(&c, dir);
     var pbuf: [512]u8 = undefined;
     const p = try Persistence.path(&pbuf, dir, "deleted.bits");
@@ -971,9 +983,11 @@ test "a quantized collection is refused by save rather than reloaded as fp32" {
     // Configured but not yet built is refused too: the collection would
     // reload as one that never asked.
     c.quant_mode = .scalar;
-    try testing.expectError(error.QuantizedNotPersisted, save(&c, "/tmp/strawmann-test-quant-refused"));
+    var q_buf: [128]u8 = undefined;
+    const q_dir = storage.testPath(&q_buf, "quant-refused");
+    try testing.expectError(error.QuantizedNotPersisted, save(&c, q_dir));
     try quantize(&c, .scalar);
-    try testing.expectError(error.QuantizedNotPersisted, save(&c, "/tmp/strawmann-test-quant-refused"));
+    try testing.expectError(error.QuantizedNotPersisted, save(&c, q_dir));
 }
 
 test "§6.4: a cosine collection records that it stored normalised vectors" {
@@ -983,7 +997,9 @@ test "§6.4: a cosine collection records that it stored normalised vectors" {
     var v = [_]f32{ 3, 4 } ++ @as([14]f32, @splat(0));
     _ = try c.upsert(.{ .num = 1 }, &v);
 
-    const dir = "/tmp/strawmann-test-cosine";
+    var dir_buf: [128]u8 = undefined;
+
+    const dir = storage.testPath(&dir_buf, "cosine");
     try save(&c, dir);
 
     var pbuf: [512]u8 = undefined;
@@ -1012,7 +1028,9 @@ test "§8.7: a corrupted graph file is refused rather than silently degrading re
     }
     try buildIndex(&c, .serial, 1);
 
-    const dir = "/tmp/strawmann-test-corrupt";
+    var dir_buf: [128]u8 = undefined;
+
+    const dir = storage.testPath(&dir_buf, "corrupt");
     var pbuf: [512]u8 = undefined;
 
     const poke = struct {
@@ -1103,7 +1121,8 @@ test "§6.4: a header whose count exceeds its capacity is refused, not read past
     defer c.deinit();
     var v = [_]f32{ 1, 0, 0, 0 };
     for (0..8) |i| _ = try c.upsert(.{ .num = i }, &v);
-    const dir = "/tmp/strawmann-test-overcount";
+    var dir_buf: [128]u8 = undefined;
+    const dir = storage.testPath(&dir_buf, "overcount");
     try save(&c, dir);
 
     // Rewrite the vectors header with a count past its capacity and a
@@ -1317,7 +1336,9 @@ test "§6.4: every storage datatype round-trips, and the header carries which" {
         }
         try buildIndex(&c, .serial, 1);
 
-        const dir = "/tmp/strawmann-test-datatype";
+        var dir_buf: [128]u8 = undefined;
+
+        const dir = storage.testPath(&dir_buf, "datatype");
         try save(&c, dir);
         var reloaded = try load(testing.allocator, "test", dir, .pinned);
         defer reloaded.deinit();
@@ -1362,7 +1383,9 @@ test "a header whose stride does not match the layout is refused" {
     var v = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 };
     _ = try c.upsert(.{ .num = 1 }, &v);
 
-    const dir = "/tmp/strawmann-test-bad-stride";
+    var dir_buf: [128]u8 = undefined;
+
+    const dir = storage.testPath(&dir_buf, "bad-stride");
     try save(&c, dir);
 
     var pbuf: [512]u8 = undefined;
@@ -1388,7 +1411,9 @@ test "a header naming an unknown datatype is refused, not read as fp32" {
     var v = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 };
     _ = try c.upsert(.{ .num = 1 }, &v);
 
-    const dir = "/tmp/strawmann-test-bad-datatype";
+    var dir_buf: [128]u8 = undefined;
+
+    const dir = storage.testPath(&dir_buf, "bad-datatype");
     try save(&c, dir);
 
     // Corrupt only the datatype byte, then repair the CRC so the file is
