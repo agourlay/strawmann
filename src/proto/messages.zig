@@ -1192,8 +1192,7 @@ pub const CreateFieldIndexCollection = struct {
 /// sent is recorded, so the handler can refuse what is outside decisions.md's
 /// scope by name rather than build a different index.
 pub const TextIndexParams = struct {
-    /// `TokenizerType`: Unknown 0, Prefix 1, Whitespace 2, Word 3, Multilingual 4.
-    tokenizer: u64 = 0,
+    tokenizer: TokenizerType = .unknown,
     lowercase: ?bool = null,
     token_len_bounds: bool = false,
     /// `StopwordsSet.languages` (field 1), each a language name.
@@ -1204,16 +1203,35 @@ pub const TextIndexParams = struct {
     /// `StemmingAlgorithm { oneof { SnowballParams snowball = 1; DisabledStemmer disabled = 2; } }`.
     snowball_language: ?[]const u8 = null,
     ascii_folding: ?bool = null,
-    /// `TextScoringParams { TextScoringType type = 1; }`, `Bm25 = 0`; null
-    /// when the index does not score.
-    scoring: ?u64 = null,
+    /// `TextScoringParams { TextScoringType type = 1; }`; null when the
+    /// index does not score.
+    scoring: ?TextScoringType = null,
+
+    /// `TokenizerType` (VERIFIED, collections.proto; `Code` is newer than
+    /// the revision above). Open: a value from a newer client is refused by
+    /// the handler, not at decode.
+    pub const TokenizerType = enum(u64) {
+        unknown = 0,
+        prefix = 1,
+        whitespace = 2,
+        word = 3,
+        multilingual = 4,
+        code = 5,
+        _,
+    };
+
+    /// `TextScoringType { Bm25 = 0; }`, open for the same reason.
+    pub const TextScoringType = enum(u64) {
+        bm25 = 0,
+        _,
+    };
 
     pub fn decode(r: *Reader) DecodeError!TextIndexParams {
         var out: TextIndexParams = .{};
         while (!r.atEnd()) {
             const t = try r.tag();
             switch (t.field) {
-                1 => out.tokenizer = try r.varint(),
+                1 => out.tokenizer = @fromBackingInt(@intCast(try r.varint())),
                 2 => out.lowercase = try r.boolean(),
                 3, 4 => {
                     _ = try r.varint();
@@ -1266,7 +1284,7 @@ pub const TextIndexParams = struct {
                         const st = try sub.tag();
                         if (st.field == 1) kind = try sub.varint() else try sub.skip(st.wire_type);
                     }
-                    out.scoring = kind;
+                    out.scoring = @fromBackingInt(@intCast(kind));
                 },
                 // `on_disk`, `phrase_matching`, `enable_hnsw`, `memory`:
                 // placement and the phrase index, neither of which changes a

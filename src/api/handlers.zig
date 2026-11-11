@@ -949,12 +949,12 @@ fn textIndexOptions(params: ?msg.TextIndexParams) TextIndexParse {
     const p = params orelse
         return unsupportedText("a text index without `scoring` (full-text filters are a §1 non-goal)");
     switch (p.tokenizer) {
-        3 => {},
-        0 => return .{ .rejected = .{ .status = .invalid_argument, .why = "unknown tokenizer type" } },
+        .word => {},
+        .unknown => return .{ .rejected = .{ .status = .invalid_argument, .why = "unknown tokenizer type" } },
         else => return unsupportedText("text index tokenizers other than `word`"),
     }
     if (p.scoring == null) return unsupportedText("a text index without `scoring` (full-text filters are a §1 non-goal)");
-    if (p.scoring.? != 0) return unsupportedText("text index scoring other than BM25");
+    if (p.scoring.? != .bm25) return unsupportedText("text index scoring other than BM25");
     if (p.token_len_bounds) return unsupportedText("text index `min_token_len` and `max_token_len`");
     if (p.ascii_folding orelse false) return unsupportedText("text index `ascii_folding`");
     if (p.custom_stopwords) return unsupportedText("custom text index stopwords");
@@ -2186,15 +2186,15 @@ fn effectiveEf(requested: ?u64, ef_construct: usize, want: usize) usize {
 const testing = std.testing;
 
 test "textIndexOptions builds the word/BM25 index and names each refusal with its status" {
-    const bm25: msg.TextIndexParams = .{ .tokenizer = 3, .scoring = 0 };
+    const bm25: msg.TextIndexParams = .{ .tokenizer = .word, .scoring = .bm25 };
     try testing.expectEqual(text_mod.tokenizer.Options{}, textIndexOptions(bm25).options);
     const Case = struct { p: ?msg.TextIndexParams, status: Status, why: []const u8 };
     for ([_]Case{
         .{ .p = null, .status = .unimplemented, .why = "a text index without `scoring` (full-text filters are a §1 non-goal)" },
-        .{ .p = .{ .tokenizer = 0, .scoring = 0 }, .status = .invalid_argument, .why = "unknown tokenizer type" },
-        .{ .p = .{ .tokenizer = 2, .scoring = 0 }, .status = .unimplemented, .why = "text index tokenizers other than `word`" },
-        .{ .p = .{ .tokenizer = 3 }, .status = .unimplemented, .why = "a text index without `scoring` (full-text filters are a §1 non-goal)" },
-        .{ .p = .{ .tokenizer = 3, .scoring = 1 }, .status = .unimplemented, .why = "text index scoring other than BM25" },
+        .{ .p = .{ .tokenizer = .unknown, .scoring = .bm25 }, .status = .invalid_argument, .why = "unknown tokenizer type" },
+        .{ .p = .{ .tokenizer = .whitespace, .scoring = .bm25 }, .status = .unimplemented, .why = "text index tokenizers other than `word`" },
+        .{ .p = .{ .tokenizer = .word }, .status = .unimplemented, .why = "a text index without `scoring` (full-text filters are a §1 non-goal)" },
+        .{ .p = .{ .tokenizer = .word, .scoring = @fromBackingInt(@intCast(1)) }, .status = .unimplemented, .why = "text index scoring other than BM25" },
     }) |c| {
         const rj = textIndexOptions(c.p).rejected;
         try testing.expectEqual(c.status, rj.status);
