@@ -16,17 +16,6 @@ on Qdrant `dev` b4ebd966f in release mode, the vector pairs T4 with T3 passing
 and the text pairs T2. What they publish wrongly, or still refuse and could
 not:
 
-**3. dbpedia's W11-steady is not flat across passes.** W11's coverage half
-is closed: since the clock (`workloads.w11_stop_at`, 2026-10-06) every corpus
-reads `write overlap` 100% on both rows, both engines, every pass, h-and-m
-last (1109). What is left is the spread on dbpedia. strawmANN's W11-steady read
-618 / 541 / 534 on 1008 and 600 / 574 / 566 on 1110, pass 1 high both times
-(1008's pass 1 was also the one with 90,509 major faults, yet the fastest, so
-paging does not explain it); Qdrant read 504 / 494 / 460 on 1008 and is flat
-on 1110 (506 / 499 / 499). h-and-m 1109 is within 4% on both engines. Whether
-the first pass's head start is the drainer (item 8) meeting a colder tail, or
-the engines' own, is open.
-
 **74. strawmANN lost the SQ8 lead on dbpedia.** On 1110 W6 reads parity
 (0.94x; 1008: 1.13x) and W6-ef256 and ef512 0.88x and 0.86x, matched-recall SQ8
 0.80x to 0.90x from recall 0.967 up. Qdrant's W6 ran 13 to 19% faster on the
@@ -36,14 +25,27 @@ at equal cycles, but pulls 2.3x the demand DRAM per query (2,444 against
 1,056 KiB) at IPC 0.53 against 0.99, on 7.1 cores busy against 7.9. Two
 suspects: stage 2 rescores up to `ef` fp32 rows (6 KiB each at d=1536) with
 no prefetch (`binary.Rescorer.run`), and strawmANN's `1 io + 7 workers` on
-eight CPUs. What it needs: an in-process A/B of a rescore prefetch and of
-`--workers 8`, W6 ladder with W4 as the control.
+eight CPUs. Since 2026-11-11 the engine takes `--rescore-prefetch off|first|whole`
+(off by default) and `ab_chain_1112.py` runs it and `--workers 8` on
+dbpedia-100K's W6 ladder. `--workers 8` did nothing for h-and-m's W4 on
+2026-09-29 (decisions.md), which bounds what to expect from it.
 
 **75. laion's per-query cost.** laion 1109 W4 reads 1.03x where sift1m reads
 1.94x, so W5 reads 0.86x: Qdrant gains 18% from batching (W4 10,933 to W5
 12,939) and strawmANN nothing (11,247 to 11,095). The fan-out of a batch over
 the workers is not the cause (ab-1110: serial 11,160 against fan-out 11,156).
-Suspects: occupancy (item 74's second) and Zig 0.17's kernel inlining.
+Occupancy is not it: on W4 both engines hold about 7 cores (0.97x), so
+1.03x is the work ratio (1.06x). strawmANN runs 40% fewer instructions per
+query (0.66M against 1.10M) at IPC 0.51 against 0.79, on the same demand
+DRAM (1,766 against 1,708 KiB). On sift1m it pulls 64 KiB against 1,089 at
+IPC 1.48: there `collection.Probe.prefetch` asks for the whole 512-byte row
+(b3ca8d2, demand fills 12,400 to 3,000 a query), while laion's 2 KiB rows
+get their first line, and about 880 rows a query arrive as demand misses.
+The W10 ladder's 1.36x at ef 128 runs `-p 8`, where Qdrant holds 5.3 cores,
+so it is not W4's like for like. Since 2026-11-11 `--probe-prefetch-bytes`
+sets the width, and `ab_chain_1112.py` runs 512 and 2048 on laion and 512 on
+dbpedia-100K beside the rule. The whole 8 KiB row lost on h-and-m
+(decisions.md, 2026-09-29); d=512 was never swept.
 
 **58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**
 W10-ef128 +10.4%, W10-ef256 +11.5%, W12-sel1 +10.2%, W11 +10%, with cycles
@@ -151,18 +153,31 @@ the exhaustive tail. The drainer (item 8) does not reach this row: W11's fifth o
 corpus arrives at 3,300 points/s, faster than it links, so the tail crosses
 `rebuild_ratio` and the rebuild takes over as before.
 
-**62. One strawmANN pass sits apart on every W10 point on dbpedia.** The
-third pass read 6 to 7% slow two nights running, W10-ef32 10,625 / 10,752 /
-9,934 on 0930 and 10,525 / 10,546 / 9,888 on 0929, while W3 and W4 on the same
-`bench2` are flat. Since 2026-09-30 every row records its engine's
-`AnonHugePages` and `FilePmdMapped` after the row (`anon_huge_bytes`,
-`file_pmd_bytes`, read outside the bracket since the walk takes
-`mmap_lock`). 1110 read them: `anon_huge_bytes` and `file_pmd_bytes` are 0 on
-every row of every pass, so the arenas are not mapped by larger pages on any
-pass, and page size is not the difference. On 1110 the odd pass moved: pass 1
-is 5 to 7% *faster* (W10-ef32 10,617 against 10,029 and 10,087; ef128 3,854
-against 3,611 and 3,620), still with W3 flat (1,079 / 1,071 / 1,077), which
-widens strawmANN's W10 bands to ±9 to ±13%. Still unexplained.
+**62. strawmANN's first pass of a dbpedia night runs 5 to 9% faster.** The
+same work at fewer cycles: on 1110 pass 1 read W10-ef32 10,617 against 10,029
+and 10,087 (cycles per query 1.26M against 1.38M, instructions flat at 467k),
+W10-ef128 +7%, W4 +2.5% and W11-steady 600 against 574 and 566 (the item 3
+spread, closed into this one: the drainer and the tail start every pass in the
+same state, and the engine's total instructions over the row are equal, so
+pass 1's lower instructions per query are the drainer's fixed cost spread
+over more queries). 1008 reads the same. 0929 and 0930 read the mirror image,
+pass 3 slow, and their per-pass directories are gone. Huge pages are not it:
+`anon_huge_bytes` and `file_pmd_bytes` are 0 on every row of every pass.
+
+What sets pass 1 apart is memory. It is the night's first pass, the only one
+that starts after strawmANN's arena wipe of 0.64 GB rather than a Qdrant pass
+and a 7.6 GB one, and it runs under pressure: about 10 GB less file RSS at W10
+(19.0 against 29.4 GB), 1.2 GB less anonymous, W1 with 30,576 major faults
+against 0, and a recall sweep that paged 2.77M faults against 0.75M and
+0.84M. The pass whose pages were reclaimed and read back runs faster than the
+ones whose pages stayed resident since the engine wrote them; h-and-m 1109's
+slow pass 3 is its most resident (4.3 against 3.6 and 3.4 GB file RSS).
+Qdrant's W10 is flat at 31.2 GB file RSS every pass. Since 2026-11-11 each row
+records the host's `MemAvailable` and used swap and the engine's `VmSwap`
+(`procstat.memory_state`). What it needs: an in-process A/B on one built
+bench2, W10-ef32 three times, the arena files evicted (`posix_fadvise
+DONTNEED`) and re-read, W10-ef32 three times more. If eviction buys the 5 to
+7%, every pass should start from the same page-cache state.
 
 **73. The filtered planner's constants at saturation.** The walk's fixed
 term moved to 350,000 (4c08d9d) after bfb's with-replacement keyword draw put
@@ -172,6 +187,12 @@ recall 1.0) and laion flat. Two things the model still gets wrong: laion's
 9-keyword queries (about 9,000 matches) scan at `ef` 256 under either
 constant, and the scan's cost per value is not flat in `d`. What it needs:
 a refit with `d` as a term, on the 1109 sweeps and an in-process ladder.
+The 1103 forced-plan ladders say a single per-value cost cannot do it: per
+matched row the scan costs about 137, 769, 1,440 and 2,270 cycles at
+d = 128, 512, 1,536 and 2,048, about 17 cycles per cache line
+everywhere but laion, at 24. laion's rows are dear to read in the scan as in
+the traversal (item 75), so the refit waits on item 75's A/B: a prefetch
+that moves laion's line cost moves this break-even with it.
 
 ### P3. What the datasets offer that no row measures yet
 
