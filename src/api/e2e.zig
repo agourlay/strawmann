@@ -2969,6 +2969,8 @@ const FilterSpec = struct {
     should: ?[2][]const u8 = null,
     /// `must` on `key` with `Range { gt = 2 }`.
     range_gt: ?f64 = null,
+    /// `Filter` fields already encoded, written after the rest.
+    raw: ?[]const u8 = null,
 };
 
 const FilteredQueryOpts = struct {
@@ -3036,6 +3038,7 @@ fn buildFilteredQuery(buf: []u8, name: []const u8, q: []const f32, opts: Filtere
             try writeKeywordCondition(&w, 1, f.key, pair[0]);
             try writeKeywordCondition(&w, 1, f.key, pair[1]);
         }
+        if (f.raw) |raw| try w.raw(raw);
         try w.endNested(fl);
     }
     if (opts.hnsw_ef != null or opts.exact) {
@@ -3631,6 +3634,223 @@ test "e2e: a float index answers range gt with the exact filtered top-k, through
         try testing.expectEqual(@as(u64, 3), schema[0].data_type);
         try testing.expectEqual(@as(u64, n + 1), schema[0].points);
     }
+}
+
+/// The payload of point `i` in the shape-condition e2e test: `t` cycles
+/// through seven shapes, `d` is a datetime `i` hours after 2024-01-01T00:00Z
+/// written in one of three forms, or an integer Qdrant never reads as one.
+const ShapePayload = struct {
+    const base: i64 = 1_704_067_200;
+
+    /// `t`'s encoded `Value`, or null for no `t` at all.
+    fn t(i: usize) ?[]const u8 {
+        return switch (i % 7) {
+            0 => null,
+            1 => "\x08\x00", // null
+            2 => "\x3a\x00", // []
+            3 => "\x3a\x08\x0a\x02\x08\x00\x0a\x02\x18\x01", // [null, 1]
+            4 => "\x22\x01x", // "x"
+            5 => "\x3a\x08\x0a\x02\x18\x01\x0a\x02\x18\x02", // [1, 2]
+            else => "\x18\x00", // 0
+        };
+    }
+
+    fn isEmpty(i: usize) bool {
+        return i % 7 <= 2;
+    }
+    fn isNull(i: usize) bool {
+        return i % 7 == 1 or i % 7 == 3;
+    }
+    /// `d` parses as a datetime.
+    fn dated(i: usize) bool {
+        return i % 4 != 3;
+    }
+
+    /// `d` as a string, the same instant in each form.
+    fn d(buf: []u8, i: usize) []const u8 {
+        const h = i;
+        return switch (i % 4) {
+            0 => std.fmt.bufPrint(buf, "2024-01-{d:0>2}T{d:0>2}:00:00Z", .{ 1 + h / 24, h % 24 }) catch unreachable,
+            1 => std.fmt.bufPrint(buf, "2024-01-{d:0>2}T{d:0>2}:00:00+01:00", .{ 1 + (h + 1) / 24, (h + 1) % 24 }) catch unreachable,
+            else => std.fmt.bufPrint(buf, "2024-01-{d:0>2} {d:0>2}:00:00", .{ 1 + h / 24, h % 24 }) catch unreachable,
+        };
+    }
+};
+
+fn buildUpsertShapes(buf: []u8, name: []const u8, first: usize, vecs: []const []const f32) ![]const u8 {
+    var w = wire.Writer.init(buf);
+    try w.writeStringField(1, name);
+    try w.writeBoolField(2, true);
+    var dbuf: [64]u8 = undefined;
+    for (vecs, first..) |v, i| {
+        const pt = try w.beginNested(3, 3);
+        {
+            const idn = try w.beginNested(1, 2);
+            try w.writeVarintFieldAlways(1, i);
+            try w.endNested(idn);
+        }
+        if (ShapePayload.t(i)) |tv| {
+            const entry = try w.beginNested(3, 2);
+            try w.writeStringField(1, "t");
+            try w.tag(2, .length_delimited);
+            try w.varint(tv.len);
+            try w.raw(tv);
+            try w.endNested(entry);
+        }
+        {
+            const entry = try w.beginNested(3, 2);
+            try w.writeStringField(1, "d");
+            const val = try w.beginNested(2, 2);
+            if (ShapePayload.dated(i)) {
+                try w.writeStringField(core.payload.value_string, ShapePayload.d(&dbuf, i));
+            } else {
+                try w.writeVarintFieldAlways(core.payload.value_integer, @intCast(ShapePayload.base + @as(i64, @intCast(i)) * 3600));
+            }
+            try w.endNested(val);
+            try w.endNested(entry);
+        }
+        {
+            const vs = try w.beginNested(4, 3);
+            const vec = try w.beginNested(1, 3);
+            const dv = try w.beginNested(101, 3);
+            try w.writePackedFloats(1, v);
+            try w.endNested(dv);
+            try w.endNested(vec);
+            try w.endNested(vs);
+        }
+        try w.endNested(pt);
+    }
+    return w.written();
+}
+
+test "e2e: is_empty, is_null and datetime_range filters return the brute-force filtered top-k" {
+    var h = try Harness.start(testing.allocator);
+    defer h.stop();
+    var c = try Client.connect(h.port);
+    defer c.close();
+    var req_buf: [1 << 18]u8 = undefined;
+    var out: [1 << 18]u8 = undefined;
+    {
+        var w = wire.Writer.init(&req_buf);
+        try w.writeStringField(1, "sh");
+        const vc = try w.beginNested(10, 2); // vectors_config
+        const p = try w.beginNested(1, 2);
+        try w.writeVarintFieldAlways(1, 16);
+        try w.writeVarintFieldAlways(2, 2); // Euclid
+        try w.endNested(p);
+        try w.endNested(vc);
+        const cr = try c.call("/qdrant.Collections/Create", w.written(), &out);
+        try testing.expectEqual(grpc.Status.ok, cr.status);
+    }
+
+    const n = 420;
+    var prng = std.Random.DefaultPrng.init(0x15e3);
+    const rnd = prng.random();
+    const stored = try testing.allocator.alloc(f32, n * 16);
+    defer testing.allocator.free(stored);
+    for (stored) |*x| x.* = rnd.floatNorm(f32);
+    var batch: [60][]const f32 = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += batch.len) {
+        for (&batch, 0..) |*v, j| v.* = stored[(i + j) * 16 ..][0..16];
+        const resp = try c.call("/qdrant.Points/Upsert", try buildUpsertShapes(&req_buf, "sh", i, &batch), &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+    }
+    _ = try waitGreen(&c, "sh", &req_buf, &out);
+
+    // [base + 50 h, base + 300 h).
+    const lo: i64 = ShapePayload.base + 50 * 3600;
+    const hi: i64 = ShapePayload.base + 300 * 3600;
+    const Admit = struct {
+        fn inWindow(j: usize) bool {
+            return ShapePayload.dated(j) and j >= 50 and j < 300;
+        }
+        fn empty(j: usize) bool {
+            return ShapePayload.isEmpty(j);
+        }
+        fn isNull(j: usize) bool {
+            return ShapePayload.isNull(j);
+        }
+        fn notEmptyInWindow(j: usize) bool {
+            return !ShapePayload.isEmpty(j) and inWindow(j);
+        }
+    };
+    var conds: [4][256]u8 = undefined;
+    // must Condition.is_empty("t").
+    var w0 = wire.Writer.init(&conds[0]);
+    {
+        const cond = try w0.beginNested(2, 2);
+        const ie = try w0.beginNested(2, 2);
+        try w0.writeStringField(1, "t");
+        try w0.endNested(ie);
+        try w0.endNested(cond);
+    }
+    // must FieldCondition { key "t", is_null = true }.
+    var w1 = wire.Writer.init(&conds[1]);
+    {
+        const cond = try w1.beginNested(2, 2);
+        const fc = try w1.beginNested(1, 2);
+        try w1.writeStringField(1, "t");
+        try w1.writeVarintFieldAlways(10, 1);
+        try w1.endNested(fc);
+        try w1.endNested(cond);
+    }
+    // must FieldCondition { key "d", datetime_range { gte = lo, lt = hi } }.
+    var w2 = wire.Writer.init(&conds[2]);
+    try writeDatetimeWindow(&w2, lo, hi);
+    // The window, and must_not Condition.is_empty("t").
+    var w3 = wire.Writer.init(&conds[3]);
+    try writeDatetimeWindow(&w3, lo, hi);
+    {
+        const cond = try w3.beginNested(3, 2);
+        const ie = try w3.beginNested(2, 2);
+        try w3.writeStringField(1, "t");
+        try w3.endNested(ie);
+        try w3.endNested(cond);
+    }
+    const Case = struct { raw: []const u8, admit: *const fn (usize) bool };
+    const cases = [_]Case{
+        .{ .raw = w0.written(), .admit = &Admit.empty },
+        .{ .raw = w1.written(), .admit = &Admit.isNull },
+        .{ .raw = w2.written(), .admit = &Admit.inWindow },
+        .{ .raw = w3.written(), .admit = &Admit.notEmptyInWindow },
+    };
+    var truth: [16]u64 = undefined;
+    var pts: [16]PointPayload = undefined;
+    for ([_]usize{ 7, 123, 301 }) |qi| {
+        const q = stored[qi * 16 ..][0..16];
+        for (cases) |cs| {
+            const tn = filteredTruth(stored, q, cs.admit, 10, &truth);
+            try testing.expectEqual(@as(usize, 10), tn);
+            for ([_]bool{ false, true }) |exact| {
+                const resp = try c.call("/qdrant.Points/QueryBatch", try buildFilteredQuery(&req_buf, "sh", q, .{
+                    .hnsw_ef = n,
+                    .exact = exact,
+                    .filter = .{ .raw = cs.raw },
+                }), &out);
+                try testing.expectEqual(grpc.Status.ok, resp.status);
+                try testing.expectEqual(@as(usize, 10), try readFirstBatchPayloads(resp.body, &pts));
+                for (pts[0..10], truth[0..10]) |p, want| try testing.expectEqual(want, p.id);
+            }
+        }
+    }
+}
+
+/// `must` a `FieldCondition` on `d` with `DatetimeRange { lt = hi, gte = lo }`,
+/// whole seconds.
+fn writeDatetimeWindow(w: *wire.Writer, lo: i64, hi: i64) !void {
+    const cond = try w.beginNested(2, 2);
+    const fc = try w.beginNested(1, 2);
+    try w.writeStringField(1, "d");
+    const dr = try w.beginNested(8, 2);
+    for ([_]struct { u32, i64 }{ .{ 1, hi }, .{ 3, lo } }) |b| {
+        const ts = try w.beginNested(b[0], 2);
+        try w.writeVarintFieldAlways(1, @bitCast(b[1]));
+        try w.endNested(ts);
+    }
+    try w.endNested(dr);
+    try w.endNested(fc);
+    try w.endNested(cond);
 }
 
 test "e2e: Scroll with a filter pages the matching points in id order, with their payloads" {
