@@ -1,10 +1,14 @@
-# Open work
+# Backlog
 
-What is still unmeasured or unexplained, in priority order, and nothing else.
-An item that closes is deleted, and its number is not reused, since commits
-and code cite items by number. Why a choice was made goes to
-[`decisions.md`](decisions.md); everything else lives in the commit that did it
-and in the test that holds it.
+Two sections. **Findings** is what is still unmeasured or unexplained, in
+priority order, and nothing else: an item that closes is deleted, and its
+number is not reused, since commits and code cite items by number ("findings
+62"). **Next** is what is ready to run, waiting on a decision, or being built,
+and points at the findings it answers. Why a choice was made goes to
+[`decisions.md`](decisions.md); everything else lives in the commit that did
+it and in the test that holds it.
+
+## Findings
 
 Ranked by what a wrong or missing number costs.
 
@@ -133,7 +137,11 @@ through the cache, and tested a gather onto one worker. At 6 GB there is no
 sharing, and a gather split across the workers is the lever, which reopens
 that decision for d=1536. The smaller lever landed in 99d2776: scans of 4 GB
 and more wait for one of four slots, 10.98 q/s against ~10 (`decisions.md`,
-2026-09-29). The shared pass is what is left. Below the cap
+2026-09-29). The shared pass is what is left. Since
+2026-11-11 it is built behind `--exact-gather` (`collection.ExactGather`: workers
+holding exact queries on one collection of 4 GiB or more meet, and each scans
+a slice of the rows for all of the group's queries), off until `gather-dbpedia`
+measures it. Below the cap
 the same contention is a draw: sift1m's W9 read 202 q/s on 0929 and 186 on
 0930, and in-process two runs of one build read 190 and 182 at 423k and 590k
 demand fills per query, as far apart as any two commits (e149208 to 1fb2e43,
@@ -240,3 +248,57 @@ things stand between that and a row:
   dataset path, and a recall that comes from the row (bfb's precision)
   rather than from a joined sweep, which `compare.py` and the report do not
   read yet; plus the ε-tie check against our filtered oracle.
+
+## Next
+
+### Ready to run (a quiet machine, a `systemd-run --user` timer)
+
+- **`ab_chain_1112.py --commit <HEAD>`**, about 3 h, one build, every arm a
+  flag. Needs `QDRANT_BINARY` and `BFB` in the unit's environment, as the
+  night runs have them.
+  - `qdrant-early` / `qdrant-late`: the pinned Qdrant's laion W4 and
+    W10-ef128 at both ends of the night (findings 58).
+  - `sq8-dbpedia`: `--rescore-prefetch off|first|whole` and `--workers 8` on
+    dbpedia-100K's W6 ladder (findings 74).
+  - `probe-laion`, `probe-dbpedia`: `--probe-prefetch-bytes 512|2048` and
+    `--workers 8` on W3, W4, W5, W10-ef128 (findings 75).
+  - `reclaim-dbpedia`: W10 on a resident collection, then reclaimed through
+    the engine's cgroup and read back (findings 62).
+  - `gather-dbpedia`: dbpedia-1m's W9 with and without `--exact-gather`
+    (findings 10).
+
+### After the chain
+
+- Read each `bench/results/ab-MMDD-<step>/summary.txt`. A flag whose arm wins
+  its target rows without losing the control becomes the default, in a commit
+  that says so and a `decisions.md` entry; one that does not is reverted.
+- The planner refit (findings 73) once 75 says what laion's line cost is.
+- A full republish of every corpus, which also puts the measured BM25 late
+  filter (1.56x to 3.33x on W15-filtered) and the planner's 350,000 walk term
+  (+5.6% on sift1m sel10-ef128) on the pages: every pair is STALE against
+  1109 and 1110 by strawmANN commit.
+
+### Waiting on a decision
+
+- **bfb's keyword match (findings 55).** A local branch,
+  `~/.cache/strawmann/bfb-keyword` (`fix/dataset-keyword-match`, a2d9e72 on the
+  pinned d2a6b6c), sends dataset `match` strings as keyword matches. Offering
+  it upstream and moving the pin is the operator's call; a pin move is a new
+  stamp, so the next pairs are STALE by design.
+- **Occupancy at 1% selectivity (findings 7):** splitting one query's scan
+  across idle workers is an occupancy choice, not a cheaper scan.
+
+### To build
+
+- **A float payload index and a `range` condition** in the engine, for laion's
+  filtered queries (findings 55).
+- **The real-filter rows (findings 55):** an upload row and a search row on
+  bfb's dataset path, a recall the row carries (bfb's precision) that
+  `compare.py` and the report read, and the ε-tie check against our filtered
+  oracle. After the bfb decision, since the rows run on it.
+
+### Dropped
+
+- dbpedia W9's 8% since the Zig 0.16 build (1008 to 1110, equal instructions):
+  no 0.16 toolchain is left and today's source needs 0.17, so a toolchain arm
+  cannot isolate it.

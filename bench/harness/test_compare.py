@@ -1615,7 +1615,7 @@ class RetentionTests(unittest.TestCase):
 
     def test_a_label_a_document_names_is_kept(self):
         self._label("sm-sift-perf")
-        (self.root / "docs/findings.md").write_text(
+        (self.root / "docs/backlog.md").write_text(
             "the run at `sm-sift-perf` is where this was measured\n")
         self.assertEqual(self._prunable(), [])
 
@@ -1624,7 +1624,7 @@ class RetentionTests(unittest.TestCase):
         backs can never be regenerated."""
         self._label("sm-dbp100k")
         self._label("qd-dbp100k")
-        (self.root / "docs/findings.md").write_text("see `sm-dbp100k`\n")
+        (self.root / "docs/backlog.md").write_text("see `sm-dbp100k`\n")
         self.assertEqual(self._prunable(), [])
 
     def test_a_committed_report_page_cites_its_labels_by_filename(self):
@@ -1693,7 +1693,7 @@ class RetentionTests(unittest.TestCase):
         self._label("exp-a")
         self._label("exp-b")
         self._label("sm-cited")
-        (self.root / "docs/findings.md").write_text("measured at `sm-cited`\n")
+        (self.root / "docs/backlog.md").write_text("measured at `sm-cited`\n")
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.fr.prune(retain_days=0)
         self.assertIn("exp-a", out.getvalue())

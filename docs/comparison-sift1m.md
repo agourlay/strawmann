@@ -336,7 +336,7 @@ cosine.** The differ reaches the same conclusion independently and prints it:
 *"the oracle says QDRANT is further off"*.
 
 **This explanation is incomplete, and the missing piece is measured in
-[`findings.md`](findings.md) §14.** Cosine normalises at ingest, and the two
+[`backlog.md`](backlog.md) §14.** Cosine normalises at ingest, and the two
 engines do not normalise identically: on any AVX host Qdrant sums the length
 with four accumulators and multiplies by `1.0/√length`, while this engine sums
 strictly and divides. At d=1536 that difference alone produces up to

@@ -15,7 +15,10 @@
    2026-09-29), and `--workers 8` beside it.
 4. findings 62 (`reclaim_ab.py`): dbpedia-1m's W10 with the collection as
    written, then reclaimed through the engine's cgroup and read back.
-5. findings 58 (`qdrant_rerun.py`): the pinned Qdrant's laion W4 and
+5. findings 10: dbpedia-1m's W9 with and without `--exact-gather`, separate
+   requests' exact queries sharing one pass split over their workers. It
+   applies from 4 GiB, so the 1M corpus: about 8 minutes a session, 50 in all.
+6. findings 58 (`qdrant_rerun.py`): the pinned Qdrant's laion W4 and
    W10-ef128 first and last, so one binary is read hours apart on one night.
    Needs `QDRANT_BINARY` in the environment, as the night runs have it.
 
@@ -69,6 +72,8 @@ def steps(tag: str, commit: str) -> list[Step]:
         # The build the steps above made, not the checkout's own.
         Step("reclaim-dbpedia", ["reclaim_ab.py", *CPUS, "--tag", f"{tag}-reclaim-dbpedia",
                                  "--binary", str(commit_ab.build_path(commit))]),
+        _step("gather-dbpedia", tag, "dbpedia-openai-1m", commit, "W2", ["W9"],
+              {"each": "", "gather": "--exact-gather"}),
         Step("qdrant-late", [*qdrant, "--tag", f"{tag}-qdrant-late"]),
     ]
 

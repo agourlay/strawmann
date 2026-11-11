@@ -3860,7 +3860,8 @@ class AbChain1112Tests(unittest.TestCase):
         ab = importlib.import_module("commit_ab")
         chain = {s.name: s.argv for s in ch.steps("t", "abc1234")}
         self.assertEqual(list(chain), ["qdrant-early", "sq8-dbpedia", "probe-laion",
-                                       "probe-dbpedia", "reclaim-dbpedia", "qdrant-late"])
+                                       "probe-dbpedia", "reclaim-dbpedia", "gather-dbpedia",
+                                       "qdrant-late"])
         self.assertEqual(chain["qdrant-early"][:1] + chain["qdrant-late"][:1],
                          ["qdrant_rerun.py", "qdrant_rerun.py"])
         self.assertEqual(chain["reclaim-dbpedia"][0], "reclaim_ab.py")
@@ -3883,6 +3884,8 @@ class AbChain1112Tests(unittest.TestCase):
                          ["rule", "pf512", "pf2048", "w8"])
         self.assertEqual(arms(chain["probe-dbpedia"])[1],
                          ("pf512", "abc1234", ("--probe-prefetch-bytes", "512")))
+        self.assertEqual(arms(chain["gather-dbpedia"]),
+                         [("each", "abc1234", ()), ("gather", "abc1234", ("--exact-gather",))])
 
 
 class ReclaimAbTests(unittest.TestCase):

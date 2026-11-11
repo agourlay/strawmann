@@ -1394,7 +1394,7 @@ headline tier is an occupancy result, as sift1m's is.
 Under `matched`, W6 is licensed at 1.29x for the first time (Qdrant's SQ8
 recall 0.9666 against 0.9640, from 0.880 at `defaults`). W7 and W8 are not:
 Qdrant's binary-quantized recall is flat in `ef`, so one oversampling for both
-engines is not a matched pool there. `findings.md` carries it.
+engines is not a matched pool there. `backlog.md` carries it.
 
 ### Two things the previous page said that this one retires
 
@@ -1520,7 +1520,7 @@ dimension every vector shares surviving training; both fail on the old rule.
 What it does to the rows is the next pair's to say, on both corpora: T4's
 `|Δscore|` should fall to about 0.001 and the stage-1 overlap rise, recall
 should not move (rescore stays on), and W6's throughput may move either way,
-since the walk navigates on the codes. `findings.md` item 1 carries that.
+since the walk navigates on the codes. `backlog.md` item 1 carries that.
 
 ## W11's write rate is the row, and the search is sized to it, decided 2026-09-25
 

@@ -8,7 +8,7 @@ Inputs to read:
 - @DIR@/report.path: the path of the HTML report; also @DIR@/report_by_hand.out if it exists.
 - bench/results/@SM@*/ and bench/results/@QD@*/ (the folded labels and their -rep1..-rep3 passes): rows.json, run.json, conformance.json, any perf or gate files.
 - The HTML report itself: its licence banner, refusals, notes, the Hardware counters section, and any row-level flags.
-- For the meaning of gate, foreign load, contamination retries, refusals, licences and tiers: docs/spec.md (§7.1, §7.2, §7.4, §8), docs/validation.md, docs/findings.md, and the docstrings in bench/harness/fullrun.py, workloads.py, report.py, compare.py, perfstat.py.
+- For the meaning of gate, foreign load, contamination retries, refusals, licences and tiers: docs/spec.md (§7.1, §7.2, §7.4, §8), docs/validation.md, docs/backlog.md, and the docstrings in bench/harness/fullrun.py, workloads.py, report.py, compare.py, perfstat.py.
 - The previous run of this pair for comparison, if any: bench/results/@PREV@ and its qd- counterpart, and the newest bench/results/report-@DATASET@-*.html older than this run's.
 
 Deliver, in this order:

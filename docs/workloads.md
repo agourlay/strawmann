@@ -943,7 +943,7 @@ from its counterpart's, and says `re-run under a different harness`.
 
 **The open-loop rows are faithful only at low rates.** Measured at three
 offered rates on one collection: 1.4x client/server p50 at 100/s, 40.1x at
-500/s, 28.8x at 2000/s. `findings.md` §15 has the table and what it implies.
+500/s, 28.8x at 2000/s. `backlog.md` §15 has the table and what it implies.
 Both timings are recorded per row so the server-side half stays usable.
 
 ## 6. Status

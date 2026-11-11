@@ -3626,7 +3626,7 @@ def default_out(runs: list[Run]) -> Path:
     the labels are *reused*. `fullrun.py` defaults to `strawmann`/`qdrant`
     every night, so a week of comparisons of the same corpus were a week of
     renders to one path, each silently replacing the last — and a page open in
-    a tab, or linked from `docs/findings.md`, said nothing about which night
+    a tab, or linked from `docs/backlog.md`, said nothing about which night
     it came from. The stamp goes last so that every render of one comparison
     still sorts together, dated copies adjacent, and it carries the minute
     because one day holds more than one run of one pair -- see `run_stamp`.
