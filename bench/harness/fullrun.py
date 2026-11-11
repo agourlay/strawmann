@@ -442,10 +442,15 @@ def estimated_minutes(dataset: str, reps: int) -> tuple[float, str] | None:
     An engine's arms measured under today's harness stamp are the basis when
     there are any, and every arm otherwise: the heaviest arm ever run priced
     dbpedia 0930 from 0924 (9.4 h against 7 h 19 min) and sift1m's 46 minutes
-    long, long after the harness that made those arms slow had changed.
+    long, long after the harness that made those arms slow had changed. Among
+    arms under other stamps the *newest* is the basis, not the heaviest: with
+    no arm on today's stamp, dbpedia 1110 was priced from 0924 again (12.2 h
+    against 10 h 37 min).
     """
-    per_engine: dict[str, tuple[float, str, list[float]]] = {}
-    current: dict[str, tuple[float, str, list[float]]] = {}
+    # engine -> (rank, priced row seconds, label, overhead ratios). The rank
+    # is the arm's row time on today's stamp, its first row's start otherwise.
+    per_engine: dict[str, tuple[tuple, float, str, list[float]]] = {}
+    current: dict[str, tuple[tuple, float, str, list[float]]] = {}
     try:
         today = workloads.stamp_hash(workloads.harness_stamp())
     except Exception:  # noqa: BLE001  (an estimate never fails a run)
@@ -508,7 +513,7 @@ def estimated_minutes(dataset: str, reps: int) -> tuple[float, str] | None:
             continue
         same_stamp = today is not None and any(r.get("harness_hash") == today for r in rows)
         pool = current if same_stamp else per_engine
-        heaviest, label, ratios = pool.get(engine, (0.0, "", []))
+        best, heaviest, label, ratios = pool.get(engine, ((), 0.0, "", []))
         ratios.extend(s / row_s for s in spans)
         # The rows *this* run will make, priced from that arm. The table grew
         # from 32 to 43 rows between rel-0903 and perf-0924 and the estimate,
@@ -518,15 +523,16 @@ def estimated_minutes(dataset: str, reps: int) -> tuple[float, str] | None:
         by_id = {r["id"]: secs(r) for r in rows if r.get("id")}
         mean = row_s / max(len(by_id), 1)
         priced = row_s if table_ids is None else sum(by_id.get(i, mean) for i in table_ids)
-        if priced > heaviest:
-            heaviest, label = priced, d.parent.name
-        pool[engine] = (heaviest, label, ratios)
+        rank = (priced,) if same_stamp else (stamped[0]["when"], priced)
+        if rank > best:
+            best, heaviest, label = rank, priced, d.parent.name
+        pool[engine] = (best, heaviest, label, ratios)
     per_engine.update(current)
     if not per_engine:
         return None
 
     arms = [(rows_s * min(ratios), label)
-            for rows_s, label, ratios in per_engine.values()]
+            for _, rows_s, label, ratios in per_engine.values()]
     # Only one engine has ever run here: the best guess for the other arm is
     # that it costs the same.
     per_pass = sum(a for a, _ in arms) * (1 if len(arms) == 2 else 2)
@@ -1262,7 +1268,8 @@ RECALL_100_COLLECTION = "bench2"
 
 
 def run_recall(uri: str, label: str, client_cpus: str,
-               collections: list[str] | None = None) -> int:
+               collections: list[str] | None = None,
+               paged: list[str] | None = None) -> int:
     """§7.4's other half: a qps without its recall is not publishable.
 
     Two passes. The first is the sweep the W10 rows join on `ef`, at limit 10. The
@@ -1272,6 +1279,9 @@ def run_recall(uri: str, label: str, client_cpus: str,
     Two passes rather than one wider one because the engines resolve width as
     `max(ef, limit)`: at limit 100 the nominal ef=32 and ef=64 both search at 100.
     `recall.py` drops those two and writes its own `.k100` file.
+
+    A sweep that warned `!!` is appended to `paged`, for `paging_followup`
+    to check against the rows that run after it.
     """
     rc = 0
     # `bench12` holds a prefix of the corpus, so a filtered grade's restricted
@@ -1293,6 +1303,8 @@ def run_recall(uri: str, label: str, client_cpus: str,
         if (warn := paging_warning(" ".join(extra) or "every collection", before,
                                    engine_major_faults(), time.monotonic() - t0)):
             print(warn, flush=True)
+            if paged is not None and warn.startswith("  !!"):
+                paged.append(" ".join(extra) or "every collection")
     return rc
 
 
@@ -1313,7 +1325,11 @@ def paging_warning(what: str, before: int | None, after: int | None, secs: float
     later row, naming no cause. A sweep's recall is unaffected by paging, but
     its time and the rows after it are, and they are read against it.
     """
-    if before is None or after is None or after <= before:
+    if before is None or after is None:
+        # Qdrant's sweeps printed nothing a night, so silence read as zero
+        # faults when it was a count nobody could read.
+        return f"  note: recall sweep ({what}) took {secs:.0f} s, major faults unreadable"
+    if after <= before:
         return ""
     n = after - before
     free = mem_available_gib()
@@ -1326,6 +1342,34 @@ def paging_warning(what: str, before: int | None, after: int | None, secs: float
     return (f"  !! recall sweep ({what}) took {secs:.0f} s with {n:,} major "
             f"faults: the engine was paging its arenas back in, and the rows after it "
             f"may be measured on a collection that was not resident{tail}")
+
+
+def paging_followup(rows: list[dict], ids: list[str]) -> str:
+    """Whether the rows after a paging sweep were resident, by their own faults.
+
+    `paging_warning` says the rows after it "may be measured on a collection
+    that was not resident", and nothing checked: dbpedia 1110 printed it three
+    times while every later strawmANN search row took under 1,000 major faults.
+    """
+    took = [(r["id"], int(r.get("major_faults") or 0)) for r in rows if r.get("id") in ids]
+    if not took:
+        return ""
+    worst_id, worst = max(took, key=lambda x: x[1])
+    if worst < PAGING_WARN_FAULTS:
+        return (f"  note: the rows after the paging sweep took at most {worst:,} major "
+                f"faults: they were resident")
+    return f"  !! {worst_id} took {worst:,} major faults after the paging sweep"
+
+
+def follow_paging(label: str, ids: list[str], paged: list[str]) -> None:
+    """`paging_followup` on `label`'s rows `ids`, if a sweep before them paged."""
+    if not paged:
+        return
+    paged.clear()
+    path = RESULTS / label / "rows.json"
+    rows = json.loads(path.read_text()) if path.is_file() else []
+    if note := paging_followup(rows, ids):
+        print(note, flush=True)
 
 
 #: Major faults a recall sweep may take before `paging_warning` says `!!`:
@@ -1821,7 +1865,8 @@ def measure(uri: str, label: str, client_cpus: str, storage: str | None,
     drop_collections(uri, client_cpus, dead)
 
     say(f"{label}: recall sweeps, while the collections still match the ground truth")
-    rc |= run_recall(uri, label, client_cpus)
+    paged: list[str] = []
+    rc |= run_recall(uri, label, client_cpus, paged=paged)
 
     # Before the mutating rows, which query `bench2` alone — and which are
     # exactly where a rebuild of the whole of `bench2` wants the memory.
@@ -1834,7 +1879,8 @@ def measure(uri: str, label: str, client_cpus: str, storage: str | None,
     for group, coll in groups:
         say(f"{label}: {', '.join(group)} in {coll}, then its sweep, then it goes")
         rc |= run_workloads(uri, label, client_cpus, storage, only=group, placement=placement)
-        rc |= run_recall(uri, label, client_cpus, collections=[coll])
+        follow_paging(label, list(group), paged)
+        rc |= run_recall(uri, label, client_cpus, collections=[coll], paged=paged)
         capture_collections(uri, label, client_cpus, names=[coll])
         drop_collections(uri, client_cpus, [coll])
 
@@ -1856,6 +1902,7 @@ def measure(uri: str, label: str, client_cpus: str, storage: str | None,
         say(f"{label}: {', '.join(mutating)} — mutates bench2, so it runs after the sweeps")
         rc |= run_workloads(uri, label, client_cpus, storage, only=mutating,
                             placement=placement)
+        follow_paging(label, mutating, paged)
         # And after them, nested rather than over the top: what the appends
         # left behind is W11's own subject (findings 25, the rebuild still
         # catching up), so both states are kept and the report says which is

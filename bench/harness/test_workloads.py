@@ -1833,7 +1833,7 @@ class FullrunRowInvocationTests(unittest.TestCase):
         with mock.patch.object(f, "run_workloads",
                                lambda *a, only=None, **k: calls.append(("rows", tuple(only or ()))) or 0), \
                 mock.patch.object(f, "run_recall",
-                                  lambda *a, collections=None: calls.append(("sweep", tuple(collections or ("*",)))) or 0), \
+                                  lambda *a, collections=None, **k: calls.append(("sweep", tuple(collections or ("*",)))) or 0), \
                 mock.patch.object(f, "capture_collections",
                                   lambda *a, names=None, **k: calls.append(("capture", tuple(names or ())))), \
                 mock.patch.object(f, "drop_collections",
@@ -2553,6 +2553,19 @@ class RunEstimateTests(unittest.TestCase):
         # Passes scale linearly; there is no once-per-run term to get wrong.
         self.assertAlmostEqual(f.estimated_minutes("sift1m", 3)[0],
                                (3 * 2 * 870) / 60, places=2)
+
+    def test_under_other_stamps_the_newest_arm_is_the_basis(self):
+        """dbpedia 1110 had no arm on its own stamp and was priced from 0924,
+        the heaviest ever run: 12.2 h against 10 h 37 min."""
+        old = self._rows(10, 120, 30)
+        new = [dict(r, when=r["when"].replace("2026-08-26", "2026-11-08")) for r in self._rows(10, 60, 30)]
+        self._label("qd-old", "sift1m", old)
+        self._label("qd-new", "sift1m", new)
+        mins, src = self.f.estimated_minutes("sift1m", 1)
+        self.assertEqual(src, "qd-new")
+        # 600 s of rows at the cheaper engine-wide ratio (870 / 600 and
+        # 1,470 / 1,200), doubled for the engine never run.
+        self.assertAlmostEqual(mins, 2 * 600 * (1470 / 1200) / 60, places=2)
 
     def test_a_mixed_row_is_priced_at_its_writer_not_its_search(self):
         """laion 0928's W11 searched 10.9 s beside a 66.7 s append."""
@@ -4114,11 +4127,41 @@ class ArmStorageTests(unittest.TestCase):
             fullrun.finish_qdrant_arm()
         self.assertEqual(calls, ["stop sm", "graphs", "wipe sm", "stop qd", "wipe qd"])
 
+    def test_the_rows_after_a_paging_sweep_say_whether_they_were_resident(self):
+        """dbpedia 1110 warned three times; every later search row took under
+        1,000 major faults, and nothing said so."""
+        import fullrun
+        rows = [{"id": "W0", "major_faults": 0.0}, {"id": "W3", "major_faults": 12.0},
+                {"id": "W4", "major_faults": 900.0}, {"id": "W1", "major_faults": 50_000.0}]
+        note = fullrun.paging_followup(rows, ["W0", "W3", "W4"])
+        self.assertTrue(note.startswith("  note:"), note)
+        self.assertIn("at most 900 major faults: they were resident", note)
+        warn = fullrun.paging_followup(
+            [{"id": "W0", "major_faults": 0}, {"id": "W11", "major_faults": 40_000}],
+            ["W0", "W11"])
+        self.assertEqual(warn, "  !! W11 took 40,000 major faults after the paging sweep")
+        self.assertEqual(fullrun.paging_followup(rows, ["W9"]), "")
+        # Only after a sweep that paged, and only once.
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "lbl").mkdir()
+            (Path(tmp) / "lbl/rows.json").write_text(json.dumps(rows))
+            out = io.StringIO()
+            with mock.patch.object(fullrun, "RESULTS", Path(tmp)), \
+                    contextlib.redirect_stdout(out):
+                fullrun.follow_paging("lbl", ["W3"], [])
+                paged = ["--filtered-base-n 200000"]
+                fullrun.follow_paging("lbl", ["W3"], paged)
+                fullrun.follow_paging("lbl", ["W3"], paged)
+            self.assertEqual(out.getvalue().count("they were resident"), 1)
+            self.assertEqual(paged, [])
+
     def test_a_recall_sweep_that_paged_says_so(self):
         """dbpedia 0929's k=100 sweep ran at 33.7 q/s with 182,555 major faults."""
         import fullrun
         self.assertEqual(fullrun.paging_warning("x", 10, 10, 5.0), "")
-        self.assertEqual(fullrun.paging_warning("x", None, 10, 5.0), "")
+        # A count nobody could read is said, so silence still means zero.
+        self.assertIn("major faults unreadable", fullrun.paging_warning("x", None, 10, 5.0))
+        self.assertIn("major faults unreadable", fullrun.paging_warning("x", 10, None, 5.0))
         warn = fullrun.paging_warning("--collections bench2 --limit 100", 100, 182_655, 297.4)
         self.assertIn("took 297 s with 182,555 major faults", warn)
         self.assertTrue(warn.startswith("  !! recall sweep (--collections bench2 --limit 100)"))
