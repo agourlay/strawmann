@@ -145,6 +145,23 @@ pub const Encoding = enum {
     pub fn needsStats(self: Encoding) bool {
         return self != .one;
     }
+
+    /// `BinaryQuantizationEncoding { OneBit = 0; TwoBits = 1; OneAndHalfBits = 2; }`.
+    pub fn toProto(self: Encoding) u32 {
+        return switch (self) {
+            .one => 0,
+            .two => 1,
+            .one_half => 2,
+        };
+    }
+
+    /// The inverse, or null for a value `toProto` never yields.
+    pub fn fromProto(v: u64) ?Encoding {
+        inline for (comptime std.enums.values(Encoding)) |e| {
+            if (e.toProto() == v) return e;
+        }
+        return null;
+    }
 };
 
 /// Per-dimension mean and standard deviation over every stored vector, as

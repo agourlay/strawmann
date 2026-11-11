@@ -210,6 +210,20 @@ test "§6.7: bfb's turbo spellings parse, and nothing near them does" {
     }
 }
 
+test "binary encodings and turbo bit sizes map to Qdrant's proto values and back" {
+    const testing = std.testing;
+    for ([_]binary.Encoding{ .one, .two, .one_half }, 0..) |e, v| {
+        try testing.expectEqual(@as(u32, @intCast(v)), e.toProto());
+        try testing.expectEqual(e, binary.Encoding.fromProto(v).?);
+    }
+    for ([_]turbo.Bits{ .b1, .b1_5, .b2, .b4 }, 0..) |b, v| {
+        try testing.expectEqual(@as(u32, @intCast(v)), b.toProto());
+        try testing.expectEqual(b, turbo.Bits.fromProto(v).?);
+    }
+    try testing.expect(binary.Encoding.fromProto(3) == null);
+    try testing.expect(turbo.Bits.fromProto(4) == null);
+}
+
 test "every binary and turbo mode parses from its name" {
     inline for (.{ binary.Encoding, turbo.Bits }, .{ "binary", "turbo" }) |T, tag| {
         inline for (comptime std.enums.values(T)) |v| {

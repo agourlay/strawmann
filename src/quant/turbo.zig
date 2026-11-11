@@ -37,6 +37,24 @@ pub const Bits = enum {
     b2,
     b4,
 
+    /// `TurboQuantBitSize { Bits1 = 0; Bits1_5 = 1; Bits2 = 2; Bits4 = 3; }`.
+    pub fn toProto(self: Bits) u32 {
+        return switch (self) {
+            .b1 => 0,
+            .b1_5 => 1,
+            .b2 => 2,
+            .b4 => 3,
+        };
+    }
+
+    /// The inverse, or null for a value `toProto` never yields.
+    pub fn fromProto(v: u64) ?Bits {
+        inline for (comptime std.enums.values(Bits)) |b| {
+            if (b.toProto() == v) return b;
+        }
+        return null;
+    }
+
     /// Code bits per padded coordinate: 1.5 bits is one-bit codes over a
     /// vector padded to 1.5x its width (`TQ/mod.rs:24-32`).
     pub fn codeBits(self: Bits) usize {

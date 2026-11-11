@@ -523,27 +523,16 @@ fn writeCollectionConfig(w: *wire.Writer, coll: *const core.Collection) wire.Wri
             const qc = try w.beginNested(5, 2);
             const bq = try w.beginNested(3, 2);
             try w.writeBoolField(1, true);
-            // `BinaryQuantizationEncoding { OneBit = 0; TwoBits = 1; OneAndHalfBits = 2; }`
-            try w.writeVarintField(2, switch (enc) {
-                .one => 0,
-                .two => 1,
-                .one_half => 2,
-            });
+            try w.writeVarintField(2, enc.toProto());
             try w.endNested(bq);
             try w.endNested(qc);
         },
         .turbo => |bits| {
             const qc = try w.beginNested(5, 2);
-            // `TurboQuantization { always_ram = 1; bits = 2; }` at oneof field 4,
-            // `TurboQuantBitSize { Bits1 = 0; Bits1_5 = 1; Bits2 = 2; Bits4 = 3; }`.
+            // `TurboQuantization { always_ram = 1; bits = 2; }` at oneof field 4.
             const tq = try w.beginNested(4, 2);
             try w.writeBoolField(1, true);
-            try w.writeVarintFieldAlways(2, switch (bits) {
-                .b1 => 0,
-                .b1_5 => 1,
-                .b2 => 2,
-                .b4 => 3,
-            });
+            try w.writeVarintFieldAlways(2, bits.toProto());
             try w.endNested(tq);
             try w.endNested(qc);
         },
@@ -659,14 +648,9 @@ fn parseQuantizationConfig(raw: []const u8) QuantParse {
                     const st = sub.tag() catch return malformedQuant("malformed binary quantization");
                     switch (st.field) {
                         2 => {
-                            // `BinaryQuantizationEncoding { OneBit = 0; TwoBits = 1; OneAndHalfBits = 2; }`
                             const v = sub.varint() catch return malformedQuant("malformed binary quantization encoding");
-                            encoding = switch (v) {
-                                0 => .one,
-                                1 => .two,
-                                2 => .one_half,
-                                else => return .{ .rejected = .{ .status = .invalid_argument, .why = "quantization_config.binary.encoding: unknown encoding" } },
-                            };
+                            encoding = quant.binary.Encoding.fromProto(v) orelse
+                                return .{ .rejected = .{ .status = .invalid_argument, .why = "quantization_config.binary.encoding: unknown encoding" } };
                         },
                         3 => {
                             // `BinaryQuantizationQueryEncoding { oneof variant { Setting setting = 4; } }`
@@ -702,13 +686,8 @@ fn parseQuantizationConfig(raw: []const u8) QuantParse {
                     const st = sub.tag() catch return malformedQuant("malformed turbo quantization");
                     if (st.field == 2) {
                         const v = sub.varint() catch return malformedQuant("malformed turbo quantization bits");
-                        bits = switch (v) {
-                            0 => .b1,
-                            1 => .b1_5,
-                            2 => .b2,
-                            3 => .b4,
-                            else => return .{ .rejected = .{ .status = .invalid_argument, .why = "quantization_config.turbo.bits: unknown bit size" } },
-                        };
+                        bits = quant.turbo.Bits.fromProto(v) orelse
+                            return .{ .rejected = .{ .status = .invalid_argument, .why = "quantization_config.turbo.bits: unknown bit size" } };
                     } else sub.skip(st.wire_type) catch return malformedQuant("malformed turbo quantization");
                 }
                 return .{ .spec = .{ .mode = .{ .turbo = bits } } };
