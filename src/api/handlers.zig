@@ -103,6 +103,9 @@ pub const Engine = struct {
     /// fan-out spreads one batch over every worker's cache, where Qdrant runs
     /// a segment's share of the batch on one thread.
     batch_fanout: bool = true,
+    /// `--rescore-prefetch`: how quantized search's stage 2 asks for its fp32
+    /// rows. An A/B arm (findings 74); off is the measured default.
+    rescore_prefetch: core.quantized_search.RescorePrefetch = .off,
     /// Largest vector dimension any worker's scratch can hold.
     ///
     /// §6.3 forbids allocating on the query path, so `Workspace.query` is sized
@@ -1515,6 +1518,7 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
             .ignore = q.params.quantization.ignore orelse false,
             .rescore = q.params.quantization.rescore orelse defaultRescore(coll),
             .oversampling = q.params.quantization.oversampling orelse 1.0,
+            .rescore_prefetch = ctx.engine.rescore_prefetch,
         };
         ctx.workspace.ensureQuant(ctx.engine.alloc, coll.config.dim) catch
             return refuse(fail, .internal, "workspace allocation failed");

@@ -335,6 +335,12 @@ pub const Rescorer = struct {
     /// the fp32 arena and any SQ8 codes.
     score: *const fn (ctx: *const anyopaque, query: []const f32, node: u32) f32,
     ctx: *const anyopaque,
+    /// Asks for a candidate's row ahead of `score`, `prefetch_distance`
+    /// candidates early. Null issues none, which is how stage 2 ran until
+    /// 2026-11-11: each fp32 row a cold miss, 6 KiB at d=1536, up to `ef` of
+    /// them a query (findings 74).
+    prefetch: ?*const fn (ctx: *const anyopaque, node: u32) void = null,
+    prefetch_distance: usize = 0,
 
     /// Rescore `candidates` in place into `out`, returning the top `limit`.
     ///
@@ -348,7 +354,10 @@ pub const Rescorer = struct {
         out: []Scored,
     ) []Scored {
         std.debug.assert(out.len >= candidates.len);
+        const ahead = if (self.prefetch != null) self.prefetch_distance else 0;
+        if (self.prefetch) |pf| for (candidates[0..@min(ahead, candidates.len)]) |c| pf(self.ctx, c);
         for (candidates, 0..) |c, i| {
+            if (self.prefetch) |pf| if (i + ahead < candidates.len) pf(self.ctx, candidates[i + ahead]);
             out[i] = .{ .id = c, .score = self.score(self.ctx, query, c) };
         }
         const slice = out[0..candidates.len];
@@ -501,6 +510,33 @@ test "every matrix dimension is a whole number of vector registers when stored" 
     for ([_]usize{ 128, 384, 768, 960, 1536 }) |d| {
         try testing.expectEqual(@as(usize, 0), paddedWordsFor(d) % max_u64_lanes);
         try testing.expect(paddedWordsFor(d) >= wordsFor(d));
+    }
+}
+
+test "a prefetching Rescorer ranks as one without, asking for each candidate once" {
+    const Ctx = struct {
+        asked: [64]u8 = @splat(0),
+        fn score(_: *const anyopaque, _: []const f32, node: u32) f32 {
+            // Ties on purpose, so the order is the §8.7 tie-break's too.
+            return @floatFromInt(node % 7);
+        }
+        fn prefetch(ctx: *const anyopaque, node: u32) void {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(ctx)));
+            self.asked[node] += 1;
+        }
+    };
+    var ids: [40]u32 = undefined;
+    for (&ids, 0..) |*id, i| id.* = @intCast((i * 13) % 64);
+    var plain_ctx = Ctx{};
+    var plain_out: [40]Scored = undefined;
+    const plain = (Rescorer{ .encoding = .fp32, .score = Ctx.score, .ctx = @ptrCast(&plain_ctx) })
+        .run(&.{}, &ids, 10, &plain_out);
+    for ([_]usize{ 1, 4, 40, 100 }) |distance| {
+        var ctx = Ctx{};
+        var out: [40]Scored = undefined;
+        const r = Rescorer{ .encoding = .fp32, .score = Ctx.score, .ctx = @ptrCast(&ctx), .prefetch = Ctx.prefetch, .prefetch_distance = distance };
+        try testing.expectEqualSlices(Scored, plain, r.run(&.{}, &ids, 10, &out));
+        for (ids) |id| try testing.expectEqual(@as(u8, 1), ctx.asked[id]);
     }
 }
 

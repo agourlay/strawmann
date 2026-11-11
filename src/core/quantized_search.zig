@@ -73,6 +73,20 @@ pub const QuantParams = struct {
     rescore: bool = true,
     /// `params.quantization.oversampling`.
     oversampling: f64 = 1.0,
+    /// Whether stage 2 asks for its fp32 rows ahead (`--rescore-prefetch`).
+    /// An A/B arm until it is measured (findings 74), so off by default.
+    rescore_prefetch: RescorePrefetch = .off,
+};
+
+/// How stage 2 asks for the rows it is about to rescore.
+pub const RescorePrefetch = enum {
+    /// None: each row a demand miss, as before 2026-11-11.
+    off,
+    /// The traversal's rule (`collection.Probe.prefetch`: whole up to 512
+    /// bytes, its first line past it), four candidates ahead.
+    first,
+    /// The whole next row: stage 2 reads every row it asks for in full.
+    whole,
 };
 
 /// Two-stage search: traverse with the quantized representation, then rescore.
@@ -293,6 +307,16 @@ pub fn searchQuantized(
     const rescorer = quant_mod.binary.Rescorer{
         .encoding = .fp32,
         .ctx = @ptrCast(&probe),
+        .prefetch = switch (qp.rescore_prefetch) {
+            .off => null,
+            .first => collection.Probe.prefetch,
+            .whole => collection.Probe.prefetchWhole,
+        },
+        .prefetch_distance = switch (qp.rescore_prefetch) {
+            .off => 0,
+            .first => 4,
+            .whole => 1,
+        },
         .score = struct {
             fn f(ctx: *const anyopaque, _: []const f32, node: u32) f32 {
                 const pr: *const collection.Probe = @ptrCast(@alignCast(ctx));
@@ -372,6 +396,44 @@ test "§6.7 two-stage search: quantized traversal plus rescore matches fp32 clos
     // SQ8 traversal with 4x oversampling and fp32 rescore should land very
     // close to the unquantized result, that is the trade §6.7 is making.
     try testing.expect(recall > 0.9);
+}
+
+test "§6.7: every --rescore-prefetch mode returns the same answer" {
+    // Stage 2's prefetch changes when a row's loads issue, never which rows
+    // are scored or how (findings 74). At d=256 a row is 1 KiB, so `first`
+    // asks for one line of it and `whole` for all sixteen.
+    const dim = 256;
+    const n = 1200;
+    var c = try makeCollection(dim, .dot, 2048);
+    defer c.deinit();
+    var prng = std.Random.DefaultPrng.init(0x1111);
+    const rnd = prng.random();
+    for (0..n) |i| {
+        var v: [dim]f32 = undefined;
+        for (&v) |*x| x.* = rnd.floatNorm(f32);
+        _ = try c.upsert(.{ .num = i }, &v);
+    }
+    try buildIndex(&c, .serial, 1);
+    try quantize(&c, .scalar);
+    var hs = try hnsw.Index.Scratch.init(testing.allocator, 2048, 512);
+    defer hs.deinit(testing.allocator);
+    var qs = try quantized.QueryScratch.init(testing.allocator, dim, 512);
+    defer qs.deinit(testing.allocator);
+    for (0..20) |_| {
+        var q: [dim]f32 = undefined;
+        for (&q) |*x| x.* = rnd.floatNorm(f32);
+        var want_buf: [128]Candidate = undefined;
+        var want = heap.TopK.init(&want_buf, 10);
+        try searchQuantized(&c, .{ .query = &q, .ef = 128, .limit = 10 }, .{ .hnsw = &hs, .quant = &qs, .alloc = testing.allocator }, &want);
+        const expected = want.finish();
+        try testing.expectEqual(@as(usize, 10), expected.len);
+        for ([_]RescorePrefetch{ .first, .whole }) |mode| {
+            var got_buf: [128]Candidate = undefined;
+            var got = heap.TopK.init(&got_buf, 10);
+            try searchQuantized(&c, .{ .query = &q, .ef = 128, .limit = 10, .quant = .{ .rescore_prefetch = mode } }, .{ .hnsw = &hs, .quant = &qs, .alloc = testing.allocator }, &got);
+            try testing.expectEqualSlices(Candidate, expected, got.finish());
+        }
+    }
 }
 
 test "§6.7: with rescore on, a wide `ef` reaches the fp32 answer" {
