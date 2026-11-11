@@ -848,6 +848,78 @@ test "§6.4: a float index survives the round-trip as its kind, rebuilt from the
     }
 }
 
+test "§6.4: a datetime index and a nested-path index survive the round-trip, rebuilt from the blobs" {
+    var c = try makeCollection(4, .euclid, 64);
+    defer c.deinit();
+    var v = [_]f32{ 1, 0, 0, 0 };
+    try c.createPayloadIndex("d", .datetime);
+    try c.createPayloadIndex("n[].k", .keyword);
+    // `{ "d": "2024-01-01T00:00:<i>Z", "n": [{ "k": "k<i % 3>" }] }`.
+    var ebuf: [256]u8 = undefined;
+    var sbuf: [32]u8 = undefined;
+    for (0..40) |i| {
+        var w = wire.Writer.init(&ebuf);
+        const d = try w.beginNested(3, 2);
+        try w.writeStringField(1, "d");
+        const dv = try w.beginNested(2, 2);
+        try w.writeStringField(payload_mod.value_string, try std.fmt.bufPrint(&sbuf, "2024-01-01T00:00:{d:0>2}Z", .{i}));
+        try w.endNested(dv);
+        try w.endNested(d);
+        const e = try w.beginNested(3, 2);
+        try w.writeStringField(1, "n");
+        const nv = try w.beginNested(2, 2);
+        const list = try w.beginNested(payload_mod.value_list, 2);
+        const elem = try w.beginNested(1, 2);
+        const st = try w.beginNested(payload_mod.value_struct, 2);
+        const f = try w.beginNested(1, 2);
+        try w.writeStringField(1, "k");
+        const kv = try w.beginNested(2, 2);
+        try w.writeStringField(payload_mod.value_string, try std.fmt.bufPrint(&sbuf, "k{d}", .{i % 3}));
+        try w.endNested(kv);
+        try w.endNested(f);
+        try w.endNested(st);
+        try w.endNested(elem);
+        try w.endNested(list);
+        try w.endNested(nv);
+        try w.endNested(e);
+        _ = try c.upsertWithPayload(.{ .num = i }, &v, w.written(), 3);
+    }
+
+    var dir_buf: [128]u8 = undefined;
+    const dir = storage.testPath(&dir_buf, "payload-datetime");
+    try save(&c, dir);
+    var reloaded = try load(testing.allocator, "test", dir, .pinned);
+    defer reloaded.deinit();
+
+    try testing.expectEqual(@as(usize, 2), reloaded.payload.fields.items.len);
+    try testing.expectEqual(payload_mod.Kind.datetime, reloaded.payload.fields.items[0].kind());
+    try testing.expectEqualStrings("n[].k", reloaded.payload.fields.items[1].name);
+    try testing.expectEqual(payload_mod.Kind.keyword, reloaded.payload.fields.items[1].kind());
+    for (c.payload.fields.items, reloaded.payload.fields.items) |a, b| try testing.expectEqual(a.points, b.points);
+    const base: i64 = 1_704_067_200;
+    var dt = payload_mod.Filter{};
+    try dt.add(.must, .{ .key = "d", .match = .{ .datetime = payload_mod.DatetimeRange.fromBounds(
+        .{ .secs = base + 30, .micros = 0 },
+        .{ .secs = base + 10, .micros = 0 },
+        null,
+        null,
+    ) } });
+    var nk = payload_mod.Filter{};
+    try nk.addPath(.must, .{ .key = "n[].k", .match = .{ .keyword = "k1" } });
+    for ([_]*const payload_mod.Filter{ &dt, &nk }, 0..) |filter, which| {
+        var a_bits: [1]u64 = undefined;
+        var b_bits: [1]u64 = undefined;
+        const a = c.payload.select(filter, &a_bits, 40).?;
+        const b = reloaded.payload.select(filter, &b_bits, 40).?;
+        try testing.expectEqual(a.count, b.count);
+        try testing.expectEqual(a_bits[0], b_bits[0]);
+        for (0..40) |i| {
+            const want = if (which == 0) i > 10 and i < 30 else i % 3 == 1;
+            try testing.expectEqual(want, payload_mod.testBit(&b_bits, @intCast(i)));
+        }
+    }
+}
+
 test "a text index keeps exact BM25 statistics through delete and the round-trip" {
     var c = try makeCollection(4, .dot, 64);
     defer c.deinit();

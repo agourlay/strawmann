@@ -3762,8 +3762,10 @@ test "e2e: is_empty, is_null and datetime_range filters return the brute-force f
     const lo: i64 = ShapePayload.base + 50 * 3600;
     const hi: i64 = ShapePayload.base + 300 * 3600;
     const Admit = struct {
+        /// A point deleted once the datetime index exists.
+        var deleted: usize = std.math.maxInt(usize);
         fn inWindow(j: usize) bool {
-            return ShapePayload.dated(j) and j >= 50 and j < 300;
+            return ShapePayload.dated(j) and j >= 50 and j < 300 and j != deleted;
         }
         fn empty(j: usize) bool {
             return ShapePayload.isEmpty(j);
@@ -3820,6 +3822,59 @@ test "e2e: is_empty, is_null and datetime_range filters return the brute-force f
     for ([_]usize{ 7, 123, 301 }) |qi| {
         const q = stored[qi * 16 ..][0..16];
         for (cases) |cs| {
+            const tn = filteredTruth(stored, q, cs.admit, 10, &truth);
+            try testing.expectEqual(@as(usize, 10), tn);
+            for ([_]bool{ false, true }) |exact| {
+                const resp = try c.call("/qdrant.Points/QueryBatch", try buildFilteredQuery(&req_buf, "sh", q, .{
+                    .hnsw_ef = n,
+                    .exact = exact,
+                    .filter = .{ .raw = cs.raw },
+                }), &out);
+                try testing.expectEqual(grpc.Status.ok, resp.status);
+                try testing.expectEqual(@as(usize, 10), try readFirstBatchPayloads(resp.body, &pts));
+                for (pts[0..10], truth[0..10]) |p, want| try testing.expectEqual(want, p.id);
+            }
+        }
+    }
+
+    // A datetime index on `d` (`FieldTypeDatetime = 6`), backfilled, then a
+    // delete inside the window: the planner now answers the window from the
+    // index, and the answers stay the brute force's.
+    {
+        const resp = try c.call("/qdrant.Points/CreateFieldIndex", try buildCreateFieldIndex(&req_buf, "sh", "d", 6), &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+        var w = wire.Writer.init(&req_buf);
+        try w.writeStringField(1, "sh");
+        const info = try c.call("/qdrant.Collections/Get", w.written(), &out);
+        var schema: [2]SchemaEntry = undefined;
+        try testing.expectEqual(@as(usize, 1), try readPayloadSchema(info.body, &schema));
+        try testing.expectEqualStrings("d", schema[0].name);
+        try testing.expectEqual(@as(u64, 7), schema[0].data_type); // `Datetime = 7`
+        // Every instant that parses, none of the integers.
+        try testing.expectEqual(@as(u64, n - n / 4), schema[0].points);
+    }
+    // Inside the window, and the nearest point to query 124, its own vector,
+    // so the delete changes that answer.
+    const victim: usize = 124;
+    try testing.expect(Admit.inWindow(victim));
+    {
+        var w = wire.Writer.init(&req_buf);
+        try w.writeStringField(1, "sh");
+        try w.writeBoolField(2, true);
+        const sel = try w.beginNested(3, 2);
+        const ids = try w.beginNested(1, 2);
+        const pid = try w.beginNested(1, 2);
+        try w.writeVarintFieldAlways(1, victim);
+        try w.endNested(pid);
+        try w.endNested(ids);
+        try w.endNested(sel);
+        const del = try c.call("/qdrant.Points/Delete", w.written(), &out);
+        try testing.expectEqual(grpc.Status.ok, del.status);
+        Admit.deleted = victim;
+    }
+    for ([_]usize{ 7, 123, 124, 301 }) |qi| {
+        const q = stored[qi * 16 ..][0..16];
+        for (cases[2..]) |cs| {
             const tn = filteredTruth(stored, q, cs.admit, 10, &truth);
             try testing.expectEqual(@as(usize, 10), tn);
             for ([_]bool{ false, true }) |exact| {
@@ -4227,7 +4282,7 @@ test "e2e: filter constructs outside the keyword/integer match are refused by na
     // A geo field index.
     const geo = try c.call("/qdrant.Points/CreateFieldIndex", try buildCreateFieldIndex(&req_buf, "rf", "loc", 3), &out);
     try testing.expectEqual(grpc.Status.unimplemented, geo.status);
-    try testing.expect(std.mem.indexOf(u8, geo.message, "keyword, integer, float and text") != null);
+    try testing.expect(std.mem.indexOf(u8, geo.message, "keyword, integer, float, datetime and text") != null);
 
     // `UpsertPoints.update_mode = 8` (`update_only`): used to be skipped and
     // answered with an unconditional upsert, which inserts the points the

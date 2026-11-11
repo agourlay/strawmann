@@ -898,8 +898,8 @@ fn upsert(ctx: *Context, req: *const server.Request, body: []const u8, out: *ser
 /// answer — which is why W12 carried `--skip-field-indices` for as long as
 /// this returned UNIMPLEMENTED, and why Qdrant's W12 was a full scan.
 ///
-/// Keyword, integer, float and text indexes; the rest (`geo`, `bool`,
-/// `datetime`, `uuid`) are refused by name. The field name is a JSON path, as
+/// Keyword, integer, float, datetime and text indexes; the rest (`geo`,
+/// `bool`, `uuid`) are refused by name. The field name is a JSON path, as
 /// Qdrant parses it (`json_path_from_proto`, update_common.rs:723), so a
 /// nested path such as `a[].b` indexes the values a condition on it reads.
 fn createFieldIndex(ctx: *Context, req: *const server.Request, body: []const u8, out: *server.ResponseBuf) server.Completion {
@@ -919,7 +919,7 @@ fn createFieldIndex(ctx: *Context, req: *const server.Request, body: []const u8,
         error.PathTooLong => err(req, .unimplemented, "a field index path of more than 32 steps"),
     };
     const kind = core.payload.Kind.fromFieldType(cf.field_type) orelse
-        return err(req, .unimplemented, "field index types other than keyword, integer, float and text");
+        return err(req, .unimplemented, "field index types other than keyword, integer, float, datetime and text");
     const built = if (kind == .text) blk: {
         const opts = switch (textIndexOptions(cf.text_params)) {
             .options => |o| o,

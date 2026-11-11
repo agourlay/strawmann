@@ -1007,10 +1007,12 @@ pub fn frameInto(out: *std.ArrayList(u8), alloc: std.mem.Allocator, entry: []con
 // =========================================================================
 
 /// `FieldType` values this engine indexes (`FieldTypeKeyword = 0`,
-/// `FieldTypeInteger = 1`, `FieldTypeFloat = 2`, VERIFIED points.proto).
-/// Stored as the `PayloadSchemaType` the collection info reports them as
-/// (`Keyword = 1`, `Integer = 2`, `Float = 3`, collections.proto), which is a
-/// different enum with different numbers.
+/// `FieldTypeInteger = 1`, `FieldTypeFloat = 2`, `FieldTypeText = 4`,
+/// `FieldTypeDatetime = 6`, VERIFIED points.proto:314). Stored as the
+/// `PayloadSchemaType` the collection info reports them as (`Keyword = 1`,
+/// `Integer = 2`, `Float = 3`, `Text = 5`, `Datetime = 7`,
+/// collections.proto:184), which is a different enum with different numbers.
+/// Persisted (payload.schema), so a value never changes meaning.
 pub const Kind = enum(u8) {
     keyword = 1,
     integer = 2,
@@ -1019,6 +1021,9 @@ pub const Kind = enum(u8) {
     /// A text index scored with BM25 (`FieldTypeText = 4`, `Text = 5`), the
     /// only text index this engine builds (decisions.md, 2026-10-07).
     text = 5,
+    /// A sorted `(microseconds, offset)` array (`DatetimeIndex`), answering
+    /// `datetime_range`.
+    datetime = 7,
 
     pub fn fromFieldType(v: u64) ?Kind {
         return switch (v) {
@@ -1026,6 +1031,7 @@ pub const Kind = enum(u8) {
             1 => .integer,
             2 => .float,
             4 => .text,
+            6 => .datetime,
             else => null,
         };
     }
@@ -1074,94 +1080,172 @@ const Postings = struct {
 /// Entries are hints like the postings (the module doc): an overwrite leaves
 /// the old value's entry, and `select` verifies what it admits by the same
 /// rules. A NaN value is not stored, since no range admits it.
-const FloatIndex = struct {
-    sorted: std.ArrayList(FloatEntry) = .empty,
-    tail: std.ArrayList(FloatEntry) = .empty,
+const FloatIndex = SortedIndex(f64, Range);
+const FloatEntry = FloatIndex.Item;
 
-    /// The tail is merged once it reaches this many entries. Every range
-    /// query scans the whole tail and every merge moves the whole sorted
-    /// part, so the bound trades one against the other: a fixed bound keeps
-    /// the per-query scan a constant, the price of the binary search's
-    /// neighbourhood rather than of the corpus, and costs one pass over the
-    /// sorted part per `tail_max` writes. Proportional to the sorted part it
-    /// would make the merges amortized constant but the scan grow with the
-    /// corpus, and the scan is on the query path.
-    const tail_max = 4096;
+/// A datetime field's index: `FloatIndex`'s design over each parsed instant
+/// as `i64` microseconds since the epoch, Qdrant's own key for it
+/// (`NumericIndex<IntPayloadType, DateTimePayloadType>`, `into_inner_value`
+/// is `timestamp_micros`, lib/segment/src/index/field_index/numeric_index/
+/// value_indexer.rs:87).
+///
+/// One wrinkle: a leap second's instant sorts before the next second in
+/// chrono's order but its microsecond count does not, so the key clamps the
+/// sub-second part to 999_999 (`microsKey`). The key is then monotone, never
+/// strictly, in the instant: a range over keys admits a superset, exact
+/// unless a leap second is stored or bounds the range (`MicrosRange`), and
+/// `select` trusts it only when exact.
+const DatetimeIndex = struct {
+    sorted: SortedIndex(i64, MicrosRange),
+    /// A stored instant fell in a leap second, so two instants may share a
+    /// key.
+    leap: bool = false,
+};
 
-    fn deinit(self: *FloatIndex, alloc: std.mem.Allocator) void {
-        self.sorted.deinit(alloc);
-        self.tail.deinit(alloc);
+fn microsKey(i: Instant) i64 {
+    return i.secs * 1_000_000 + @min(i.micros, 999_999);
+}
+
+/// A `DatetimeRange` over `microsKey`s. Every bound a request can give fits
+/// in an `i64` of microseconds (chrono's years, `timestamp_min_secs`), and the
+/// absent ends map to the type's.
+const MicrosRange = struct {
+    lo: i64,
+    lo_strict: bool,
+    hi: i64,
+    hi_strict: bool,
+    /// Admits exactly the keys of the instants `DatetimeRange` admits, when
+    /// no stored instant is a leap second. A leap-second bound is made
+    /// inclusive instead, a superset.
+    exact: bool,
+
+    fn of(r: DatetimeRange) MicrosRange {
+        const lo_leap = r.lo.secs != Instant.min.secs and r.lo.micros >= 1_000_000;
+        const hi_leap = r.hi.secs != Instant.max.secs and r.hi.micros >= 1_000_000;
+        return .{
+            .lo = if (r.lo.secs == Instant.min.secs) std.math.minInt(i64) else microsKey(r.lo),
+            .lo_strict = r.lo_strict and !lo_leap,
+            .hi = if (r.hi.secs == Instant.max.secs) std.math.maxInt(i64) else microsKey(r.hi),
+            .hi_strict = r.hi_strict and !hi_leap,
+            .exact = !lo_leap and !hi_leap,
+        };
     }
 
-    /// Under the index's exclusive lock, which also covers the merge.
-    fn add(self: *FloatIndex, alloc: std.mem.Allocator, v: f64, offset: u32) !void {
-        if (std.math.isNan(v)) return;
-        try self.tail.append(alloc, .{ .v = v, .off = offset });
-        if (self.tail.items.len >= tail_max) try self.merge(alloc);
+    fn aboveLo(self: MicrosRange, v: i64) bool {
+        return v > self.lo or (v == self.lo and !self.lo_strict);
     }
 
-    /// Sort the tail and merge it into the sorted part, back to front and in
-    /// place. A failure to grow leaves both parts as they were, which still
-    /// answers correctly, with a longer tail.
-    fn merge(self: *FloatIndex, alloc: std.mem.Allocator) !void {
-        const t = self.tail.items;
-        try self.sorted.ensureUnusedCapacity(alloc, t.len);
-        std.mem.sort(FloatEntry, t, {}, FloatEntry.lessThan);
-        var i = self.sorted.items.len;
-        var j = t.len;
-        self.sorted.items.len += t.len;
-        const out = self.sorted.items;
-        var k = out.len;
-        while (j > 0) {
-            k -= 1;
-            if (i > 0 and out[i - 1].v > t[j - 1].v) {
-                i -= 1;
-                out[k] = out[i];
-            } else {
-                j -= 1;
-                out[k] = t[j];
+    fn belowHi(self: MicrosRange, v: i64) bool {
+        return v < self.hi or (v == self.hi and !self.hi_strict);
+    }
+
+    fn contains(self: MicrosRange, v: i64) bool {
+        return self.aboveLo(v) and self.belowHi(v);
+    }
+};
+
+/// `(value, offset)` entries sorted by value, plus an unsorted tail of the
+/// writes since the last merge, answering a range `R` (one with `aboveLo`,
+/// monotone, `belowHi`, antitone, and `contains`).
+fn SortedIndex(comptime V: type, comptime R: type) type {
+    return struct {
+        const Self = @This();
+
+        sorted: std.ArrayList(Item) = .empty,
+        tail: std.ArrayList(Item) = .empty,
+
+        pub const Item = struct {
+            v: V,
+            off: u32,
+
+            fn lessThan(_: void, a: Item, b: Item) bool {
+                return a.v < b.v;
+            }
+        };
+
+        /// The tail is merged once it reaches this many entries. Every range
+        /// query scans the whole tail and every merge moves the whole sorted
+        /// part, so the bound trades one against the other: a fixed bound
+        /// keeps the per-query scan a constant, the price of the binary
+        /// search's neighbourhood rather than of the corpus, and costs one
+        /// pass over the sorted part per `tail_max` writes. Proportional to
+        /// the sorted part it would make the merges amortized constant but
+        /// the scan grow with the corpus, and the scan is on the query path.
+        const tail_max = 4096;
+
+        fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+            self.sorted.deinit(alloc);
+            self.tail.deinit(alloc);
+        }
+
+        /// Under the index's exclusive lock, which also covers the merge.
+        fn add(self: *Self, alloc: std.mem.Allocator, v: V, offset: u32) !void {
+            try self.tail.append(alloc, .{ .v = v, .off = offset });
+            if (self.tail.items.len >= tail_max) try self.merge(alloc);
+        }
+
+        /// Sort the tail and merge it into the sorted part, back to front and
+        /// in place. A failure to grow leaves both parts as they were, which
+        /// still answers correctly, with a longer tail.
+        fn merge(self: *Self, alloc: std.mem.Allocator) !void {
+            const t = self.tail.items;
+            try self.sorted.ensureUnusedCapacity(alloc, t.len);
+            std.mem.sort(Item, t, {}, Item.lessThan);
+            var i = self.sorted.items.len;
+            var j = t.len;
+            self.sorted.items.len += t.len;
+            const out = self.sorted.items;
+            var k = out.len;
+            while (j > 0) {
+                k -= 1;
+                if (i > 0 and out[i - 1].v > t[j - 1].v) {
+                    i -= 1;
+                    out[k] = out[i];
+                } else {
+                    j -= 1;
+                    out[k] = t[j];
+                }
+            }
+            self.tail.clearRetainingCapacity();
+        }
+
+        /// The sorted entries `r` admits: a contiguous run, since `aboveLo`
+        /// and `belowHi` are monotone in the value.
+        fn span(self: *const Self, r: R) []const Item {
+            const items = self.sorted.items;
+            const lo = std.sort.partitionPoint(Item, items, r, belowLo);
+            const hi = std.sort.partitionPoint(Item, items, r, withinHi);
+            return items[lo..@max(lo, hi)];
+        }
+
+        fn belowLo(r: R, e: Item) bool {
+            return !r.aboveLo(e.v);
+        }
+
+        fn withinHi(r: R, e: Item) bool {
+            return r.belowHi(e.v);
+        }
+
+        /// Entries `r` admits, for the planner. Over-counts as `points`
+        /// does: a point with several values in range, or an overwritten
+        /// one, counts once per entry.
+        fn count(self: *const Self, r: R) usize {
+            var n = self.span(r).len;
+            for (self.tail.items) |e| {
+                if (r.contains(e.v)) n += 1;
+            }
+            return n;
+        }
+
+        /// Set the bit of every entry `r` admits, through `admit`.
+        fn admitRange(self: *const Self, r: R, store: *const Store, filter: *const Filter, bits: []u64, bound: usize, trusted: bool) void {
+            for (self.span(r)) |e| store.admit(filter, bits, bound, trusted, e.off);
+            for (self.tail.items) |e| {
+                if (r.contains(e.v)) store.admit(filter, bits, bound, trusted, e.off);
             }
         }
-        self.tail.clearRetainingCapacity();
-    }
-
-    /// The sorted entries `r` admits: a contiguous run, since `aboveLo` and
-    /// `belowHi` are monotone in the value.
-    fn span(self: *const FloatIndex, r: Range) []const FloatEntry {
-        const items = self.sorted.items;
-        const lo = std.sort.partitionPoint(FloatEntry, items, r, belowLo);
-        const hi = std.sort.partitionPoint(FloatEntry, items, r, withinHi);
-        return items[lo..@max(lo, hi)];
-    }
-
-    fn belowLo(r: Range, e: FloatEntry) bool {
-        return !r.aboveLo(e.v);
-    }
-
-    fn withinHi(r: Range, e: FloatEntry) bool {
-        return r.belowHi(e.v);
-    }
-
-    /// Entries `r` admits, for the planner. Over-counts as `points` does: a
-    /// point with several values in range, or an overwritten one, counts
-    /// once per entry.
-    fn count(self: *const FloatIndex, r: Range) usize {
-        var n = self.span(r).len;
-        for (self.tail.items) |e| {
-            if (r.contains(e.v)) n += 1;
-        }
-        return n;
-    }
-};
-
-const FloatEntry = struct {
-    v: f64,
-    off: u32,
-
-    fn lessThan(_: void, a: FloatEntry, b: FloatEntry) bool {
-        return a.v < b.v;
-    }
-};
+    };
+}
 
 pub const Field = struct {
     /// The path as `CreateFieldIndex` named it; `first` and `steps` borrow it.
@@ -1187,6 +1271,7 @@ pub const Field = struct {
         /// The BM25 index. Unlike the postings it is exact: a rewrite
         /// replaces the point's document and a delete removes it.
         text: *text.TextIndex,
+        datetime: DatetimeIndex,
     };
 
     pub fn kind(self: *const Field) Kind {
@@ -1229,6 +1314,7 @@ pub const Field = struct {
                 m.deinit(alloc);
             },
             .float => |*fi| fi.deinit(alloc),
+            .datetime => |*di| di.sorted.deinit(alloc),
             .text => |ti| {
                 ti.deinit();
                 alloc.destroy(ti);
@@ -1347,9 +1433,20 @@ pub const Field = struct {
         }
     };
 
-    /// A string, which only a keyword field indexes.
+    /// A string: a keyword's posting, or a datetime field's instant when it
+    /// parses as `datetime_range` parses it (Qdrant's datetime index takes
+    /// what `DateTimePayloadType::from_str` takes, value_indexer.rs:75).
     fn addString(self: *Field, alloc: std.mem.Allocator, offset: u32, s: []const u8) IndexError!void {
-        if (self.index == .keyword) try self.addKeyword(alloc, offset, s);
+        switch (self.index) {
+            .keyword => try self.addKeyword(alloc, offset, s),
+            .datetime => |*di| {
+                const at = parseDatetime(s) orelse return;
+                try di.sorted.add(alloc, microsKey(at), offset);
+                if (at.micros >= 1_000_000) di.leap = true;
+                self.points += 1;
+            },
+            else => {},
+        }
     }
 
     fn addKeyword(self: *Field, alloc: std.mem.Allocator, offset: u32, s: []const u8) !void {
@@ -1731,6 +1828,7 @@ pub const Store = struct {
             .keyword => .{ .keyword = .empty },
             .integer => .{ .integer = .empty },
             .float => .{ .float = .{} },
+            .datetime => .{ .datetime = .{ .sorted = .{} } },
             // `createTextIndex` builds a text field, with its options.
             .text => unreachable,
         };
@@ -1839,9 +1937,13 @@ pub const Store = struct {
                 if (f.index != .float) return null;
                 return f.index.float.count(r);
             },
+            .datetime => |r| {
+                if (f.index != .datetime) return null;
+                return f.index.datetime.sorted.count(MicrosRange.of(r));
+            },
             // No index holds what these ask: the blobs decide, as for an
             // unindexed field.
-            .boolean, .datetime, .values_count, .is_empty, .is_null, .all_empty => return null,
+            .boolean, .values_count, .is_empty, .is_null, .all_empty => return null,
         }
     }
 
@@ -1876,13 +1978,15 @@ pub const Store = struct {
         const words = (bound + 63) / 64;
         std.debug.assert(words <= bits.len);
         @memset(bits[0..words], 0);
-        if (pick.f.index == .float) {
-            const r = pick.c.match.range;
-            const fi = &pick.f.index.float;
-            for (fi.span(r)) |e| self.admit(filter, bits, bound, trusted, e.off);
-            for (fi.tail.items) |e| {
-                if (r.contains(e.v)) self.admit(filter, bits, bound, trusted, e.off);
-            }
+        switch (pick.f.index) {
+            .float => |*fi| fi.admitRange(pick.c.match.range, self, filter, bits, bound, trusted),
+            .datetime => |*di| {
+                // Keys stand for instants exactly only without a leap second
+                // (`DatetimeIndex`); otherwise every entry is verified.
+                const r = MicrosRange.of(pick.c.match.datetime);
+                di.sorted.admitRange(r, self, filter, bits, bound, trusted and r.exact and !di.leap);
+            },
+            else => {},
         }
         var lists = PostingLists.init(pick.f, pick.c.match);
         while (lists.next()) |p| {
@@ -1946,8 +2050,8 @@ pub const Store = struct {
                     self.done = true;
                     return if (self.f.index.integer.getPtr(i)) |p| p else null;
                 },
-                // A float field's entries are not postings; `select` reads
-                // them before this runs.
+                // A float or datetime field's entries are not postings;
+                // `select` reads them before this runs.
                 .boolean, .range, .datetime, .values_count, .is_empty, .is_null, .all_empty => return null,
                 .keywords => {
                     while (!self.r.atEnd()) {
@@ -3297,4 +3401,211 @@ test "an index on a nested path holds what a condition on that path reads, and a
     try testing.expect(store.exact_postings.load(.acquire));
     // `a[].b[]` reaches the elements of a list under `b` only: 6's `[]`.
     try testing.expectEqual(@as(usize, 0), store.field("a[].b[]").?.points);
+}
+
+/// The datetime index against a scan of the blobs and a model of each
+/// point's current instants, as `FloatModel` checks the float index.
+const DatetimeModel = struct {
+    const n = 6000;
+    const DtItem = SortedIndex(i64, MicrosRange).Item;
+    vals: [][3]Instant,
+    lens: []u8,
+    /// Every instant the index was given, stale ones included.
+    entries: std.ArrayList(DtItem) = .empty,
+    store: Store,
+    indexed: bool = false,
+    /// Whether writes may hold leap seconds.
+    leap: bool = false,
+    rnd: std.Random,
+    arena: std.heap.ArenaAllocator,
+
+    fn init(rnd: std.Random) !DatetimeModel {
+        const vals = try testing.allocator.alloc([3]Instant, n);
+        errdefer testing.allocator.free(vals);
+        const lens = try testing.allocator.alloc(u8, n);
+        errdefer testing.allocator.free(lens);
+        @memset(lens, 0);
+        return .{
+            .vals = vals,
+            .lens = lens,
+            .store = try Store.init(testing.allocator, n),
+            .rnd = rnd,
+            .arena = std.heap.ArenaAllocator.init(testing.allocator),
+        };
+    }
+
+    fn deinit(self: *DatetimeModel) void {
+        testing.allocator.free(self.vals);
+        testing.allocator.free(self.lens);
+        self.entries.deinit(testing.allocator);
+        self.store.deinit(testing.allocator);
+        self.arena.deinit();
+    }
+
+    /// An instant in a three-minute window, so ties and the bounds' edges
+    /// occur, written in one of the forms `parseDatetime` takes.
+    fn datetimeString(self: *DatetimeModel) []const u8 {
+        const a = self.arena.allocator();
+        const minute = self.rnd.uintLessThan(u32, 3);
+        var second = self.rnd.uintLessThan(u32, 60);
+        if (self.leap and self.rnd.uintLessThan(u8, 10) == 0) second = 60;
+        const micros: u32 = switch (self.rnd.uintLessThan(u8, 4)) {
+            0 => 0,
+            1 => 500_000,
+            2 => 999_999,
+            else => self.rnd.uintLessThan(u32, 1_000_000),
+        };
+        return switch (self.rnd.uintLessThan(u8, 3)) {
+            0 => std.fmt.allocPrint(a, "2024-01-01T00:{d:0>2}:{d:0>2}.{d:0>6}Z", .{ minute, second, micros }),
+            1 => std.fmt.allocPrint(a, "2024-01-01T01:{d:0>2}:{d:0>2}.{d:0>6}+01:00", .{ minute, second, micros }),
+            else => std.fmt.allocPrint(a, "2024-01-01 00:{d:0>2}:{d:0>2}.{d:0>6}", .{ minute, second, micros }),
+        } catch @panic("oom");
+    }
+
+    fn write(self: *DatetimeModel, off: u32) !void {
+        const v = Vb{ .a = self.arena.allocator() };
+        const count = self.rnd.uintLessThan(u8, 4);
+        if (count == 0) {
+            // A cleared payload, or one without the field.
+            if (self.rnd.boolean()) {
+                try self.store.set(testing.allocator, off, &.{}, 3);
+            } else {
+                try self.store.set(testing.allocator, off, v.payload(&.{.{ "s", v.str("z") }}), 3);
+            }
+            self.lens[off] = 0;
+            return;
+        }
+        var elems: [4][]const u8 = undefined;
+        for (0..count) |i| {
+            const s = self.datetimeString();
+            const at = parseDatetime(s).?;
+            self.vals[off][i] = at;
+            if (self.indexed) try self.entries.append(testing.allocator, .{ .v = microsKey(at), .off = off });
+            elems[i] = v.str(s);
+        }
+        self.lens[off] = count;
+        // Beside the instants, a string and a number no range admits.
+        var len: usize = count;
+        if (self.rnd.uintLessThan(u8, 4) == 0) {
+            elems[len] = if (self.rnd.boolean()) v.str("not a date") else v.int(1_704_067_200);
+            len += 1;
+        }
+        const value = if (len == 1 and self.rnd.boolean()) elems[0] else v.list(elems[0..len]);
+        try self.store.set(testing.allocator, off, v.payload(&.{ .{ "s", v.str("z") }, .{ "d", value } }), 3);
+    }
+
+    fn createIndex(self: *DatetimeModel, written: u32) !void {
+        try self.store.createIndex(testing.allocator, "d", .datetime, written);
+        self.indexed = true;
+        for (0..written) |off| {
+            for (self.vals[off][0..self.lens[off]]) |at| {
+                try self.entries.append(testing.allocator, .{ .v = microsKey(at), .off = @intCast(off) });
+            }
+        }
+    }
+
+    fn modelMatches(self: *const DatetimeModel, off: usize, r: DatetimeRange) bool {
+        for (self.vals[off][0..self.lens[off]]) |at| if (r.contains(at)) return true;
+        return false;
+    }
+
+    /// Bounds in and around the window, some a leap second's.
+    fn randomRange(self: *DatetimeModel) DatetimeRange {
+        var b: [4]?Instant = .{ null, null, null, null };
+        for (&b) |*x| {
+            if (self.rnd.uintLessThan(u8, 3) != 0) continue;
+            const secs = new_year.secs - 2 + @as(i64, self.rnd.uintLessThan(u32, 185));
+            const micros: u32 = switch (self.rnd.uintLessThan(u8, 5)) {
+                0 => 0,
+                1 => 500_000,
+                2 => 999_999,
+                3 => self.rnd.uintLessThan(u32, 1_000_000),
+                else => if (@mod(secs, 60) == 59) 1_000_000 + self.rnd.uintLessThan(u32, 1_000_000) else 0,
+            };
+            x.* = .{ .secs = secs, .micros = micros };
+        }
+        return DatetimeRange.fromBounds(b[0], b[1], b[2], b[3]);
+    }
+
+    fn check(self: *DatetimeModel, written: u32, queries: usize) !void {
+        var bits: [(n + 63) / 64]u64 = undefined;
+        const field = self.store.field("d").?;
+        const middle = DatetimeRange.fromBounds(null, null, .{ .secs = new_year.secs + 60, .micros = 0 }, .{ .secs = new_year.secs + 120, .micros = 0 });
+        for (0..queries) |q| {
+            const r = self.randomRange();
+            const bound: usize = if (q % 4 == 0) self.rnd.uintAtMost(usize, written) else written;
+            // The planner's count is the index's entries in range.
+            var want_entries: usize = 0;
+            const mr = MicrosRange.of(r);
+            for (self.entries.items) |e| {
+                if (mr.contains(e.v)) want_entries += 1;
+            }
+            try testing.expectEqual(want_entries, Store.postingLen(field, .{ .datetime = r }).?);
+            var f = Filter{};
+            try f.add(.must, .{ .key = "d", .match = .{ .datetime = r } });
+            for (0..2) |pass| {
+                if (pass == 1) try f.add(.must_not, .{ .key = "d", .match = .{ .datetime = middle } });
+                const sel = self.store.select(&f, &bits, bound).?;
+                var want: usize = 0;
+                for (0..bound) |off| {
+                    const scan = self.store.matches(@intCast(off), &f);
+                    const model = self.modelMatches(off, r) and
+                        (pass == 0 or !self.modelMatches(off, middle));
+                    try testing.expectEqual(model, scan);
+                    try testing.expectEqual(scan, testBit(&bits, @intCast(off)));
+                    want += @intFromBool(scan);
+                }
+                try testing.expectEqual(want, sel.count);
+            }
+        }
+    }
+};
+
+test "the datetime index counts and selects what a blob scan admits, across merges, overwrites, clears and leap seconds" {
+    var prng = std.Random.DefaultPrng.init(0xda7e);
+    var model = try DatetimeModel.init(prng.random());
+    defer model.deinit();
+    const n = DatetimeModel.n;
+    for (0..1000) |off| try model.write(@intCast(off));
+    try model.createIndex(1000);
+    for (1000..n) |off| try model.write(@intCast(off));
+    const field = model.store.field("d").?;
+    try testing.expectEqual(Kind.datetime, field.kind());
+    const di = &field.index.datetime;
+    try testing.expect(di.sorted.sorted.items.len >= SortedIndex(i64, MicrosRange).tail_max);
+    try testing.expect(di.sorted.tail.items.len > 0);
+    try testing.expect(!di.leap);
+    // Nothing rewritten and no leap second: the trusted path, exact.
+    try testing.expect(model.store.exact_postings.load(.acquire));
+    try model.check(n, 150);
+    // Overwrites and clears leave stale entries the verification drops.
+    for (0..1500) |_| try model.write(model.rnd.uintLessThan(u32, n));
+    try testing.expect(!model.store.exact_postings.load(.acquire));
+    try model.check(n, 150);
+    // Leap seconds: keys tie, so every entry is verified.
+    model.leap = true;
+    for (0..1500) |_| try model.write(model.rnd.uintLessThan(u32, n));
+    try testing.expect(di.leap);
+    try testing.expect(std.sort.isSorted(DatetimeModel.DtItem, di.sorted.sorted.items, {}, DatetimeModel.DtItem.lessThan));
+    try model.check(n, 150);
+}
+
+test "a leap second's key ties with the second's last microsecond, and a range over keys is a superset" {
+    const leap = parseDatetime("2016-12-31T23:59:60.25Z").?;
+    const last = parseDatetime("2016-12-31T23:59:59.999999Z").?;
+    const next = parseDatetime("2017-01-01T00:00:00Z").?;
+    try testing.expectEqual(std.math.Order.lt, last.order(leap));
+    try testing.expectEqual(std.math.Order.lt, leap.order(next));
+    try testing.expectEqual(microsKey(last), microsKey(leap));
+    try testing.expectEqual(microsKey(next), microsKey(leap) + 1);
+    // `gt: last` excludes `last` and admits `leap`; over keys it is made
+    // inclusive only when a bound is a leap second.
+    const r = MicrosRange.of(DatetimeRange.fromBounds(null, last, null, null));
+    try testing.expect(r.exact and !r.contains(microsKey(last)));
+    const rl = MicrosRange.of(DatetimeRange.fromBounds(leap, null, null, null));
+    try testing.expect(!rl.exact and rl.contains(microsKey(leap)) and rl.contains(microsKey(last)));
+    const open = MicrosRange.of(.{});
+    try testing.expect(open.exact and open.contains(std.math.minInt(i64)) and open.contains(std.math.maxInt(i64)));
+    try testing.expectEqual(@as(u32, 7), Kind.datetime.schemaType());
+    try testing.expectEqual(Kind.datetime, Kind.fromFieldType(6).?);
 }
