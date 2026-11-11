@@ -1325,7 +1325,10 @@ fn runGatheredExact(
         if (want == 0 or want > Workspace.max_limit) return null;
         const query = q.query orelse return null;
         const dense = switch (query) {
-            .nearest => |near| near.dense orelse return null,
+            .nearest => |near| switch (near) {
+                .dense => |d| d,
+                .none, .id => return null,
+            },
             .text => return null,
         };
         if (dense.dim() != coll.config.dim) return null;
@@ -1349,7 +1352,7 @@ fn runGatheredExact(
     it = qb.queryIterator();
     while (it.next() catch return null) |q| {
         const raw = ctx.workspace.gather_queries[i * dim ..][0..dim];
-        const dense = q.query.?.nearest.dense.?;
+        const dense = q.query.?.nearest.dense;
         _ = dense.copyInto(raw) catch {
             held.release();
             return err(req, .invalid_argument, "query vector too large");
@@ -1421,9 +1424,10 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
     if (q.using) |name| {
         if (name.len > 0) return refuse(.unimplemented, "named vector spaces (phase 2)");
     }
-    const dense = nearest.dense orelse {
-        if (nearest.id != null) return refuse(.unimplemented, "query by point id (phase 2)");
-        return refuse(.invalid_argument, "query.nearest.dense is required");
+    const dense = switch (nearest) {
+        .dense => |d| d,
+        .id => return refuse(.unimplemented, "query by point id (phase 2)"),
+        .none => return refuse(.invalid_argument, "query.nearest.dense is required"),
     };
     if (dense.dim() != coll.config.dim) {
         return refuse(.invalid_argument, "query dimension does not match collection");

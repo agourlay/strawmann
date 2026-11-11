@@ -824,25 +824,28 @@ pub const QuantizationSearchParams = struct {
 /// natural guess, dense first, is wrong, and gets every query rejected as
 /// "query.nearest.dense is required" while the vector sits in the frame under
 /// a tag the decoder skipped.
-pub const VectorInput = struct {
-    dense: ?DenseVector = null,
+pub const VectorInput = union(enum) {
+    /// Neither field was sent.
+    none,
+    dense: DenseVector,
     /// Query-by-existing-point-id. bfb's `--uuid-query` path pre-fetches IDs
     /// via Scroll and then queries by vector, so this is not on the critical
     /// path, but recognising it lets us reject it by name.
-    id: ?PointId = null,
+    id: PointId,
 
     pub fn decode(r: *Reader) DecodeError!VectorInput {
-        var out: VectorInput = .{};
+        // A oneof keeps the last of its fields on the wire.
+        var out: VectorInput = .none;
         while (!r.atEnd()) {
             const t = try r.tag();
             switch (t.field) {
                 1 => {
                     var sub = try r.nested();
-                    out.id = try PointId.decode(&sub);
+                    out = .{ .id = try PointId.decode(&sub) };
                 },
                 2 => {
                     var sub = try r.nested();
-                    out.dense = try DenseVector.decode(&sub);
+                    out = .{ .dense = try DenseVector.decode(&sub) };
                 },
                 3 => return unimplemented("sparse query vectors"),
                 4 => return unimplemented("multi-dense query vectors"),
@@ -2002,6 +2005,29 @@ test "Vectors with neither field is .none, and the last oneof field wins" {
     try testing.expectEqual(@as(usize, 2), vs.single.dense.dim());
 }
 
+test "VectorInput with neither field is .none, and the last oneof field wins" {
+    var empty = Reader.init(&.{});
+    try testing.expect(try VectorInput.decode(&empty) == .none);
+
+    var buf: [128]u8 = undefined;
+    var w = Writer.init(&buf);
+    const dn = try w.beginNested(2, 2); // dense
+    try w.writePackedFloats(1, &[_]f32{ 1.0, 2.0 });
+    try w.endNested(dn);
+    const idn = try w.beginNested(1, 2); // id
+    try w.writeVarintFieldAlways(1, 7);
+    try w.endNested(idn);
+    var r = Reader.init(w.written());
+    try testing.expect((try VectorInput.decode(&r)).id.eql(.{ .num = 7 }));
+
+    // And the dense vector, sent after an id, is the query.
+    const dn2 = try w.beginNested(2, 2);
+    try w.writePackedFloats(1, &[_]f32{3.0});
+    try w.endNested(dn2);
+    r = Reader.init(w.written());
+    try testing.expectEqual(@as(usize, 1), (try VectorInput.decode(&r)).dense.dim());
+}
+
 test "Vectors decodes named vectors as a map" {
     var buf: [512]u8 = undefined;
     var w = Writer.init(&buf);
@@ -2065,9 +2091,7 @@ test "VERIFIED field numbers: the ones that were wrong before checking" {
         try w.endNested(dn);
         var r = Reader.init(w.written());
         const vi = try VectorInput.decode(&r);
-        try testing.expect(vi.dense != null);
-        try testing.expectEqual(@as(usize, 2), vi.dense.?.dim());
-        try testing.expect(vi.id == null);
+        try testing.expectEqual(@as(usize, 2), vi.dense.dim());
     }
     {
         var w = Writer.init(&buf);
@@ -2076,8 +2100,7 @@ test "VERIFIED field numbers: the ones that were wrong before checking" {
         try w.endNested(idn);
         var r = Reader.init(w.written());
         const vi = try VectorInput.decode(&r);
-        try testing.expect(vi.id != null);
-        try testing.expect(vi.dense == null);
+        try testing.expect(vi.id.eql(.{ .num = 42 }));
     }
 
     // QueryPoints: limit at 8, filter at 5, score_threshold at 7, offset at 9.
