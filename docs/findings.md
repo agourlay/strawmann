@@ -216,3 +216,27 @@ scored against the shipped `closest_ids` with the ε-tie rule (checked once
 against our own filtered oracle, as `ground-truth.md` §6 did for the
 unconditional sets). This is also the workload vector-db-benchmark runs on
 these two datasets.
+
+Looked at on 2026-11-11. bfb already does the client side: `bfb upload` takes
+a vector-db-benchmark tar layout (`vectors.npy`, `payloads.jsonl`) as both the
+vector and the whole-payload source, with field indexes declared, and `bfb
+search` with a `type: dataset` source applies each test's own `conditions`
+and reports precision@k against its `closest_ids`. h-and-m is extracted beside
+its archive (`h-and-m-2048-angular-filters/hnm/`), laion already was. Three
+things stand between that and a row:
+
+- **bfb sends whitespace values as full-text matches.** qdrant-client's
+  `From<String> for MatchValue` makes "Light Orange" a `text` match; strawmANN
+  refuses it (§1), and on Qdrant it is a substring match on a keyword field,
+  not the dataset's query. Fixed on a local bfb branch
+  (`~/.cache/strawmann/bfb-keyword`, `fix/dataset-keyword-match`, a2d9e72 on
+  the pinned d2a6b6c, with a test); a 3,000-point smoke through it ran 300 of
+  h-and-m's filtered queries on strawmANN without an error. Moving bfb's pin
+  to it, and offering it upstream, is the operator's call.
+- **laion needs a float range.** Its 2,530 conditioned queries are `range
+  {gt}` on `similarity`, and the engine has keyword and integer indexes and
+  `match` conditions only.
+- **The harness has no row for it.** An upload row and a search row on bfb's
+  dataset path, and a recall that comes from the row (bfb's precision)
+  rather than from a joined sweep, which `compare.py` and the report do not
+  read yet; plus the ε-tie check against our filtered oracle.
