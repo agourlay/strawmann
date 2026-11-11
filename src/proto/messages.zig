@@ -504,20 +504,19 @@ fn decodeCondition(r: *Reader, out: *payload.Filter, clause: payload.Filter.Clau
         switch (t.field) {
             1 => {
                 var fc = try r.nested();
-                const c = try decodeFieldCondition(&fc);
-                out.add(clause, c) catch return invalidArgument("more than 16 conditions in one clause");
+                try addKeyed(out, clause, try decodeFieldCondition(&fc));
             },
             // `IsEmptyCondition { string key = 1; }` and `IsNullCondition`,
-            // the same shape. On one top-level key, which holds one value,
-            // Qdrant's `check_is_empty`/`check_is_null` over the key's
-            // values (lib/segment/src/common/utils.rs) agree with the
-            // `FieldCondition` forms set to `true` on a present and on a
-            // missing key alike, so they decode to those.
+            // the same shape, which Qdrant checks with `check_is_empty` (every
+            // value the path reaches empty) and `check_is_null` (any of them
+            // null), lib/segment/src/common/utils.rs:20. The second is the
+            // `FieldCondition` form set to `true`; the first is that only
+            // where the path reaches one value, so it has its own `Match`.
             2, 5 => {
                 var kc = try r.nested();
                 const key = try decodeConditionKey(&kc);
-                const m: payload.Match = if (t.field == 2) .{ .is_empty = true } else .{ .is_null = true };
-                out.add(clause, .{ .key = key, .match = m }) catch return invalidArgument("more than 16 conditions in one clause");
+                const m: payload.Match = if (t.field == 2) .all_empty else .{ .is_null = true };
+                try addKeyed(out, clause, .{ .key = key, .match = m });
             },
             3 => return unimplemented("has_id conditions"),
             4 => {
@@ -594,11 +593,7 @@ fn decodeFieldCondition(r: *Reader) DecodeError!payload.Condition {
         .{ .is_null = b }
     else
         null;
-    if (shape) |m| {
-        try requireTopLevelKey(k);
-        return .{ .key = k, .match = m };
-    }
-    if (datetime != null) try requireTopLevelKey(k);
+    if (shape) |m| return .{ .key = k, .match = m };
     const ranged: ?payload.Match = if (range) |rg|
         .{ .range = rg }
     else if (datetime) |dr|
@@ -620,24 +615,26 @@ fn decodeConditionKey(r: *Reader) DecodeError![]const u8 {
         const t = try r.tag();
         if (t.field == 1) key = try r.bytes() else try r.skip(t.wire_type);
     }
-    // Qdrant parses the key as a JSON path, and an empty one does not parse
-    // (`json_path_from_proto`, lib/api/src/conversions/json.rs).
-    if (key.len == 0) return invalidArgument("Invalid json path: ''");
-    try requireTopLevelKey(key);
     return key;
 }
 
-/// Qdrant reads a condition key as a JSON path (`a.b`, `a[]`, `a[0]`,
-/// `"a.b"`; lib/segment/src/json_path/parse.rs) and this store matches a
-/// top-level key byte for byte. For a value match the two agree on a key
-/// without path syntax and only miss on one with it. The conditions added
-/// with this check refuse such a key by name rather than inherit that miss,
-/// which for the ones a *missing* field satisfies (`is_empty`,
-/// `values_count` with 0 in range, `is_null: false`) would be the opposite
-/// miss: a path read as a plain key admits every point.
-fn requireTopLevelKey(key: []const u8) DecodeError!void {
-    if (std.mem.indexOfAny(u8, key, ".[]\"") != null)
-        return unimplemented("a nested payload path in is_empty, is_null, values_count or datetime_range");
+/// Add a decoded condition, its key read as the JSON path Qdrant reads it
+/// as (`json_path_from_proto`, lib/api/src/conversions/json.rs:44, refusing
+/// what does not parse with its message).
+fn addKeyed(out: *payload.Filter, clause: payload.Filter.Clause, c: payload.Condition) DecodeError!void {
+    out.addPath(clause, c) catch |e| return switch (e) {
+        error.TooManyConditions => invalidArgument("more than 16 conditions in one clause"),
+        error.InvalidPath => invalidJsonPath(c.key),
+        error.PathTooLong => unimplemented("a filter with more than 32 JSON path steps over its conditions"),
+    };
+}
+
+threadlocal var path_detail: [160]u8 = undefined;
+
+/// Qdrant's `Invalid json path: '<key>'`, a long key cut short.
+pub fn invalidJsonPath(key: []const u8) DecodeError {
+    const shown = key[0..@min(key.len, 120)];
+    return invalidArgument(std.fmt.bufPrint(&path_detail, "Invalid json path: '{s}'", .{shown}) catch "Invalid json path");
 }
 
 /// `ValuesCount { optional uint64 lt = 1; optional uint64 gt = 2; optional
@@ -2666,7 +2663,7 @@ fn writeKeyCondition(w: *Writer, clause: u32, which: u32, key: []const u8) !void
     try w.endNested(cond);
 }
 
-test "Condition.is_empty and Condition.is_null decode as the FieldCondition forms set to true" {
+test "Condition.is_empty decodes as an all-of, Condition.is_null as the FieldCondition form set to true" {
     var buf: [256]u8 = undefined;
     var w = Writer.init(&buf);
     try writeKeyCondition(&w, 2, 2, "a");
@@ -2674,23 +2671,53 @@ test "Condition.is_empty and Condition.is_null decode as the FieldCondition form
     try writeKeyCondition(&w, 1, 2, "c");
     const f = try decodeFilter(w.written());
     try testing.expectEqualStrings("a", f.must[0].key);
-    try testing.expect(f.must[0].match.is_empty);
+    try testing.expect(f.must[0].match == .all_empty);
     try testing.expectEqualStrings("b", f.must_not[0].key);
     try testing.expect(f.must_not[0].match.is_null);
-    try testing.expect(f.should[0].match.is_empty);
+    try testing.expect(f.should[0].match == .all_empty);
 
     // An empty key is not a JSON path Qdrant parses.
     var w2 = Writer.init(&buf);
     try writeKeyCondition(&w2, 2, 5, "");
     try testing.expectError(DecodeError.InvalidArgument, decodeFilter(w2.written()));
     try testing.expectEqualStrings("Invalid json path: ''", takeInvalidDetail());
-    // A path into the payload is refused by name.
-    for ([_][]const u8{ "a.b", "a[]", "a[0]", "\"a\"" }) |key| {
-        var w3 = Writer.init(&buf);
-        try writeKeyCondition(&w3, 2, 2, key);
-        try testing.expectError(DecodeError.Unimplemented, decodeFilter(w3.written()));
-        try testing.expectEqualStrings("a nested payload path in is_empty, is_null, values_count or datetime_range", unimplemented_detail);
+}
+
+test "a condition key decodes as a JSON path, parsed once into the filter's steps" {
+    var buf: [512]u8 = undefined;
+    var w = Writer.init(&buf);
+    try writeKeyCondition(&w, 2, 2, "a.b");
+    try writeFieldCondition(&w, 2, "c[]", .{ .keyword = "x" });
+    try writeFieldCondition(&w, 3, "\"d.e\"", .{ .values_count = &.{} });
+    try writeKeyCondition(&w, 1, 5, "f[2].\"g h\"[]");
+    const f = try decodeFilter(w.written());
+    try testing.expectEqualStrings("a", f.must[0].key);
+    try testing.expectEqual(@as(usize, 1), f.restOf(f.must[0]).len);
+    try testing.expectEqualStrings("b", f.restOf(f.must[0])[0].key);
+    try testing.expectEqualStrings("c", f.must[1].key);
+    try testing.expect(f.restOf(f.must[1])[0] == .wildcard);
+    // A quoted key is one top-level key, dot and all.
+    try testing.expectEqualStrings("d.e", f.must_not[0].key);
+    try testing.expectEqual(@as(usize, 0), f.restOf(f.must_not[0]).len);
+    try testing.expectEqualStrings("f", f.should[0].key);
+    const rest = f.restOf(f.should[0]);
+    try testing.expectEqual(@as(usize, 3), rest.len);
+    try testing.expectEqual(@as(usize, 2), rest[0].index);
+    try testing.expectEqualStrings("g h", rest[1].key);
+    try testing.expect(rest[2] == .wildcard);
+
+    // What Qdrant does not parse is refused with its message.
+    for ([_][]const u8{ "a.", "a b", "[0]", "a[x]", "a[-1]" }) |key| {
+        var w2 = Writer.init(&buf);
+        try writeFieldCondition(&w2, 2, key, .{ .keyword = "x" });
+        try testing.expectError(DecodeError.InvalidArgument, decodeFilter(w2.written()));
+        var want: [64]u8 = undefined;
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "Invalid json path: '{s}'", .{key}), takeInvalidDetail());
     }
+    // Past the filter's step bound, refused by name.
+    var w3 = Writer.init(&buf);
+    try writeFieldCondition(&w3, 2, &payload.wildcardPath(33), .{ .keyword = "x" });
+    try testing.expectError(DecodeError.Unimplemented, decodeFilter(w3.written()));
 }
 
 test "FieldCondition.is_empty, is_null and values_count decode, and override a match beside them as Qdrant's check does" {
@@ -2738,10 +2765,12 @@ test "FieldCondition.is_empty, is_null and values_count decode, and override a m
     try writeFieldCondition(&w3, 2, "a", .{});
     try testing.expectError(DecodeError.InvalidArgument, decodeFilter(w3.written()));
     _ = takeInvalidDetail();
-    // A path key is refused for these, as for the Condition forms.
+    // A path key is read as a path for these too.
     var w4 = Writer.init(&buf);
     try writeFieldCondition(&w4, 3, "a.b", .{ .values_count = &.{} });
-    try testing.expectError(DecodeError.Unimplemented, decodeFilter(w4.written()));
+    const f4 = try decodeFilter(w4.written());
+    try testing.expectEqualStrings("a", f4.must_not[0].key);
+    try testing.expectEqualStrings("b", f4.restOf(f4.must_not[0])[0].key);
 }
 
 test "FieldCondition.datetime_range decodes its Timestamp bounds, ORs with a match, and yields to a range" {

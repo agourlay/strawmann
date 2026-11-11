@@ -899,8 +899,9 @@ fn upsert(ctx: *Context, req: *const server.Request, body: []const u8, out: *ser
 /// this returned UNIMPLEMENTED, and why Qdrant's W12 was a full scan.
 ///
 /// Keyword, integer, float and text indexes; the rest (`geo`, `bool`,
-/// `datetime`, `uuid`) are refused by name, since a filter over them is not
-/// evaluated either.
+/// `datetime`, `uuid`) are refused by name. The field name is a JSON path, as
+/// Qdrant parses it (`json_path_from_proto`, update_common.rs:723), so a
+/// nested path such as `a[].b` indexes the values a condition on it reads.
 fn createFieldIndex(ctx: *Context, req: *const server.Request, body: []const u8, out: *server.ResponseBuf) server.Completion {
     var r = wire.Reader.init(body);
     const cf = msg.CreateFieldIndexCollection.decode(&r) catch |e| return decodeErr(req, e);
@@ -909,6 +910,14 @@ fn createFieldIndex(ctx: *Context, req: *const server.Request, body: []const u8,
     defer held.release();
     const coll = held.coll;
 
+    var steps: [core.payload.max_path_steps]core.payload.PathStep = undefined;
+    _ = core.payload.parsePath(cf.field_name, &steps) catch |e| return switch (e) {
+        error.InvalidPath => blk: {
+            _ = msg.invalidJsonPath(cf.field_name) catch {};
+            break :blk err(req, .invalid_argument, msg.takeInvalidDetail());
+        },
+        error.PathTooLong => err(req, .unimplemented, "a field index path of more than 32 steps"),
+    };
     const kind = core.payload.Kind.fromFieldType(cf.field_type) orelse
         return err(req, .unimplemented, "field index types other than keyword, integer, float and text");
     const built = if (kind == .text) blk: {

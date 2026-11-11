@@ -60,6 +60,9 @@ pub const value_double: u32 = 2;
 pub const value_integer: u32 = 3;
 pub const value_string: u32 = 4;
 pub const value_bool: u32 = 5;
+/// `Struct { map<string, Value> fields = 1; }`, which a path's key steps
+/// descend into.
+pub const value_struct: u32 = 6;
 pub const value_list: u32 = 7;
 
 /// A map entry, on the wire: `key = 1`, `value = 2`.
@@ -94,10 +97,19 @@ pub const Match = union(enum) {
     /// `FieldCondition.values_count`. This and the two below look at a
     /// value's shape, not at its elements, and decide a missing field too.
     values_count: ValuesCount,
-    /// `FieldCondition.is_empty`, and `Condition.is_empty` as `true`.
+    /// `FieldCondition.is_empty`: any value the path reaches is (or is not)
+    /// empty, as `check_field_condition` (query_checker.rs) ORs
+    /// `FieldCondition::check` over them.
     is_empty: bool,
-    /// `FieldCondition.is_null`, and `Condition.is_null` as `true`.
+    /// `FieldCondition.is_null`, and `Condition.is_null` as `true`: the two
+    /// agree, since `check_is_null` (lib/segment/src/common/utils.rs) is an
+    /// any-of too.
     is_null: bool,
+    /// `Condition.is_empty`: every value the path reaches is empty, none
+    /// included (`check_is_empty`, lib/segment/src/common/utils.rs, an
+    /// all-of). It differs from `is_empty = true` only where a path reaches
+    /// several values, `[1, null]` through `a[]` say.
+    all_empty,
 };
 
 /// `Range { optional double lt = 1; gt = 2; gte = 3; lte = 4; }` (VERIFIED,
@@ -407,8 +419,168 @@ fn digitsAt(s: []const u8, at: usize, n: usize) ?u32 {
     return v;
 }
 
-pub const Condition = struct {
+// =========================================================================
+// JSON paths
+// =========================================================================
+
+/// One step of a JSON path after its first key: Qdrant's `JsonPathItem`
+/// (lib/segment/src/json_path/mod.rs:26), `.key`, `[3]` and `[]`. A key
+/// borrows the path's text.
+pub const PathStep = union(enum) {
     key: []const u8,
+    index: usize,
+    wildcard,
+
+    fn eql(a: PathStep, b: PathStep) bool {
+        return switch (a) {
+            .key => |k| b == .key and std.mem.eql(u8, k, b.key),
+            .index => |i| b == .index and i == b.index,
+            .wildcard => b == .wildcard,
+        };
+    }
+};
+
+/// Steps per filter, over all its conditions, and per indexed field. A
+/// bound so that a decoded filter stays a fixed-size value (§6.3); Qdrant
+/// has none, and a path past it is refused by name.
+pub const max_path_steps = 32;
+
+pub const PathError = error{ InvalidPath, PathTooLong };
+
+pub const ParsedPath = struct {
+    /// The top-level key, unquoted.
+    first: []const u8,
+    /// Steps written to the caller's buffer.
+    steps: usize,
+};
+
+/// Parse `raw` as Qdrant's `json_path` does (lib/segment/src/json_path/
+/// parse.rs:28): a first key, then any run of `.key`, `[digits]` and `[]`,
+/// the whole string consumed. A key is either raw, one or more alphanumerics,
+/// `_` or `-` (`raw_str`), or quoted, `"` then anything but `"` and `\` then
+/// `"` (`quoted_str`, which has no escapes and admits an empty key). An index
+/// is a `usize`, leading zeros allowed. So `""` and `a."b.c"[007][]` parse;
+/// ``, `a.`, `[0]`, `a[x]`, `a b`, `a..b` and `"a\"b"` do not.
+///
+/// Where this differs: Rust's `is_alphanumeric` is Unicode's, and without
+/// its tables every non-ASCII byte is taken as part of a raw key, so a
+/// non-ASCII symbol (`a→b`) parses here where Qdrant refuses it.
+pub fn parsePath(raw: []const u8, out: []PathStep) PathError!ParsedPath {
+    var pos: usize = 0;
+    const first = pathKey(raw, &pos) orelse return error.InvalidPath;
+    var n: usize = 0;
+    while (pos < raw.len) {
+        const step: PathStep = switch (raw[pos]) {
+            '.' => blk: {
+                pos += 1;
+                break :blk .{ .key = pathKey(raw, &pos) orelse return error.InvalidPath };
+            },
+            '[' => blk: {
+                pos += 1;
+                const start = pos;
+                while (pos < raw.len and std.ascii.isDigit(raw[pos])) pos += 1;
+                if (pos == raw.len or raw[pos] != ']') return error.InvalidPath;
+                const digits = raw[start..pos];
+                pos += 1;
+                if (digits.len == 0) break :blk .wildcard;
+                // `str::parse::<usize>` refuses an overflow, and so the path.
+                break :blk .{ .index = std.fmt.parseInt(usize, digits, 10) catch return error.InvalidPath };
+            },
+            else => return error.InvalidPath,
+        };
+        if (n == out.len) return error.PathTooLong;
+        out[n] = step;
+        n += 1;
+    }
+    return .{ .first = first, .steps = n };
+}
+
+fn pathKey(raw: []const u8, pos: *usize) ?[]const u8 {
+    const start = pos.*;
+    if (start < raw.len and raw[start] == '"') {
+        var i = start + 1;
+        while (i < raw.len and raw[i] != '"' and raw[i] != '\\') i += 1;
+        if (i == raw.len or raw[i] != '"') return null;
+        pos.* = i + 1;
+        return raw[start + 1 .. i];
+    }
+    var i = start;
+    while (i < raw.len and (std.ascii.isAlphanumeric(raw[i]) or raw[i] == '_' or raw[i] == '-' or raw[i] >= 0x80)) i += 1;
+    if (i == start) return null;
+    pos.* = i;
+    return raw[start..i];
+}
+
+/// Call `visitor.visit(value)` on every `Value` the path `first` then
+/// `rest` reaches in a framed blob, as Qdrant's `value_get`
+/// (lib/segment/src/json_path/mod.rs:320) collects them: a key step reads a
+/// struct's field, an index step one list element and `[]` every element;
+/// a step that meets any other kind of value reaches nothing, so `a.b`
+/// through a list reaches nothing without `a[].b`. A list at the end of the
+/// path is one value, which the conditions then descend into. Stops when
+/// `visit` returns true, and returns whether it did.
+///
+/// No allocation: the recursion is one frame per step.
+fn visitPath(blob: []const u8, first: []const u8, rest: []const PathStep, visitor: anytype) bool {
+    var it = BlobIterator.init(blob);
+    while (it.next()) |entry| {
+        const kv = splitEntry(entry) orelse continue;
+        if (!std.mem.eql(u8, kv.key, first)) continue;
+        if (visitSteps(kv.value, rest, visitor)) return true;
+    }
+    return false;
+}
+
+fn visitSteps(value: []const u8, rest: []const PathStep, visitor: anytype) bool {
+    if (rest.len == 0) return visitor.visit(value);
+    const k = valueKind(value) orelse return false;
+    var r = wire.Reader.init(k.body);
+    switch (rest[0]) {
+        .key => |key| {
+            if (k.kind != value_struct) return false;
+            // `Struct.fields = 1`, map entries.
+            while (!r.atEnd()) {
+                const t = r.tag() catch return false;
+                if (t.field != 1 or t.wire_type != .length_delimited) {
+                    r.skip(t.wire_type) catch return false;
+                    continue;
+                }
+                const kv = splitEntry(r.bytes() catch return false) orelse continue;
+                if (std.mem.eql(u8, kv.key, key) and visitSteps(kv.value, rest[1..], visitor)) return true;
+            }
+        },
+        .index, .wildcard => {
+            if (k.kind != value_list) return false;
+            var i: usize = 0;
+            // `ListValue.values = 1`.
+            while (!r.atEnd()) {
+                const t = r.tag() catch return false;
+                if (t.field != 1 or t.wire_type != .length_delimited) {
+                    r.skip(t.wire_type) catch return false;
+                    continue;
+                }
+                const elem = r.bytes() catch return false;
+                switch (rest[0]) {
+                    .index => |want| if (i == want) return visitSteps(elem, rest[1..], visitor),
+                    else => if (visitSteps(elem, rest[1..], visitor)) return true,
+                }
+                i += 1;
+            }
+        },
+    }
+    return false;
+}
+
+/// A condition's steps after its first key, as a span of its filter's.
+pub const StepSpan = struct { start: u8 = 0, len: u8 = 0 };
+
+pub const Condition = struct {
+    /// The top-level key: the path's first key, unquoted, once the filter
+    /// holds it (`Filter.addPath`).
+    key: []const u8,
+    /// The rest of the path, in `Filter.steps`. Empty for a top-level key,
+    /// the common case and the fast one.
+    rest: StepSpan = .{},
     match: Match,
     /// A `FieldCondition` carrying a `match` and a `range` or a
     /// `datetime_range` too: Qdrant admits a value any of them admits
@@ -435,6 +607,11 @@ pub const Filter = struct {
     must_not_len: usize = 0,
     should: [max_conditions]Condition = undefined,
     should_len: usize = 0,
+    /// Every condition's path steps, each condition's a `StepSpan` of them.
+    /// Indexed rather than sliced so the filter stays a value it is safe to
+    /// copy.
+    steps: [max_path_steps]PathStep = undefined,
+    steps_len: usize = 0,
 
     pub const Clause = enum { must, must_not, should };
 
@@ -447,6 +624,24 @@ pub const Filter = struct {
         if (len.* >= max_conditions) return error.TooManyConditions;
         arr[len.*] = c;
         len.* += 1;
+    }
+
+    /// `add`, with `c.key` read as Qdrant reads a condition key: a JSON
+    /// path (`json_path_from_proto`, lib/api/src/conversions/json.rs:44),
+    /// parsed once here so that no point re-parses it. The steps borrow the
+    /// key's bytes.
+    pub fn addPath(self: *Filter, clause: Clause, c: Condition) (error{TooManyConditions} || PathError)!void {
+        const p = try parsePath(c.key, self.steps[self.steps_len..]);
+        var keyed = c;
+        keyed.key = p.first;
+        keyed.rest = .{ .start = @intCast(self.steps_len), .len = @intCast(p.steps) };
+        try self.add(clause, keyed);
+        self.steps_len += p.steps;
+    }
+
+    /// `c`'s steps after its first key.
+    pub fn restOf(self: *const Filter, c: Condition) []const PathStep {
+        return self.steps[c.rest.start..][0..c.rest.len];
     }
 
     pub fn isEmpty(self: *const Filter) bool {
@@ -465,33 +660,46 @@ pub const Filter = struct {
 
     /// Whether a framed blob satisfies the filter.
     pub fn matchesBlob(self: *const Filter, blob: []const u8) bool {
-        for (self.musts()) |c| if (!conditionMatches(blob, c)) return false;
-        for (self.mustNots()) |c| if (conditionMatches(blob, c)) return false;
+        for (self.musts()) |c| if (!conditionMatches(blob, c, self.restOf(c))) return false;
+        for (self.mustNots()) |c| if (conditionMatches(blob, c, self.restOf(c))) return false;
         if (self.should_len > 0) {
-            for (self.shoulds()) |c| if (conditionMatches(blob, c)) return true;
+            for (self.shoulds()) |c| if (conditionMatches(blob, c, self.restOf(c))) return true;
             return false;
         }
         return true;
     }
 };
 
-/// Whether any entry under `c.key` in the blob matches `c.match`.
+/// Whether any value the condition's path reaches in the blob matches
+/// `c.match`, as `check_field_condition` (query_checker.rs:203) ORs
+/// `FieldCondition::check` over `get_value`'s values.
 ///
-/// A key absent from the payload matches only what `missingMatches` says,
+/// A path that reaches no value matches only what `missingMatches` says,
 /// which for a value match is nothing: that is what makes `must_not` on an
 /// absent key true and `must` on one false, as in Qdrant.
-fn conditionMatches(blob: []const u8, c: Condition) bool {
-    var it = BlobIterator.init(blob);
-    var present = false;
-    while (it.next()) |entry| {
-        const kv = splitEntry(entry) orelse continue;
-        if (!std.mem.eql(u8, kv.key, c.key)) continue;
-        present = true;
-        if (valueMatches(kv.value, c.match)) return true;
-        if (c.or_match) |m| if (valueMatches(kv.value, m)) return true;
+fn conditionMatches(blob: []const u8, c: Condition, rest: []const PathStep) bool {
+    if (c.match == .all_empty) {
+        // Every value empty: no value is not.
+        var v = ConditionVisitor{ .match = .{ .is_empty = false } };
+        return !visitPath(blob, c.key, rest, &v);
     }
-    return !present and missingMatches(c.match);
+    var v = ConditionVisitor{ .match = c.match, .or_match = c.or_match };
+    if (visitPath(blob, c.key, rest, &v)) return true;
+    return !v.present and missingMatches(c.match);
 }
+
+const ConditionVisitor = struct {
+    match: Match,
+    or_match: ?Match = null,
+    present: bool = false,
+
+    fn visit(self: *ConditionVisitor, value: []const u8) bool {
+        self.present = true;
+        if (valueMatches(value, self.match)) return true;
+        if (self.or_match) |m| if (valueMatches(value, m)) return true;
+        return false;
+    }
+};
 
 /// A missing field, as Qdrant's `FieldCondition::check_empty`
 /// (condition_checker.rs) answers it: zero values, empty, and not null.
@@ -956,7 +1164,14 @@ const FloatEntry = struct {
 };
 
 pub const Field = struct {
+    /// The path as `CreateFieldIndex` named it; `first` and `steps` borrow it.
     name: []u8,
+    /// The parsed path whose values the index holds: a nested path indexes
+    /// what a condition on that path reads, as Qdrant's indexes ingest
+    /// `get_value(field)` (lib/segment/src/index/struct_payload_index/
+    /// payload_index.rs:168).
+    first: []const u8,
+    steps: []PathStep,
     index: Index,
     /// Postings written, which over-counts overwritten points the same way
     /// the postings do. Reported as `PayloadSchemaInfo.points`.
@@ -976,6 +1191,26 @@ pub const Field = struct {
 
     pub fn kind(self: *const Field) Kind {
         return self.index;
+    }
+
+    /// Whether this field indexes the path `first` then `rest`: Qdrant
+    /// looks a condition's index up by its whole path
+    /// (`field_indexes.get(&field_condition.key)`, query_checker.rs:213), so
+    /// an index on `a` answers nothing about `a[]` or `a.b`.
+    pub fn hasPath(self: *const Field, first: []const u8, rest: []const PathStep) bool {
+        if (!std.mem.eql(u8, self.first, first) or self.steps.len != rest.len) return false;
+        for (self.steps, rest) |a, b| if (!a.eql(b)) return false;
+        return true;
+    }
+
+    /// A field for the path `name`, owning a copy of it, with `index`.
+    fn init(alloc: std.mem.Allocator, name: []const u8, index: Index, capacity: usize) !Field {
+        const owned = try alloc.dupe(u8, name);
+        errdefer alloc.free(owned);
+        var buf: [max_path_steps]PathStep = undefined;
+        const p = try parsePath(owned, &buf);
+        const steps = try alloc.dupe(PathStep, buf[0..p.steps]);
+        return .{ .name = owned, .first = p.first, .steps = steps, .index = index, .capacity = capacity };
     }
 
     fn deinit(self: *Field, alloc: std.mem.Allocator) void {
@@ -999,14 +1234,13 @@ pub const Field = struct {
                 alloc.destroy(ti);
             },
         }
+        alloc.free(self.steps);
         alloc.free(self.name);
     }
 
-    /// The point's string values under this field (one string, or a list's
-    /// strings), as the text index's document.
-    fn setText(ti: *text.TextIndex, alloc: std.mem.Allocator, offset: u32, value: []const u8) !void {
-        var values: std.ArrayList([]const u8) = .empty;
-        defer values.deinit(alloc);
+    /// One value's strings (a string, or a list's strings), appended to the
+    /// text index's document.
+    fn collectStrings(alloc: std.mem.Allocator, values: *std.ArrayList([]const u8), value: []const u8) IndexError!void {
         var r = wire.Reader.init(value);
         while (!r.atEnd()) {
             const t = try r.tag();
@@ -1032,19 +1266,17 @@ pub const Field = struct {
                 else => try r.skip(t.wire_type),
             }
         }
-        try ti.set(offset, values.items);
     }
 
-    /// Index one point's value(s) for this field.
-    fn add(self: *Field, alloc: std.mem.Allocator, offset: u32, value: []const u8) !void {
+    const IndexError = wire.Error || std.mem.Allocator.Error;
+
+    /// Index one value the field's path reaches.
+    fn add(self: *Field, alloc: std.mem.Allocator, offset: u32, value: []const u8) IndexError!void {
         var r = wire.Reader.init(value);
         while (!r.atEnd()) {
             const t = try r.tag();
             switch (t.field) {
-                value_string => {
-                    const s = try r.bytes();
-                    if (self.index == .keyword) try self.addKeyword(alloc, offset, s);
-                },
+                value_string => try self.addString(alloc, offset, try r.bytes()),
                 value_integer => {
                     const v: i64 = @bitCast(try r.varint());
                     try self.addNumber(alloc, offset, v);
@@ -1063,10 +1295,7 @@ pub const Field = struct {
                         while (!inner.atEnd()) {
                             const it = try inner.tag();
                             switch (it.field) {
-                                value_string => {
-                                    const s = try inner.bytes();
-                                    if (self.index == .keyword) try self.addKeyword(alloc, offset, s);
-                                },
+                                value_string => try self.addString(alloc, offset, try inner.bytes()),
                                 value_integer => {
                                     const v: i64 = @bitCast(try inner.varint());
                                     try self.addNumber(alloc, offset, v);
@@ -1082,17 +1311,45 @@ pub const Field = struct {
         }
     }
 
-    /// Every value under this field's key in a framed blob. A text field's
-    /// document is replaced, or removed when the blob no longer holds the key.
+    /// Every value this field's path reaches in a framed blob. A text
+    /// field's document is replaced, or removed when the path reaches none.
     fn addBlob(self: *Field, alloc: std.mem.Allocator, offset: u32, blob: []const u8) !void {
-        var it = BlobIterator.init(blob);
-        while (it.next()) |entry| {
-            const kv = splitEntry(entry) orelse continue;
-            if (!std.mem.eql(u8, self.name, kv.key)) continue;
-            if (self.index == .text) return setText(self.index.text, alloc, offset, kv.value);
-            try self.add(alloc, offset, kv.value);
+        var strings: std.ArrayList([]const u8) = .empty;
+        defer strings.deinit(alloc);
+        var v = IndexVisitor{ .f = self, .alloc = alloc, .offset = offset, .strings = if (self.index == .text) &strings else null };
+        _ = visitPath(blob, self.first, self.steps, &v);
+        if (v.err) |e| return e;
+        if (self.index != .text) return;
+        if (v.present) return self.index.text.set(offset, strings.items);
+        self.index.text.remove(offset);
+    }
+
+    const IndexVisitor = struct {
+        f: *Field,
+        alloc: std.mem.Allocator,
+        offset: u32,
+        /// A text field's document, gathered over every value.
+        strings: ?*std.ArrayList([]const u8),
+        present: bool = false,
+        err: ?IndexError = null,
+
+        fn visit(self: *IndexVisitor, value: []const u8) bool {
+            self.present = true;
+            const res = if (self.strings) |l|
+                collectStrings(self.alloc, l, value)
+            else
+                self.f.add(self.alloc, self.offset, value);
+            res catch |e| {
+                self.err = e;
+                return true;
+            };
+            return false;
         }
-        if (self.index == .text) self.index.text.remove(offset);
+    };
+
+    /// A string, which only a keyword field indexes.
+    fn addString(self: *Field, alloc: std.mem.Allocator, offset: u32, s: []const u8) IndexError!void {
+        if (self.index == .keyword) try self.addKeyword(alloc, offset, s);
     }
 
     fn addKeyword(self: *Field, alloc: std.mem.Allocator, offset: u32, s: []const u8) !void {
@@ -1127,7 +1384,7 @@ pub const Field = struct {
         if (self.index == .float) try self.addFloat(alloc, offset, v);
     }
 
-    fn addFloat(self: *Field, alloc: std.mem.Allocator, offset: u32, v: f64) !void {
+    fn addFloat(self: *Field, alloc: std.mem.Allocator, offset: u32, v: f64) IndexError!void {
         if (std.math.isNan(v)) return;
         try self.index.float.add(alloc, v, offset);
         self.points += 1;
@@ -1405,18 +1662,18 @@ pub const Store = struct {
         count: usize,
         deleted: *const std.bit_set.Dynamic,
     ) !void {
-        for (self.fields.items) |f| {
-            if (std.mem.eql(u8, f.name, name)) {
-                if (f.index != .text) return error.IndexKindMismatch;
-                if (!std.meta.eql(f.index.text.opts, opts)) return error.IndexKindMismatch;
-                return;
-            }
+        if (try self.fieldPath(name)) |f| {
+            if (f.index != .text) return error.IndexKindMismatch;
+            if (!std.meta.eql(f.index.text.opts, opts)) return error.IndexKindMismatch;
+            return;
         }
-        const owned = try alloc.dupe(u8, name);
-        errdefer alloc.free(owned);
         const ti = try alloc.create(text.TextIndex);
         ti.* = text.TextIndex.init(alloc, opts);
-        var f = Field{ .name = owned, .index = .{ .text = ti }, .capacity = self.slots.len };
+        var f = Field.init(alloc, name, .{ .text = ti }, self.slots.len) catch |e| {
+            ti.deinit();
+            alloc.destroy(ti);
+            return e;
+        };
         errdefer f.deinit(alloc);
         // Populated before it is published, as `createIndex` does.
         var off: u32 = 0;
@@ -1443,8 +1700,22 @@ pub const Store = struct {
         rw.unlockShared();
     }
 
+    /// The field indexing the path `name`, or null, including when `name`
+    /// is no path.
     pub fn field(self: *const Store, name: []const u8) ?*const Field {
-        for (self.fields.items) |*f| if (std.mem.eql(u8, f.name, name)) return f;
+        return self.fieldPath(name) catch null;
+    }
+
+    /// The field indexing the path `name`, however it is spelled: `"a"` and
+    /// `a` are one path.
+    fn fieldPath(self: *const Store, name: []const u8) PathError!?*const Field {
+        var buf: [max_path_steps]PathStep = undefined;
+        const p = try parsePath(name, &buf);
+        return self.fieldAt(p.first, buf[0..p.steps]);
+    }
+
+    fn fieldAt(self: *const Store, first: []const u8, rest: []const PathStep) ?*const Field {
+        for (self.fields.items) |*f| if (f.hasPath(first, rest)) return f;
         return null;
     }
 
@@ -1452,11 +1723,9 @@ pub const Store = struct {
     /// stored so far, and every point written from now on. Idempotent for the
     /// same kind; a different kind on an existing name is refused.
     pub fn createIndex(self: *Store, alloc: std.mem.Allocator, name: []const u8, kind: Kind, count: usize) !void {
-        for (self.fields.items) |f| {
-            if (std.mem.eql(u8, f.name, name)) {
-                if (f.kind() != kind) return error.IndexKindMismatch;
-                return;
-            }
+        if (try self.fieldPath(name)) |f| {
+            if (f.kind() != kind) return error.IndexKindMismatch;
+            return;
         }
         const index: Field.Index = switch (kind) {
             .keyword => .{ .keyword = .empty },
@@ -1465,8 +1734,7 @@ pub const Store = struct {
             // `createTextIndex` builds a text field, with its options.
             .text => unreachable,
         };
-        const owned = try alloc.dupe(u8, name);
-        var f = Field{ .name = owned, .index = index, .capacity = self.slots.len };
+        var f = try Field.init(alloc, name, index, self.slots.len);
         errdefer f.deinit(alloc);
         // Populate first, publish second. The field is private until it is
         // appended, so the backfill needs no lock; appending it under the
@@ -1502,7 +1770,7 @@ pub const Store = struct {
         var best_len: usize = std.math.maxInt(usize);
         for (filter.musts()) |c| {
             if (c.or_match != null) continue;
-            const f = self.field(c.key) orelse continue;
+            const f = self.fieldAt(c.key, filter.restOf(c)) orelse continue;
             const n = postingLen(f, c.match) orelse continue;
             if (n < best_len) {
                 best_len = n;
@@ -1573,7 +1841,7 @@ pub const Store = struct {
             },
             // No index holds what these ask: the blobs decide, as for an
             // unindexed field.
-            .boolean, .datetime, .values_count, .is_empty, .is_null => return null,
+            .boolean, .datetime, .values_count, .is_empty, .is_null, .all_empty => return null,
         }
     }
 
@@ -1680,7 +1948,7 @@ pub const Store = struct {
                 },
                 // A float field's entries are not postings; `select` reads
                 // them before this runs.
-                .boolean, .range, .datetime, .values_count, .is_empty, .is_null => return null,
+                .boolean, .range, .datetime, .values_count, .is_empty, .is_null, .all_empty => return null,
                 .keywords => {
                     while (!self.r.atEnd()) {
                         const t = self.r.tag() catch return null;
@@ -2751,4 +3019,282 @@ test "the float index counts and selects what a blob scan admits, across merges,
     try testing.expect(!model.store.exact_postings.load(.acquire));
     try testing.expect(std.sort.isSorted(FloatEntry, fi.sorted.items, {}, FloatEntry.lessThan));
     try model.check(n, 150);
+}
+
+test "a JSON path parses as Qdrant's json_path parses it, and nothing else does" {
+    var buf: [max_path_steps]PathStep = undefined;
+    const Ok = struct { raw: []const u8, first: []const u8, steps: []const PathStep };
+    const oks = [_]Ok{
+        .{ .raw = "a", .first = "a", .steps = &.{} },
+        .{ .raw = "foo_123-Bar", .first = "foo_123-Bar", .steps = &.{} },
+        .{ .raw = "a.b", .first = "a", .steps = &.{.{ .key = "b" }} },
+        .{ .raw = "a[]", .first = "a", .steps = &.{.wildcard} },
+        .{ .raw = "a[0]", .first = "a", .steps = &.{.{ .index = 0 }} },
+        .{ .raw = "a[007]", .first = "a", .steps = &.{.{ .index = 7 }} },
+        .{ .raw = "a[].b[2].c", .first = "a", .steps = &.{ .wildcard, .{ .key = "b" }, .{ .index = 2 }, .{ .key = "c" } } },
+        // parse.rs's own test case.
+        .{ .raw = "foo[1][50].bar-baz[].\"qux[.]quux\"", .first = "foo", .steps = &.{ .{ .index = 1 }, .{ .index = 50 }, .{ .key = "bar-baz" }, .wildcard, .{ .key = "qux[.]quux" } } },
+        // Quoted keys, the first one too, and an empty one.
+        .{ .raw = "\"a.b\"", .first = "a.b", .steps = &.{} },
+        .{ .raw = "\"a\"", .first = "a", .steps = &.{} },
+        .{ .raw = "\"\"", .first = "", .steps = &.{} },
+        .{ .raw = "a.\"b c\"[]", .first = "a", .steps = &.{ .{ .key = "b c" }, .wildcard } },
+        // Non-ASCII alphanumerics are raw key characters.
+        .{ .raw = "été.ü", .first = "été", .steps = &.{.{ .key = "ü" }} },
+    };
+    for (oks) |ok| {
+        const p = try parsePath(ok.raw, &buf);
+        try testing.expectEqualStrings(ok.first, p.first);
+        try testing.expectEqual(ok.steps.len, p.steps);
+        for (ok.steps, buf[0..p.steps]) |want, got| try testing.expect(want.eql(got));
+    }
+    const bad = [_][]const u8{
+        "",      ".a",   "a.",   "a..b", "a b",   " a",                      "a ",
+        "[0]",   "[]",   "a[",   "a[0",  "a]",    "a[x]",                    "a[-1]",
+        "a[ 0]", "a.[]", "a[]b", "\"a",  "a.\"b", "\"a\\\"b\"",              "\"a\\b\"",
+        "a.b.",  "a/b",  "a:b",  "a,b",  "a[0]]", "a[99999999999999999999]",
+    };
+    for (bad) |raw| {
+        testing.expectError(error.InvalidPath, parsePath(raw, &buf)) catch |e| {
+            std.debug.print("path {s}\n", .{raw});
+            return e;
+        };
+    }
+    try testing.expectError(error.PathTooLong, parsePath(&wildcardPath(max_path_steps + 1), &buf));
+    _ = try parsePath(&wildcardPath(max_path_steps), &buf);
+}
+
+/// `a` then `k` wildcard steps, for the tests of the step bound.
+pub fn wildcardPath(comptime k: usize) [1 + 2 * k]u8 {
+    var s: [1 + 2 * k]u8 = undefined;
+    s[0] = 'a';
+    for (0..k) |i| {
+        s[1 + 2 * i] = '[';
+        s[2 + 2 * i] = ']';
+    }
+    return s;
+}
+
+/// Hand-built protobuf `Value`s and payload maps, in an arena.
+const Vb = struct {
+    a: std.mem.Allocator,
+
+    fn wrap(self: Vb, field: u32, body: []const u8) []const u8 {
+        var head: [11]u8 = undefined;
+        head[0] = @intCast(field << 3 | 2);
+        const n = writeVarint(head[1..], body.len);
+        return std.mem.concat(self.a, u8, &.{ head[0 .. 1 + n], body }) catch @panic("oom");
+    }
+
+    fn str(self: Vb, s: []const u8) []const u8 {
+        return self.wrap(value_string, s);
+    }
+
+    fn int(self: Vb, v: i64) []const u8 {
+        var b: [11]u8 = undefined;
+        b[0] = value_integer << 3;
+        const n = writeVarint(b[1..], @bitCast(v));
+        return self.a.dupe(u8, b[0 .. 1 + n]) catch @panic("oom");
+    }
+
+    fn dbl(self: Vb, v: f64) []const u8 {
+        var b: [9]u8 = undefined;
+        b[0] = value_double << 3 | 1;
+        std.mem.writeInt(u64, b[1..9], @bitCast(v), .little);
+        return self.a.dupe(u8, &b) catch @panic("oom");
+    }
+
+    const nul: []const u8 = "\x08\x00";
+
+    fn list(self: Vb, elems: []const []const u8) []const u8 {
+        var body: []const u8 = &.{};
+        for (elems) |e| body = std.mem.concat(self.a, u8, &.{ body, self.wrap(1, e) }) catch @panic("oom");
+        return self.wrap(value_list, body);
+    }
+
+    fn entries(self: Vb, field: u32, kvs: []const [2][]const u8) []const u8 {
+        var body: []const u8 = &.{};
+        for (kvs) |kv| {
+            const entry = std.mem.concat(self.a, u8, &.{ self.wrap(entry_key, kv[0]), self.wrap(entry_value, kv[1]) }) catch @panic("oom");
+            body = std.mem.concat(self.a, u8, &.{ body, self.wrap(field, entry) }) catch @panic("oom");
+        }
+        return body;
+    }
+
+    fn obj(self: Vb, kvs: []const [2][]const u8) []const u8 {
+        return self.wrap(value_struct, self.entries(1, kvs));
+    }
+
+    /// A `PointStruct.payload` (field 3) holding `kvs`.
+    fn payload(self: Vb, kvs: []const [2][]const u8) []const u8 {
+        return self.entries(3, kvs);
+    }
+};
+
+/// The payloads the path tests resolve against, by point offset.
+fn pathShapes(v: Vb) [14][]const u8 {
+    return .{
+        // 0: {"a": {"b": "x"}}
+        v.payload(&.{.{ "a", v.obj(&.{.{ "b", v.str("x") }}) }}),
+        // 1: {"a": [{"b": "x"}, {"b": "y"}]}
+        v.payload(&.{.{ "a", v.list(&.{ v.obj(&.{.{ "b", v.str("x") }}), v.obj(&.{.{ "b", v.str("y") }}) }) }}),
+        // 2: {"a": [{"b": "y"}, {"c": 1}]}
+        v.payload(&.{.{ "a", v.list(&.{ v.obj(&.{.{ "b", v.str("y") }}), v.obj(&.{.{ "c", v.int(1) }}) }) }}),
+        // 3: {"a": {"b": ["x", "z"]}}
+        v.payload(&.{.{ "a", v.obj(&.{.{ "b", v.list(&.{ v.str("x"), v.str("z") }) }}) }}),
+        // 4: {"a": {"b": null}}
+        v.payload(&.{.{ "a", v.obj(&.{.{ "b", Vb.nul }}) }}),
+        // 5: {"a": {"c": 1}}
+        v.payload(&.{.{ "a", v.obj(&.{.{ "c", v.int(1) }}) }}),
+        // 6: {"a": [{"b": []}, {"b": 1}]}
+        v.payload(&.{.{ "a", v.list(&.{ v.obj(&.{.{ "b", v.list(&.{}) }}), v.obj(&.{.{ "b", v.int(1) }}) }) }}),
+        // 7: {"a": [1, null]}
+        v.payload(&.{.{ "a", v.list(&.{ v.int(1), Vb.nul }) }}),
+        // 8: {"a": "x"}
+        v.payload(&.{.{ "a", v.str("x") }}),
+        // 9: {"o": 1}
+        v.payload(&.{.{ "o", v.int(1) }}),
+        // 10: {"a": [[{"b": "x"}]]}
+        v.payload(&.{.{ "a", v.list(&.{v.list(&.{v.obj(&.{.{ "b", v.str("x") }})})}) }}),
+        // 11: {"a": [{"b": "2024-01-02"}, {"b": 2.5}]}
+        v.payload(&.{.{ "a", v.list(&.{ v.obj(&.{.{ "b", v.str("2024-01-02") }}), v.obj(&.{.{ "b", v.dbl(2.5) }}) }) }}),
+        // 12: {"a.b": "x"}
+        v.payload(&.{.{ "a.b", v.str("x") }}),
+        // 13: {"a": {"b": {"c": 5}}}
+        v.payload(&.{.{ "a", v.obj(&.{.{ "b", v.obj(&.{.{ "c", v.int(5) }}) }}) }}),
+    };
+}
+
+const PathCase = struct {
+    path: []const u8,
+    clause: Filter.Clause = .must,
+    match: Match,
+    /// Per point of `pathShapes`, `T` where the filter admits it.
+    want: *const [14]u8,
+};
+
+const new_year = Instant{ .secs = 1_704_067_200, .micros = 0 };
+
+/// Each expectation is Qdrant's `value_get` (json_path/mod.rs:320) then
+/// `check_field_condition` (query_checker.rs:203) worked by hand: a key step
+/// only into an object, `[i]` and `[]` only into a list, any value
+/// matching, and `check_empty` when the path reaches none.
+const path_cases = [_]PathCase{
+    // Columns: 0 {"a":{"b":"x"}}, 1 [{"b":"x"},{"b":"y"}], 2 [{"b":"y"},{"c":1}],
+    // 3 {"b":["x","z"]}, 4 {"b":null}, 5 {"c":1}, 6 [{"b":[]},{"b":1}], 7 [1,null],
+    // 8 "x", 9 no "a", 10 [[{"b":"x"}]], 11 [{"b":"2024-01-02"},{"b":2.5}],
+    // 12 {"a.b":"x"}, 13 {"b":{"c":5}}.
+    // `a.b` reads an object's field, a list's element only through `[]`.
+    .{ .path = "a.b", .match = .{ .keyword = "x" }, .want = "TFFTFFFFFFFFFF" },
+    .{ .path = "a[].b", .match = .{ .keyword = "x" }, .want = "FTFFFFFFFFFFFF" },
+    .{ .path = "a[].b", .clause = .must_not, .match = .{ .keyword = "x" }, .want = "TFTTTTTTTTTTTT" },
+    .{ .path = "a[].b", .clause = .should, .match = .{ .keyword = "y" }, .want = "FTTFFFFFFFFFFF" },
+    .{ .path = "a[0].b", .match = .{ .keyword = "y" }, .want = "FFTFFFFFFFFFFF" },
+    .{ .path = "a[1].b", .match = .{ .keyword = "y" }, .want = "FTFFFFFFFFFFFF" },
+    .{ .path = "a[5].b", .match = .{ .keyword = "y" }, .want = "FFFFFFFFFFFFFF" },
+    .{ .path = "a[].b", .match = .{ .keywords = "\x0a\x01q\x0a\x01y" }, .want = "FTTFFFFFFFFFFF" },
+    .{ .path = "a[].c", .match = .{ .integer = 1 }, .want = "FFTFFFFFFFFFFF" },
+    .{ .path = "a.b.c", .match = .{ .integers = "\x0a\x02\x05\x06" }, .want = "FFFFFFFFFFFFFT" },
+    // A list at the path's end is one value, matched per element.
+    .{ .path = "a[]", .match = .{ .integer = 1 }, .want = "FFFFFFFTFFFFFF" },
+    .{ .path = "a", .match = .{ .integer = 1 }, .want = "FFFFFFFTFFFFFF" },
+    .{ .path = "a[].b", .match = .{ .range = Range.fromBounds(null, null, 1, null) }, .want = "FFFFFFTFFFFTFF" },
+    .{ .path = "a[].b", .match = .{ .datetime = DatetimeRange.fromBounds(null, null, new_year, null) }, .want = "FFFFFFFFFFFTFF" },
+    // A quoted key is one top-level key.
+    .{ .path = "\"a.b\"", .match = .{ .keyword = "x" }, .want = "FFFFFFFFFFFFTF" },
+    // values_count: any one value's count in range, 0 when none.
+    .{ .path = "a[].b", .match = .{ .values_count = ValuesCount.fromBounds(1, null, null, null) }, .want = "TFFTTTTTTTTFTT" },
+    .{ .path = "a[].b", .match = .{ .values_count = ValuesCount.fromBounds(null, null, 2, null) }, .want = "FFFFFFFFFFFFFF" },
+    .{ .path = "a.b", .match = .{ .values_count = ValuesCount.fromBounds(null, null, 2, null) }, .want = "FFFTFFFFFFFFFF" },
+    .{ .path = "a[]", .match = .{ .values_count = ValuesCount.fromBounds(null, null, 1, 1) }, .want = "FTTFFFTTFFTTFF" },
+    // FieldCondition.is_empty: any value empty, or none.
+    .{ .path = "a[].b", .match = .{ .is_empty = true }, .want = "TFFTTTTTTTTFTT" },
+    .{ .path = "a[].b", .match = .{ .is_empty = false }, .want = "FTTFFFTFFFFTFF" },
+    .{ .path = "a[]", .match = .{ .is_empty = true }, .want = "TFFTTTFTTTFFTT" },
+    // Condition.is_empty: every value empty, or none.
+    .{ .path = "a[].b", .match = .all_empty, .want = "TFFTTTFTTTTFTT" },
+    .{ .path = "a[]", .match = .all_empty, .want = "TFFTTTFFTTFFTT" },
+    .{ .path = "a[]", .clause = .must_not, .match = .all_empty, .want = "FTTFFFTTFFTTFF" },
+    // is_null: any value null or a list holding one; never when none.
+    .{ .path = "a.b", .match = .{ .is_null = true }, .want = "FFFFTFFFFFFFFF" },
+    .{ .path = "a.b", .match = .{ .is_null = false }, .want = "TTTTFTTTTTTTTT" },
+    .{ .path = "a[]", .match = .{ .is_null = true }, .want = "FFFFFFFTFFFFFF" },
+    .{ .path = "a", .match = .{ .is_null = true }, .want = "FFFFFFFTFFFFFF" },
+};
+
+test "a path resolves over nested objects and lists for every condition, as Qdrant's value_get and checks do" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const v = Vb{ .a = arena.allocator() };
+    var store = try Store.init(testing.allocator, 16);
+    defer store.deinit(testing.allocator);
+    for (pathShapes(v), 0..) |p, i| try store.set(testing.allocator, @intCast(i), p, 3);
+    for (path_cases) |cs| {
+        var f = Filter{};
+        try f.addPath(cs.clause, .{ .key = cs.path, .match = cs.match });
+        for (cs.want, 0..) |w, off| {
+            testing.expectEqual(w == 'T', store.matches(@intCast(off), &f)) catch |e| {
+                std.debug.print("path {s} point {d}\n", .{ cs.path, off });
+                return e;
+            };
+        }
+    }
+    // A filter holds several paths' steps side by side.
+    var f = Filter{};
+    try f.addPath(.must, .{ .key = "a[].b", .match = .{ .keyword = "y" } });
+    try f.addPath(.must, .{ .key = "a[1].c", .match = .{ .integer = 1 } });
+    try f.addPath(.must_not, .{ .key = "a[0].b", .match = .{ .keyword = "x" } });
+    for (0..14) |off| try testing.expectEqual(off == 2, store.matches(@intCast(off), &f));
+}
+
+test "an index on a nested path holds what a condition on that path reads, and answers only that path" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const v = Vb{ .a = arena.allocator() };
+    var store = try Store.init(testing.allocator, 64);
+    defer store.deinit(testing.allocator);
+    const shapes = pathShapes(v);
+    for (shapes[0..7], 0..) |p, i| try store.set(testing.allocator, @intCast(i), p, 3);
+    try store.createIndex(testing.allocator, "a[].b", .keyword, 7);
+    try store.createIndex(testing.allocator, "a[].b[]", .float, 7);
+    try store.createIndex(testing.allocator, "\"a\".b", .integer, 7);
+    for (shapes[7..], 7..) |p, i| try store.set(testing.allocator, @intCast(i), p, 3);
+    // The same path however spelled is one field; another kind on it is refused.
+    try store.createIndex(testing.allocator, "\"a\"[].\"b\"", .keyword, 14);
+    try testing.expectError(error.IndexKindMismatch, store.createIndex(testing.allocator, "a[].b", .integer, 14));
+    try testing.expectError(error.InvalidPath, store.createIndex(testing.allocator, "a b", .keyword, 14));
+    try testing.expectEqual(@as(usize, 3), store.fields.items.len);
+    try testing.expectEqual(Kind.keyword, store.field("a[].\"b\"").?.kind());
+    try testing.expect(store.field("a b") == null);
+
+    var bits: [1]u64 = undefined;
+    const Sel = struct { path: []const u8, match: Match, indexed: bool };
+    const sels = [_]Sel{
+        .{ .path = "a[].b", .match = .{ .keyword = "y" }, .indexed = true },
+        .{ .path = "a[].b", .match = .{ .keyword = "x" }, .indexed = true },
+        .{ .path = "a.b", .match = .{ .keyword = "x" }, .indexed = false },
+        .{ .path = "a[]", .match = .{ .keyword = "x" }, .indexed = false },
+        .{ .path = "a[].b[]", .match = .{ .range = Range.fromBounds(null, null, 1, null) }, .indexed = true },
+        .{ .path = "a.b", .match = .{ .integer = 1 }, .indexed = true },
+    };
+    for (sels) |s| {
+        for (0..2) |pass| {
+            var f = Filter{};
+            try f.addPath(.must, .{ .key = s.path, .match = s.match });
+            // The second pass verifies every entry, the first trusts them.
+            if (pass == 1) try f.addPath(.must_not, .{ .key = "o", .match = .{ .integer = 2 } });
+            const sel = store.select(&f, &bits, 14);
+            try testing.expectEqual(s.indexed, sel != null);
+            if (sel == null) continue;
+            var want: u64 = 0;
+            for (0..14) |off| {
+                if (store.matches(@intCast(off), &f)) want |= @as(u64, 1) << @intCast(off);
+            }
+            try testing.expectEqual(want, bits[0]);
+            try testing.expectEqual(@as(usize, @popCount(want)), sel.?.count);
+        }
+    }
+    try testing.expect(store.exact_postings.load(.acquire));
+    // `a[].b[]` reaches the elements of a list under `b` only: 6's `[]`.
+    try testing.expectEqual(@as(usize, 0), store.field("a[].b[]").?.points);
 }

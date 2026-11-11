@@ -3853,6 +3853,209 @@ fn writeDatetimeWindow(w: *wire.Writer, lo: i64, hi: i64) !void {
     try w.endNested(cond);
 }
 
+/// One `Struct.fields` entry (field 1) of a `struct_value`, `key: value`
+/// with the value a string or an integer.
+fn writeStructField(w: *wire.Writer, key: []const u8, value: union(enum) { s: []const u8, i: i64 }) !void {
+    const f = try w.beginNested(1, 2);
+    try w.writeStringField(1, key);
+    const v = try w.beginNested(2, 2);
+    switch (value) {
+        .s => |s| try w.writeStringField(core.payload.value_string, s),
+        .i => |i| try w.writeVarintFieldAlways(core.payload.value_integer, @bitCast(i)),
+    }
+    try w.endNested(v);
+    try w.endNested(f);
+}
+
+/// Points `first..` with `{"m": [{"k": "k<i % 5>"}, {"k": "z", "n": i}],
+/// "o": {"p": "yes" when i % 3 == 0 else "no"}}`.
+fn buildUpsertNested(buf: []u8, name: []const u8, first: usize, vecs: []const []const f32) ![]const u8 {
+    var w = wire.Writer.init(buf);
+    try w.writeStringField(1, name);
+    try w.writeBoolField(2, true);
+    var kb: [8]u8 = undefined;
+    for (vecs, first..) |v, i| {
+        const pt = try w.beginNested(3, 3);
+        {
+            const idn = try w.beginNested(1, 2);
+            try w.writeVarintFieldAlways(1, i);
+            try w.endNested(idn);
+        }
+        {
+            const entry = try w.beginNested(3, 2);
+            try w.writeStringField(1, "m");
+            const val = try w.beginNested(2, 2);
+            const list = try w.beginNested(core.payload.value_list, 2);
+            const e0 = try w.beginNested(1, 2);
+            const s0 = try w.beginNested(core.payload.value_struct, 2);
+            try writeStructField(&w, "k", .{ .s = try std.fmt.bufPrint(&kb, "k{d}", .{i % 5}) });
+            try w.endNested(s0);
+            try w.endNested(e0);
+            const e1 = try w.beginNested(1, 2);
+            const s1 = try w.beginNested(core.payload.value_struct, 2);
+            try writeStructField(&w, "k", .{ .s = "z" });
+            try writeStructField(&w, "n", .{ .i = @intCast(i) });
+            try w.endNested(s1);
+            try w.endNested(e1);
+            try w.endNested(list);
+            try w.endNested(val);
+            try w.endNested(entry);
+        }
+        {
+            const entry = try w.beginNested(3, 2);
+            try w.writeStringField(1, "o");
+            const val = try w.beginNested(2, 2);
+            const s = try w.beginNested(core.payload.value_struct, 2);
+            try writeStructField(&w, "p", .{ .s = if (i % 3 == 0) "yes" else "no" });
+            try w.endNested(s);
+            try w.endNested(val);
+            try w.endNested(entry);
+        }
+        {
+            const vs = try w.beginNested(4, 3);
+            const vec = try w.beginNested(1, 3);
+            const dv = try w.beginNested(101, 3);
+            try w.writePackedFloats(1, v);
+            try w.endNested(dv);
+            try w.endNested(vec);
+            try w.endNested(vs);
+        }
+        try w.endNested(pt);
+    }
+    return w.written();
+}
+
+/// A `Condition.field` under `clause` with `Range { gte = 3, lt = 1 }`.
+fn writeRangeWindow(w: *wire.Writer, clause: u32, key: []const u8, gte: f64, lt: f64) !void {
+    const cond = try w.beginNested(clause, 2);
+    const fc = try w.beginNested(1, 2);
+    try w.writeStringField(1, key);
+    const rg = try w.beginNested(3, 2);
+    try w.tag(1, .fixed64);
+    try w.fixed64(@bitCast(lt));
+    try w.tag(3, .fixed64);
+    try w.fixed64(@bitCast(gte));
+    try w.endNested(rg);
+    try w.endNested(fc);
+    try w.endNested(cond);
+}
+
+test "e2e: filters on nested payload paths return the brute-force filtered top-k, indexed or not" {
+    var h = try Harness.start(testing.allocator);
+    defer h.stop();
+    var c = try Client.connect(h.port);
+    defer c.close();
+    var req_buf: [1 << 18]u8 = undefined;
+    var out: [1 << 18]u8 = undefined;
+    {
+        var w = wire.Writer.init(&req_buf);
+        try w.writeStringField(1, "nk");
+        const vc = try w.beginNested(10, 2);
+        const p = try w.beginNested(1, 2);
+        try w.writeVarintFieldAlways(1, 16);
+        try w.writeVarintFieldAlways(2, 2); // Euclid
+        try w.endNested(p);
+        try w.endNested(vc);
+        const cr = try c.call("/qdrant.Collections/Create", w.written(), &out);
+        try testing.expectEqual(grpc.Status.ok, cr.status);
+    }
+    const n = 300;
+    var prng = std.Random.DefaultPrng.init(0x4e57);
+    const rnd = prng.random();
+    const stored = try testing.allocator.alloc(f32, n * 16);
+    defer testing.allocator.free(stored);
+    for (stored) |*x| x.* = rnd.floatNorm(f32);
+    var batch: [60][]const f32 = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += batch.len) {
+        for (&batch, 0..) |*v, j| v.* = stored[(i + j) * 16 ..][0..16];
+        const resp = try c.call("/qdrant.Points/Upsert", try buildUpsertNested(&req_buf, "nk", i, &batch), &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+    }
+    _ = try waitGreen(&c, "nk", &req_buf, &out);
+
+    const Admit = struct {
+        fn k2(j: usize) bool {
+            return j % 5 == 2;
+        }
+        fn yesInWindow(j: usize) bool {
+            return j % 3 == 0 and j >= 100 and j < 200;
+        }
+        fn notK1Below150(j: usize) bool {
+            return j % 5 != 1 and j < 150;
+        }
+    };
+    var conds: [3][256]u8 = undefined;
+    // must `m[].k` = "k2".
+    var w0 = wire.Writer.init(&conds[0]);
+    try writeKeywordCondition(&w0, 2, "m[].k", "k2");
+    // must `o.p` = "yes", must `m[].n` in [100, 200).
+    var w1 = wire.Writer.init(&conds[1]);
+    try writeKeywordCondition(&w1, 2, "o.p", "yes");
+    try writeRangeWindow(&w1, 2, "m[].n", 100, 200);
+    // must_not `m[].k` = "k1", must `m[1].n` in [0, 150).
+    var w2 = wire.Writer.init(&conds[2]);
+    try writeKeywordCondition(&w2, 3, "m[].k", "k1");
+    try writeRangeWindow(&w2, 2, "m[1].n", 0, 150);
+    const Case = struct { raw: []const u8, admit: *const fn (usize) bool };
+    const cases = [_]Case{
+        .{ .raw = w0.written(), .admit = &Admit.k2 },
+        .{ .raw = w1.written(), .admit = &Admit.yesInWindow },
+        .{ .raw = w2.written(), .admit = &Admit.notK1Below150 },
+    };
+    var truth: [16]u64 = undefined;
+    var pts: [16]PointPayload = undefined;
+    // Unindexed, then with a keyword index on `m[].k` and a float index on
+    // `m[].n`, which the planner reads for the first two cases.
+    for (0..2) |pass| {
+        if (pass == 1) {
+            for ([_]struct { []const u8, u64 }{ .{ "m[].k", 0 }, .{ "m[].n", 2 } }) |fi| {
+                const resp = try c.call("/qdrant.Points/CreateFieldIndex", try buildCreateFieldIndex(&req_buf, "nk", fi[0], fi[1]), &out);
+                try testing.expectEqual(grpc.Status.ok, resp.status);
+            }
+            var w = wire.Writer.init(&req_buf);
+            try w.writeStringField(1, "nk");
+            const info = try c.call("/qdrant.Collections/Get", w.written(), &out);
+            var schema: [4]SchemaEntry = undefined;
+            try testing.expectEqual(@as(usize, 2), try readPayloadSchema(info.body, &schema));
+            try testing.expectEqualStrings("m[].k", schema[0].name);
+            try testing.expectEqual(@as(u64, 1), schema[0].data_type);
+            // Two `k`s per point, one `n`.
+            try testing.expectEqual(@as(u64, 2 * n), schema[0].points);
+            try testing.expectEqualStrings("m[].n", schema[1].name);
+            try testing.expectEqual(@as(u64, n), schema[1].points);
+        }
+        for ([_]usize{ 2, 140, 299 }) |qi| {
+            const q = stored[qi * 16 ..][0..16];
+            for (cases) |cs| {
+                const tn = filteredTruth(stored, q, cs.admit, 10, &truth);
+                try testing.expectEqual(@as(usize, 10), tn);
+                for ([_]bool{ false, true }) |exact| {
+                    const resp = try c.call("/qdrant.Points/QueryBatch", try buildFilteredQuery(&req_buf, "nk", q, .{
+                        .hnsw_ef = n,
+                        .exact = exact,
+                        .filter = .{ .raw = cs.raw },
+                    }), &out);
+                    try testing.expectEqual(grpc.Status.ok, resp.status);
+                    try testing.expectEqual(@as(usize, 10), try readFirstBatchPayloads(resp.body, &pts));
+                    for (pts[0..10], truth[0..10]) |p, want| try testing.expectEqual(want, p.id);
+                }
+            }
+        }
+    }
+
+    // A path Qdrant does not parse is refused with its message, in a filter
+    // and in CreateFieldIndex.
+    var wb = wire.Writer.init(&conds[0]);
+    try writeKeywordCondition(&wb, 2, "m[x]", "k2");
+    const bad = try c.call("/qdrant.Points/QueryBatch", try buildFilteredQuery(&req_buf, "nk", stored[0..16], .{ .filter = .{ .raw = wb.written() } }), &out);
+    try testing.expectEqual(grpc.Status.invalid_argument, bad.status);
+    try testing.expectEqualStrings("Invalid json path: 'm[x]'", bad.message);
+    const bad_index = try c.call("/qdrant.Points/CreateFieldIndex", try buildCreateFieldIndex(&req_buf, "nk", "m.", 0), &out);
+    try testing.expectEqual(grpc.Status.invalid_argument, bad_index.status);
+    try testing.expectEqualStrings("Invalid json path: 'm.'", bad_index.message);
+}
+
 test "e2e: Scroll with a filter pages the matching points in id order, with their payloads" {
     var h = try Harness.start(testing.allocator);
     defer h.stop();
