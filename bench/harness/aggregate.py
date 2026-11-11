@@ -414,6 +414,13 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
         if "time_to_green_floored" in merged:
             wait = merged.get("index_wait_s")
             merged["time_to_green_floored"] = bfb_output.time_to_green_floored(wait)
+        # `notes` describe one pass's numbers, so they come from the pass
+        # whose qps is the median: dbpedia 1110's strawmANN W11 kept pass 1's
+        # "(112 over the whole search)" beside pass 3's folded 108.
+        src = next((r for r in got if r.get("qps") is not None
+                    and r.get("qps") == merged.get("qps")), None)
+        if src is not None and "notes" in src:
+            merged["notes"] = src["notes"]
         for key in sorted(numeric & config):
             seen = {v for v in (r.get(key) for r in got) if v is not None}
             if len(seen) > 1:

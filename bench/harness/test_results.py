@@ -617,6 +617,25 @@ class NoiseTests(unittest.TestCase):
             self.assertEqual(row["index_wait_s"], 4.01)
             self.assertFalse(row["time_to_green_floored"])
 
+    def test_folded_notes_come_from_the_median_pass(self):
+        """dbpedia 1110's strawmANN W11 kept pass 1's "(112 over the whole
+        search)" beside pass 3's folded 108."""
+        import importlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _reload(root)
+            agg = importlib.reload(importlib.import_module("aggregate"))
+            for i, (qps, seen) in enumerate(((127.6, 112), (122.0, 107), (123.3, 108)),
+                                            start=1):
+                self._rep(root, f"lbl-rep{i}", [_row(
+                    "W11", qps, notes=f"concurrent append ({seen} over the whole search)")])
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(agg.main(["aggregate.py", "lbl",
+                                           "lbl-rep1", "lbl-rep2", "lbl-rep3"]), 0)
+            row = json.loads((root / "bench/results/lbl/rows.json").read_text())[0]
+            self.assertEqual(row["qps"], 123.3)
+            self.assertIn("108 over the whole search", row["notes"])
+
     def test_a_folded_sweep_carries_the_matched_count_range(self):
         import importlib
         with tempfile.TemporaryDirectory() as tmp:
