@@ -2563,3 +2563,37 @@ and make both engines build a graph no W15 query reads.
 for the write path on purpose. Checked on scifact: all 5,183 points in one
 immutable segment, the appendable empty. The threshold is in the collection
 stamp, so the next BEIR pairs are STALE against the 2026-10-08 ones by design.
+
+## A one-pass outlier keeps a ratio that clears its band either way, decided 2026-11-11
+
+`compare.py` refused every row with one pass apart from two that agree
+(`aggregate._rep_outlier`), since the band built from such a spread is not a
+noise band: laion 1003's Qdrant W6-ef512 (1,858, 1,870, 1,464) had banded a
+1.12x row as parity. The refusal also took rows the odd pass could not have
+changed: dbpedia 1110's W7 read 1.71x on Qdrant's two agreeing passes and
+2.02x with its odd one, and published `-`. A row with an odd pass now keeps
+its ratio when the dataset has a noise floor for it and the ratio clears that
+band on the same side both on the median (one of the agreeing pair) and with
+each arm's odd pass, and says so beside the ratio. Without a floor, or inside
+it on either reading, it is refused as before. Re-measuring the row in an
+extra pass was the alternative; it adds night time to rescue rows that are
+already decided.
+
+## `--rps-reference auto` keeps the previous pair's W4, decided 2026-11-11
+
+The open-loop W4-sat rows offer a fraction of a reference rate, and `auto`
+takes the slower engine's W4 from the previous pair on the corpus, which on
+dbpedia 1110 was 1008's, on another `env_hash` and another Qdrant binary: the
+rows offered 49, 69 and 88% of this run's Qdrant W4. Kept: §4 asks that both
+engines get the same offered load, which they do, and a rate that follows each
+night's own W4 would move the rows every time either engine moved. Requiring a
+matching environment, or pinning a rate per corpus, were the alternatives.
+
+## Batched search keeps its fan-out, decided 2026-11-11
+
+laion 1109's W5 read 0.86x, and the suspect was the fan-out of a QueryBatch
+over the worker queue (`BatchJob`), against Qdrant's serial batch. ab-1110
+measured `--no-batch-fanout` (73936bd) against the default on both corpora,
+three passes each: laion W5 11,160 serial against 11,156 fanned out, sift1m
+W4 and W5 within 1.1%. Not the cause, so the default stays and the flag stays
+as the A/B arm. What laion's W5 does measure is findings 75.

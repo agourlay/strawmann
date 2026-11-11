@@ -823,7 +823,12 @@ class Row:
         # (`aggregate._rep_outlier`): laion 1003's Qdrant W6-ef512 read 1,858,
         # 1,870, 1,464, and its +/-40% band called a 1.12x row parity.
         if outlying := self._outlying(ra, rb):
-            return self._refuse(f"one pass apart from the other two ({', '.join(outlying)})")
+            # Unless the ratio clears the band whichever reading is right:
+            # dbpedia 1110's W7 read 1.71x on Qdrant's two agreeing passes and
+            # 2.02x with its odd one, and was refused all the same.
+            if (cleared := self._clears_either_way(ra, rb, band)) is None:
+                return self._refuse(f"one pass apart from the other two ({', '.join(outlying)})")
+            self.notes.append(cleared)
         # Said only where the ratio survives every refusal above: a decomposition
         # of a number the page is not going to print would be furniture.
         decomp = self._decomposition(ra, rb)
@@ -914,6 +919,27 @@ class Row:
         return [f"{lbl} {r['rep_drift']:+.0%}"
                 for lbl, r in ((self.a_label, ra), (self.b_label, rb))
                 if r.get("rep_drift") is not None]
+
+    def _clears_either_way(self, ra: dict, rb: dict, band: float | None) -> str | None:
+        """A note when the ratio clears `band` on the same side both with the
+        agreeing passes (the median) and with each arm's odd pass, else None.
+
+        No band, no verdict: the odd pass is the one thing a noise floor would
+        have to rule on. The odd pass is read back from `rep_outlier`'s move
+        off the agreeing pair's midpoint, which the median sits within 2.5% of.
+        """
+        if band is None or not self.qa or not self.qb:
+            return None
+        def odd(q: float, r: dict) -> float:
+            o = r.get("rep_outlier")
+            return q * (1 + o["move"]) if o else q
+        pair = self.qa / self.qb
+        with_odd = odd(self.qa, ra) / odd(self.qb, rb)
+        side = [(x > 1 + band) - (x < 1 - band) for x in (pair, with_odd)]
+        if side[0] == 0 or side[0] != side[1]:
+            return None
+        return (f"[one pass apart, but the ratio clears the ±{100 * band:.1f}% band either "
+                f"way: {pair:.2f}x on the agreeing passes, {with_odd:.2f}x with the odd one]")
 
     def _outlying(self, ra: dict, rb: dict) -> list[str]:
         """Arms with one pass apart from two that agree (`aggregate._rep_outlier`)."""

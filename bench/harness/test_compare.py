@@ -2033,6 +2033,23 @@ class HarnessBoundRowTests(unittest.TestCase):
         self.assertIsNone(re.fullmatch(r"[\d.]+x", rows["W4"].ratio or ""),
                           f"outlying row published a ratio: {rows['W4'].ratio!r}")
 
+    def test_one_pass_apart_keeps_a_ratio_that_clears_the_band_either_way(self):
+        """dbpedia 1110's W7: 1.71x on Qdrant's agreeing passes, 2.02x with
+        its odd one, refused all the same."""
+        cmp = self.m["compare"]
+        b_row = _row("W9", 13618.0, rep_outlier={"pass": 3, "move": -0.152})
+        with mock.patch.object(cmp, "parity_band", lambda *a: 0.10):
+            rows = self._joined([_row("W9", 23359.0)], [b_row])
+        self.assertEqual(rows["W9"].ratio, "1.72x", rows["W9"].note_text)
+        self.assertIn("clears the ±10.0% band either way: 1.72x on the agreeing passes, "
+                      "2.02x with the odd one", rows["W9"].note_text)
+        # Inside the band on one reading: still refused.
+        with mock.patch.object(cmp, "parity_band", lambda *a: 0.10):
+            rows = self._joined([_row("W9", 2072.0)],
+                                [_row("W9", 1858.0, rep_outlier={"pass": 3, "move": +0.214})])
+        self.assertEqual(rows["W9"].ratio, "-")
+        self.assertIn("one pass apart from the other two", rows["W9"].refusal)
+
     def test_a_steady_row_is_not_called_drifted(self):
         rows = self._joined([_row("W4", 1000.0)], [_row("W4", 900.0)])
         self.assertNotIn("monotonically", rows["W4"].note_text)
