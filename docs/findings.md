@@ -10,140 +10,40 @@ Ranked by what a wrong or missing number costs.
 
 ### P1. What costs a number on the headline page
 
-The current pages are the 1007 pair for sift1m, the 1008 pair for
-dbpedia-openai-1m, the 1007 pair for laion-small-clip and the 0929 pair for h-and-m, all T4 with T3
-passing and production-mode Qdrant. What they publish wrongly, or still refuse and could
+The current pages are the 1109 pairs for sift1m, laion-small-clip,
+h-and-m and the four BM25 corpora and the 1110 pair for dbpedia-openai-1m, all
+on Qdrant `dev` b4ebd966f in release mode, the vector pairs T4 with T3 passing
+and the text pairs T2. What they publish wrongly, or still refuse and could
 not:
 
-**3. W11's search still ends inside its append on three corpora of four.**
-The write rate is fixed (1,900 and 3,300 points/s at 1M, hashed into the
-stamp), and since 10a274a the row is measured over the append alone
-(`workloads.write_window_qps`), with the search sized to outlast the append on
-the faster engine (`decisions.md`, 2026-09-29). The 0930 pairs show the sizing
-does not hold:
+**3. dbpedia's W11-steady is not flat across passes.** W11's coverage half
+is closed: since the clock (`workloads.w11_stop_at`, 2026-10-06) every corpus
+reads `write overlap` 100% on both rows, both engines, every pass, h-and-m
+last (1109). What is left is the spread on dbpedia. strawmANN's W11-steady read
+618 / 541 / 534 on 1008 and 600 / 574 / 566 on 1110, pass 1 high both times
+(1008's pass 1 was also the one with 90,509 major faults, yet the fastest, so
+paging does not explain it); Qdrant read 504 / 494 / 460 on 1008 and is flat
+on 1110 (506 / 499 / 499). h-and-m 1109 is within 4% on both engines. Whether
+the first pass's head start is the drainer (item 8) meeting a colder tail, or
+the engines' own, is open.
 
-- **sift1m and laion:** the sizing asks for 305,000 to 633,000 queries and
-  `min(QUERIES, n)` caps it at 50,000, so the search covered 7 to 37% of the
-  append while fullrun printed "running 25% past the append". README's
-  `mixed read/write` cell (8,033 against 2,387) is therefore the append's first
-  10%, published under its note.
-- **dbpedia:** W11-steady covered 100% on both engines. W11 covered 53% on
-  strawmANN, because it was sized from 0929's faster engine (Qdrant, 106 q/s)
-  and the drainer made strawmANN the faster one (251 q/s), and Qdrant's writer
-  ran 2,344 to 2,729 points/s against the 3,300 asked, so its append lasted 72
-  to 84 s, not 60.
+**74. strawmANN lost the SQ8 lead on dbpedia.** On 1110 W6 reads parity
+(0.94x; 1008: 1.13x) and W6-ef256 and ef512 0.88x and 0.86x, matched-recall SQ8
+0.80x to 0.90x from recall 0.967 up. Qdrant's W6 ran 13 to 19% faster on the
+new pin with a third fewer instructions per query (plausibly qdrant#10975's
+VNNI kernels). strawmANN still runs fewer instructions (0.96M against 1.79M)
+at equal cycles, but pulls 2.3x the demand DRAM per query (2,444 against
+1,056 KiB) at IPC 0.53 against 0.99, on 7.1 cores busy against 7.9. Two
+suspects: stage 2 rescores up to `ef` fp32 rows (6 KiB each at d=1536) with
+no prefetch (`binary.Rescorer.run`), and strawmANN's `1 io + 7 workers` on
+eight CPUs. What it needs: an in-process A/B of a rescore prefetch and of
+`--workers 8`, W6 ladder with W4 as the control.
 
-Since 2026-09-30 `resolve_w11_sizing` has no cap at `QUERIES`, sizes each
-label over its own measured writer span (`background_s`), bounds the slower
-engine's search at `W11_MAX_SEARCH_S` (240 s), and prints `!!` when that
-bound bites. It closes when a pair shows both rows' `write overlap` at 90% or
-more on every corpus and `W11-steady` flat across passes. laion 1003 is the
-first pair measured with it: `write overlap` 100% on both rows, both engines,
-every pass, with the search running 38% (strawmANN) and 75% (Qdrant) past the
-append and no `!!` bound line. strawmANN's W11-steady is flat (10,108 / 10,094
-/ 10,102); Qdrant's is not (6,996 / 7,651 / 7,170, rsd 4.7%), while its
-optimizer rebuilt on the same eight CPUs (run-queue wait 196 to 249 s a pass).
-sift1m 1006 did not hold: Qdrant's W11 and both
-engines' W11-steady covered 100%, but strawmANN's W11 covered 52.3%, its search
-sized from 0930's 8,033 q/s and running at 18,066 (W11_QUERIES=572,856). A
-count sized from the previous pair cannot follow an engine that doubles
-between pairs; a search bounded by the writer's end is the sizing that can.
-dbpedia 1006 measured but is unlicensed (the differ hung, item 60). Since
-2026-10-06 there is no count: the search runs until its append ends, then a
-quarter of the append's span more, at most 240 s (`workloads.w11_stop_at`),
-and the harness stops bfb with SIGINT (`decisions.md`). sift1m 1007 is the
-first pair measured with it: `write overlap` 100% on both rows, both engines,
-every pass, the search ending at the append's span times 1.25 (W11: 60.6 s
-append, 75.8 s search). strawmANN's W11-steady is flat (20,727 / 21,082 /
-21,074); Qdrant's is not (4,416 / 4,431 / 3,554, rsd 12.1%), its third pass
-low as laion 1003's first was. laion 1007 reads 100% on both rows, both
-engines, every pass, too. dbpedia 1008 reads 100% on both rows, both engines,
-every pass, each search ending about 25% of the append's span past it, so the
-coverage half holds on three corpora of four;
-h-and-m has no pair measured with the clock yet. The flat half does not hold
-on dbpedia: strawmANN's W11-steady reads 618 / 541 / 534 (pass 1 +15%, the pass
-with 90,509 major faults, though it is the fastest, so paging does not explain
-it) and Qdrant's 504 / 494 / 460. What is open is h-and-m, and whether the
-W11-steady spreads are the engines' own. Item 8 is what the row shows once it
-measures what it claims to.
-
-**70. The published W5 ratios are mostly parallelism.** Every current
-page's batched row ran at two requests in flight, where strawmANN used 7 cores
-and Qdrant 2 (`decisions.md`, 2026-10-06): 3.6x of sift1m's 5.68x, laion's
-2.83x and dbpedia's 2.69x, and per batched query Qdrant is the cheaper engine
-on laion and dbpedia. W5 now runs W4's client. It closes when each corpus has
-a pair measured with it. sift1m 1007 is: W5 reads 1.58x (27,641 against
-17,448), the 3.6 factor gone, with Qdrant on 7.89 cores and strawmANN 7.02.
-laion 1007 is too: 0.88x (11,218 against 12,706), Qdrant ahead as predicted.
-dbpedia 1008 is too, and the prediction missed there: W5 reads parity (3,542
-against 3,441, band ±5.9%), and per batched query Qdrant is now the dearer
-engine (4.63M cycles against strawmANN's 4.00M at `-p 64`; 2.99M against 4.01M
-at 1006's two in flight). Its per-batch saving was a low-concurrency property.
-What is open is h-and-m.
-
-**71. The published W12 ratios are partly harness configuration.** Every
-current page ran Qdrant's filtered search with a 10 KB full-scan threshold (5
-points at d=512, so every filter walked the graph) and without ACORN, which
-strawmANN's plan takes on its own (`decisions.md`, 2026-10-06). sel1's
-2.3x to 4.0x at high `ef` and sel10's recall gap at low `ef` (0.94 to 0.99
-against 0.77 to 0.87 at `ef` 32) both carry it. W12 now runs Qdrant's shipped
-threshold and ACORN. It closes when each corpus has a pair measured with them.
-
-sift1m 1007 is: 10,000 KB at d=128 is 20,000 points, above both tiers'
-matches, so Qdrant scans both (recall 1.0000 at every `ef`, cycles per query
-at sel10 4.3x 1006's) and never takes ACORN. sel1 reads 1.95x, sel10 2.25x
-(1006: 0.61x). laion 1007's W12 rows are not publishable, because their recall is not
-the recall of the search they ran. At d=512 the threshold is about 5,000
-points, so sel10 (about 10,000 matches) walks the graph. The rows walked it
-with ACORN (bfb `--acorn`), but the sweep they join (`recall.py`, the
-conformance `relevance` binary) had no way to send ACORN, so it scored a walk
-without it: Qdrant 0.0901 at `ef` 32, 0.2652 at 128 and 0.4126 at 512 (1003,
-at the 10 KB threshold: 0.8164, 0.9854, 0.9993). A probe on a rebuilt laion
-bench12 at the default threshold (`bench/results/acorn-probe-laion/`, bfb
-`--search-quality` against Qdrant's exact search under the same filter, 1,000
-queries) read 0.090 / 0.202 / 0.332 without ACORN and 0.962 / 0.992 / 0.997
-with it. ACORN is not what costs the recall: it is what restores it on a graph
-the default threshold builds without payload-block links. `relevance` now
-takes `--acorn`, `recall.py` sends it on the filtered grades when the rows do,
-the sweep records it, and each W12 row records its own `acorn`. The join
-refuses a sweep whose ACORN differs from the row's (from the label's
-`w12_acorn` stamp for a row recorded before the field, and off for a label
-stamped before that), except on strawmANN, which ignores the flag; the fold
-applies the same rule (`recall.acorn_applies`). Swept that way on a rebuilt bench12, Qdrant's sel10
-reads 0.9649 / 0.9930 / 0.9982 against fp64 truth. bench12 is dropped after a
-run, so laion 1007's W12 rows cannot be re-swept. Its page is published with
-every W12 row refused (recall missing) and its other rows as measured; the
-night's mismatched sweeps no longer join, and the sink's W12 rows for the pair
-were deleted before re-ingesting. laion's W12 needs a pair measured with the
-fix. sift1m's W12 recall is unaffected:
-Qdrant scans both tiers there, so ACORN never applies, and strawmANN ignores
-the flag. Its published 1007 page (sel1 1.95x, sel10 2.25x) is kept, though it
-no longer regenerates: the join refuses sift 1007's Qdrant sweeps for not
-recording `acorn` (its rows predate the field, and the stamp says on), so
-`compare.py --write-readme` for that pair would print Qdrant's W12 recall as
-missing. `readme-table-current` did not catch it, since it checks
-placeholder labels rather than the published pairs. The next sift pair
-replaces the page. dbpedia (d=1536, about 1,700 points) walks
-sel10 too, so its next pair needs the fix. dbpedia 1008 is that pair: rows and
-sweep both with ACORN, joined without refusal, Qdrant's sel10 recall 0.9699 /
-0.9972 / 0.9998 at `ef` 32 / 128 / 512 (0930: 0.7668 at 32), sel1 2.84x and
-sel10 3.04x. sel1 matched 1,977 points against Qdrant's threshold of 1,666 at
-d=1536, so it walks by a 19% margin, and bfb draws the keywords unseeded. At
-sel10-ef512 strawmANN falls 3.3x from `ef` 256 (1,468 to 443 q/s, IPC 0.25):
-`filteredPlan` scans by a 3% margin (35.7M against 36.9M modelled) where the
-walk is faster under 64 clients, both per-row costs running 2.6x to 4.4x the
-model's. What is open is h-and-m, laion's W12 (a pair measured with the fix),
-and whether the plan's constants hold at saturation.
-
-**72. h-and-m's quantized and W12 ratios ran at two requests in flight.**
-2f4a3fd moved W6, W7, W8, W14 and every W12 row to W4's client; its message
-called the old ratios like for like, since both engines serve one request per
-thread. dbpedia 1008 says they were not: against 1006, W6 went 1.46x to 1.13x,
-W7 1.16x to 1.72x, W7-2bit 1.21x to 1.66x, W8 1.26x to 1.21x and W14 at 1, 2
-and 4 bits 0.87x / 1.01x / 1.05x to 1.12x / 1.37x / 1.29x (bfb's pin and the
-W12 configuration changed in the same pair, so the move is not this commit's
-alone). sift1m, laion and dbpedia now publish pairs measured with the new
-client; h-and-m's 0929 page does not. It closes with an h-and-m pair.
+**75. laion's per-query cost.** laion 1109 W4 reads 1.03x where sift1m reads
+1.94x, so W5 reads 0.86x: Qdrant gains 18% from batching (W4 10,933 to W5
+12,939) and strawmANN nothing (11,247 to 11,095). The fan-out of a batch over
+the workers is not the cause (ab-1110: serial 11,160 against fan-out 11,156).
+Suspects: occupancy (item 74's second) and Zig 0.17's kernel inlining.
 
 **58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**
 W10-ef128 +10.4%, W10-ef256 +11.5%, W12-sel1 +10.2%, W11 +10%, with cycles
@@ -251,32 +151,27 @@ the exhaustive tail. The drainer (item 8) does not reach this row: W11's fifth o
 corpus arrives at 3,300 points/s, faster than it links, so the tail crosses
 `rebuild_ratio` and the rebuild takes over as before.
 
-**60. Exact search past 4 GB admits waiting scans in no order, and W9's tail
-doubled.** dbpedia 0930 W9 reads 13.06 q/s (1.33x, from parity) with the cap,
-and p99 1,505 ms, p99.9 2,481 ms, max 3,292 ms against p50 576 ms (0929 p99
-1,109 ms). `acquireScanSlot` is a compare-exchange plus a 50 us sleep, so a
-waiter can lose every race. Since 2026-09-30 the slots are a ticket gate
-(`collection.ScanGate`): admission in arrival order, at most `exact_scan_cap`
-in flight, waiters asleep on a futex, and a test that holds both. What is
-open is the dbpedia W9 row read against 13.06 q/s and 1,505 ms. dbpedia
-1006 read it, unlicensed: 12.28 q/s, p99 828 ms and max 842 ms, the tail
-gone. The same night the differ's closed 32-query exact batch hung for 600 s
-and left the pair without a licence: `release` woke one sleeper
-(`maxInt(u32)`, which `lock.zig` documents as waking one), and when that was
-not the next ticket the next ticket slept on with nothing left to wake it.
-W9's continuous arrivals kept rotating the queue, which is why its rows and
-the gate's test passed. Fixed with `lock.wake_all`, and a test that queues
-the admissible ticket second (it hung before). What is open is a licensed
-dbpedia pair with the fix.
-
-**62. strawmANN's third pass is 6 to 7% slower on every W10 point on
-dbpedia, two nights running.** W10-ef32 10,625 / 10,752 / 9,934 on 0930 and
-10,525 / 10,546 / 9,888 on 0929, while W3 and W4 on the same `bench2` are
-flat. Unexplained. Since 2026-09-30 every row records its engine's
+**62. One strawmANN pass sits apart on every W10 point on dbpedia.** The
+third pass read 6 to 7% slow two nights running, W10-ef32 10,625 / 10,752 /
+9,934 on 0930 and 10,525 / 10,546 / 9,888 on 0929, while W3 and W4 on the same
+`bench2` are flat. Since 2026-09-30 every row records its engine's
 `AnonHugePages` and `FilePmdMapped` after the row (`anon_huge_bytes`,
 `file_pmd_bytes`, read outside the bracket since the walk takes
-`mmap_lock`). What is open is reading them on the next dbpedia pair: whether
-pass 3's arenas are mapped by smaller pages.
+`mmap_lock`). 1110 read them: `anon_huge_bytes` and `file_pmd_bytes` are 0 on
+every row of every pass, so the arenas are not mapped by larger pages on any
+pass, and page size is not the difference. On 1110 the odd pass moved: pass 1
+is 5 to 7% *faster* (W10-ef32 10,617 against 10,029 and 10,087; ef128 3,854
+against 3,611 and 3,620), still with W3 flat (1,079 / 1,071 / 1,077), which
+widens strawmANN's W10 bands to ±9 to ±13%. Still unexplained.
+
+**73. The filtered planner's constants at saturation.** The walk's fixed
+term moved to 350,000 (4c08d9d) after bfb's with-replacement keyword draw put
+63% of sift1m's sel10 queries at about 20,000 matches, not the fitted mean
+19,124; ab-1110 measured sift1m sel10-ef128 +5.6% from it (now a scan,
+recall 1.0) and laion flat. Two things the model still gets wrong: laion's
+9-keyword queries (about 9,000 matches) scan at `ef` 256 under either
+constant, and the scan's cost per value is not flat in `d`. What it needs:
+a refit with `d` as a term, on the 1109 sweeps and an in-process ladder.
 
 ### P3. What the datasets offer that no row measures yet
 
