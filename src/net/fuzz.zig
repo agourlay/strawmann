@@ -610,8 +610,7 @@ fn interleavedStreamsRound(alloc: std.mem.Allocator, seed: u64) !void {
             for (owned, 0..) |o, i| {
                 const id = o orelse continue;
                 if (c.streams[i].id != id) return error.OwnedSlotRenamed;
-                if (c.streams[i].state != .half_closed_remote and c.streams[i].state != .closed) return error.OwnedSlotReopened;
-                if (!c.streams[i].dispatched) return error.OwnedSlotUndispatched;
+                if (!c.streams[i].state.ownedByWorker()) return error.OwnedSlotReopened;
             }
             // Refusals are visible on the wire.
             try noteRefusals(&out, refused);
@@ -665,7 +664,7 @@ fn completeOne(c: *h2.Connection, out: *h2.OutBuf, owned: []?u31, responses: []u
     if (n == 0) return;
     const idx = candidates[rnd.uintLessThan(usize, n)];
     const id = owned[idx].?;
-    if (c.streams[idx].state == .closed) {
+    if (c.streams[idx].state == .orphaned) {
         // Reset by the peer while the worker ran: dropped.
     } else {
         try grpc.writeError(out, id, .ok, "");

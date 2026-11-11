@@ -211,15 +211,43 @@ pub const Settings = struct {
 /// rather than a stall.
 pub const max_streams = Settings.default_max_streams;
 
+/// One enum rather than a state plus `too_large` and `dispatched` flags: of
+/// the sixteen combinations those allowed, six were reachable, and `reset`
+/// had to clear the flags by hand (a slot reused after an over-sized request
+/// once kept `too_large` and failed every later request on it).
 pub const StreamState = enum {
+    /// Free, or never opened.
     idle,
+    /// HEADERS seen, the body is being accumulated.
     open,
-    /// Client sent END_STREAM; we owe a response.
-    half_closed_remote,
-    /// Reset by the peer while a worker still owns the request. The slot is
-    /// held, invisible to `findStream`, until the completion drains and drops
-    /// the response; see `Event.reset`.
-    closed,
+    /// The body outgrew the request buffer and `.request_too_large` was
+    /// reported; the rest of the upload is credited and discarded. Still open
+    /// on the peer's side: RFC 9113 §8.1 allows a complete response before
+    /// the request has ended.
+    draining,
+    /// A draining stream saw END_STREAM: half-closed (remote), never
+    /// dispatched. The server frees it once the error response is written.
+    drained,
+    /// END_STREAM on an accepted body: half-closed (remote), and a `.request`
+    /// was produced, so a worker may hold pointers into `body`. Such a slot is
+    /// only ever freed by `closeStream`, never by the peer: an RST_STREAM on
+    /// it moves it to `.orphaned`. Freeing it on RST let the next HEADERS
+    /// reuse the slot under the worker, and the old completion's
+    /// `closeStream` then reset the *new* stream, whose response was never
+    /// sent.
+    dispatched,
+    /// Reset, by the peer or by us, while a worker still owns the request.
+    /// The slot is held, invisible to `findStream`, until the completion
+    /// drains and drops the response; see `Event.reset`.
+    orphaned,
+
+    /// A worker owns the request buffer, so only its completion may free it.
+    pub fn ownedByWorker(self: StreamState) bool {
+        return switch (self) {
+            .dispatched, .orphaned => true,
+            .idle, .open, .draining, .drained => false,
+        };
+    }
 };
 
 pub const Stream = struct {
@@ -231,17 +259,6 @@ pub const Stream = struct {
     /// The gRPC request body, accumulated across DATA frames.
     body: []u8 = &.{},
     body_len: usize = 0,
-    /// Set when the body outgrew `body`, so the remaining DATA is drained and
-    /// the stream is failed on `END_STREAM` instead of the connection dying.
-    too_large: bool = false,
-    /// A `.request` was produced for this slot, so a worker may hold pointers
-    /// into `body`. Such a slot is only ever freed by `closeStream`, never by
-    /// the peer: an RST_STREAM on it marks the stream `.closed` and the server
-    /// frees it when the completion drains. Freeing it on RST let the next
-    /// HEADERS reuse the slot under the worker, and the old completion's
-    /// `closeStream` then reset the *new* stream, whose response was never
-    /// sent.
-    dispatched: bool = false,
 
     /// `:path`, copied out of the HPACK arena because that arena is reused by
     /// the next header block while this stream is still pending.
@@ -261,11 +278,6 @@ pub const Stream = struct {
         self.body_len = 0;
         self.path_len = 0;
         self.id = 0;
-        // Must be cleared with the rest: a slot reused after an over-sized
-        // request would fail every subsequent request on that slot, and slots
-        // are recycled constantly.
-        self.too_large = false;
-        self.dispatched = false;
     }
 };
 
@@ -282,7 +294,7 @@ pub const Event = union(enum) {
     request_too_large: usize,
     /// A live stream in this slot was taken away from the peer: it sent
     /// RST_STREAM, or we did (STREAM_CLOSED). A dispatched slot is held
-    /// as `.closed` until its completion drains and calls `closeStream`; any
+    /// as `.orphaned` until its completion drains and calls `closeStream`; any
     /// other slot has already been freed. Either way the caller must drop
     /// whatever response it had in progress for the slot.
     reset: usize,
@@ -379,10 +391,15 @@ pub const Connection = struct {
 
     fn findStream(self: *Connection, id: u31) ?usize {
         for (&self.streams, 0..) |*s, i| {
-            // A `.closed` slot is owned by a worker and no longer belongs to
-            // the peer: frames for its id are treated as arriving on a stream
-            // we already forgot, which RFC 9113 §5.1 lets us ignore.
-            if (s.id == id and s.state != .idle and s.state != .closed) return i;
+            if (s.id != id) continue;
+            switch (s.state) {
+                .open, .draining, .drained, .dispatched => return i,
+                // An `.orphaned` slot is owned by a worker and no longer
+                // belongs to the peer: frames for its id are treated as
+                // arriving on a stream we already forgot, which RFC 9113 §5.1
+                // lets us ignore.
+                .idle, .orphaned => {},
+            }
         }
         return null;
     }
@@ -419,12 +436,13 @@ pub const Connection = struct {
     /// we did: the caller must drop whatever response it had in progress.
     fn dropStream(self: *Connection, i: usize) Event {
         const s = &self.streams[i];
-        if (s.dispatched) {
+        switch (s.state) {
             // A worker holds this slot's request buffer. Park it as
-            // `.closed` and let the completion free it.
-            s.state = .closed;
-        } else {
-            self.closeStream(i);
+            // `.orphaned` and let the completion free it.
+            .dispatched => s.state = .orphaned,
+            .open, .draining, .drained => self.closeStream(i),
+            // `findStream` never returns these.
+            .idle, .orphaned => unreachable,
         }
         return .{ .reset = i };
     }
@@ -697,10 +715,11 @@ pub const Connection = struct {
             // `finishHeaders` on a slot a worker already owns and emitted a
             // second `.request` for it. Stream-level: the block is decoded
             // and dropped, then the stream is reset from `finishHeaders`.
-            if (self.streams[i].state != .open) {
-                self.header_rst = .stream_closed;
-            } else {
-                idx = i;
+            switch (self.streams[i].state) {
+                // A draining stream may still send its request trailers.
+                .open, .draining => idx = i,
+                .drained, .dispatched => self.header_rst = .stream_closed,
+                .idle, .orphaned => unreachable,
             }
         } else if (h.stream_id % 2 == 0) {
             // RFC 9113 §5.1.1: clients open odd-numbered streams only.
@@ -800,17 +819,19 @@ pub const Connection = struct {
         // answered with RESOURCE_EXHAUSTED on the first frame that overflowed,
         // and the rest of the body is being drained. Dispatching here would
         // hand a worker the truncated body and produce a second response.
-        if (s.too_large) {
-            if (end_stream) s.state = .half_closed_remote;
-            return .progress;
+        switch (s.state) {
+            .draining => {
+                if (end_stream) s.state = .drained;
+                return .progress;
+            },
+            .open => {
+                if (!end_stream) return .progress;
+                s.state = .dispatched;
+                return .{ .request = i };
+            },
+            // `handleHeaders` routes these to a reset, never here.
+            .idle, .drained, .dispatched, .orphaned => unreachable,
         }
-
-        if (end_stream) {
-            s.state = .half_closed_remote;
-            s.dispatched = true;
-            return .{ .request = i };
-        }
-        return .progress;
     }
 
     fn handleData(self: *Connection, h: FrameHeader, payload: []const u8, out: *OutBuf) Error!Event {
@@ -843,7 +864,11 @@ pub const Connection = struct {
         // *second* `.request` for the same slot, so two workers would write the
         // same response buffer concurrently and two responses would go out on
         // one stream id. A stream error: RST_STREAM this stream, keep the rest.
-        if (s.state != .open) return self.streamClosed(out, h.stream_id);
+        switch (s.state) {
+            .open, .draining => {},
+            .drained, .dispatched => return self.streamClosed(out, h.stream_id),
+            .idle, .orphaned => unreachable,
+        }
 
         // An over-sized body is a **stream** error, not a connection error.
         //
@@ -865,26 +890,25 @@ pub const Connection = struct {
         // slot. Reporting immediately lets the server answer while the client
         // is still uploading (RFC 9113 §8.1 allows a complete response before
         // the request has ended), and the remaining DATA is drained here.
-        if (s.too_large) {
-            // Draining. Credit the stream window back so a client that keeps
-            // uploading is never stalled on a body nobody will read; the
-            // connection window is topped up above as for any DATA.
+        const end_stream = h.hasFlag(Flags.end_stream);
+        if (s.state == .draining) {
+            // Credit the stream window back so a client that keeps uploading
+            // is never stalled on a body nobody will read; the connection
+            // window is topped up above as for any DATA.
             try self.creditStreamWindow(out, h.stream_id, h.length);
-            if (h.hasFlag(Flags.end_stream)) s.state = .half_closed_remote;
+            if (end_stream) s.state = .drained;
             return .progress;
         }
         if (s.body_len + body.len > s.body.len) {
-            s.too_large = true;
+            s.state = if (end_stream) .drained else .draining;
             try self.creditStreamWindow(out, h.stream_id, h.length);
-            if (h.hasFlag(Flags.end_stream)) s.state = .half_closed_remote;
             return .{ .request_too_large = idx };
         }
         @memcpy(s.body[s.body_len..][0..body.len], body);
         s.body_len += body.len;
 
-        if (h.hasFlag(Flags.end_stream)) {
-            s.state = .half_closed_remote;
-            s.dispatched = true;
+        if (end_stream) {
+            s.state = .dispatched;
             return .{ .request = idx };
         }
         return .progress;
@@ -1227,7 +1251,7 @@ test "HEADERS + DATA with END_STREAM produces a request" {
         .request => |idx| {
             try testing.expectEqualStrings(path, c.streams[idx].path());
             try testing.expectEqualStrings(body, c.streams[idx].bodyBytes());
-            try testing.expectEqual(StreamState.half_closed_remote, c.streams[idx].state);
+            try testing.expectEqual(StreamState.dispatched, c.streams[idx].state);
         },
         else => return error.ExpectedRequest,
     }
@@ -1379,8 +1403,7 @@ test "a body larger than the stream buffer fails the stream, not the connection"
     @memset(frame_buf[frame_header_len..], 0);
     const r1 = try c.readFrame(&frame_buf, &out);
     try testing.expectEqual(@as(usize, idx), r1.event.request_too_large);
-    try testing.expect(c.streams[idx].too_large);
-    try testing.expect(!c.streams[idx].dispatched);
+    try testing.expectEqual(StreamState.draining, c.streams[idx].state);
     {
         const wu = FrameHeader.parse(out.buf[0..frame_header_len]);
         try testing.expectEqual(FrameType.window_update, wu.frame_type);
@@ -1402,13 +1425,76 @@ test "a body larger than the stream buffer fails the stream, not the connection"
         .write(&tail);
     const r2 = try c.readFrame(&tail, &out);
     try testing.expectEqual(Event.progress, r2.event);
-    try testing.expectEqual(StreamState.half_closed_remote, c.streams[idx].state);
+    try testing.expectEqual(StreamState.drained, c.streams[idx].state);
 
-    // The slot is reusable afterwards: `too_large` must not persist, or every
+    // The slot is reusable afterwards: the overflow must not persist, or every
     // later request landing on this slot fails too.
     c.closeStream(idx);
     const again = try c.openStream(3);
-    try testing.expect(!c.streams[again].too_large);
+    try testing.expectEqual(StreamState.open, c.streams[again].state);
+    out.reset();
+    var small: [frame_header_len + 4]u8 = undefined;
+    (FrameHeader{ .length = 4, .frame_type = .data, .flags = Flags.end_stream, .stream_id = 3 })
+        .write(small[0..frame_header_len]);
+    @memcpy(small[frame_header_len..], "abcd");
+    try testing.expectEqual(@as(usize, again), (try c.readFrame(&small, &out)).event.request);
+    try testing.expectEqual(StreamState.dispatched, c.streams[again].state);
+}
+
+test "a body that overflows on its END_STREAM frame is drained at once, and later frames free the slot" {
+    // The overflow and END_STREAM arrive together, so the stream skips
+    // `.draining`. No worker owns it, so a frame after END_STREAM (RFC 9113
+    // §5.1: STREAM_CLOSED) frees the slot outright instead of parking it
+    // `.orphaned` for a completion that will never come.
+    const bufs = try testBuffers(testing.allocator, 2, 128);
+    defer freeBuffers(testing.allocator, bufs);
+    var c = Connection.init(bufs);
+    var ob: [4096]u8 = undefined;
+    var out = OutBuf.init(&ob);
+    try c.sendInitialFrames(&out);
+    out.reset();
+    var fb: [512]u8 = undefined;
+
+    _ = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers, "/a"), &out);
+    const idx = c.findStream(1).?;
+    var df: [frame_header_len + 200]u8 = undefined;
+    (FrameHeader{ .length = 200, .frame_type = .data, .flags = Flags.end_stream, .stream_id = 1 }).write(df[0..frame_header_len]);
+    @memset(df[frame_header_len..], 1);
+    try testing.expectEqual(@as(usize, idx), (try c.readFrame(&df, &out)).event.request_too_large);
+    try testing.expectEqual(StreamState.drained, c.streams[idx].state);
+    try testing.expect(!c.streams[idx].state.ownedByWorker());
+
+    out.reset();
+    const r = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers | Flags.end_stream, "/a"), &out);
+    try testing.expectEqual(@as(usize, idx), r.event.reset);
+    try testing.expectEqual(StreamState.idle, c.streams[idx].state);
+    try testing.expectEqualSlices(u8, &expectRst(1, .stream_closed), out.written()[0 .. frame_header_len + 4]);
+}
+
+test "RST_STREAM on a draining stream frees the slot" {
+    // Draining is not dispatched: the I/O thread owns the error response, so
+    // the slot goes straight back to `.idle` and the reset tells it to drop
+    // that response.
+    const bufs = try testBuffers(testing.allocator, 2, 128);
+    defer freeBuffers(testing.allocator, bufs);
+    var c = Connection.init(bufs);
+    var ob: [4096]u8 = undefined;
+    var out = OutBuf.init(&ob);
+    try c.sendInitialFrames(&out);
+    out.reset();
+    var fb: [512]u8 = undefined;
+
+    _ = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers, "/a"), &out);
+    const idx = c.findStream(1).?;
+    var df: [frame_header_len + 200]u8 = undefined;
+    (FrameHeader{ .length = 200, .frame_type = .data, .flags = 0, .stream_id = 1 }).write(df[0..frame_header_len]);
+    @memset(df[frame_header_len..], 1);
+    try testing.expectEqual(@as(usize, idx), (try c.readFrame(&df, &out)).event.request_too_large);
+    try testing.expectEqual(StreamState.draining, c.streams[idx].state);
+
+    var rb: [frame_header_len + 4]u8 = undefined;
+    try testing.expectEqual(@as(usize, idx), (try c.readFrame(testRstFrame(&rb, 1, .cancel), &out)).event.reset);
+    try testing.expectEqual(StreamState.idle, c.streams[idx].state);
 }
 
 test "oversized frames and bad frame sizes are refused" {
@@ -1585,13 +1671,13 @@ test "DATA on a half-closed stream is refused, not dispatched twice" {
     }
     // The stream is now half-closed; a second DATA is a *stream* error (RFC
     // 9113 §5.1): RST_STREAM(STREAM_CLOSED) on stream 1, the connection
-    // survives, and the dispatched slot is parked as `.closed` exactly as a
+    // survives, and the dispatched slot is parked as `.orphaned` exactly as a
     // peer RST would leave it, so the worker's response is dropped. It used
     // to be a GOAWAY.
     const idx = first.event.request;
     const second = try c.readFrame(&f, &out);
     try testing.expectEqual(@as(usize, idx), second.event.reset);
-    try testing.expectEqual(StreamState.closed, c.streams[idx].state);
+    try testing.expectEqual(StreamState.orphaned, c.streams[idx].state);
     try testing.expectEqualSlices(u8, &expectRst(1, .stream_closed), out.written()[0 .. frame_header_len + 4]);
     try testing.expect(!c.goaway_sent);
 
@@ -1649,7 +1735,7 @@ test "END_STREAM survives a header block split across CONTINUATION" {
     switch (r.event) {
         .request => |idx| {
             try testing.expectEqualStrings(path, c.streams[idx].path());
-            try testing.expectEqual(StreamState.half_closed_remote, c.streams[idx].state);
+            try testing.expectEqual(StreamState.dispatched, c.streams[idx].state);
         },
         else => return error.ExpectedRequest,
     }
@@ -1709,13 +1795,13 @@ test "RST_STREAM on a dispatched stream holds the slot until the completion free
     var fb: [512]u8 = undefined;
     const r1 = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers | Flags.end_stream, "/a"), &out);
     const owned = r1.event.request;
-    try testing.expect(c.streams[owned].dispatched);
+    try testing.expectEqual(StreamState.dispatched, c.streams[owned].state);
 
     // The peer resets it while the worker runs.
     var rb: [frame_header_len + 4]u8 = undefined;
     const r2 = try c.readFrame(testRstFrame(&rb, 1, .cancel), &out);
     try testing.expectEqual(@as(usize, owned), r2.event.reset);
-    try testing.expectEqual(StreamState.closed, c.streams[owned].state);
+    try testing.expectEqual(StreamState.orphaned, c.streams[owned].state);
     try testing.expectEqual(@as(u31, 1), c.streams[owned].id);
 
     // A new stream must land in the *other* slot; the pool is two wide, so a
@@ -1726,7 +1812,7 @@ test "RST_STREAM on a dispatched stream holds the slot until the completion free
     const r4 = try c.readFrame(testHeadersFrame(&fb, 5, Flags.end_headers | Flags.end_stream, "/c"), &out);
     try testing.expectEqual(Event.progress, r4.event);
     try testing.expectEqual(FrameType.rst_stream, FrameHeader.parse(out.buf[0..frame_header_len]).frame_type);
-    try testing.expectEqual(StreamState.closed, c.streams[owned].state);
+    try testing.expectEqual(StreamState.orphaned, c.streams[owned].state);
 
     // Frames for the reset id are ignored, not applied to the held slot.
     var df: [frame_header_len + 2]u8 = undefined;
@@ -1756,7 +1842,7 @@ test "RST_STREAM on an undispatched stream frees it and still reports the reset"
     var fb: [512]u8 = undefined;
     _ = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers, "/a"), &out);
     const idx = c.findStream(1).?;
-    try testing.expect(!c.streams[idx].dispatched);
+    try testing.expectEqual(StreamState.open, c.streams[idx].state);
 
     var rb: [frame_header_len + 4]u8 = undefined;
     const r = try c.readFrame(testRstFrame(&rb, 1, .cancel), &out);
@@ -1837,16 +1923,16 @@ test "HEADERS with END_STREAM on a half-closed stream is refused, not dispatched
 
     const first = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers | Flags.end_stream, "/a"), &out);
     const idx = first.event.request;
-    try testing.expectEqual(StreamState.half_closed_remote, c.streams[idx].state);
+    try testing.expectEqual(StreamState.dispatched, c.streams[idx].state);
     // A stream error, not a connection error: RST_STREAM(STREAM_CLOSED) and
-    // the slot is parked `.closed` for the worker's completion to free.
+    // the slot is parked `.orphaned` for the worker's completion to free.
     out.reset();
     const second = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers | Flags.end_stream, "/b"), &out);
     try testing.expectEqual(@as(usize, idx), second.event.reset);
-    try testing.expectEqual(StreamState.closed, c.streams[idx].state);
+    try testing.expectEqual(StreamState.orphaned, c.streams[idx].state);
     try testing.expectEqualSlices(u8, &expectRst(1, .stream_closed), out.written()[0 .. frame_header_len + 4]);
     // Also without END_STREAM: nothing may follow END_STREAM from the peer.
-    // The slot is now `.closed`, so this is a HEADERS on a closed id: the
+    // The slot is now `.orphaned`, so this is a HEADERS on a closed id: the
     // same RST, and no second reset event for a slot already taken away.
     out.reset();
     const third = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers, "/c"), &out);
@@ -1867,7 +1953,7 @@ test "HEADERS with END_STREAM on a half-closed stream is refused, not dispatched
 }
 
 test "request trailers on a body that overflowed do not dispatch the truncated body" {
-    // After `.request_too_large` the stream stays `.open` while the rest of
+    // After `.request_too_large` the stream is `.draining` while the rest of
     // the body drains. A trailing HEADERS+END_STREAM used to reach
     // `finishHeaders` and dispatch the partial body as a request, a second
     // response for a stream already answered RESOURCE_EXHAUSTED.
@@ -1888,12 +1974,11 @@ test "request trailers on a body that overflowed do not dispatch the truncated b
     @memset(df[frame_header_len..], 1);
     try testing.expectEqual(Event.progress, (try c.readFrame(&df, &out)).event); // fits
     try testing.expectEqual(@as(usize, idx), (try c.readFrame(&df, &out)).event.request_too_large); // overflows
-    try testing.expectEqual(StreamState.open, c.streams[idx].state);
+    try testing.expectEqual(StreamState.draining, c.streams[idx].state);
 
     const r = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers | Flags.end_stream, "/a"), &out);
     try testing.expectEqual(Event.progress, r.event);
-    try testing.expect(!c.streams[idx].dispatched);
-    try testing.expectEqual(StreamState.half_closed_remote, c.streams[idx].state);
+    try testing.expectEqual(StreamState.drained, c.streams[idx].state);
 }
 
 test "stream ids are validated: PING and GOAWAY on 0, PRIORITY off 0, HEADERS odd and increasing" {
@@ -2072,7 +2157,7 @@ test "streams opened after the peer's GOAWAY are refused, in-flight ones are kep
     try testing.expectEqual(Event.goaway, (try c.readFrame(&g, &out)).event);
 
     // The in-flight stream is untouched.
-    try testing.expectEqual(StreamState.half_closed_remote, c.streams[held].state);
+    try testing.expectEqual(StreamState.dispatched, c.streams[held].state);
     try testing.expectEqual(@as(u31, 1), c.streams[held].id);
 
     // A new one is refused (retryable), its block still decoded.

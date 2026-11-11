@@ -1492,8 +1492,8 @@ fn drainCompletions(t: *IoThread) void {
         // The slot was held for this completion, so it still names this
         // stream, whether or not the peer reset it in the meantime.
         const s = &c.h2c.streams[cm.stream_idx];
-        std.debug.assert(s.dispatched and s.id == cm.stream_id);
-        if (s.state == .closed) {
+        std.debug.assert(s.state.ownedByWorker() and s.id == cm.stream_id);
+        if (s.state == .orphaned) {
             // Reset by the peer while the worker ran: the response is
             // dropped and the slot, kept out of reuse until now, is freed.
             c.h2c.closeStream(cm.stream_idx);

@@ -416,7 +416,7 @@ test "a success response is three frames ending in trailers with END_STREAM" {
     var c = testConn(&.{});
     // The pool has no request buffers, so open slot 0 by hand.
     c.streams[0].id = 1;
-    c.streams[0].state = .half_closed_remote;
+    c.streams[0].state = .dispatched;
     const body = "\x08\x01\x10\x02";
     try writeResponse(&c, &out, 0, body);
 
