@@ -234,21 +234,44 @@ def _huge_page_note(wid: str, got: list[dict]) -> str | None:
     smaller pages behind the two that were not. Keyed on the pages alone, so
     the note appears whether or not qps moved with them.
     """
+    return _spread_note(wid, got, _HUGE_NAMES, "huge pages")
+
+
+#: `procstat.MEMORY_FIELDS` as the note names them.
+_MEMORY_NAMES = {"mem_available_bytes": "MemAvailable", "swap_used_bytes": "host swap",
+                 "engine_swap_bytes": "engine VmSwap"}
+
+
+def _memory_note(wid: str, got: list[dict]) -> str | None:
+    """Each pass's memory state beside its qps, when the passes disagree.
+
+    findings 62: dbpedia 1110's first pass ran W10 7% faster at equal
+    instructions, and it was the one pass under memory pressure (10 GB less
+    file RSS, the only major faults); the fold medians the memory fields
+    like any column, which would hide that pass behind the other two. The
+    same rule as `_huge_page_note`.
+    """
+    return _spread_note(wid, got, _MEMORY_NAMES, "memory")
+
+
+def _spread_note(wid: str, got: list[dict], names: dict[str, str], what: str) -> str | None:
+    """`names`' fields per pass beside qps, for those that spread
+    `HUGE_SPREAD_MIN` or more of their largest across the passes."""
     parts = []
-    for k in procstat.HUGE_FIELDS:
+    for k, label in names.items():
         vals = [r.get(k) for r in got]
         if not all(isinstance(v, int) and not isinstance(v, bool) for v in vals):
             continue
         top = max(vals)
         if top == 0 or (top - min(vals)) / top < HUGE_SPREAD_MIN:
             continue
-        parts.append(f"{_HUGE_NAMES[k]} {', '.join(procstat.human_bytes(v) for v in vals)}")
+        parts.append(f"{label} {', '.join(procstat.human_bytes(v) for v in vals)}")
     if not parts:
         return None
     qps = [r.get("qps") for r in got]
     qps_text = ", ".join(f"{q:,.0f}" if isinstance(q, (int, float)) else "n/a" for q in qps)
-    return (f"{wid}: huge pages differ across the {len(got)} passes "
-            f"({'; '.join(parts)}) beside qps {qps_text}")
+    return (f"{wid}: {what} differ{'s' if what == 'memory' else ''} across the {len(got)} "
+            f"passes ({'; '.join(parts)}) beside qps {qps_text}")
 
 
 def _rep_drift(vals: list) -> float | None:
@@ -499,6 +522,8 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
                          + _paging_note(got))
         if (huge := _huge_page_note(wid, got)) is not None:
             notes.append(huge)
+        if (mem := _memory_note(wid, got)) is not None:
+            notes.append(mem)
         out.append(merged)
     return out, rsd, notes
 

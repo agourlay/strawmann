@@ -775,6 +775,32 @@ class NoiseTests(unittest.TestCase):
             for wid in ("W3", "W4", "W9"):
                 self.assertNotIn(f"{wid}: huge pages", text)
 
+    def test_passes_that_disagree_on_memory_are_named_beside_their_qps(self):
+        """findings 62: dbpedia 1110's fast first pass was the one under
+        memory pressure, which a median of the memory fields would hide."""
+        import importlib
+        gib = 1 << 30
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _reload(root)
+            agg = importlib.reload(importlib.import_module("aggregate"))
+            for i, (q, avail) in enumerate(((10617.0, 20 * gib), (10029.0, 40 * gib),
+                                            (10087.0, 41 * gib)), start=1):
+                self._rep(root, f"lbl-rep{i}", [
+                    _row("W10-ef32", q, mem_available_bytes=avail, swap_used_bytes=gib,
+                         engine_swap_bytes=0),
+                    # Passes that agree within the spread say nothing.
+                    _row("W3", 1000.0, mem_available_bytes=40 * gib + i)])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                self.assertEqual(agg.main(["aggregate.py", "lbl",
+                                           "lbl-rep1", "lbl-rep2", "lbl-rep3"]), 0)
+            text = out.getvalue()
+            self.assertIn("W10-ef32: memory differs across the 3 passes (MemAvailable "
+                          "20.0 GiB, 40.0 GiB, 41.0 GiB) beside qps 10,617, 10,029, 10,087",
+                          text)
+            self.assertNotIn("W3: memory", text)
+
     def test_a_folded_floor_says_mixed_when_the_passes_disagree(self):
         import importlib
         with tempfile.TemporaryDirectory() as tmp:
