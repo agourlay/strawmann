@@ -242,8 +242,12 @@ things stand between that and a row:
   h-and-m's filtered queries on strawmANN without an error. The pin moves
   once it merges.
 - **laion needs a float range.** Its 2,530 conditioned queries are `range
-  {gt}` on `similarity`, and the engine has keyword and integer indexes and
-  `match` conditions only.
+  {gt}` on `similarity`. Since 2026-11-11 the engine decodes `range` (its
+  bounds folded in Qdrant's OrderedFloat order, NaN largest) and builds a
+  float index (`Kind.float = 3`): a sorted `(value, point)` array plus a
+  tail merged every 4,096 writes, counted for the planner and selected
+  under the same trusted and verified rules as the postings. A range on an
+  integer-indexed field is the verified scan.
 - **The harness has no row for it.** An upload row and a search row on bfb's
   dataset path, and a recall that comes from the row (bfb's precision)
   rather than from a joined sweep, which `compare.py` and the report do not
@@ -293,8 +297,6 @@ things stand between that and a row:
 
 ### To build
 
-- **A float payload index and a `range` condition** in the engine, for laion's
-  filtered queries (findings 55).
 - **The real-filter rows (findings 55):** an upload row and a search row on
   bfb's dataset path, a recall the row carries (bfb's precision) that
   `compare.py` and the report read, and the ε-tie check against our filtered
