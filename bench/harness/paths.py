@@ -345,6 +345,85 @@ def text_index(name: str) -> dict:
     return {"lowercase": True, **(_entry(name).get("text_index") or {})}
 
 
+class FilteredTests(NamedTuple):
+    """A corpus whose `tests.jsonl` ships its own filtered queries (findings 55).
+
+    `tar_dir` is the extracted vector-db-benchmark bundle (`vectors.npy`,
+    `payloads.jsonl`, `tests.jsonl`) relative to the dataset root, which is
+    how bfb's `type: dataset, format: tar` source names it. `fields` are the
+    payload indexes W16 declares, as `(name, bfb type)`: the fields the tests'
+    conditions read and nothing more, since an index nobody filters on is
+    upload time both engines pay for no row. `k` is how many neighbours each
+    test ships under its condition.
+    """
+
+    tar_dir: str
+    fields: tuple[tuple[str, str], ...]
+    k: int
+    #: Whether bfb has to send the tests' `match` strings as keyword matches
+    #: for the row to be the dataset's query (`BFB_SENDS_KEYWORD_MATCH`).
+    needs_keyword_match: bool = False
+
+
+#: Whether the pinned bfb sends a dataset condition's `match` string as a
+#: keyword match. It does not: qdrant-client's `From<String> for MatchValue`
+#: makes any value with whitespace a `text` match, which strawmANN refuses
+#: (§1) and which Qdrant answers as a substring match on a keyword field, not
+#: the dataset's question. 4,255 of h-and-m's 10,000 tests carry such a value
+#: ("Light Orange"). qdrant/bfb#193 fixes it; **set this to True in the commit
+#: that moves the bfb pin (`workloads.BFB_PIN`) past it**, and h-and-m's W16
+#: rows join its table. laion's conditions are float ranges and never needed it.
+BFB_SENDS_KEYWORD_MATCH = False
+
+#: The corpora W16 runs on, keyed as `_CORPUS`. Written down rather than read
+#: from `datasets.json`: its `extract.dir` for h-and-m is `h-and-m-2048-angular/hnm`,
+#: an older extraction beside the one bfb is pointed at, and its
+#: `payload_schema` lists all 24 h-and-m fields where the tests filter on ten.
+#: Those ten are `filters.json`'s `name`s, the fields the query generator drew
+#: its conditions from.
+FILTERED_TESTS = {
+    "laion-small-clip": FilteredTests(
+        "laion-small-clip/laion-small-clip", (("similarity", "float"),), 10),
+    "h-and-m-2048-angular-filters": FilteredTests(
+        "h-and-m-2048-angular-filters/hnm",
+        tuple((f, "keyword") for f in (
+            "index_group_name", "colour_group_name", "department_name",
+            "garment_group_name", "graphical_appearance_name",
+            "perceived_colour_master_name", "perceived_colour_value_name",
+            "product_group_name", "product_type_name", "section_name")),
+        25, needs_keyword_match=True),
+}
+
+
+def filtered_tests(name: str) -> FilteredTests | None:
+    """`name`'s shipped filtered tests, when a W16 row can run them on the
+    pinned bfb, else None: h-and-m is None until `BFB_SENDS_KEYWORD_MATCH`."""
+    spec = FILTERED_TESTS.get(name)
+    if spec is None or (spec.needs_keyword_match and not BFB_SENDS_KEYWORD_MATCH):
+        return None
+    return spec
+
+
+def tests_dir(name: str) -> Path:
+    """The extracted bundle bfb uploads from and searches, resolved on call
+    so `use_data_dir` reaches it."""
+    return DATA / FILTERED_TESTS[name].tar_dir
+
+
+def tests_n(name: str) -> int:
+    """Rows the bundle holds, its descriptor `n`: W16 uploads all of them,
+    because a test's `closest_ids` may name any row of it."""
+    return int(_entry(name)["n"])
+
+
+def tests_files(name: str) -> list[Path]:
+    """What W16 and its recall read, or [] for a corpus W16 does not run on."""
+    if filtered_tests(name) is None:
+        return []
+    d = tests_dir(name)
+    return [d / "vectors.npy", d / "payloads.jsonl", d / "tests.jsonl"]
+
+
 def source(key: str) -> str:
     """Where `key`'s root came from, in words rather than as a path.
 
