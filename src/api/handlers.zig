@@ -1542,7 +1542,7 @@ fn searchOne(ctx: *Context, coll: *core.Collection, q: msg.QueryPoints, want: us
         // the configuration cannot deliver (see the measured frontier in
         // core/collection.zig).
         const qp = core.quantized_search.QuantParams{
-            .ignore = q.params.quantization.ignore orelse false,
+            .use = if (q.params.quantization.ignore orelse false) .ignore else .use,
             .rescore = q.params.quantization.rescore orelse defaultRescore(coll),
             .oversampling = q.params.quantization.oversampling orelse 1.0,
             .rescore_prefetch = ctx.engine.rescore_prefetch,

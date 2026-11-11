@@ -63,9 +63,9 @@ pub const Scratch = struct {
 
 /// §6.7's knobs, resolved from `SearchParams.quantization` per request.
 pub const QuantParams = struct {
-    /// `params.quantization.ignore`: search the fp32 representation even
-    /// though a quantized store exists.
-    ignore: bool = false,
+    /// `params.quantization.ignore`: `.ignore` searches the fp32
+    /// representation even though a quantized store exists.
+    use: collection.QuantUse = .use,
     /// `params.quantization.rescore`. Absent means "collection default", which
     /// for us is on, §6.7 pairs binary with "oversampling + rescore" and
     /// silently skipping it would report a recall the configuration cannot
@@ -123,7 +123,7 @@ pub fn searchQuantized(
     const guard = collection.SearchGuard.begin(coll);
     defer guard.end();
 
-    switch (collection.choosePath(coll, .approximate, if (qp.ignore) .ignore else .use)) {
+    switch (collection.choosePath(coll, .approximate, qp.use)) {
         // Without a graph there is nothing for the quantized traversal to
         // accelerate, and brute-forcing quantized codes then rescoring would be
         // strictly worse than brute-forcing fp32 directly.
@@ -588,7 +588,7 @@ test "§6.7: quantization.ignore falls back to the fp32 path" {
 
     var ab: [32]Candidate = undefined;
     var ignored = heap.TopK.init(&ab, 10);
-    try searchQuantized(&c, .{ .query = &q, .ef = 128, .limit = 10, .quant = .{ .ignore = true } }, .{ .hnsw = &hs, .quant = &qs, .alloc = testing.allocator }, &ignored);
+    try searchQuantized(&c, .{ .query = &q, .ef = 128, .limit = 10, .quant = .{ .use = .ignore } }, .{ .hnsw = &hs, .quant = &qs, .alloc = testing.allocator }, &ignored);
 
     var bb: [32]Candidate = undefined;
     var plain = heap.TopK.init(&bb, 10);
