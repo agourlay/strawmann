@@ -2967,6 +2967,8 @@ const FilterSpec = struct {
     must_not_keyword: ?[]const u8 = null,
     /// Two `should` keyword conditions on `key`.
     should: ?[2][]const u8 = null,
+    /// `must` on `key` with `Range { gt = 2 }`.
+    range_gt: ?f64 = null,
 };
 
 const FilteredQueryOpts = struct {
@@ -3015,6 +3017,17 @@ fn buildFilteredQuery(buf: []u8, name: []const u8, q: []const f32, opts: Filtere
             const m = try w.beginNested(2, 2);
             try w.writeVarintFieldAlways(2, @bitCast(i));
             try w.endNested(m);
+            try w.endNested(fc);
+            try w.endNested(cond);
+        }
+        if (f.range_gt) |gt| {
+            const cond = try w.beginNested(2, 2);
+            const fc = try w.beginNested(1, 2);
+            try w.writeStringField(1, f.key);
+            const rg = try w.beginNested(3, 2);
+            try w.tag(2, .fixed64);
+            try w.fixed64(@bitCast(gt));
+            try w.endNested(rg);
             try w.endNested(fc);
             try w.endNested(cond);
         }
@@ -3450,6 +3463,173 @@ test "e2e: W12's shape: CreateFieldIndex, keyword payloads, filtered QueryBatch 
         try testing.expectEqual(@as(u64, n), schema[0].points);
         try testing.expectEqualStrings("n", schema[1].name);
         try testing.expectEqual(@as(u64, 2), schema[1].data_type); // Integer
+    }
+}
+
+/// `buildUpsert` with one double payload, `similarity`, per point.
+fn buildUpsertSimilarity(buf: []u8, name: []const u8, ids: []const u64, vecs: []const []const f32, sims: []const f64) ![]const u8 {
+    var w = wire.Writer.init(buf);
+    try w.writeStringField(1, name);
+    try w.writeBoolField(2, true);
+    for (ids, vecs, sims) |id, v, sim| {
+        const pt = try w.beginNested(3, 3);
+        {
+            const idn = try w.beginNested(1, 2);
+            try w.writeVarintFieldAlways(1, id);
+            try w.endNested(idn);
+        }
+        {
+            const entry = try w.beginNested(3, 2);
+            try w.writeStringField(1, "similarity");
+            const val = try w.beginNested(2, 2);
+            try w.tag(core.payload.value_double, .fixed64);
+            try w.fixed64(@bitCast(sim));
+            try w.endNested(val);
+            try w.endNested(entry);
+        }
+        {
+            const vs = try w.beginNested(4, 3);
+            const vec = try w.beginNested(1, 3);
+            const dv = try w.beginNested(101, 3);
+            try w.writePackedFloats(1, v);
+            try w.endNested(dv);
+            try w.endNested(vec);
+            try w.endNested(vs);
+        }
+        try w.endNested(pt);
+    }
+    return w.written();
+}
+
+test "e2e: a float index answers range gt with the exact filtered top-k, through overwrite and delete" {
+    var h = try Harness.start(testing.allocator);
+    defer h.stop();
+    var c = try Client.connect(h.port);
+    defer c.close();
+    var req_buf: [1 << 18]u8 = undefined;
+    var out: [1 << 18]u8 = undefined;
+    {
+        var w = wire.Writer.init(&req_buf);
+        try w.writeStringField(1, "fl");
+        const vc = try w.beginNested(10, 2); // vectors_config
+        const p = try w.beginNested(1, 2);
+        try w.writeVarintFieldAlways(1, 16);
+        try w.writeVarintFieldAlways(2, 2); // Euclid
+        try w.endNested(p);
+        try w.endNested(vc);
+        const cr = try c.call("/qdrant.Collections/Create", w.written(), &out);
+        try testing.expectEqual(grpc.Status.ok, cr.status);
+    }
+
+    const n = 600;
+    var prng = std.Random.DefaultPrng.init(0xf10a);
+    const rnd = prng.random();
+    const stored = try testing.allocator.alloc(f32, n * 16);
+    defer testing.allocator.free(stored);
+    for (stored) |*x| x.* = rnd.floatNorm(f32);
+    const Sim = struct {
+        /// Rewritten and deleted by the test, so the truth leaves them out.
+        var lowered: usize = n;
+        var deleted: usize = n;
+
+        /// Spread over [0, 1) and not monotone in the id, so the nearest
+        /// points are a mix of admitted and refused.
+        fn of(i: usize) f64 {
+            return @as(f64, @floatFromInt((i * 7919) % 1000)) / 1000;
+        }
+        fn above(i: usize) bool {
+            if (i == lowered or i == deleted) return false;
+            return of(i) > 0.7;
+        }
+    };
+    // The first half before the index exists (backfilled), the second
+    // after (indexed on write).
+    var batch_ids: [50]u64 = undefined;
+    var batch_vecs: [50][]const f32 = undefined;
+    var batch_sims: [50]f64 = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += 50) {
+        if (i == n / 2) {
+            const cf = try c.call("/qdrant.Points/CreateFieldIndex", try buildCreateFieldIndex(&req_buf, "fl", "similarity", 2), &out);
+            try testing.expectEqual(grpc.Status.ok, cf.status);
+        }
+        for (0..50) |j| {
+            batch_ids[j] = i + j;
+            batch_vecs[j] = stored[(i + j) * 16 ..][0..16];
+            batch_sims[j] = Sim.of(i + j);
+        }
+        const resp = try c.call("/qdrant.Points/Upsert", try buildUpsertSimilarity(&req_buf, "fl", &batch_ids, &batch_vecs, &batch_sims), &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+    }
+    _ = try waitGreen(&c, "fl", &req_buf, &out);
+
+    const q = stored[11 * 16 ..][0..16];
+    var truth: [16]u64 = undefined;
+    var pts: [16]PointPayload = undefined;
+    const spec = FilterSpec{ .key = "similarity", .range_gt = 0.7 };
+    for ([_]bool{ false, true }) |exact| {
+        const tn = filteredTruth(stored, q, &Sim.above, 10, &truth);
+        try testing.expectEqual(@as(usize, 10), tn);
+        const resp = try c.call("/qdrant.Points/QueryBatch", try buildFilteredQuery(&req_buf, "fl", q, .{
+            .hnsw_ef = n,
+            .exact = exact,
+            .filter = spec,
+        }), &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+        try testing.expectEqual(@as(usize, 10), try readFirstBatchPayloads(resp.body, &pts));
+        for (pts[0..10], truth[0..10]) |p, want| try testing.expectEqual(want, p.id);
+    }
+
+    // Lower the nearest admitted point below the bound (its old entry is
+    // now stale) and delete the next: neither may come back.
+    const first = truth[0];
+    const second = truth[1];
+    {
+        const ids = [_]u64{first};
+        const vecs = [_][]const f32{stored[first * 16 ..][0..16]};
+        const sims = [_]f64{0.1};
+        const resp = try c.call("/qdrant.Points/Upsert", try buildUpsertSimilarity(&req_buf, "fl", &ids, &vecs, &sims), &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+        Sim.lowered = first;
+    }
+    {
+        var w = wire.Writer.init(&req_buf);
+        try w.writeStringField(1, "fl");
+        try w.writeBoolField(2, true);
+        const sel = try w.beginNested(3, 2); // points
+        const ids = try w.beginNested(1, 2); // PointsIdsList
+        const pid = try w.beginNested(1, 2);
+        try w.writeVarintFieldAlways(1, second);
+        try w.endNested(pid);
+        try w.endNested(ids);
+        try w.endNested(sel);
+        const del = try c.call("/qdrant.Points/Delete", w.written(), &out);
+        try testing.expectEqual(grpc.Status.ok, del.status);
+        Sim.deleted = second;
+    }
+    for ([_]bool{ false, true }) |exact| {
+        const tn = filteredTruth(stored, q, &Sim.above, 10, &truth);
+        try testing.expectEqual(@as(usize, 10), tn);
+        const resp = try c.call("/qdrant.Points/QueryBatch", try buildFilteredQuery(&req_buf, "fl", q, .{
+            .hnsw_ef = n,
+            .exact = exact,
+            .filter = spec,
+        }), &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+        try testing.expectEqual(@as(usize, 10), try readFirstBatchPayloads(resp.body, &pts));
+        for (pts[0..10], truth[0..10]) |p, want| try testing.expectEqual(want, p.id);
+    }
+
+    // The schema reports the field as `Float = 3`, over every value written.
+    {
+        var w = wire.Writer.init(&req_buf);
+        try w.writeStringField(1, "fl");
+        const resp = try c.call("/qdrant.Collections/Get", w.written(), &out);
+        var schema: [2]SchemaEntry = undefined;
+        try testing.expectEqual(@as(usize, 1), try readPayloadSchema(resp.body, &schema));
+        try testing.expectEqualStrings("similarity", schema[0].name);
+        try testing.expectEqual(@as(u64, 3), schema[0].data_type);
+        try testing.expectEqual(@as(u64, n + 1), schema[0].points);
     }
 }
 
