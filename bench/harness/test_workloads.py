@@ -3859,8 +3859,10 @@ class AbChain1112Tests(unittest.TestCase):
         ch = importlib.import_module("ab_chain_1112")
         ab = importlib.import_module("commit_ab")
         chain = {s.name: s.argv for s in ch.steps("t", "abc1234")}
-        self.assertEqual(list(chain), ["sq8-dbpedia", "probe-laion", "probe-dbpedia",
-                                       "reclaim-dbpedia"])
+        self.assertEqual(list(chain), ["qdrant-early", "sq8-dbpedia", "probe-laion",
+                                       "probe-dbpedia", "reclaim-dbpedia", "qdrant-late"])
+        self.assertEqual(chain["qdrant-early"][:1] + chain["qdrant-late"][:1],
+                         ["qdrant_rerun.py", "qdrant_rerun.py"])
         self.assertEqual(chain["reclaim-dbpedia"][0], "reclaim_ab.py")
         self.assertEqual(chain["reclaim-dbpedia"][-1], str(ab.build_path("abc1234")))
 
@@ -3906,6 +3908,18 @@ class ReclaimAbTests(unittest.TestCase):
             self.assertIn("(Is a directory)", r.reclaim(cg, 1))
             (cg / "memory.current").unlink()
             self.assertIn("memory.current unreadable", r.reclaim(cg, 1))
+
+
+class QdrantRerunTests(unittest.TestCase):
+    def test_no_binary_is_refused_before_anything_starts(self):
+        """findings 58's rerun needs the pinned binary, never a guess."""
+        r = importlib.import_module("qdrant_rerun")
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"QDRANT_BINARY": "/nonexistent/qdrant"}), \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(r.main(["qdrant_rerun.py", "--server-cpus", "4-11",
+                                     "--client-cpus", "0-3"]), 2)
+        self.assertIn("no qdrant binary at /nonexistent/qdrant", err.getvalue())
 
 
 class Phase1ChainTests(unittest.TestCase):

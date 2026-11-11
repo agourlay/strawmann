@@ -57,8 +57,9 @@ laion W4/W10 moves cannot be read as strawmANN's. laion 1003 reproduced the 0930
 level within 1.5% (W10-ef128 8,312 to 8,268, W12-sel1 3,331 to 3,368), on a
 newer kernel and with Qdrant on its compiled-in config rather than the
 checkout's, so 0928 is the odd pair. What it needs: a Qdrant-only same-binary
-A/B on laion at two times of day (`qdrant_ab.py` with one build on both
-sides).
+reading on laion at two times. `qdrant_rerun.py` measures the pinned native
+binary's W4 and W10-ef128, and `ab_chain_1112.py` runs it first and last.
+(`qdrant_ab.py` drives images, not a native binary.)
 
 ### P2. What the licensed numbers are made of, and what the run costs
 

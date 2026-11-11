@@ -15,6 +15,9 @@
    2026-09-29), and `--workers 8` beside it.
 4. findings 62 (`reclaim_ab.py`): dbpedia-1m's W10 with the collection as
    written, then reclaimed through the engine's cgroup and read back.
+5. findings 58 (`qdrant_rerun.py`): the pinned Qdrant's laion W4 and
+   W10-ef128 first and last, so one binary is read hours apart on one night.
+   Needs `QDRANT_BINARY` in the environment, as the night runs have it.
 
 Development-grade, like `ab_chain_1110.py`, whose runner this reuses: no
 Qdrant, no publication, every arm one commit. Scheduled, not run from a
@@ -52,7 +55,9 @@ def _step(name: str, tag: str, dataset: str, commit: str, upload: str, rows: lis
 
 
 def steps(tag: str, commit: str) -> list[Step]:
+    qdrant = ["qdrant_rerun.py", *CPUS]
     return [
+        Step("qdrant-early", [*qdrant, "--tag", f"{tag}-qdrant-early"]),
         _step("sq8-dbpedia", tag, DBPEDIA, commit, "W6-upload", ["W6", "W6-ef256", "W6-ef512"],
               {"off": "", "first": "--rescore-prefetch first",
                "whole": "--rescore-prefetch whole", "w8": "--workers 8"}),
@@ -64,6 +69,7 @@ def steps(tag: str, commit: str) -> list[Step]:
         # The build the steps above made, not the checkout's own.
         Step("reclaim-dbpedia", ["reclaim_ab.py", *CPUS, "--tag", f"{tag}-reclaim-dbpedia",
                                  "--binary", str(commit_ab.build_path(commit))]),
+        Step("qdrant-late", [*qdrant, "--tag", f"{tag}-qdrant-late"]),
     ]
 
 
