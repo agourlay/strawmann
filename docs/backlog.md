@@ -302,6 +302,13 @@ things stand between that and a row:
   `compare.py` and the report read, and the ε-tie check against our filtered
   oracle. After the bfb decision, since the rows run on it.
 
+- **Nested payload keys in filters.** A filter key such as `a.b`, `a[]` or
+  `a[0]` is a path into the payload in Qdrant; strawmANN compares `match` and
+  `range` keys as one literal top-level key, and the `values_count`,
+  `is_empty`, `is_null` and `datetime_range` conditions refuse such keys as
+  unimplemented. No benchmark payload nests, so no number is affected; a
+  client filtering a nested field gets a different answer from Qdrant.
+
 ### Dropped
 
 - dbpedia W9's 8% since the Zig 0.16 build (1008 to 1110, equal instructions):
