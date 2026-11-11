@@ -3861,7 +3861,7 @@ class AbChain1112Tests(unittest.TestCase):
         chain = {s.name: s.argv for s in ch.steps("t", "abc1234")}
         self.assertEqual(list(chain), ["qdrant-early", "sq8-dbpedia", "probe-laion",
                                        "probe-dbpedia", "reclaim-dbpedia", "gather-dbpedia",
-                                       "qdrant-late"])
+                                       "query-union-dbpedia", "qdrant-late"])
         self.assertEqual(chain["qdrant-early"][:1] + chain["qdrant-late"][:1],
                          ["qdrant_rerun.py", "qdrant_rerun.py"])
         self.assertEqual(chain["reclaim-dbpedia"][0], "reclaim_ab.py")
@@ -3886,6 +3886,8 @@ class AbChain1112Tests(unittest.TestCase):
                          ("pf512", "abc1234", ("--probe-prefetch-bytes", "512")))
         self.assertEqual(arms(chain["gather-dbpedia"]),
                          [("each", "abc1234", ()), ("gather", "abc1234", ("--exact-gather",))])
+        self.assertEqual(arms(chain["query-union-dbpedia"]),
+                         [("before", ch.QUERY_UNION_PARENT, ()), ("union", ch.QUERY_UNION, ())])
 
 
 class ReclaimAbTests(unittest.TestCase):

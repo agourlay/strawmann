@@ -18,7 +18,10 @@
 5. findings 10: dbpedia-1m's W9 with and without `--exact-gather`, separate
    requests' exact queries sharing one pass split over their workers. It
    applies from 4 GiB, so the 1M corpus: about 8 minutes a session, 50 in all.
-6. findings 58 (`qdrant_rerun.py`): the pinned Qdrant's laion W4 and
+6. The quantized `Query` union (ee3dbcc, 16accd6) against its parent
+   (154628e), on dbpedia-100K's W6 ladder: a refactor of the hot path's
+   score dispatch, which must read flat.
+7. findings 58 (`qdrant_rerun.py`): the pinned Qdrant's laion W4 and
    W10-ef128 first and last, so one binary is read hours apart on one night.
    Needs `QDRANT_BINARY` in the environment, as the night runs have it.
 
@@ -44,6 +47,8 @@ import phase1_chain
 from phase1_chain import BFB, CPUS, RESULTS, Step
 
 DBPEDIA = "dbpedia-openai-100K-1536-angular"
+QUERY_UNION_PARENT = "154628e"  # before the quantized Query union
+QUERY_UNION = "16accd6"         # the union and QuantParams.use
 LAION = "laion-small-clip"
 
 
@@ -74,6 +79,11 @@ def steps(tag: str, commit: str) -> list[Step]:
                                  "--binary", str(commit_ab.build_path(commit))]),
         _step("gather-dbpedia", tag, "dbpedia-openai-1m", commit, "W2", ["W9"],
               {"each": "", "gather": "--exact-gather"}),
+        Step("query-union-dbpedia", [
+            "commit_ab.py", *CPUS, "--dataset", DBPEDIA, "--reps", "3",
+            "--tag", f"{tag}-query-union-dbpedia", "--upload", "W6-upload",
+            "--rows", "W6", "W6-ef256", "W6-ef512",
+            "--commits", f"before={QUERY_UNION_PARENT}", f"union={QUERY_UNION}"]),
         Step("qdrant-late", [*qdrant, "--tag", f"{tag}-qdrant-late"]),
     ]
 

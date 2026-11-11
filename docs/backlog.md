@@ -253,8 +253,8 @@ things stand between that and a row:
 
 ### Ready to run (a quiet machine, a `systemd-run --user` timer)
 
-- **`ab_chain_1112.py --commit <HEAD>`**, about 3 h, one build, every arm a
-  flag. Needs `QDRANT_BINARY` and `BFB` in the unit's environment, as the
+- **`ab_chain_1112.py --commit <HEAD>`**, about 3.5 h, one build for the flag
+  arms. Needs `QDRANT_BINARY` and `BFB` in the unit's environment, as the
   night runs have them.
   - `qdrant-early` / `qdrant-late`: the pinned Qdrant's laion W4 and
     W10-ef128 at both ends of the night (findings 58).
@@ -266,6 +266,9 @@ things stand between that and a row:
     the engine's cgroup and read back (findings 62).
   - `gather-dbpedia`: dbpedia-1m's W9 with and without `--exact-gather`
     (findings 10).
+  - `query-union-dbpedia`: the quantized `Query` union (ee3dbcc, 16accd6)
+    against its parent 154628e on dbpedia-100K's W6 ladder. A hot-path
+    refactor of the score dispatch, which must read flat.
 
 ### After the chain
 
