@@ -21,7 +21,10 @@
 6. The quantized `Query` union (ee3dbcc, 16accd6) against its parent
    (154628e), on dbpedia-100K's W6 ladder: a refactor of the hot path's
    score dispatch, which must read flat.
-7. findings 58 (`qdrant_rerun.py`): the pinned Qdrant's laion W4 and
+7. findings 8: dbpedia-1m's W11-steady and W11 with and without
+   `--prune-memo` (a back-link re-prune from the list's recorded selection).
+   Each session's W2 upload also times the build, which the flag covers too.
+8. findings 58 (`qdrant_rerun.py`): the pinned Qdrant's laion W4 and
    W10-ef128 first and last, so one binary is read hours apart on one night.
    Needs `QDRANT_BINARY` in the environment, as the night runs have it.
 
@@ -84,6 +87,8 @@ def steps(tag: str, commit: str) -> list[Step]:
             "--tag", f"{tag}-query-union-dbpedia", "--upload", "W6-upload",
             "--rows", "W6", "W6-ef256", "W6-ef512",
             "--commits", f"before={QUERY_UNION_PARENT}", f"union={QUERY_UNION}"]),
+        _step("prune-memo-dbpedia", tag, "dbpedia-openai-1m", commit, "W2",
+              ["W11-steady", "W11"], {"full": "", "memo": "--prune-memo"}),
         Step("qdrant-late", [*qdrant, "--tag", f"{tag}-qdrant-late"]),
     ]
 
