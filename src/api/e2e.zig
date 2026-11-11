@@ -852,6 +852,32 @@ test "e2e: a batch that does not fit its request buffer's spare bytes runs seque
     for (0..nq) |qi| try testing.expectEqual(@as(u64, qi * 17 % n), ids[qi][0]);
 }
 
+test "e2e: a point with an empty vectors message is refused for having no vector" {
+    // `Vectors` is a oneof; neither field set used to read as the named
+    // case and came back "named vector spaces (phase 2)".
+    var h = try Harness.start(testing.allocator);
+    defer h.stop();
+    var c = try Client.connect(h.port);
+    defer c.close();
+    var req_buf: [4096]u8 = undefined;
+    var out: [4096]u8 = undefined;
+    _ = try c.call("/qdrant.Collections/Create", try buildCreateCollection(&req_buf, "nv", 4, 2), &out);
+
+    var w = wire.Writer.init(&req_buf);
+    try w.writeStringField(1, "nv");
+    try w.writeBoolField(2, true);
+    const pt = try w.beginNested(3, 3);
+    const idn = try w.beginNested(1, 2);
+    try w.writeVarintFieldAlways(1, 7);
+    try w.endNested(idn);
+    const vs = try w.beginNested(4, 3);
+    try w.endNested(vs);
+    try w.endNested(pt);
+    const resp = try c.call("/qdrant.Points/Upsert", w.written(), &out);
+    try testing.expectEqual(grpc.Status.invalid_argument, resp.status);
+    try testing.expect(std.mem.indexOf(u8, resp.message, "no vector") != null);
+}
+
 test "e2e: one refused query fails the whole fanned-out batch, as Qdrant does" {
     var h = try Harness.start(testing.allocator);
     defer h.stop();

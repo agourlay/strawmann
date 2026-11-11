@@ -834,8 +834,10 @@ fn upsert(ctx: *Context, req: *const server.Request, body: []const u8, out: *ser
     };
 
     while (it.next() catch |e| return decodeErr(req, e)) |pt| {
-        const dense = if (pt.vectors.single) |v| v.dense else {
-            return err(req, .unimplemented, "named vector spaces (phase 2)");
+        const dense = switch (pt.vectors) {
+            .single => |v| v.dense,
+            .named => return err(req, .unimplemented, "named vector spaces (phase 2)"),
+            .none => return err(req, .invalid_argument, "point has no vector"),
         };
         if (dense.dim() != coll.config.dim) {
             return err(req, .invalid_argument, "vector dimension does not match collection");

@@ -130,9 +130,12 @@ pub fn fuzzProtoMessages(input: []const u8) void {
             while (it.next() catch null) |pt| {
                 n += 1;
                 if (n > 4096) break; // a self-referential frame must not loop forever
-                if (pt.vectors.single) |v| {
-                    var dst: [64]f32 = undefined;
-                    _ = v.dense.copyInto(&dst) catch {};
+                switch (pt.vectors) {
+                    .single => |v| {
+                        var dst: [64]f32 = undefined;
+                        _ = v.dense.copyInto(&dst) catch {};
+                    },
+                    .none, .named => {},
                 }
             }
         } else |_| {}

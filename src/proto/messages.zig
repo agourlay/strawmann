@@ -273,23 +273,30 @@ pub const NamedVector = struct {
     vector: Vector,
 };
 
-pub const Vectors = struct {
-    /// The unnamed default vector, when field 1 was used.
-    single: ?Vector = null,
-    /// Named vectors, when field 2 was used. Borrowed from the frame; the
-    /// caller iterates and copies into arenas.
-    named_raw: ?[]const u8 = null,
+/// `Vectors { oneof { Vector vector = 1; NamedVectors vectors = 2; } }`: one
+/// of the two, or neither. A struct of two optionals let an empty `vectors {}`
+/// reach the upsert handler as "named vector spaces (phase 2)", for a point
+/// that sent no vector at all; a union gives that case its own arm.
+pub const Vectors = union(enum) {
+    /// Neither field was sent.
+    none,
+    /// The unnamed default vector, field 1.
+    single: Vector,
+    /// Named vectors, field 2. Borrowed from the frame; the caller iterates
+    /// and copies into arenas.
+    named: []const u8,
 
     pub fn decode(r: *Reader) DecodeError!Vectors {
-        var out: Vectors = .{};
+        // A oneof keeps the last of its fields on the wire.
+        var out: Vectors = .none;
         while (!r.atEnd()) {
             const t = try r.tag();
             switch (t.field) {
                 1 => {
                     var sub = try r.nested();
-                    out.single = try Vector.decode(&sub);
+                    out = .{ .single = try Vector.decode(&sub) };
                 },
-                2 => out.named_raw = try r.bytes(),
+                2 => out = .{ .named = try r.bytes() },
                 else => try r.skip(t.wire_type),
             }
         }
@@ -328,7 +335,10 @@ pub const Vectors = struct {
     };
 
     pub fn namedIterator(self: Vectors) NamedIterator {
-        return .{ .r = Reader.init(self.named_raw orelse &.{}) };
+        return .{ .r = Reader.init(switch (self) {
+            .named => |raw| raw,
+            .none, .single => &.{},
+        }) };
     }
 };
 
@@ -1919,7 +1929,7 @@ test "UpsertPoints iterates points without materialising a list" {
     var count: usize = 0;
     while (try it.next()) |p| {
         try testing.expect(p.id.eql(.{ .num = count }));
-        const dv = p.vectors.single.?.dense;
+        const dv = p.vectors.single.dense;
         try testing.expectEqual(@as(usize, 3), dv.dim());
         var dst: [3]f32 = undefined;
         _ = try dv.copyInto(&dst);
@@ -1972,6 +1982,26 @@ test "VectorParams decodes size, distance and hnsw config" {
     try testing.expectEqual(Datatype.float32, Datatype.fromProto(vp.datatype).?);
 }
 
+test "Vectors with neither field is .none, and the last oneof field wins" {
+    // An empty `vectors {}` used to read as the named-vectors case and was
+    // refused as "named vector spaces (phase 2)".
+    var empty = Reader.init(&.{});
+    try testing.expect(try Vectors.decode(&empty) == .none);
+
+    var buf: [128]u8 = undefined;
+    var w = Writer.init(&buf);
+    const named = try w.beginNested(2, 2);
+    try w.endNested(named);
+    const single = try w.beginNested(1, 2); // Vector
+    const dn = try w.beginNested(101, 2); // Vector.dense
+    try w.writePackedFloats(1, &[_]f32{ 1.0, 2.0 });
+    try w.endNested(dn);
+    try w.endNested(single);
+    var r = Reader.init(w.written());
+    const vs = try Vectors.decode(&r);
+    try testing.expectEqual(@as(usize, 2), vs.single.dense.dim());
+}
+
 test "Vectors decodes named vectors as a map" {
     var buf: [512]u8 = undefined;
     var w = Writer.init(&buf);
@@ -1992,8 +2022,7 @@ test "Vectors decodes named vectors as a map" {
 
     var r = Reader.init(w.written());
     const vs = try Vectors.decode(&r);
-    try testing.expect(vs.single == null);
-    try testing.expect(vs.named_raw != null);
+    try testing.expect(vs == .named);
 
     var it = vs.namedIterator();
     var seen: usize = 0;
