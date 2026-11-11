@@ -342,27 +342,40 @@ pub const Connection = struct {
     /// Header block reassembly across CONTINUATION frames.
     header_accum: [64 * 1024]u8 = undefined,
     header_accum_len: usize = 0,
-    header_stream: u31 = 0,
-    expecting_continuation: bool = false,
-    /// END_STREAM from the HEADERS frame that opened a CONTINUATION sequence.
-    ///
-    /// END_STREAM is carried on HEADERS, never on CONTINUATION, so a header
-    /// block that spans frames must remember it. Dropping it left a
-    /// bodyless request (HEADERS with END_STREAM but no END_HEADERS, any
-    /// request whose header block exceeds one frame) permanently `.open`,
-    /// holding a stream slot while the client waited for a response that could
-    /// never be produced.
-    header_end_stream: bool = false,
-    /// The header block being accumulated belongs to a stream that was
-    /// refused (pool exhausted, or opened after the peer's GOAWAY) or that is
-    /// no longer accepting HEADERS (half-closed by the peer, or already
-    /// closed). RFC 9113 §4.3 still requires the block to be decoded, because
-    /// it may modify the HPACK dynamic table and skipping it desynchronises
-    /// every later header block on the connection. The block is decoded and
-    /// discarded, then RST_STREAM with this code is sent: REFUSED_STREAM for
-    /// the former, STREAM_CLOSED for the latter (§5.1: a stream error, not a
-    /// connection error, so the other streams live on).
-    header_rst: ?ErrorCode = null,
+    /// The HEADERS that started a block still awaiting CONTINUATION frames;
+    /// null when no block is open. One optional record rather than a flag
+    /// plus three fields that only meant something while the flag was set.
+    pending: ?HeaderBlock = null,
+
+    /// A header block's frame-level facts, decided when its HEADERS arrives.
+    const HeaderBlock = struct {
+        stream_id: u31,
+        /// END_STREAM is carried on HEADERS, never on CONTINUATION, so a
+        /// header block that spans frames must remember it. Dropping it left
+        /// a bodyless request (HEADERS with END_STREAM but no END_HEADERS, any
+        /// request whose header block exceeds one frame) permanently `.open`,
+        /// holding a stream slot while the client waited for a response that
+        /// could never be produced.
+        end_stream: bool,
+        target: Target,
+
+        const Target = union(enum) {
+            /// The slot the block is applied to. Nothing but CONTINUATION
+            /// may arrive until the block ends (§6.10), so it cannot change.
+            stream: usize,
+            /// The block belongs to a stream that was refused (pool
+            /// exhausted, or opened after the peer's GOAWAY) or that is no
+            /// longer accepting HEADERS (half-closed by the peer, or already
+            /// closed). RFC 9113 §4.3 still requires the block to be decoded,
+            /// because it may modify the HPACK dynamic table and skipping it
+            /// desynchronises every later header block on the connection. The
+            /// block is decoded and discarded, then RST_STREAM with this code
+            /// is sent: REFUSED_STREAM for the former, STREAM_CLOSED for the
+            /// latter (§5.1: a stream error, not a connection error, so the
+            /// other streams live on).
+            reject: ErrorCode,
+        };
+    };
 
     pub fn init(buffers: []([]u8)) Connection {
         var c: Connection = .{
@@ -563,7 +576,7 @@ pub const Connection = struct {
         // another CONTINUATION on the same stream. Anything else interleaved is
         // a connection error, and is a known attack shape, since unbounded
         // interleaving lets a peer make the server buffer without limit.
-        if (self.expecting_continuation and h.frame_type != .continuation) {
+        if (self.pending != null and h.frame_type != .continuation) {
             return Error.ProtocolError;
         }
 
@@ -707,62 +720,65 @@ pub const Connection = struct {
         }
 
         // Which stream, and what to do with the block once decoded.
-        var idx: ?usize = null;
-        self.header_rst = null;
-        if (self.findStream(h.stream_id)) |i| {
+        const block_info: HeaderBlock = .{
+            .stream_id = h.stream_id,
+            .end_stream = h.hasFlag(Flags.end_stream),
+            .target = try self.headersTarget(h.stream_id),
+        };
+
+        if (block.len > self.header_accum.len) return Error.CompressionError;
+        @memcpy(self.header_accum[0..block.len], block);
+        self.header_accum_len = block.len;
+
+        if (!h.hasFlag(Flags.end_headers)) {
+            self.pending = block_info;
+            return .progress;
+        }
+        return try self.finishHeaders(block_info, out);
+    }
+
+    /// Which stream a HEADERS frame applies to, or why it is reset once its
+    /// block has been decoded.
+    fn headersTarget(self: *Connection, stream_id: u31) Error!HeaderBlock.Target {
+        if (self.findStream(stream_id)) |i| {
             // RFC 9113 §5.1: HEADERS on a half-closed (remote) stream is a
             // STREAM_CLOSED error, exactly as DATA is. Accepting it re-ran
             // `finishHeaders` on a slot a worker already owns and emitted a
             // second `.request` for it. Stream-level: the block is decoded
             // and dropped, then the stream is reset from `finishHeaders`.
-            switch (self.streams[i].state) {
+            return switch (self.streams[i].state) {
                 // A draining stream may still send its request trailers.
-                .open, .draining => idx = i,
-                .drained, .dispatched => self.header_rst = .stream_closed,
+                .open, .draining => .{ .stream = i },
+                .drained, .dispatched => .{ .reject = .stream_closed },
                 .idle, .orphaned => unreachable,
-            }
-        } else if (h.stream_id % 2 == 0) {
+            };
+        } else if (stream_id % 2 == 0) {
             // RFC 9113 §5.1.1: clients open odd-numbered streams only.
             return Error.ProtocolError;
-        } else if (h.stream_id <= self.last_stream_id) {
+        } else if (stream_id <= self.last_stream_id) {
             // RFC 9113 §5.1.1: ids increase, so this stream is closed, either
             // explicitly (reset by the peer while a worker held it, or already
             // answered, and a client that got a complete response early is
             // allowed its trailers) or implicitly by the use of a higher id.
             // §5.1 makes a frame on a closed stream a STREAM_CLOSED *stream*
             // error; the block is still decoded for the dynamic table.
-            self.header_rst = .stream_closed;
+            return .{ .reject = .stream_closed };
         } else {
-            self.last_stream_id = h.stream_id;
-            idx = self.openStream(h.stream_id) catch |e| switch (e) {
+            self.last_stream_id = stream_id;
+            const i = self.openStream(stream_id) catch |e| switch (e) {
                 // Legal and retryable, much better than stalling the client.
-                // The block is still decoded below (RFC 9113 §4.3), then the
-                // RST goes out from `finishHeaders`.
-                Error.RefusedStream => blk: {
-                    self.header_rst = .refused_stream;
-                    break :blk null;
-                },
+                // The block is still decoded (RFC 9113 §4.3), then the RST
+                // goes out from `finishHeaders`.
+                Error.RefusedStream => return .{ .reject = .refused_stream },
                 else => return e,
             };
+            return .{ .stream = i };
         }
-
-        if (block.len > self.header_accum.len) return Error.CompressionError;
-        @memcpy(self.header_accum[0..block.len], block);
-        self.header_accum_len = block.len;
-        self.header_stream = h.stream_id;
-
-        if (!h.hasFlag(Flags.end_headers)) {
-            self.expecting_continuation = true;
-            self.header_end_stream = h.hasFlag(Flags.end_stream);
-            return .progress;
-        }
-        return try self.finishHeaders(idx, h.hasFlag(Flags.end_stream), out);
     }
 
     fn handleContinuation(self: *Connection, h: FrameHeader, payload: []const u8, out: *OutBuf) Error!Event {
-        if (!self.expecting_continuation or h.stream_id != self.header_stream) {
-            return Error.ProtocolError;
-        }
+        const p = self.pending orelse return Error.ProtocolError;
+        if (h.stream_id != p.stream_id) return Error.ProtocolError;
         if (self.header_accum_len + payload.len > self.header_accum.len) {
             return Error.CompressionError;
         }
@@ -770,35 +786,30 @@ pub const Connection = struct {
         self.header_accum_len += payload.len;
 
         if (!h.hasFlag(Flags.end_headers)) return .progress;
-        self.expecting_continuation = false;
-
-        const idx: ?usize = if (self.header_rst != null)
-            null
-        else
-            self.findStream(h.stream_id) orelse return Error.ProtocolError;
-        // END_STREAM belongs to the HEADERS frame that started this block, not
-        // to the CONTINUATION that ends it, so it is replayed from there.
-        const end_stream = self.header_end_stream;
-        self.header_end_stream = false;
-        return try self.finishHeaders(idx, end_stream, out);
+        self.pending = null;
+        // The target and END_STREAM were fixed by the HEADERS frame that
+        // started this block, not by the CONTINUATION that ends it.
+        return try self.finishHeaders(p, out);
     }
 
-    fn finishHeaders(self: *Connection, idx: ?usize, end_stream: bool, out: *OutBuf) Error!Event {
+    fn finishHeaders(self: *Connection, block: HeaderBlock, out: *OutBuf) Error!Event {
         const headers = self.hpack_dec.decode(self.header_accum[0..self.header_accum_len]) catch {
             // RFC 9113 §4.3: HPACK failure is always a connection error,
             // because the decoder state is now unrecoverable.
             return Error.CompressionError;
         };
         self.header_accum_len = 0;
+        const end_stream = block.end_stream;
 
-        const i = idx orelse {
+        const i = switch (block.target) {
+            .stream => |slot| slot,
             // Refused or closed: the block has done its work on the dynamic
             // table and is otherwise discarded.
-            const code = self.header_rst orelse return Error.ProtocolError;
-            self.header_rst = null;
-            if (code == .stream_closed) return self.streamClosed(out, self.header_stream);
-            try self.sendRstStream(out, self.header_stream, code);
-            return .progress;
+            .reject => |code| {
+                if (code == .stream_closed) return self.streamClosed(out, block.stream_id);
+                try self.sendRstStream(out, block.stream_id, code);
+                return .progress;
+            },
         };
         const s = &self.streams[i];
         for (headers) |hdr| {
@@ -1281,7 +1292,7 @@ test "header block split across CONTINUATION frames reassembles" {
     @memcpy(frame_buf[frame_header_len..][0..split], hb[0..split]);
     var r = try c.readFrame(frame_buf[0 .. frame_header_len + split], &out);
     try testing.expectEqual(Event.progress, r.event);
-    try testing.expect(c.expecting_continuation);
+    try testing.expect(c.pending != null);
 
     // An interleaved DATA frame here is a protocol error.
     var bad: [frame_header_len]u8 = undefined;
@@ -1295,7 +1306,7 @@ test "header block split across CONTINUATION frames reassembles" {
     @memcpy(frame_buf[frame_header_len..][0..rest], hb[split..hn]);
     r = try c.readFrame(frame_buf[0 .. frame_header_len + rest], &out);
     try testing.expectEqual(Event.progress, r.event);
-    try testing.expect(!c.expecting_continuation);
+    try testing.expect(c.pending == null);
 
     const idx = c.findStream(1).?;
     try testing.expectEqualStrings(path, c.streams[idx].path());
@@ -1883,7 +1894,7 @@ test "a refused HEADERS still decodes its block, so the dynamic table stays in s
     out.reset();
     var r = try c.readFrame(head[0..split], &out);
     try testing.expectEqual(Event.progress, r.event);
-    try testing.expect(c.expecting_continuation);
+    try testing.expectEqual(ErrorCode.refused_stream, c.pending.?.target.reject);
     try testing.expectEqual(@as(usize, 0), out.len); // no RST until the block is complete
 
     var cont: [64]u8 = undefined;
@@ -1892,7 +1903,7 @@ test "a refused HEADERS still decodes its block, so the dynamic table stays in s
     @memcpy(cont[frame_header_len..][0..rest], whole[split..]);
     r = try c.readFrame(cont[0 .. frame_header_len + rest], &out);
     try testing.expectEqual(Event.progress, r.event);
-    try testing.expect(!c.expecting_continuation);
+    try testing.expect(c.pending == null);
     const rst = FrameHeader.parse(out.buf[0..frame_header_len]);
     try testing.expectEqual(FrameType.rst_stream, rst.frame_type);
     try testing.expectEqual(@as(u31, 3), rst.stream_id);
@@ -1908,6 +1919,53 @@ test "a refused HEADERS still decodes its block, so the dynamic table stays in s
     @memcpy(f[frame_header_len..][0..hn], hb[0..hn]);
     r = try c.readFrame(f[0 .. frame_header_len + hn], &out);
     try testing.expectEqualStrings("/refused", c.streams[r.event.request].path());
+}
+
+test "a split HEADERS keeps its target until the block ends, and CONTINUATION needs an open block" {
+    // The HEADERS frame decides where the block goes; the CONTINUATION that
+    // ends it applies that decision rather than looking the stream up again.
+    const bufs = try testBuffers(testing.allocator, 2, 1024);
+    defer freeBuffers(testing.allocator, bufs);
+    var c = Connection.init(bufs);
+    var ob: [4096]u8 = undefined;
+    var out = OutBuf.init(&ob);
+    var fb: [512]u8 = undefined;
+
+    // A CONTINUATION with no block open is a connection error (§6.10).
+    var lone: [frame_header_len]u8 = undefined;
+    (FrameHeader{ .length = 0, .frame_type = .continuation, .flags = Flags.end_headers, .stream_id = 1 }).write(&lone);
+    try testing.expectError(Error.ProtocolError, c.readFrame(&lone, &out));
+
+    const first = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers | Flags.end_stream, "/a"), &out);
+    const idx = first.event.request;
+
+    // Trailers on the dispatched stream, split: the target is fixed as a
+    // STREAM_CLOSED reset when HEADERS arrives, and nothing goes out yet.
+    var wb: [512]u8 = undefined;
+    const whole = testHeadersFrame(&wb, 1, 0, "/trailers");
+    const split = frame_header_len + 4;
+    var head: [64]u8 = undefined;
+    @memcpy(head[0..split], whole[0..split]);
+    (FrameHeader{ .length = 4, .frame_type = .headers, .flags = 0, .stream_id = 1 }).write(head[0..frame_header_len]);
+    out.reset();
+    try testing.expectEqual(Event.progress, (try c.readFrame(head[0..split], &out)).event);
+    try testing.expectEqual(ErrorCode.stream_closed, c.pending.?.target.reject);
+    try testing.expectEqual(@as(usize, 0), out.len);
+
+    // A CONTINUATION for another stream is a connection error (§6.10).
+    var cont: [64]u8 = undefined;
+    const rest = whole.len - split;
+    (FrameHeader{ .length = @intCast(rest), .frame_type = .continuation, .flags = Flags.end_headers, .stream_id = 3 }).write(cont[0..frame_header_len]);
+    @memcpy(cont[frame_header_len..][0..rest], whole[split..]);
+    try testing.expectError(Error.ProtocolError, c.readFrame(cont[0 .. frame_header_len + rest], &out));
+
+    // The right one ends the block: the stream is reset and its slot parked
+    // for the worker, exactly as for an unsplit HEADERS.
+    (FrameHeader{ .length = @intCast(rest), .frame_type = .continuation, .flags = Flags.end_headers, .stream_id = 1 }).write(cont[0..frame_header_len]);
+    try testing.expectEqual(@as(usize, idx), (try c.readFrame(cont[0 .. frame_header_len + rest], &out)).event.reset);
+    try testing.expect(c.pending == null);
+    try testing.expectEqual(StreamState.orphaned, c.streams[idx].state);
+    try testing.expectEqualSlices(u8, &expectRst(1, .stream_closed), out.written()[0 .. frame_header_len + 4]);
 }
 
 test "HEADERS with END_STREAM on a half-closed stream is refused, not dispatched twice" {
