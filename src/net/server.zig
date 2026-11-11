@@ -1317,12 +1317,7 @@ fn parseInput(server: *Server, t: *IoThread, c: *Connection, ci: usize) void {
             continue;
         }
         const r = c.h2c.readFrame(c.in[pos..c.in_len], &c.out) catch |e| {
-            const code: h2.ErrorCode = switch (e) {
-                h2.Error.FlowControlError => .flow_control_error,
-                h2.Error.FrameSizeError => .frame_size_error,
-                h2.Error.CompressionError => .compression_error,
-                else => .protocol_error,
-            };
+            const code = h2.errorCode(e);
             // Best effort: the connection closes on the next line whether or
             // not the peer can be told why.
             c.h2c.sendGoaway(&c.out, code) catch {};

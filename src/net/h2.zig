@@ -108,6 +108,30 @@ pub const Error = error{
     OutputFull,
 };
 
+/// The GOAWAY code a connection error closes with. Exhaustive, so a new
+/// `Error` needs its own code: the server's `else => .protocol_error` told a
+/// client "protocol error" when the server had run out of output buffer
+/// (`OutputFull`) or streams (`RefusedStream`).
+pub fn errorCode(e: Error) ErrorCode {
+    return switch (e) {
+        Error.ProtocolError => .protocol_error,
+        Error.FrameSizeError => .frame_size_error,
+        Error.FlowControlError => .flow_control_error,
+        Error.CompressionError => .compression_error,
+        Error.RefusedStream => .refused_stream,
+        Error.OutputFull => .internal_error,
+    };
+}
+
+test "each connection error closes with its own GOAWAY code" {
+    try std.testing.expectEqual(ErrorCode.protocol_error, errorCode(Error.ProtocolError));
+    try std.testing.expectEqual(ErrorCode.frame_size_error, errorCode(Error.FrameSizeError));
+    try std.testing.expectEqual(ErrorCode.flow_control_error, errorCode(Error.FlowControlError));
+    try std.testing.expectEqual(ErrorCode.compression_error, errorCode(Error.CompressionError));
+    try std.testing.expectEqual(ErrorCode.refused_stream, errorCode(Error.RefusedStream));
+    try std.testing.expectEqual(ErrorCode.internal_error, errorCode(Error.OutputFull));
+}
+
 pub const FrameHeader = struct {
     length: u32,
     frame_type: FrameType,
