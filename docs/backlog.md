@@ -251,7 +251,13 @@ things stand between that and a row:
 - **The harness has no row for it.** An upload row and a search row on bfb's
   dataset path, and a recall that comes from the row (bfb's precision)
   rather than from a joined sweep, which `compare.py` and the report do not
-  read yet; plus the ε-tie check against our filtered oracle.
+  read yet; plus the ε-tie check against our filtered oracle. The
+  conformance side is built: `relevance --dataset-tests <tests.jsonl>`
+  sends each query under its own condition and scores it against the
+  shipped `closest_ids` with the tie rule, and `dataset-truth-check` checks
+  those ids against our filtered fp64 top-k. On the first 200 tests of each,
+  all 200 shipped sets are our exact sets (laion 86 conditioned, max score
+  delta 2.6e-7; h-and-m 200 conditioned, 4.4e-7).
 
 ## Next
 

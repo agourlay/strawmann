@@ -17,6 +17,7 @@
 //! T0–T4 against the pinned Qdrant container nightly on the full dataset; the
 //! fuzz corpus continuously."
 
+mod dataset_tests;
 mod datasets;
 mod differ;
 mod engine;
@@ -504,6 +505,15 @@ enum Command {
     /// dataset scale without a Qdrant instance to compare against.
     Relevance(RelevanceRun),
 
+    /// Findings 55: check a vector-db-benchmark bundle's shipped
+    /// `closest_ids` against our own filtered fp64 top-k, as `ground-truth.md`
+    /// §6 did for the unconditional sets. Offline: reads `vectors.npy`,
+    /// `payloads.jsonl` and `tests.jsonl` from `--dataset-dir`, evaluates each
+    /// test's conditions on the payloads, and judges each shipped set with the
+    /// §4.3 tie rule. `relevance --dataset-tests` scores against those ids, so
+    /// this is what says they are the right ones.
+    DatasetTruthCheck(DatasetTruthCheckRun),
+
     /// §9: convert `fvecs`/`ivecs`-era files to `fbin`.
     ///
     /// §4.3 makes `fbin` canonical and bfb's dataset path only reads `fbin`
@@ -620,6 +630,15 @@ fn read_vectors(path: &Path, limit: Option<usize>) -> anyhow::Result<datasets::V
     // picking by extension avoids a conversion step for a one-off run.
     match path.extension().and_then(|e| e.to_str()) {
         Some("fvecs") => datasets::read_fvecs(path, limit),
+        // A vector-db-benchmark bundle's corpus, which `--dataset-tests`
+        // reads beside its tests file; same rows as `convert-npy`'s fbin.
+        Some("npy") => {
+            let (v, _) = datasets::npy_convert::read_npy(path)?;
+            Ok(match limit {
+                Some(l) if l < v.n => v.prefix(l),
+                _ => v,
+            })
+        }
         _ => datasets::read_fbin(path, limit),
     }
 }
@@ -628,6 +647,8 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Relevance(a) => run_relevance(a),
+
+        Command::DatasetTruthCheck(a) => run_dataset_truth_check(a),
 
         Command::ConvertVecs(a) => run_convert_vecs(a),
 
@@ -2040,12 +2061,26 @@ struct RelevanceRun {
     engine: String,
     #[arg(long, default_value = "strawmann")]
     label: String,
-    #[arg(long)]
-    base: PathBuf,
-    #[arg(long)]
-    queries: PathBuf,
-    #[arg(long)]
-    ground_truth: PathBuf,
+    /// The corpus (`fbin`, `fvecs` or `npy`). Under `--dataset-tests` it
+    /// defaults to the `vectors.npy` beside the tests file.
+    #[arg(long, required_unless_present = "dataset_tests")]
+    base: Option<PathBuf>,
+    #[arg(long, required_unless_present = "dataset_tests")]
+    queries: Option<PathBuf>,
+    #[arg(long, required_unless_present = "dataset_tests")]
+    ground_truth: Option<PathBuf>,
+    /// Findings 55: a vector-db-benchmark `tests.jsonl` in place of
+    /// `--queries`, `--ground-truth` and `--filter-values`. Each record's
+    /// query is sent under its own `conditions` and scored against its own
+    /// `closest_ids` / `closest_scores` at depth `--limit`, with the §4.3 tie
+    /// rule. The payload is not uploaded from here, so the collection must
+    /// already hold it (`--skip-upload`; bfb's dataset upload loads it).
+    #[arg(
+        long,
+        group = "filtered",
+        conflicts_with_all = ["queries", "ground_truth", "filter_field"]
+    )]
+    dataset_tests: Option<PathBuf>,
     #[arg(long, default_value = "euclid")]
     metric: String,
     #[arg(long, default_value_t = 10)]
@@ -2116,7 +2151,7 @@ struct RelevanceRun {
     /// answer, it is a different question. Both halves are refused separately
     /// below -- values without a restricted truth, and a restricted truth
     /// without values.
-    #[arg(long, num_args = 1.., value_delimiter = ',')]
+    #[arg(long, num_args = 1.., value_delimiter = ',', group = "filtered")]
     filter_values: Vec<String>,
     /// W12: `params.acorn.enable` on every filtered query, as bfb's `--acorn`
     /// sends it with Qdrant's default `max_selectivity`.
@@ -2124,8 +2159,9 @@ struct RelevanceRun {
     /// The W12 rows search with ACORN and the sweep searched without it, so
     /// laion 1007 published the recall of one search (Qdrant 0.09 at `ef` 32)
     /// beside the throughput of another (0.96 with ACORN). ACORN is a filtered
-    /// path, so it needs `--filter-values`.
-    #[arg(long, default_value_t = false, requires = "filter_values")]
+    /// path, so it needs `--filter-values` or `--dataset-tests`; under the
+    /// latter only the conditioned queries carry it.
+    #[arg(long, default_value_t = false, requires = "filtered")]
     acorn: bool,
 }
 
@@ -2224,6 +2260,19 @@ struct RecallSweep {
     /// condition: a W12 row run with `--acorn` is a different search from
     /// one without it, at the same `ef` and filter.
     acorn: bool,
+    /// Findings 55: the vector-db-benchmark `tests.jsonl` every query, its
+    /// condition and its truth came from (`condition` is then
+    /// `"dataset-tests"`). Absent on every other sweep, so their files are
+    /// unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dataset_tests: Option<String>,
+    /// How many of those queries carried a condition, and how many were sent
+    /// unfiltered: laion's tests mix the two, and one recall over both says
+    /// nothing about either without the split.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conditioned_queries: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unconditioned_queries: Option<usize>,
     points: Vec<RecallPoint>,
 }
 
@@ -2238,14 +2287,20 @@ fn fixed_or_na(v: f64, prec: usize) -> String {
     }
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn run_relevance(r: RelevanceRun) -> anyhow::Result<()> {
-    let m = parse_metric(&r.metric)?;
-    let gt = oracle::load(&r.ground_truth)?;
-    let b = read_vectors(&r.base, r.limit_base)?;
+/// The `--queries` / `--ground-truth` path: an oracle truth and the query file
+/// it was computed from, checked against each other and against the sweep's
+/// condition. Returns the truth, the (capped) queries and the condition.
+fn load_file_truth(
+    r: &RelevanceRun,
+    gt_path: &Path,
+    q_path: &Path,
+    m: oracle::Metric,
+    b: &datasets::Vectors,
+) -> anyhow::Result<(oracle::GroundTruth, datasets::Vectors, Option<String>)> {
+    let gt = oracle::load(gt_path)?;
     // The whole query file, so its checksum can be compared against
     // the ground truth's; the cap is applied afterwards.
-    let q_full = read_vectors(&r.queries, None)?;
+    let q_full = read_vectors(q_path, None)?;
 
     // §4.3: ground truth is keyed to the exact r.base and query files it
     // was computed from. A mismatched pair produces recall numbers that
@@ -2286,8 +2341,7 @@ async fn run_relevance(r: RelevanceRun) -> anyhow::Result<()> {
         gt.condition.as_deref(),
         r.quant().is_some(),
     )
-    .map_err(|e| anyhow::anyhow!("{e} (ground truth: {})", r.ground_truth.display()))?;
-    let filter = r.filter();
+    .map_err(|e| anyhow::anyhow!("{e} (ground truth: {})", gt_path.display()))?;
     let q = match r.limit_queries {
         Some(cap) if cap < q_full.n => datasets::Vectors {
             n: cap,
@@ -2296,6 +2350,83 @@ async fn run_relevance(r: RelevanceRun) -> anyhow::Result<()> {
         },
         _ => q_full,
     };
+    Ok((gt, q, condition))
+}
+
+/// The `--dataset-tests` path (findings 55): queries, conditions and truth
+/// from one vector-db-benchmark `tests.jsonl`.
+fn load_dataset_truth(
+    r: &RelevanceRun,
+    path: &Path,
+    m: oracle::Metric,
+    b: &datasets::Vectors,
+) -> anyhow::Result<(
+    oracle::GroundTruth,
+    datasets::Vectors,
+    Vec<dataset_tests::TestRecord>,
+)> {
+    // The payload the conditions read lives in `payloads.jsonl`, with the
+    // field indexes bfb's dataset upload declares. `upsert` writes `{"i": id}`
+    // alone, so every condition would match nothing and the sweep would score
+    // empty pages as the engine's recall.
+    anyhow::ensure!(
+        r.skip_upload,
+        "--dataset-tests needs --skip-upload: the conditions read the payload in \
+         payloads.jsonl, which this tool does not upload. Load the collection with \
+         bfb's dataset upload first."
+    );
+    // The single-condition path's quantization refusal holds for these too:
+    // the truth is fp32 and what a rescore pool holds under a filter is a
+    // second question.
+    let c = dataset_tests::DATASET_CONDITION;
+    relevance::validate_condition(Some(c), Some(c), r.quant().is_some())
+        .map_err(anyhow::Error::msg)?;
+    let recs = dataset_tests::read_tests(path, r.limit_queries)?;
+    let gt = dataset_tests::truth_from_tests(
+        &recs,
+        r.limit as usize,
+        m,
+        b.n,
+        oracle::checksum_f32(&b.data),
+    )
+    .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    let q = datasets::Vectors {
+        n: recs.len(),
+        dim: gt.dim,
+        data: recs.iter().flat_map(|x| x.query.iter().copied()).collect(),
+    };
+    Ok((gt, q, recs))
+}
+
+#[tokio::main(flavor = "multi_thread")]
+async fn run_relevance(r: RelevanceRun) -> anyhow::Result<()> {
+    let m = parse_metric(&r.metric)?;
+    let base_path = match (&r.base, &r.dataset_tests) {
+        (Some(b), _) => b.clone(),
+        (None, Some(t)) => t.with_file_name("vectors.npy"),
+        (None, None) => anyhow::bail!("--base is required without --dataset-tests"),
+    };
+    let b = read_vectors(&base_path, r.limit_base)?;
+    let (gt, q, condition, ground_truth_name, tests) = match &r.dataset_tests {
+        Some(path) => {
+            let (gt, q, recs) = load_dataset_truth(&r, path, m, &b)?;
+            (
+                gt,
+                q,
+                Some(dataset_tests::DATASET_CONDITION.to_string()),
+                path.display().to_string(),
+                Some(recs),
+            )
+        }
+        None => {
+            let (Some(gt_path), Some(q_path)) = (&r.ground_truth, &r.queries) else {
+                anyhow::bail!("--queries and --ground-truth are required without --dataset-tests");
+            };
+            let (gt, q, condition) = load_file_truth(&r, gt_path, q_path, m, &b)?;
+            (gt, q, condition, gt_path.display().to_string(), None)
+        }
+    };
+    let filter = r.filter();
     anyhow::ensure!(
         gt.dim == b.dim && b.dim == q.dim,
         "dimension mismatch: gt={} r.base={} r.queries={}",
@@ -2303,6 +2434,13 @@ async fn run_relevance(r: RelevanceRun) -> anyhow::Result<()> {
         b.dim,
         q.dim
     );
+    // Per query under `--dataset-tests`, `None` where a record carries no
+    // condition; `filter` above is the single-condition path's.
+    let per_query: Option<Vec<Option<qdrant_client::qdrant::Filter>>> = tests.as_ref().map(|t| {
+        t.iter()
+            .map(|x| x.conditions.as_ref().map(|c| c.to_filter()))
+            .collect()
+    });
 
     // §4.3's hard requirement, checked rather than trusted.
     //
@@ -2411,6 +2549,19 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
     // §4.3's tie clause judged on the oracle's own fp64 score of each
     // returned point, not on the score the engine reported for it.
     let rescorer = oracle::Rescorer::new(m, &b.data, b.n, &q.data, n_q, b.dim);
+    if let Some(recs) = &tests {
+        dataset_tests::check_shipped_scores(recs, r.limit as usize, |qi, id| {
+            rescorer.score(qi, id)
+        })
+        .map_err(|e| anyhow::anyhow!("{ground_truth_name}: {e}"))?;
+        let conditioned = recs.iter().filter(|x| x.conditions.is_some()).count();
+        eprintln!(
+            "{ground_truth_name}: {conditioned} conditioned and {} unconditioned queries, \
+             truth at depth {}",
+            recs.len() - conditioned,
+            r.limit
+        );
+    }
 
     println!(
         "{:>6}  {:>10}  {:>10}  {:>10}  {:>10}  recall@10 CI95",
@@ -2421,6 +2572,20 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
         let hnsw_ef = if e == 0 { None } else { Some(e) };
         let t = std::time::Instant::now();
         let res = match r.quant() {
+            None if per_query.is_some() => {
+                eng.query_filtered_each(
+                    &r.collection,
+                    &q.data,
+                    n_q,
+                    q.dim,
+                    r.limit,
+                    r.exact,
+                    hnsw_ef,
+                    per_query.as_deref().expect("this arm is guarded on it"),
+                    r.acorn,
+                )
+                .await?
+            }
             None if filter.is_some() => {
                 eng.query_filtered(
                     &r.collection,
@@ -2537,7 +2702,7 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
             epsilon_source: format!("{eps_source:?}").to_lowercase(),
             condition: condition.clone(),
             queries: n_q,
-            ground_truth: r.ground_truth.display().to_string(),
+            ground_truth: ground_truth_name.clone(),
             // §4.3: the corpus this recall was measured against, so a
             // joined table cannot pair recall from one base file with
             // latency from another.
@@ -2545,6 +2710,13 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
             quantization_oversampling: r.quantization_oversampling,
             quantization_rescore: r.quantization_rescore,
             acorn: r.acorn,
+            dataset_tests: r.dataset_tests.as_ref().map(|p| p.display().to_string()),
+            conditioned_queries: tests
+                .as_ref()
+                .map(|t| t.iter().filter(|x| x.conditions.is_some()).count()),
+            unconditioned_queries: tests
+                .as_ref()
+                .map(|t| t.iter().filter(|x| x.conditions.is_none()).count()),
             points,
         };
         if let Some(dir) = path.parent() {
@@ -2556,6 +2728,77 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
     println!();
     println!("§7.4: these q/s figures are a smoke-test rate from a batching client,");
     println!("not a W3/W4 latency measurement. Use bfb for load; this reports recall.");
+    Ok(())
+}
+
+#[derive(clap::Args)]
+struct DatasetTruthCheckRun {
+    /// The extracted bundle: `vectors.npy`, `payloads.jsonl`, `tests.jsonl`.
+    #[arg(long)]
+    dataset_dir: PathBuf,
+    /// Check the first N tests only.
+    #[arg(long)]
+    limit_queries: Option<usize>,
+    #[arg(long, default_value = "cosine")]
+    metric: String,
+}
+
+fn run_dataset_truth_check(a: DatasetTruthCheckRun) -> anyhow::Result<()> {
+    let m = parse_metric(&a.metric)?;
+    let (base, _) = datasets::npy_convert::read_npy(&a.dataset_dir.join("vectors.npy"))?;
+    let payloads = dataset_tests::read_payloads(&a.dataset_dir.join("payloads.jsonl"))?;
+    // §4.3: ids are row indices, so payload row i is point i's. A payload
+    // file of another length pairs conditions with the wrong points.
+    anyhow::ensure!(
+        payloads.len() == base.n,
+        "{} payloads for {} vectors: row i must be point i's payload (§4.3)",
+        payloads.len(),
+        base.n
+    );
+    let tests_path = a.dataset_dir.join("tests.jsonl");
+    let recs = dataset_tests::read_tests(&tests_path, a.limit_queries)?;
+    anyhow::ensure!(
+        recs[0].query.len() == base.dim,
+        "{}: queries are {}-dimensional and the corpus is {}",
+        tests_path.display(),
+        recs[0].query.len(),
+        base.dim
+    );
+    let (eps, src) = differ::tolerance::default_epsilon(m, base.dim);
+    eprintln!("tie tolerance: {} [{src:?}]", eps.describe());
+    let mut base_pre = base.data;
+    if m.normalises_at_ingest() {
+        for row in base_pre.chunks_mut(base.dim) {
+            row.copy_from_slice(&oracle::preprocess(m, row));
+        }
+    }
+    let t = std::time::Instant::now();
+    let c = dataset_tests::check_truth(m, &base_pre, base.n, base.dim, &payloads, &recs, &eps);
+    println!(
+        "{}: {} tests ({} conditioned): {} exact, {} equal under ties, {} mismatched; \
+         max |shipped score - fp64 score| = {:.3e} ({:.1}s)",
+        tests_path.display(),
+        c.checked,
+        c.conditioned,
+        c.exact,
+        c.equal_under_ties,
+        c.mismatched,
+        c.max_score_delta,
+        t.elapsed().as_secs_f64()
+    );
+    for q in c.mismatches.iter().take(10) {
+        println!(
+            "  query {} (line {}): k-th {:.7}; shipped not ours {:?}; failing its condition {:?}; \
+             ours not shipped {:?}",
+            q.query, q.line, q.kth, q.extra, q.violating, q.missing
+        );
+    }
+    anyhow::ensure!(
+        c.mismatched == 0,
+        "{} of {} shipped neighbour sets are not the filtered top-k",
+        c.mismatched,
+        c.checked
+    );
     Ok(())
 }
 
@@ -3523,6 +3766,35 @@ mod tests {
         // An unfiltered search never takes ACORN, so asking for it there would
         // record a search the engine did not run.
         assert!(parse(&["--acorn"]).is_err());
+    }
+
+    #[test]
+    fn relevance_dataset_tests_replaces_the_query_truth_and_filter_flags() {
+        let parse =
+            |extra: &[&str]| Cli::try_parse_from(["conformance", "relevance"].iter().chain(extra));
+        let Command::Relevance(r) = parse(&["--dataset-tests", "t.jsonl", "--acorn"])
+            .unwrap()
+            .command
+        else {
+            panic!("parsed as another command")
+        };
+        // No --base: the loader takes the bundle's vectors.npy.
+        assert!(r.acorn && r.base.is_none() && r.queries.is_none());
+        assert_eq!(r.dataset_tests.as_deref(), Some(Path::new("t.jsonl")));
+        assert!(parse(&["--dataset-tests", "t", "--base", "b.fbin"]).is_ok());
+        // Each replaced flag is refused beside it, rather than one silently
+        // winning over the other.
+        for extra in [
+            ["--queries", "q"],
+            ["--ground-truth", "g"],
+            ["--filter-values", "x"],
+            ["--filter-field", "a"],
+        ] {
+            let args = [&["--dataset-tests", "t"][..], &extra[..]].concat();
+            assert!(parse(&args).is_err(), "{extra:?}");
+        }
+        // And without it the file path's flags are still required.
+        assert!(parse(&["--base", "b", "--queries", "q"]).is_err());
     }
 
     #[test]
