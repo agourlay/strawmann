@@ -236,8 +236,85 @@ class RecallTests(unittest.TestCase):
         self.assertEqual(rc.grade_of("W12-sel10"), "sel10")
         # Every other row is unfiltered, including ones with a suffix that is
         # not a grade.
-        for wid in ("W3", "W10-ef128", "W11-steady", "W6-ef32", "W12-upload"):
+        for wid in ("W3", "W10-ef128", "W11-steady", "W6-ef32", "W12-upload", "W16-upload"):
             self.assertIsNone(rc.grade_of(wid), wid)
+        # W16's ladder is one grade, the dataset's own tests, at every `ef`.
+        for wid in ("W16-ef32", "W16-ef128", "W16-ef512"):
+            self.assertEqual(rc.grade_of(wid), rc.TESTS_GRADE, wid)
+
+    def test_the_tests_sweep_calls_relevance_on_the_dataset_tests(self):
+        """W16's recall: the conformance binary reads the queries, conditions
+        and neighbours from `tests.jsonl`, so none of ours are passed."""
+        rc = self.m["recall"]
+        import workloads
+        self.assertEqual(rc.TESTS_COLLECTION, workloads.W16_COLLECTION)
+        argv = rc.tests_relevance_argv("http://x", "lbl", Path("/d/tests.jsonl"), "cosine",
+                                       10, 5000, [32, 64], Path("/o.json"), acorn=True)
+        self.assertEqual(argv, [
+            "cargo", "run", "--release", "--quiet", "--", "relevance",
+            "--engine", "http://x", "--label", "lbl", "--collection", "bench16",
+            "--skip-upload", "--dataset-tests", "/d/tests.jsonl", "--metric", "cosine",
+            "--limit", "10", "--limit-queries", "5000", "--json", "/o.json",
+            "--ef", "32", "64", "--acorn"])
+        off = rc.tests_relevance_argv("http://x", "lbl", Path("/d/tests.jsonl"), "cosine",
+                                      10, 5000, [32], Path("/o.json"), acorn=False)
+        self.assertNotIn("--acorn", off)
+        for flag in ("--queries", "--ground-truth", "--base", "--filter-field",
+                     "--filter-values"):
+            self.assertNotIn(flag, argv)
+
+    def test_the_tests_sweep_is_stamped_and_joins_the_w16_rows(self):
+        rc = self.m["recall"]
+        tdir = Path(self.tmp.name) / "bundle"
+        tdir.mkdir()
+        lines = [{"query": [0.1], "conditions": {"and": [
+                     {"similarity": {"range": {"gt": 0.3}}}]}, "closest_ids": [1]},
+                 {"query": [0.2], "conditions": None, "closest_ids": [2]},
+                 {"query": [0.3], "closest_ids": [3]}]
+        (tdir / "tests.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+        self.assertEqual(rc.tests_counts(tdir / "tests.jsonl"), (1, 2))
+        self.assertEqual(rc.tests_counts(tdir / "tests.jsonl", 1), (1, 0))
+        seen = []
+
+        def run(cmd, **_):
+            seen.append(cmd)
+            out = Path(cmd[cmd.index("--json") + 1])
+            out.write_text(json.dumps({"collection": "bench16", "acorn": True, "points": [
+                {"ef": 64, "recall_at_10": 0.93}]}))
+            return mock.Mock(returncode=0)
+
+        import workloads
+        d = rc.ROOT / "bench/results/lbl"
+        d.mkdir(parents=True)
+        (d / "run.json").write_text(json.dumps({"engine_comm": "qdrant", "harness": {
+            "collection": {"w12_acorn": "on, Qdrant's default max_selectivity"}}}))
+        with mock.patch.object(rc, "DATASET", "laion-small-clip"), \
+                mock.patch.object(rc, "METRIC", "cosine"), \
+                mock.patch.object(rc.paths, "tests_dir", lambda _: tdir), \
+                mock.patch.object(rc.subprocess, "run", run), \
+                mock.patch.object(workloads, "DATASET", "laion-small-clip"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(rc.sweep_tests("http://x", "lbl", 10_000), 0)
+        self.assertEqual(seen[0][seen[0].index("--limit-queries") + 1], "5000",
+                         "capped at the tests the corpus ships")
+        self.assertIn("--acorn", seen[0])
+        out = rc.recall_path("lbl", "laion-small-clip", "bench16", grade="tests")
+        self.assertEqual(out.name, "recall.laion-small-clip.bench16.tests.json")
+        doc = json.loads(out.read_text())
+        self.assertEqual((doc["dataset"], doc["grade"], doc["limit"]),
+                         ("laion-small-clip", "tests", 10))
+        self.assertEqual(doc["dataset_tests"], str(tdir / "tests.jsonl"))
+        self.assertEqual((doc["conditioned"], doc["unconditioned"]), (1, 2))
+        # Joined as W12's grades are: by the row's grade and its ACORN, and
+        # not to an unfiltered row of the same collection.
+        import compare
+        row = {"collection": "bench16", "ef": 64, "acorn": True}
+        self.assertEqual(compare.recall_at("lbl", "laion-small-clip", row, "W16-ef64"), 0.93)
+        compare._RECALL_CACHE.clear()
+        self.assertIsNone(compare.recall_at("lbl", "laion-small-clip",
+                                            {**row, "acorn": False}, "W16-ef64"))
+        self.assertIsNone(compare.recall_at("lbl", "sift1m", row, "W16-ef64"))
+        self.assertEqual(rc.load_recall("lbl", "laion-small-clip", "bench16"), {})
 
     def test_headline_and_sift_paths_differ(self):
         rc = self.m["recall"]

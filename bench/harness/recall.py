@@ -74,6 +74,9 @@ COLLECTIONS = {
     # ground truth. Absent from this map until 2026-09-08, which is why W12
     # was the row §8 refused for having a qps and no recall.
     "bench12": "fp32 with keyword payloads (filtered)",
+    # Swept in its own phase, after W16's rows (`workloads.isolated_groups`),
+    # against the dataset's own filtered tests rather than our ground truth.
+    "bench16": "fp32 with the dataset's own payload, each query under its own condition",
 }
 
 #: The `ef` values W10 sweeps, plus the 128 every other search row pins. A
@@ -100,6 +103,14 @@ FILTER_GRADES: dict[str, list[str]] = {
 
 #: The collection the filtered grades search, and the rows they speak for.
 FILTERED_COLLECTION = "bench12"
+
+#: W16's collection, and the grade its sweep is written and joined under.
+#: A grade because it is one, of a kind `FILTER_GRADES` does not hold: the
+#: condition is per query, the dataset's own (`tests.jsonl`), so the file name
+#: has to keep it apart from an unfiltered sweep of the same collection, and
+#: the join holds it to the rows' ACORN as it does W12's grades.
+TESTS_COLLECTION = "bench16"
+TESTS_GRADE = "tests"
 
 #: The dataset every sweep here scores against, and the metric its ground truth
 #: was computed under. `headline.py` sweeps another one and writes it under its
@@ -223,7 +234,8 @@ def corpus_disagreement(sweep_json: dict) -> str | None:
 
 def stamp(path: Path, dataset: str, collection: str, metric: str,
           oversampling: float | None = None, rescore: bool | None = None,
-          limit: int = DEFAULT_LIMIT, grade: str | None = None) -> bool:
+          limit: int = DEFAULT_LIMIT, grade: str | None = None,
+          extra: dict | None = None) -> bool:
     """Record inside the JSON what the sweep was of, and refuse a mismatch.
 
     The conformance binary writes `collection`, `metric` and `base_checksum`;
@@ -266,6 +278,10 @@ def stamp(path: Path, dataset: str, collection: str, metric: str,
     # records. The condition is the exact expression; the grade is the name the
     # row carries, and a reader joins on the second.
     d["grade"] = grade
+    # What only this kind of sweep knows about itself (W16's tests file and
+    # its counts); the binary's own record of the same key wins.
+    for k, v in (extra or {}).items():
+        d.setdefault(k, v)
     path.write_text(json.dumps(d, indent=2) + "\n")
     return True
 
@@ -635,6 +651,9 @@ def grade_of(wid: str) -> str | None:
     # width every ladder row read as unfiltered, found no sweep, and would have
     # been refused for the recall it does have.
     suffix = re.sub(r"-ef\d+$", "", suffix)
+    # W16's rows are all one grade, the dataset's tests, at five widths.
+    if wid.startswith("W16-") and not wid.endswith("-upload"):
+        return TESTS_GRADE
     return suffix if suffix in FILTER_GRADES else None
 
 
@@ -793,6 +812,94 @@ def sweep(engine: str, label: str, collection: str, queries: int,
     return 0
 
 
+class TestsCounts(NamedTuple):
+    """How many of the tests a sweep scored carry a condition, and how many
+    do not: laion's 5,000 are 2,530 and 2,470, so its recall is a blend of a
+    filtered and an unfiltered search, and the file says in what proportion."""
+
+    conditioned: int
+    unconditioned: int
+
+
+def tests_counts(tests: Path, n: int | None = None) -> TestsCounts:
+    """Count `tests.jsonl`'s queries with and without `conditions`, over the
+    first `n` (the sweep's `--limit-queries`) or all of them."""
+    cond = uncond = 0
+    with tests.open() as f:
+        for i, line in enumerate(f):
+            if n is not None and i >= n:
+                break
+            if not line.strip():
+                continue
+            if json.loads(line).get("conditions"):
+                cond += 1
+            else:
+                uncond += 1
+    return TestsCounts(cond, uncond)
+
+
+def tests_relevance_argv(engine: str, label: str, tests: Path, metric: str, limit: int,
+                         queries: int, ef: list[int], out: Path, acorn: bool) -> list[str]:
+    """The conformance binary's `relevance` over a dataset's own filtered tests.
+
+    No `--queries`, `--ground-truth` or `--filter-*`: the queries, each one's
+    condition and its neighbours under that condition all come from
+    `--dataset-tests`, and the binary scores against the shipped `closest_ids`
+    with the ε-tie rule. `--skip-upload`, as every sweep: W16's rows left
+    `bench16` behind and this measures that collection. `--acorn` as W12's
+    sweeps send it, when the rows did.
+    """
+    return ["cargo", "run", "--release", "--quiet", "--",
+            "relevance",
+            "--engine", engine,
+            "--label", label,
+            "--collection", TESTS_COLLECTION,
+            "--skip-upload",
+            "--dataset-tests", str(tests),
+            "--metric", metric,
+            "--limit", str(limit),
+            "--limit-queries", str(queries),
+            "--json", str(out),
+            "--ef", *[str(e) for e in ef],
+            *(["--acorn"] if acorn else [])]
+
+
+def sweep_tests(engine: str, label: str, queries: int, ef: list[int] | None = None) -> int:
+    """W16's recall: `bench16` under each of the dataset's own tests, per `ef`.
+
+    Written as every other sweep is (`recall_path` under `TESTS_GRADE`) and
+    stamped the same way, plus the tests file and its conditioned count, so
+    `compare.py`, the report and the sink join it on (dataset, collection,
+    ef) and the grade, as they join W12's.
+    """
+    import workloads
+    if paths.filtered_tests(DATASET) is None:
+        print(f"  !! {DATASET} has no filtered tests W16 runs on; nothing to sweep",
+              file=sys.stderr)
+        return 1
+    limit = workloads.w16_limit()
+    want = usable_ef(list(ef or workloads.W16_EF), limit).usable
+    tests = paths.tests_dir(DATASET) / "tests.jsonl"
+    queries = min(queries, paths.n_queries(DATASET))
+    out = recall_path(label, DATASET, TESTS_COLLECTION, limit, grade=TESTS_GRADE)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = tests_relevance_argv(engine, label, tests, METRIC, limit, queries, want, out,
+                               sweep_acorn(label))
+    print(f"\n=== {TESTS_COLLECTION} ({COLLECTIONS[TESTS_COLLECTION]}): {tests} ===",
+          flush=True)
+    r = subprocess.run(cmd, cwd=CONF)
+    if r.returncode != 0:
+        print(f"  !! sweep failed for {TESTS_COLLECTION}; W16's rows will carry no recall",
+              file=sys.stderr)
+        return 1
+    counts = tests_counts(tests, queries)
+    if not stamp(out, DATASET, TESTS_COLLECTION, METRIC, limit=limit, grade=TESTS_GRADE,
+                 extra={"dataset_tests": str(tests), **counts._asdict()}):
+        return 1
+    print(f"  wrote {out}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("label", help="result directory the sweeps belong to")
@@ -841,6 +948,10 @@ def main(argv: list[str]) -> int:
     rc = 0
     for raw in args.collections.split(","):
         c = raw.strip()
+        if c == TESTS_COLLECTION:
+            rc |= sweep_tests(args.engine, args.label, args.queries,
+                              [int(x) for x in args.ef.split(",")] if args.ef else None)
+            continue
         if c == FILTERED_COLLECTION:
             # One collection, one sweep per grade: W12's two rows differ only
             # in selectivity, so they search the same `bench12` under different
