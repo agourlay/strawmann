@@ -426,7 +426,7 @@
 <div class="panel" id="scifact">
   <div class="panel-head">
     <strong>scifact <span>· BM25, 5,183 documents, 300 queries</span></strong>
-    <span>measured 2026-11-09 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-11-12 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -436,18 +436,18 @@
     <tbody>
       <tr>
         <td class="what">One query at a time<small>single client; nDCG@10 0.6886 / 0.6886</small></td>
-        <td class="num">7,595</td><td class="num">3,652</td>
-        <td><div class="ratio win" title="strawmANN serves 2.08x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:41.6%"></i></span><b>2.08x</b></div></td>
+        <td class="num">8,224</td><td class="num">3,657</td>
+        <td><div class="ratio win" title="strawmANN serves 2.25x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:45.0%"></i></span><b>2.25x</b></div></td>
       </tr>
       <tr>
         <td class="what">Saturating<small>closed loop, every core busy; nDCG@10 0.6886 / 0.6886</small></td>
-        <td class="num">77,687</td><td class="num">32,351</td>
-        <td><div class="ratio win" title="strawmANN serves 2.40x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:48.0%"></i></span><b>2.40x</b></div></td>
+        <td class="num">78,056</td><td class="num">32,996</td>
+        <td><div class="ratio win" title="strawmANN serves 2.37x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:47.4%"></i></span><b>2.37x</b></div></td>
       </tr>
       <tr>
         <td class="what">Filtered<small>a keyword filter keeping half the corpus; nDCG@10 0.3542 / 0.3542</small></td>
-        <td class="num">71,076</td><td class="num">32,440</td>
-        <td><div class="ratio win" title="strawmANN serves 2.19x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:43.8%"></i></span><b>2.19x</b></div></td>
+        <td class="num">70,587</td><td class="num">32,669</td>
+        <td><div class="ratio win" title="strawmANN serves 2.16x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:43.2%"></i></span><b>2.16x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -456,7 +456,7 @@
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-scifact.md"><code>comparison-scifact.md</code></a>.
     Qdrant served BM25 from optimized segments only: all 5,183 points in immutable indexes (indexing threshold 1 KB). strawmANN served it from its one text index. Every ratio in this panel is against that Qdrant index.
-    <a class="report-link" href="reports/report-scifact-sm-scifact-perf-1109-vs-qd-scifact-perf-1109-2026-11-09-1702.html">Full report for this run</a>
+    <a class="report-link" href="reports/report-scifact-sm-scifact-perf-1111-vs-qd-scifact-perf-1111-2026-11-12-0108.html">Full report for this run</a>
   </div>
 </div>
 <!-- END landing-scifact -->
@@ -464,7 +464,7 @@
 <div class="panel" id="fiqa">
   <div class="panel-head">
     <strong>fiqa <span>· BM25, 57,638 documents, 648 queries</span></strong>
-    <span>measured 2026-11-09 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-11-12 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -474,18 +474,18 @@
     <tbody>
       <tr>
         <td class="what">One query at a time<small>single client; nDCG@10 0.2500 / 0.2500</small></td>
-        <td class="num">3,551</td><td class="num">1,389</td>
-        <td><div class="ratio win" title="strawmANN serves 2.56x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:51.2%"></i></span><b>2.56x</b></div></td>
+        <td class="num">4,127</td><td class="num">1,394</td>
+        <td><div class="ratio win" title="strawmANN serves 2.96x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:59.2%"></i></span><b>2.96x</b></div></td>
       </tr>
       <tr>
         <td class="what">Saturating<small>closed loop, every core busy; nDCG@10 0.2500 / 0.2500</small></td>
-        <td class="num">49,226</td><td class="num">12,219</td>
-        <td><div class="ratio win" title="strawmANN serves 4.03x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:80.6%"></i></span><b>4.03x</b></div></td>
+        <td class="num">69,617</td><td class="num">12,216</td>
+        <td><div class="ratio win" title="strawmANN serves 5.70x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:100.0%"></i></span><b>5.70x</b></div></td>
       </tr>
       <tr>
         <td class="what">Filtered<small>a keyword filter keeping half the corpus; nDCG@10 0.1616 / 0.1616</small></td>
-        <td class="num">20,098</td><td class="num">10,757</td>
-        <td><div class="ratio win" title="strawmANN serves 1.87x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:37.4%"></i></span><b>1.87x</b></div></td>
+        <td class="num">68,149</td><td class="num">10,536</td>
+        <td><div class="ratio win" title="strawmANN serves 6.47x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:100.0%"></i></span><b>6.47x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -494,7 +494,7 @@
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-fiqa.md"><code>comparison-fiqa.md</code></a>.
     Qdrant served BM25 from optimized segments only: all 57,638 points in immutable indexes (indexing threshold 1 KB). strawmANN served it from its one text index. Every ratio in this panel is against that Qdrant index.
-    <a class="report-link" href="reports/report-fiqa-sm-fiqa-perf-1109-vs-qd-fiqa-perf-1109-2026-11-09-1725.html">Full report for this run</a>
+    <a class="report-link" href="reports/report-fiqa-sm-fiqa-perf-1111-vs-qd-fiqa-perf-1111-2026-11-12-0129.html">Full report for this run</a>
   </div>
 </div>
 <!-- END landing-fiqa -->
@@ -502,7 +502,7 @@
 <div class="panel" id="arguana">
   <div class="panel-head">
     <strong>arguana <span>· BM25, 8,674 documents, 1,406 queries</span></strong>
-    <span>measured 2026-11-09 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-11-12 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -512,18 +512,18 @@
     <tbody>
       <tr>
         <td class="what">One query at a time<small>single client; nDCG@10 0.3138 / 0.3139</small></td>
-        <td class="num">2,031</td><td class="num">1,730</td>
-        <td><div class="ratio win" title="strawmANN serves 1.17x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:23.4%"></i></span><b>1.17x</b></div></td>
+        <td class="num">2,411</td><td class="num">1,734</td>
+        <td><div class="ratio win" title="strawmANN serves 1.39x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:27.8%"></i></span><b>1.39x</b></div></td>
       </tr>
       <tr>
         <td class="what">Saturating<small>closed loop, every core busy; nDCG@10 0.3138 / 0.3139</small></td>
-        <td class="num">22,471</td><td class="num">13,823</td>
-        <td><div class="ratio win" title="strawmANN serves 1.63x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:32.6%"></i></span><b>1.63x</b></div></td>
+        <td class="num">30,169</td><td class="num">13,928</td>
+        <td><div class="ratio win" title="strawmANN serves 2.17x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:43.4%"></i></span><b>2.17x</b></div></td>
       </tr>
       <tr>
         <td class="what">Filtered<small>a keyword filter keeping half the corpus; nDCG@10 0.2615 / 0.2615</small></td>
-        <td class="num">10,158</td><td class="num">15,157</td>
-        <td><div class="ratio lose" title="strawmANN serves 0.67x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:13.4%"></i></span><b>0.67x</b></div></td>
+        <td class="num">29,862</td><td class="num">15,162</td>
+        <td><div class="ratio win" title="strawmANN serves 1.97x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:39.4%"></i></span><b>1.97x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -532,7 +532,7 @@
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-arguana.md"><code>comparison-arguana.md</code></a>.
     Qdrant served BM25 from optimized segments only: all 8,674 points in immutable indexes (indexing threshold 1 KB). strawmANN served it from its one text index. Every ratio in this panel is against that Qdrant index.
-    <a class="report-link" href="reports/report-arguana-sm-arguana-perf-1109-vs-qd-arguana-perf-1109-2026-11-09-1749.html">Full report for this run</a>
+    <a class="report-link" href="reports/report-arguana-sm-arguana-perf-1111-vs-qd-arguana-perf-1111-2026-11-12-0152.html">Full report for this run</a>
   </div>
 </div>
 <!-- END landing-arguana -->
@@ -540,7 +540,7 @@
 <div class="panel" id="quora">
   <div class="panel-head">
     <strong>quora <span>· BM25, 522,931 documents, 10,000 queries</span></strong>
-    <span>measured 2026-11-09 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-11-12 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -550,18 +550,18 @@
     <tbody>
       <tr>
         <td class="what">One query at a time<small>single client; nDCG@10 0.7906 / 0.7905</small></td>
-        <td class="num">1,715</td><td class="num">1,437</td>
-        <td><div class="ratio win" title="strawmANN serves 1.19x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:23.8%"></i></span><b>1.19x</b></div></td>
+        <td class="num">2,165</td><td class="num">1,426</td>
+        <td><div class="ratio win" title="strawmANN serves 1.52x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:30.4%"></i></span><b>1.52x</b></div></td>
       </tr>
       <tr>
         <td class="what">Saturating<small>closed loop, every core busy; nDCG@10 0.7906 / 0.7905</small></td>
-        <td class="num">20,896</td><td class="num">13,013</td>
-        <td><div class="ratio win" title="strawmANN serves 1.61x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:32.2%"></i></span><b>1.61x</b></div></td>
+        <td class="num">27,598</td><td class="num">13,071</td>
+        <td><div class="ratio win" title="strawmANN serves 2.11x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:42.2%"></i></span><b>2.11x</b></div></td>
       </tr>
       <tr>
         <td class="what">Filtered<small>a keyword filter keeping half the corpus; nDCG@10 0.4334 / 0.4334</small></td>
-        <td class="num">16,779</td><td class="num">6,676</td>
-        <td><div class="ratio win" title="strawmANN serves 2.51x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:50.2%"></i></span><b>2.51x</b></div></td>
+        <td class="num">25,653</td><td class="num">6,594</td>
+        <td><div class="ratio win" title="strawmANN serves 3.89x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:77.8%"></i></span><b>3.89x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -570,7 +570,7 @@
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-quora.md"><code>comparison-quora.md</code></a>.
     Qdrant served BM25 from optimized segments only: all 522,931 points in immutable indexes (indexing threshold 1 KB). strawmANN served it from its one text index. Every ratio in this panel is against that Qdrant index.
-    <a class="report-link" href="reports/report-quora-sm-quora-perf-1109-vs-qd-quora-perf-1109-2026-11-09-1815.html">Full report for this run</a>
+    <a class="report-link" href="reports/report-quora-sm-quora-perf-1111-vs-qd-quora-perf-1111-2026-11-12-0218.html">Full report for this run</a>
   </div>
 </div>
 <!-- END landing-quora -->
