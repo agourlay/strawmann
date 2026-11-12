@@ -4568,16 +4568,19 @@ class DatasetTestsTableTests(unittest.TestCase):
         self.assertEqual(p.tests_n("laion-small-clip"), 100_000)
         self.assertEqual(p.tests_n("h-and-m-2048-angular-filters"), 105_100)
 
-    def test_the_hnm_fields_are_its_filters_json(self):
-        """The ten fields the query generator drew from, where the bundle is
-        on this disk to say so; skipped where it is not."""
+    def test_the_hnm_fields_are_keyword_fields_of_its_payload_schema(self):
+        """The ten fields W16 indexes are keyword fields of h-and-m's payload,
+        by the committed `datasets.json` rather than the bundle's
+        `filters.json`, which is not on a CI runner: a skip there failed the
+        harness step on every push from cf8fed4 on (check.py counts a skip as
+        a failure)."""
         p = self.w.paths
-        f = p.tests_dir("h-and-m-2048-angular-filters") / "filters.json"
-        if not f.exists():
-            self.skipTest(f"{f} not on this disk")
-        names = [x["name"] for x in json.loads(f.read_text())]
-        want = [n for n, _ in p.FILTERED_TESTS["h-and-m-2048-angular-filters"].fields]
-        self.assertEqual(sorted(names), sorted(want))
+        reg = json.loads((Path(__file__).resolve().parents[2]
+                          / "conformance/datasets/datasets.json").read_text())
+        schema = next(d for d in reg if d["name"] == "h-and-m-2048-angular-filters")["payload_schema"]
+        for name, kind in p.FILTERED_TESTS["h-and-m-2048-angular-filters"].fields:
+            self.assertEqual(kind, "keyword")
+            self.assertEqual(schema.get(name), "keyword", name)
 
     def test_laion_gains_the_w16_rows_and_runs_them_on_their_own(self):
         ids = self.ids()
