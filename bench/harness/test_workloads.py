@@ -387,6 +387,8 @@ class WorkloadTests(unittest.TestCase):
         self.assertNotIn("--skip-field-indices", t["W12-upload"].args)
         self.assertFalse(w.payload_index_suppressed(t["W12-sel1"]))
         self.assertFalse(w.payload_index_suppressed(t["W12-sel10"]))
+        # As its docstring says: no row in the table is suppressed.
+        self.assertEqual([r for r in t if w.payload_index_suppressed(t[r])], [])
 
     def test_the_filtered_row_is_two_selectivity_grades_on_the_config_path(self):
         """docs/workloads.md W12 point 2: two grades, not one -- "an engine

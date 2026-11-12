@@ -1300,12 +1300,12 @@ def payload_index_suppressed(w: Workload) -> bool:
     """The row told bfb not to create field indices, so the engine has none.
 
     The one direction in which the harness's *intent* is evidence: asking for
-    no index guarantees there is none, while asking for one guarantees nothing
-    — which is why `Workload.needs_payload_index` reads the engine back instead
-    of trusting the flags. W12 carries `--skip-field-indices` because strawmANN
-    answers `UNIMPLEMENTED` for `CreateFieldIndex` and bfb `unwrap()`s that into
-    a panic; the flag keeps the row runnable and costs Qdrant its index, and
-    both halves of that belong in the published row rather than in a comment.
+    no index guarantees there is none, while asking for one guarantees nothing,
+    which is why `Workload.needs_payload_index` reads the engine back instead
+    of trusting the flags. No row in the table passes `--skip-field-indices`
+    since 2026-09-03, when strawmANN began answering `CreateFieldIndex` and W12
+    dropped the flag, so this is False on every current row. It stays because
+    rows measured before then were suppressed, and a hand-built row could be.
     """
     return "--skip-field-indices" in w.args
 
