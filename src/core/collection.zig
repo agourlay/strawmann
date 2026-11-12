@@ -1824,7 +1824,6 @@ pub const Probe = struct {
     pub fn prefetch(ctx: *const anyopaque, node: u32) void {
         const self: *const Probe = @ptrCast(@alignCast(ctx));
         const row = self.coll.space.rowBytes(node);
-        if (prefetch_bytes_override) |n| return dist.common.prefetchRow(row.ptr, @min(row.len, n));
         if (row.len <= whole_row_bytes)
             dist.common.prefetchRow(row.ptr, row.len)
         else
@@ -1834,13 +1833,12 @@ pub const Probe = struct {
     /// The widest row `prefetch` asks for whole: eight lines, d=128 in fp32.
     pub const whole_row_bytes: usize = 512;
 
-    /// `--probe-prefetch-bytes`: ask for this much of every row instead,
-    /// whatever its width. An A/B arm for findings 75: laion's 2 KiB rows
-    /// get one line under the rule above, and its W4 pulls as much DRAM per
-    /// query as Qdrant at IPC 0.51 against 0.79, while the deeper prefetch
-    /// that lost on h-and-m (decisions.md, 2026-09-29) was never swept at
-    /// d=512. Set once at startup, before any search.
-    pub var prefetch_bytes_override: ?usize = null;
+    // A wider prefetch past 512 bytes was swept on 2026-11-11 (ab-1112,
+    // `--probe-prefetch-bytes`, since removed) and lost everywhere: laion W4
+    // -2.1% at 512 bytes and -10.6% at its whole 2 KiB row, although demand
+    // DRAM per query fell 56%; dbpedia W4 -0.9% at 512. The extra hints cost
+    // more than the misses they saved, as on h-and-m (decisions.md,
+    // 2026-09-29). The rule above stands for every width.
 
     /// A node's whole stored row, for a reader that will read all of it next:
     /// quantized search's stage 2 (`--rescore-prefetch whole`), not a

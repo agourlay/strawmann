@@ -49,7 +49,6 @@ const Flag = enum {
     prune_memo,
     filtered_plan,
     rescore_prefetch,
-    probe_prefetch_bytes,
 
     /// The text each flag is spelled with.
     ///
@@ -83,7 +82,6 @@ const Flag = enum {
             .prune_memo => "--prune-memo",
             .filtered_plan => "--filtered-plan",
             .rescore_prefetch => "--rescore-prefetch",
-            .probe_prefetch_bytes => "--probe-prefetch-bytes",
         };
     }
 
@@ -260,7 +258,6 @@ const Options = struct {
     prune_memo: bool = engineDefault(.prune_memo),
     filtered_plan: ?api.FilteredPlan = engineDefault(.filtered_plan),
     rescore_prefetch: core.quantized_search.RescorePrefetch = engineDefault(.rescore_prefetch),
-    probe_prefetch_bytes: ?usize = null,
     pin: bool = false,
     /// §5.5. Declared, never ambient, §7.1's rule, so a result row can state
     /// which arm produced it.
@@ -307,9 +304,6 @@ fn usage(w: *Io.Writer) !void {
         \\  --rescore-prefetch   off|first|whole: how quantized search asks
         \\                       for the fp32 rows it rescores (default off;
         \\                       an A/B arm)
-        \\  --probe-prefetch-bytes <n>  prefetch the first n bytes of every fp32
-        \\                       row the traversal visits (default: whole up
-        \\                       to 512, one line past it; an A/B arm)
         \\  --pin               pin threads to cores   (§6.3, §7.1)
         \\  --cpus <list>        which cpus --pin may use, e.g. 4-11 or 0,2,4-6
         \\                       (default 0..; name them on a heterogeneous part)
@@ -459,7 +453,6 @@ pub fn main(init: std.process.Init) !void {
                     return error.BadArgument;
                 };
             },
-            .probe_prefetch_bytes => opts.probe_prefetch_bytes = try parse(usize, next(args, &i)),
             .build_mode => {
                 const v = next(args, &i) orelse return error.MissingValue;
                 opts.build_mode = std.meta.stringToEnum(core.collection.BuildMode, v) orelse {
@@ -498,7 +491,6 @@ pub fn main(init: std.process.Init) !void {
     engine.prune_memo = opts.prune_memo;
     engine.filtered_plan = opts.filtered_plan;
     engine.rescore_prefetch = opts.rescore_prefetch;
-    core.collection.Probe.prefetch_bytes_override = opts.probe_prefetch_bytes;
     if (opts.default_placement.isMapped() and opts.data_dir == null) {
         try w.print("error: --default-placement {s} needs --data-dir <path>\n", .{opts.default_placement.name()});
         try w.flush();
@@ -721,11 +713,7 @@ pub fn main(init: std.process.Init) !void {
         try w.print("  filtered plan          : cost model (scan, two-hop or walk per query)\n", .{});
     }
     try w.print("  rescore prefetch       : {s} (--rescore-prefetch)\n", .{@tagName(engine.rescore_prefetch)});
-    if (core.collection.Probe.prefetch_bytes_override) |n| {
-        try w.print("  fp32 row prefetch      : the first {d} bytes of every row (--probe-prefetch-bytes)\n", .{n});
-    } else {
-        try w.print("  fp32 row prefetch      : whole up to {d} bytes, first line past it\n", .{core.collection.Probe.whole_row_bytes});
-    }
+    try w.print("  fp32 row prefetch      : whole up to {d} bytes, first line past it\n", .{core.collection.Probe.whole_row_bytes});
 
     // §7.2: the hardware baseline belongs next to the result, not in a separate
     // document nobody opens. A qps figure without the bandwidth of the machine
