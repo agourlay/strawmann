@@ -709,7 +709,7 @@ def _dumbbell(runs: list[Run], values: dict[str, dict[str, float]],
 
 
 def _per_query(df: pd.DataFrame, runs: list[Run], key: str,
-               scale: float = 1.0) -> dict[str, dict[str, float]]:
+               scale=1.0) -> dict[str, dict[str, float]]:
     """A hardware counter divided by the queries that caused it, per row.
 
     The only form in which two engines' counters compare: an absolute count is
@@ -729,7 +729,10 @@ def _per_query(df: pd.DataFrame, runs: list[Run], key: str,
                 continue
             v, n = r.get(key), r.get("n_queries")
             if pd.notna(v) and pd.notna(n) and n and v > 0:
-                out.setdefault(r["id"], {})[run.label] = float(v) * scale / float(n)
+                # A callable scale reads the row: DRAM's line size is the
+                # measuring host's, recorded on it, not this one's.
+                k = scale(r) if callable(scale) else scale
+                out.setdefault(r["id"], {})[run.label] = float(v) * k / float(n)
     return out
 
 
@@ -778,7 +781,8 @@ def chart_dram_per_query(runs: list[Run], df: pd.DataFrame) -> dict | None:
     which makes them the right number for the graph rows and the wrong one to
     compare against a bandwidth roofline on the scan rows.
     """
-    vals = _per_query(df, runs, "perf_dram_fills", scale=perfstat.line_bytes() / 1024)
+    vals = _per_query(df, runs, "perf_dram_fills",
+                      scale=lambda r: perfstat.row_line_bytes(r) / 1024)
     order = [w for w in dict.fromkeys(df["id"]) if w in vals]
     if not order or not _worth_plotting(vals):
         return None
@@ -786,8 +790,8 @@ def chart_dram_per_query(runs: list[Run], df: pd.DataFrame) -> dict | None:
                          "KiB")
     return dict(section="hardware", title="Demand loads from DRAM per query",
                 html=fig_html(fig),
-                note="Demand loads served from DRAM, times the cache line this host "
-                     "reports. Lower is better. " + (LOG_NOTE if log else "")
+                note="Demand loads served from DRAM, times the cache line the "
+                     "measuring host reported. Lower is better. " + (LOG_NOTE if log else "")
                      + "<b>Demand only</b>: the hardware prefetcher's fills are a "
                        "separate counter and are not in this number, so a row that "
                        "streams — an exact scan above all — moved far more than this "

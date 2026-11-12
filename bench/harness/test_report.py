@@ -2642,6 +2642,34 @@ class InstrumentTests(unittest.TestCase):
             self.assertNotIn("W11", vals, key)
             self.assertIn("W3", vals, key)
 
+    def test_dram_per_query_uses_the_measuring_hosts_line_size(self):
+        """DRAM per query multiplied fills by `perfstat.line_bytes()` of the
+        host rendering the report, not the one that measured the row."""
+        report = self.report
+        import perfstat
+        perf = dict(n_queries=1000, perf_set="default", perf_dram_fills=16_000.0)
+        measured = _row("W3", 1.0, perf_line_bytes=128, **perf)
+        with mock.patch.object(perfstat, "line_bytes", return_value=64):
+            html = report.hardware_rows_table(self._runs([measured]))
+            self.assertIn("2.0 KiB", html)        # 16 fills x 128 bytes per query
+            self.assertNotIn("1.0 KiB", html)     # x this host's 64
+            self.assertEqual(perfstat.derive(measured)["dram_bytes"], 16_000 * 128)
+            # A row from before the field keeps the rendering host's size.
+            html = report.hardware_rows_table(self._runs([_row("W3", 1.0, **perf)]))
+            self.assertIn("1.0 KiB", html)
+            runs = self._runs([measured, _row("W4", 1.0, **perf)])
+            seen = {}
+            charts = importlib.import_module("report_charts")
+            real = charts._per_query
+            def spy(df, runs_, key, scale=1.0):
+                seen.update(real(df, runs_, key, scale))
+                return seen
+            with mock.patch.object(charts, "_per_query", spy):
+                report.chart_dram_per_query(runs, report.frame(runs))
+        label = runs[0].label
+        self.assertAlmostEqual(seen["W3"][label], 2.0)
+        self.assertAlmostEqual(seen["W4"][label], 1.0)
+
     def test_per_engine_tables_name_each_engine_once(self):
         """Every column header repeated the label: seven times per engine in the
         scheduler table, five in stalls, six in hardware, two in sharing."""

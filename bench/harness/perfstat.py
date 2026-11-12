@@ -165,7 +165,7 @@ EVENT_SETS: dict[str, tuple[Event, ...]] = {
 PERF_FIELDS = tuple(dict.fromkeys(
     [e.field for evs in EVENT_SETS.values() for e in evs]
     + ["perf_set", "perf_events", "perf_enabled_pct", "perf_window_s", "perf_note",
-       "perf_ref_hz"]))
+       "perf_ref_hz", "perf_line_bytes"]))
 
 _line_bytes_cache: list[int] = []
 
@@ -184,6 +184,18 @@ def line_bytes() -> int:
         except (OSError, ValueError):
             _line_bytes_cache.append(64)
     return _line_bytes_cache[0]
+
+
+def row_line_bytes(row) -> int:
+    """The line size the row's own host reported, else this host's.
+
+    A report rendered on another machine multiplied every row's fills by its
+    own line size; rows from before `perf_line_bytes` keep that fallback.
+    """
+    v = row.get("perf_line_bytes")
+    if isinstance(v, (int, float)) and v > 0:   # NaN > 0 is False
+        return int(v)
+    return line_bytes()
 
 
 _supported_cache: dict[str, bool] = {}
@@ -553,6 +565,8 @@ class Sidecar:
         # report rendered on another machine must not silently substitute that
         # machine's rate into this row's frequency.
         out["perf_ref_hz"] = ref_cycles_hz()
+        # Same reason: DRAM per query is fills times this host's line size.
+        out["perf_line_bytes"] = line_bytes()
         multiplexed = out.pop("_multiplexed", [])
         missing = out.pop("_missing", [])
         # What was actually counted, in the row, because the role names above
@@ -623,7 +637,7 @@ def derive(row: dict) -> dict:
         if ref_hz:
             out["ghz"] = cycles / ref * ref_hz / 1e9
     if fills is not None:
-        out["dram_bytes"] = fills * line_bytes()
+        out["dram_bytes"] = fills * row_line_bytes(row)
     return out
 
 

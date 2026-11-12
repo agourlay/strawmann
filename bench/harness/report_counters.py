@@ -323,7 +323,8 @@ def perf_arms(runs: list[Run]) -> dict[str, str]:
     out = {}
     counters = [f for f in perfstat.PERF_FIELDS
                 if f not in ("perf_set", "perf_events", "perf_note",
-                             "perf_enabled_pct", "perf_window_s", "perf_ref_hz")]
+                             "perf_enabled_pct", "perf_window_s", "perf_ref_hz",
+                             "perf_line_bytes")]
     for run in runs:
         sets = {(r.get("perf_set") or "") for r in run.rows
                 if any(r.get(f) is not None for f in counters)}
@@ -443,10 +444,10 @@ def hardware_rows_table(runs: list[Run]) -> str:
                     _perf_cell(row, "branch_mpki", 2),
                     _per_query_cell(row, "perf_cycles", 0),
                     # Fills times the line size, in KiB: the same conversion
-                    # `perfstat.derive` uses, read from the host rather than
-                    # assumed to be 64.
+                    # `perfstat.derive` uses, read from the measuring host
+                    # (recorded on the row) rather than the rendering one.
                     _per_query_cell(row, "perf_dram_fills", 1,
-                                    perfstat.line_bytes() / 1024, " KiB"),
+                                    perfstat.row_line_bytes(row) / 1024, " KiB"),
                     _per_query_cell(row, "perf_dtlb_walks", 1))):
                 any_value = any_value or present
                 cells.append(f'<td class="num{" grp" if i == 0 else ""}">{text}</td>')

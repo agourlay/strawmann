@@ -357,6 +357,9 @@ class PerfFields:
     #: was measured. Without it the row has a frequency *ratio* and no
     #: frequency; see `perfstat.derive`.
     perf_ref_hz: float | None = None
+    #: This host's cache line size, recorded for the same reason: DRAM per
+    #: query is fills times it, and the rendering host's may differ.
+    perf_line_bytes: int | None = None
     perf_cycles: float | None = None
     perf_ref_cycles: float | None = None
     perf_instructions: float | None = None
