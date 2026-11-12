@@ -315,8 +315,10 @@ _LANES = re.compile(r"f32 lanes / accumulators: (\d+) / (\d+)")
 
 
 def native_kernels(probe_text: str) -> tuple[str, ...] | None:
-    """The fp32 kernels whose `align(64)` is load-bearing (findings 69), by the
-    symbol names Zig gives them, at the width this build compiled.
+    """The kernels whose `align(64)` is load-bearing, by the symbol names Zig
+    gives them, at the width this build compiled: the fp32 ones (findings 69)
+    and PQ's ADC loop, which laion 1111 measured 6.4% slower once a rewrite
+    of its caller left it inlined across three cache lines (af8bf2d).
 
     The width is the build host's (`-Dcpu=native`): `Dot(16,8)` on an AVX-512
     host, `Dot(8,8)` on an AVX2 one. Naming the 16-lane kernels failed CI on
@@ -326,7 +328,8 @@ def native_kernels(probe_text: str) -> tuple[str, ...] | None:
     if m is None:
         return None
     lanes, acc = m.groups()
-    return (f"dist.dot_f32.Dot({lanes},{acc}).call", f"dist.l2_f32.Euclid({lanes},{acc}).call")
+    return (f"dist.dot_f32.Dot({lanes},{acc}).call", f"dist.l2_f32.Euclid({lanes},{acc}).call",
+            "dist.pq_adc.Pq8Adc.score")
 
 
 def kernel_alignment(nm_text: str, names: tuple[str, ...], align: int = 64) -> list[str]:

@@ -787,7 +787,8 @@ class KernelAlignTests(unittest.TestCase):
         """CI failed on a runner without AVX-512: its build had `Dot(8,8)`."""
         self.assertEqual(self.check.native_kernels(
             "isa build              : native\nf32 lanes / accumulators: 8 / 8\n"),
-            ("dist.dot_f32.Dot(8,8).call", "dist.l2_f32.Euclid(8,8).call"))
+            ("dist.dot_f32.Dot(8,8).call", "dist.l2_f32.Euclid(8,8).call",
+             "dist.pq_adc.Pq8Adc.score"))
         self.assertIsNone(self.check.native_kernels("isa build: native\n"))
 
     def test_aligned_out_of_line_kernels_pass(self):
