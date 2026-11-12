@@ -924,6 +924,42 @@ pub fn save(gt: &GroundTruth, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+impl GroundTruth {
+    /// §4.3: a ground truth is keyed to the exact base file, query file and
+    /// metric it was computed from. A mismatch on any of the three produces
+    /// recall numbers that are wrong in a way nothing downstream can detect,
+    /// so it is an error, not a warning. The one copy of the check: the
+    /// differ and the relevance run each had their own, and one of them
+    /// compared the base file only.
+    pub fn check_inputs(
+        &self,
+        base: &[f32],
+        queries: &[f32],
+        metric: Metric,
+    ) -> anyhow::Result<()> {
+        let (base_sum, query_sum) = (checksum_f32(base), checksum_f32(queries));
+        anyhow::ensure!(
+            self.base_checksum == base_sum,
+            "ground truth was computed for a different base file (checksum {:x} vs {:x}) (§4.3)",
+            self.base_checksum,
+            base_sum,
+        );
+        anyhow::ensure!(
+            self.query_checksum == query_sum,
+            "ground truth was computed for a different query file (checksum {:x} vs {:x}) (§4.3)",
+            self.query_checksum,
+            query_sum,
+        );
+        anyhow::ensure!(
+            self.metric == metric,
+            "ground truth was computed for {} but --metric is {} (§4.3)",
+            self.metric.as_str(),
+            metric.as_str()
+        );
+        Ok(())
+    }
+}
+
 pub fn load(path: &Path) -> anyhow::Result<GroundTruth> {
     let f = std::fs::File::open(path)?;
     Ok(serde_json::from_reader(f)?)
@@ -1187,6 +1223,18 @@ mod tests {
         assert_eq!(a.ids, b.ids);
         assert_eq!(a.base_checksum, b.base_checksum);
         assert_eq!(a.ids.len(), nq * 10);
+    }
+
+    #[test]
+    fn check_inputs_refuses_another_base_query_or_metric() {
+        let (base, queries) = (vec![1.0f32, 2.0, 3.0, 4.0], vec![0.5f32, 0.5]);
+        let gt = compute(Metric::Euclid, &base, 2, &queries, 1, 2, 1);
+        gt.check_inputs(&base, &queries, Metric::Euclid).unwrap();
+        let other = vec![9.0f32, 2.0, 3.0, 4.0];
+        let err = |r: anyhow::Result<()>| r.unwrap_err().to_string();
+        assert!(err(gt.check_inputs(&other, &queries, Metric::Euclid)).contains("base file"));
+        assert!(err(gt.check_inputs(&base, &other[..2], Metric::Euclid)).contains("query file"));
+        assert!(err(gt.check_inputs(&base, &queries, Metric::Cosine)).contains("--metric"));
     }
 
     #[test]

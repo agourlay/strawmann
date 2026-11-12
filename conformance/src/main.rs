@@ -954,17 +954,20 @@ fn payload_matches(
     }
 }
 
+/// BM25's parameter ranges. Every command that takes `--k1` and `--b` asks:
+/// the truth command alone used to, so the two engine-facing ones sent values
+/// it would have refused.
+fn check_bm25_params(k1: f64, b: f64) -> anyhow::Result<()> {
+    anyhow::ensure!(k1.is_finite() && k1 >= 0.0, "--k1 must be >= 0, got {k1}");
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&b),
+        "--b must be within [0, 1], got {b}"
+    );
+    Ok(())
+}
+
 fn run_bm25_truth(a: Bm25TruthRun) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        a.k1.is_finite() && a.k1 >= 0.0,
-        "--k1 must be >= 0, got {}",
-        a.k1
-    );
-    anyhow::ensure!(
-        (0.0..=1.0).contains(&a.b),
-        "--b must be within [0, 1], got {}",
-        a.b
-    );
+    check_bm25_params(a.k1, a.b)?;
     let settings = text::Bm25Settings {
         params: text::TextParams {
             lowercase: a.lowercase,
@@ -1254,6 +1257,7 @@ fn text_tiers(
 
 #[tokio::main(flavor = "multi_thread")]
 async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
+    check_bm25_params(a.k1, a.b)?;
     let params = text::TextParams {
         lowercase: a.lowercase,
         english_stopwords: a.english_stopwords,
@@ -1594,6 +1598,7 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
+    check_bm25_params(a.k1, a.b)?;
     let params = text::TextParams {
         lowercase: a.lowercase,
         english_stopwords: a.english_stopwords,
@@ -2302,33 +2307,7 @@ fn load_file_truth(
     // the ground truth's; the cap is applied afterwards.
     let q_full = read_vectors(q_path, None)?;
 
-    // §4.3: ground truth is keyed to the exact r.base and query files it
-    // was computed from. A mismatched pair produces recall numbers that
-    // are wrong in a way nothing downstream can detect, so this is a
-    // hard failure rather than a warning.
-    anyhow::ensure!(
-        gt.base_checksum == oracle::checksum_f32(&b.data),
-        "ground truth was computed for a different r.base set (checksum {:x} vs {:x})",
-        gt.base_checksum,
-        oracle::checksum_f32(&b.data),
-    );
-    // The query file too. `run_differ` checked both; this checked one,
-    // so a ground truth for another query set was accepted here and
-    // every recall number that followed was against the wrong answers.
-    anyhow::ensure!(
-        gt.query_checksum == oracle::checksum_f32(&q_full.data),
-        "ground truth was computed for a different query set (checksum {:x} vs {:x}) (§4.3)",
-        gt.query_checksum,
-        oracle::checksum_f32(&q_full.data),
-    );
-    // And for this metric. A euclid ground truth judging a cosine
-    // collection is not approximately right, it is a different question.
-    anyhow::ensure!(
-        gt.metric == m,
-        "ground truth was computed for {} but --metric is {} (§4.3)",
-        gt.metric.as_str(),
-        m.as_str()
-    );
+    gt.check_inputs(&b.data, &q_full.data, m)?;
     // Under the same condition, in both directions. Either mismatch produces a
     // number that looks like an engine result and is not one: an unfiltered
     // search judged against a restricted truth misses every neighbour the
@@ -2884,23 +2863,9 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
     let queries = read_vectors(query_path, None)?;
     let gt = oracle::load(gt_path)?;
 
-    // §4.3: "Checksums of base, query, and GT files are recorded in every
-    // result row." Checking them here means a stale ground truth is caught
-    // before it can quietly produce meaningless recall.
-    anyhow::ensure!(
-        gt.base_checksum == oracle::checksum_f32(&base.data),
-        "ground truth was computed for a different base file (§4.3)"
-    );
-    anyhow::ensure!(
-        gt.query_checksum == oracle::checksum_f32(&queries.data),
-        "ground truth was computed for a different query file (§4.3)"
-    );
-    anyhow::ensure!(
-        gt.metric == m,
-        "ground truth was computed for {} but --metric is {} (§4.3)",
-        gt.metric.as_str(),
-        m.as_str()
-    );
+    // §4.3: a stale ground truth is caught here, before it can quietly
+    // produce meaningless recall.
+    gt.check_inputs(&base.data, &queries.data, m)?;
 
     let engines = [
         engine::Engine::connect("strawmann", strawmann_url)?,
@@ -3672,6 +3637,15 @@ fn spread_across_arms(paths: &[PathBuf]) -> anyhow::Result<differ::tolerance::Di
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bm25_params_are_range_checked() {
+        assert!(check_bm25_params(1.2, 0.75).is_ok());
+        assert!(check_bm25_params(0.0, 0.0).is_ok());
+        assert!(check_bm25_params(-0.1, 0.75).is_err());
+        assert!(check_bm25_params(f64::NAN, 0.75).is_err());
+        assert!(check_bm25_params(1.2, 1.5).is_err());
+    }
 
     #[test]
     fn an_unmeasured_recall_prints_as_not_applicable() {
