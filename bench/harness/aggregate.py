@@ -174,6 +174,33 @@ def _paging_note(got: list[dict]) -> str:
     return f" (major faults {mf[0]:,.0f} to {mf[-1]:,.0f} across them: the engine was paging)"
 
 
+#: The per-pass state an outlier note names when it spread `HUGE_SPREAD_MIN`
+#: or more of its largest: `(field, label, format)`.
+_PASS_STATE = (("major_faults", "major faults", lambda v: f"{v:,.0f}"),
+               ("runqueue_wait_s", "run-queue wait", lambda v: f"{v:,.1f} s"),
+               ("rss_peak_bytes", "peak RSS", lambda v: procstat.human_bytes(int(v))))
+
+
+def _pass_state_note(got: list[dict]) -> str:
+    """Each pass's faults, run-queue wait and peak RSS, when they moved.
+
+    laion 1111's W11 outlier note called the normal pass the odd one, while
+    the two slow passes carried four times its major faults and up to 21.7 GiB
+    of peak RSS, and W12-sel1's slow passes four times its run-queue wait:
+    the cause was in the rows, and the note did not say it.
+    """
+    parts = []
+    for key, label, fmt in _PASS_STATE:
+        vals = [r.get(key) for r in got]
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals):
+            continue
+        top = max(vals)
+        if top <= 0 or (top - min(vals)) / top < HUGE_SPREAD_MIN:
+            continue
+        parts.append(f"{label} {', '.join(fmt(v) for v in vals)}")
+    return f" ({'; '.join(parts)})" if parts else ""
+
+
 #: Instructions per query within this of the pair's: the odd pass did the
 #: same work, so its speed moved for another reason (stalls, placement, load).
 SAME_WORK_MAX = 0.05
@@ -513,7 +540,8 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
             notes.append(f"{wid}: pass {odd['pass']} read {odd['move']:+.0%} against "
                          f"two passes that agree; one pass set this row's spread, "
                          f"and a band built from it would call a real difference parity"
-                         + _paging_note(got) + _counter_note(got, odd["pass"] - 1))
+                         + _paging_note(got) + _counter_note(got, odd["pass"] - 1)
+                         + _pass_state_note(got))
         elif (drift := _rep_drift([r.get("qps") for r in got])) is not None:
             merged["rep_drift"] = drift
             notes.append(f"{wid}: qps moved {drift:+.0%} monotonically across the "

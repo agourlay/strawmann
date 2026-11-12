@@ -852,6 +852,28 @@ class NoiseTests(unittest.TestCase):
             for wid in ("W3", "W4", "W9"):
                 self.assertNotIn(f"{wid}: huge pages", text)
 
+    def test_an_outlier_note_names_the_pass_state_that_moved_with_it(self):
+        """laion 1111's W11 note named no faults, though the slow passes had
+        four times the normal one's."""
+        import importlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _reload(root)
+            agg = importlib.reload(importlib.import_module("aggregate"))
+            for i, (q, mf, rq) in enumerate(((1000.0, 1000.0, 5.0), (1010.0, 1020.0, 5.1),
+                                             (800.0, 4000.0, 5.0)), start=1):
+                self._rep(root, f"lbl-rep{i}", [_row("W11", q, major_faults=mf,
+                                                     runqueue_wait_s=rq)])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                self.assertEqual(agg.main(["aggregate.py", "lbl",
+                                           "lbl-rep1", "lbl-rep2", "lbl-rep3"]), 0)
+            text = out.getvalue()
+            self.assertIn("W11: pass 3 read", text)
+            self.assertIn("(major faults 1,000, 1,020, 4,000)", text)
+            # Run-queue wait within the spread is not named.
+            self.assertNotIn("run-queue wait", text)
+
     def test_passes_that_disagree_on_memory_are_named_beside_their_qps(self):
         """findings 62: dbpedia 1110's fast first pass was the one under
         memory pressure, which a median of the memory fields would hide."""
