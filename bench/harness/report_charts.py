@@ -26,6 +26,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 
 import compare
+import procstat
 import recall as recall_mod
 from report_data import (
     BUILD_ROWS,
@@ -720,7 +721,12 @@ def _per_query(df: pd.DataFrame, runs: list[Run], key: str,
         return {}
     out: dict[str, dict[str, float]] = {}
     for run in runs:
+        # W11's counters include the concurrent writer's indexing and its
+        # n_queries counts searches only: not a per-query cost, so absent.
+        writer = {w for w, row in run.by_id().items() if procstat.is_mutating(row)}
         for _, r in df[df["engine"] == run.label].iterrows():
+            if r["id"] in writer:
+                continue
             v, n = r.get(key), r.get("n_queries")
             if pd.notna(v) and pd.notna(n) and n and v > 0:
                 out.setdefault(r["id"], {})[run.label] = float(v) * scale / float(n)
@@ -749,7 +755,8 @@ def chart_query_cost(runs: list[Run], df: pd.DataFrame) -> dict | None:
                      + (LOG_NOTE if log else "")
                      + "Load rows are absent: they have no queries to divide by, "
                        "and an absolute count under a per-query axis would be a "
-                       "different quantity wearing this one's label.")
+                       "different quantity wearing this one's label. So are W11's, "
+                       "whose counters include the concurrent writer's indexing.")
 
 
 def chart_dram_per_query(runs: list[Run], df: pd.DataFrame) -> dict | None:

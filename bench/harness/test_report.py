@@ -2622,6 +2622,26 @@ class InstrumentTests(unittest.TestCase):
         # recomputed from the CPU time sitting right there.
         self.assertNotIn("nominal", html)
 
+    def test_a_writer_row_has_no_per_query_counters(self):
+        """W11's sidecar brackets the concurrent writer's indexing while its
+        n_queries counts searches only, so cycles, DRAM and TLB walks per
+        query charged the writer's work to the searches."""
+        report = self.report
+        perf = dict(n_queries=50_000, perf_set="default", perf_cycles=9.9e12,
+                    perf_instructions=2e12, perf_dtlb_walks=7.7e9, perf_dram_fills=3.3e9)
+        w11 = _row("W11", 1.0, background_pps=5000.0, background_s=40.0, **perf)
+        w3 = _row("W3", 1.0, **{**perf, "perf_cycles": 1.3e10})
+        runs = self._runs([w3, w11])
+        html = report.hardware_rows_table(runs)
+        self.assertNotIn("198,000,000", html)    # W11's cycles per query
+        self.assertIn("260,000", html)           # W3's still reads
+        self.assertIn("concurrent writer", html)
+        df = report.frame(runs)
+        for key in ("perf_cycles", "perf_dram_fills", "perf_dtlb_walks"):
+            vals = importlib.import_module("report_charts")._per_query(df, runs, key)
+            self.assertNotIn("W11", vals, key)
+            self.assertIn("W3", vals, key)
+
     def test_per_engine_tables_name_each_engine_once(self):
         """Every column header repeated the label: seven times per engine in the
         scheduler table, five in stalls, six in hardware, two in sharing."""

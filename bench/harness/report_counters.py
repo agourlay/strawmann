@@ -372,6 +372,11 @@ def _per_query_cell(row: dict, key: str, digits: int = 0,
     the same question twice. A row with no query count — a load row — gets a
     dash rather than an absolute number in a per-query column.
     """
+    # W11's sidecar brackets the concurrent writer's indexing too, while
+    # n_queries counts searches only, so its cycles per query were the
+    # writer's cost spread over the searches. Skipped, not relabelled.
+    if procstat.is_mutating(row):
+        return "-", False
     v = perfstat.per_query(row.get(key), row.get("n_queries"))
     if v is None:
         return "-", False
@@ -426,11 +431,12 @@ def hardware_rows_table(runs: list[Run]) -> str:
     (`perfstat.py --overhead`) rather than assumed.
     """
     ids = list(dict.fromkeys(r["id"] for run in runs for r in run.rows))
-    body = []
+    body, writer = [], False
     for wid in ids:
         cells, any_value = [], False
         for run in runs:
             row = run.by_id().get(wid, {})
+            writer = writer or (procstat.is_mutating(row) and row.get("perf_cycles") is not None)
             for i, (text, present) in enumerate((
                     _perf_cell(row, "ipc", 2),
                     _freq_cell(row),
@@ -449,8 +455,11 @@ def hardware_rows_table(runs: list[Run]) -> str:
                         f'{"".join(cells)}</tr>')
     if not body:
         return ""
+    note = ('<p class="muted">Per-query columns are blank on rows with a concurrent '
+            'writer (W11): the counters include its indexing and the query count '
+            'does not.</p>' if writer else "")
     return _engine_grouped(runs, ["IPC", "GHz", "branch MPKI", "cycles/query",
-                                  "demand DRAM/query", "TLB walks/query"], body)
+                                  "demand DRAM/query", "TLB walks/query"], body) + note
 
 
 
