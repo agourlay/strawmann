@@ -161,6 +161,25 @@ def affinity(pid: int | None) -> str | None:
     return ", ".join(f"{m} x{n}" for m, n in ordered)
 
 
+def cpus_in(spec: str) -> set[int]:
+    """The CPUs a list like `4-11,14` names. Spaces and empty parts are skipped.
+
+    The one parser: `fullrun`, `report` and `w9_ab` each had a copy, and
+    `w9_ab`'s raised on `4-11, 14` and on a trailing comma.
+    """
+    out: set[int] = set()
+    for raw in spec.split(","):
+        part = raw.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            out.update(range(int(lo), int(hi) + 1))
+        else:
+            out.add(int(part))
+    return out
+
+
 def running_binary(pid: int | None) -> Path | None:
     """The executable behind `pid`, via `/proc/<pid>/exe`.
 

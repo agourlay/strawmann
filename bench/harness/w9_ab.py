@@ -42,6 +42,7 @@ import fullrun
 import perfstat
 
 import procstat
+import provenance
 import workloads
 
 #: name, query workers, queries per request.
@@ -57,13 +58,8 @@ PORT = 6334
 COMMON = ["--retry", "0", "--timeout", str(workloads.BFB_TIMEOUT_S), "--p9", "3"]
 
 
-def cpu_set(spec: str) -> set[int]:
-    """`0-3,8` as `{0, 1, 2, 3, 8}`."""
-    out: set[int] = set()
-    for part in spec.split(","):
-        lo, _, hi = part.partition("-")
-        out.update(range(int(lo), int(hi or lo) + 1))
-    return out
+#: `0-3,8` as `{0, 1, 2, 3, 8}`.
+cpu_set = provenance.cpus_in
 
 
 def plan(reps: int) -> list[tuple[int, list[tuple[str, int]]]]:

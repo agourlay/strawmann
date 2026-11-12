@@ -2422,19 +2422,7 @@ def _network_path(mode: str | None) -> str:
                     '(finding 26)</span>')
 
 
-def _cpus_in(mask: str) -> set[int]:
-    """The CPUs a list like `4-11,14` names."""
-    out: set[int] = set()
-    for raw in mask.split(","):
-        part = raw.strip()
-        if not part:
-            continue
-        if "-" in part:
-            lo, hi = part.split("-", 1)
-            out.update(range(int(lo), int(hi) + 1))
-        else:
-            out.add(int(part))
-    return out
+_cpus_in = provenance.cpus_in
 
 
 def _as_ranges(cpus: set[int]) -> str:

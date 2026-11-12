@@ -3745,6 +3745,11 @@ class W9CpuSetTests(unittest.TestCase):
         ab = importlib.import_module("w9_ab")
         self.assertEqual(ab.cpu_set("0-3"), {0, 1, 2, 3})
         self.assertEqual(ab.cpu_set("0-1,8,10-11"), {0, 1, 8, 10, 11})
+        # One parser for the drivers, `fullrun` and the report: this one used
+        # to raise on a space after a comma and on a trailing comma.
+        self.assertEqual(ab.cpu_set("4-5, 8,"), {4, 5, 8})
+        fullrun = importlib.import_module("fullrun")
+        self.assertEqual(fullrun.cpu_count("4-11, 14,"), 9)
 
 
 class CommitAbTests(unittest.TestCase):

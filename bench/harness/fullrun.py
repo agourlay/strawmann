@@ -161,17 +161,7 @@ def qdrant_segment_env() -> dict[str, str]:
 
 def cpu_count(spec: str) -> int:
     """How many CPUs a list like `4-11` names."""
-    n = 0
-    for raw in spec.split(","):
-        part = raw.strip()
-        if not part:
-            continue
-        if "-" in part:
-            lo, hi = part.split("-", 1)
-            n += int(hi) - int(lo) + 1
-        else:
-            n += 1
-    return n
+    return len(provenance.cpus_in(spec))
 
 
 # -------------------------------------------------------------------------
