@@ -49,6 +49,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -849,6 +850,34 @@ def stop_scope(unit: str) -> None:
     """Stop a transient scope by name, including one an interrupted run left."""
     if shutil.which("systemctl"):
         sh(["systemctl", "--user", "stop", f"{unit}.scope"], 60)
+
+
+def stop_leftover_scopes() -> None:
+    """Stop both engines' scopes by name before the ports are asked.
+
+    A night unit stopped with `systemctl --user stop` left both engines
+    running in their own scopes (they are not in the unit's cgroup), and the
+    next night's port check then waited out `--wait-for-gate` on them. The
+    names are this harness's, so whatever holds them is a leftover.
+    """
+    for unit in (QDRANT_SCOPE, STRAWMANN_SCOPE):
+        stop_scope(unit)
+
+
+def on_sigterm(_signum, _frame) -> None:
+    """SIGTERM as an exit, so the `finally` blocks that stop the engines run.
+
+    Python's default for SIGTERM is to die where it stands, and `systemctl
+    --user stop` of a night unit sends exactly that: both engines outlived
+    the run. Further SIGTERMs are ignored so they cannot cut the cleanup
+    short; systemd's SIGKILL after its stop timeout still ends it.
+    """
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise SystemExit(143)
+
+
+def install_sigterm_handler() -> None:
+    signal.signal(signal.SIGTERM, on_sigterm)
 
 
 def keep_qdrant_log(label: str) -> Path | None:
@@ -2719,6 +2748,7 @@ def main(argv: list[str]) -> int:
         print(f"estimate    unknown -- no previous {DATASET} run on this machine "
               f"to measure against", flush=True)
 
+    stop_leftover_scopes()
     verdict = wait_until_admitted(args.lax, args.wait_for_gate)
     if not verdict:
         return 1
@@ -2862,6 +2892,7 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    install_sigterm_handler()
     try:
         sys.exit(main(sys.argv))
     finally:

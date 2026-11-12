@@ -11,6 +11,7 @@ import itertools
 import json
 import math
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -4890,7 +4891,7 @@ class FullrunSessionPublishTests(unittest.TestCase):
         self.assertTrue(self.f.is_defect(why[0]))
 
 
-def _drive_fullrun_to_first_arm(f, *extra, at_arm=None):
+def _drive_fullrun_to_first_arm(f, *extra, at_arm=None, events=None):
     """`fullrun.main` with everything before the first arm stubbed, stopping
     there: `start_strawmann` calls `at_arm` and returns None, so `main` exits 1
     without touching an engine, a corpus or the gate."""
@@ -4899,8 +4900,15 @@ def _drive_fullrun_to_first_arm(f, *extra, at_arm=None):
             at_arm()
         return
 
+    events = [] if events is None else events
+
+    def admitted(*_a):
+        events.append("gate")
+        return f.Gate(proceed=True, failed=False)
+
     err = io.StringIO()
     with mock.patch.object(f.workloads, "check_bfb_pin", return_value=None), \
+            mock.patch.object(f, "stop_scope", events.append), \
             mock.patch.object(f.workloads, "use_dataset", lambda name: name), \
             mock.patch.object(f.workloads, "required_capacity", lambda: 1000), \
             mock.patch.object(f.workloads, "foreign_dataset", lambda *_a: None), \
@@ -4910,8 +4918,7 @@ def _drive_fullrun_to_first_arm(f, *extra, at_arm=None):
             mock.patch.object(f.paths, "metric", lambda _n: "l2"), \
             mock.patch.object(f, "preflight_placement", lambda *_a: None), \
             mock.patch.object(f, "estimated_minutes", lambda *_a: None), \
-            mock.patch.object(f, "wait_until_admitted",
-                              lambda *_a: f.Gate(proceed=True, failed=False)), \
+            mock.patch.object(f, "wait_until_admitted", admitted), \
             mock.patch.object(f, "start_strawmann", first_arm), \
             contextlib.redirect_stderr(err), \
             contextlib.redirect_stdout(io.StringIO()):
@@ -4947,3 +4954,44 @@ class FullrunNPinResetTests(unittest.TestCase):
             "--reps", "3",
             at_arm=lambda: seen.update({p: p.exists() for p in pins}))
         self.assertEqual(seen, dict.fromkeys(pins, False))
+
+
+class FullrunSigtermTests(unittest.TestCase):
+    """`systemctl --user stop` of a night unit sent SIGTERM, Python died where
+    it stood, the `finally` blocks that stop the engines never ran, and both
+    engines outlived the run in their own scopes. The next night's port check
+    then waited out `--wait-for-gate` on them."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        _reload(Path(self.tmp.name))
+        self.f = importlib.reload(sys.modules["fullrun"]) \
+            if "fullrun" in sys.modules else importlib.import_module("fullrun")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_sigterm_is_an_exit_that_runs_finally_blocks(self):
+        installed = {}
+        with mock.patch.object(self.f.signal, "signal",
+                               installed.__setitem__):
+            self.f.install_sigterm_handler()
+            handler = installed[signal.SIGTERM]
+            cleaned = []
+            with self.assertRaises(SystemExit) as cm:
+                try:
+                    handler(signal.SIGTERM, None)
+                finally:
+                    cleaned.append("engines stopped")
+        self.assertEqual(cm.exception.code, 143)
+        self.assertEqual(cleaned, ["engines stopped"])
+        # A second SIGTERM must not cut that cleanup short.
+        self.assertIs(installed[signal.SIGTERM], signal.SIG_IGN)
+
+    def test_leftover_scopes_are_stopped_by_name_before_the_ports_are_asked(self):
+        events = []
+        _drive_fullrun_to_first_arm(self.f, events=events)
+        self.assertIn("gate", events)
+        before = events[:events.index("gate")]
+        self.assertIn(self.f.QDRANT_SCOPE, before)
+        self.assertIn(self.f.STRAWMANN_SCOPE, before)
