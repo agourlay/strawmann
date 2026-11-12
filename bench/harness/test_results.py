@@ -279,7 +279,7 @@ class RecallTests(unittest.TestCase):
         def run(cmd, **_):
             seen.append(cmd)
             out = Path(cmd[cmd.index("--json") + 1])
-            out.write_text(json.dumps({"collection": "bench16", "acorn": True, "points": [
+            out.write_text(json.dumps({"collection": "bench16", "acorn": False, "points": [
                 {"ef": 64, "recall_at_10": 0.93}]}))
             return mock.Mock(returncode=0)
 
@@ -297,7 +297,8 @@ class RecallTests(unittest.TestCase):
             self.assertEqual(rc.sweep_tests("http://x", "lbl", 10_000), 0)
         self.assertEqual(seen[0][seen[0].index("--limit-queries") + 1], "5000",
                          "capped at the tests the corpus ships")
-        self.assertIn("--acorn", seen[0])
+        # W16's own ACORN, off (`workloads.W16_ACORN`), not W12's stamp.
+        self.assertNotIn("--acorn", seen[0])
         out = rc.recall_path("lbl", "laion-small-clip", "bench16", grade="tests")
         self.assertEqual(out.name, "recall.laion-small-clip.bench16.tests.json")
         doc = json.loads(out.read_text())
@@ -308,11 +309,11 @@ class RecallTests(unittest.TestCase):
         # Joined as W12's grades are: by the row's grade and its ACORN, and
         # not to an unfiltered row of the same collection.
         import compare
-        row = {"collection": "bench16", "ef": 64, "acorn": True}
+        row = {"collection": "bench16", "ef": 64, "acorn": False}
         self.assertEqual(compare.recall_at("lbl", "laion-small-clip", row, "W16-ef64"), 0.93)
         compare._RECALL_CACHE.clear()
         self.assertIsNone(compare.recall_at("lbl", "laion-small-clip",
-                                            {**row, "acorn": False}, "W16-ef64"))
+                                            {**row, "acorn": True}, "W16-ef64"))
         self.assertIsNone(compare.recall_at("lbl", "sift1m", row, "W16-ef64"))
         self.assertEqual(rc.load_recall("lbl", "laion-small-clip", "bench16"), {})
 

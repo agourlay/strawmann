@@ -1474,7 +1474,7 @@ def collection_settings() -> dict:
         # indexes W16 declares, the `limit` its searches send and the points it
         # loads. The bundle's path is not here: it is where the data sits, not what it is.
         **({"w16_fields": [list(f) for f in spec.fields], "w16_limit": w16_limit(),
-            "w16_n": w16_n()}
+            "w16_n": w16_n(), "w16_acorn": W16_ACORN}
            if (spec := paths.filtered_tests(DATASET)) is not None else {}),
     }
 
@@ -1802,6 +1802,14 @@ def text_table() -> list[Workload]:
 #: dataset's bundle rather than from the fbin, since the payload rides in it.
 W16_COLLECTION = "bench16"
 
+#: Whether W16's searches send `--acorn`. Off, on both engines (operator's
+#: call, 2026-11-12): the pinned bfb refuses `--acorn` on a `type: dataset`
+#: source ("--acorn needs a config whose requests carry `filters`"), which
+#: failed all 30 of laion 1111's W16 rows, and making it accept one is a bfb
+#: change still to land. Recorded in the stamp (`w16_acorn`), and the recall
+#: sweep follows it, so the rows and their recall are one setting.
+W16_ACORN = False
+
 #: W16's ladder, W10's and W12's: a filtered recall moves with `ef` as W12-sel10's
 #: did (findings 48), so one point would say nothing about either curve.
 W16_EF = (32, 64, 128, 256, 512)
@@ -1894,8 +1902,8 @@ def tests_table() -> list[Workload]:
     """W16 on a corpus that ships filtered tests, or [] (`paths.filtered_tests`).
 
     Only on those corpora, so no other corpus's table, stamp or row set moves.
-    The search rows take W12's client and ACORN, the filtered rows' settings:
-    the same search under a different filter is the comparison W16 adds.
+    The search rows take W12's client, the filtered rows' setting; ACORN
+    follows `W16_ACORN`, off since bfb refuses it on a dataset source.
     """
     if paths.filtered_tests(DATASET) is None:
         return []
@@ -1908,7 +1916,8 @@ def tests_table() -> list[Workload]:
         rows.append(Workload(
             f"W16-ef{ef}", f"filtered search under each test's own condition, ef={ef}",
             flags("-n", FILTERED_QUERIES, "--search-limit", w16_limit(),
-                  "--search-hnsw-ef", ef, *SATURATING_CLIENT, *W12_SEARCH_FLAGS),
+                  "--search-hnsw-ef", ef, *SATURATING_CLIENT,
+                  *(("--acorn",) if W16_ACORN else ())),
             query_collection=W16_COLLECTION, query_strategy="tests",
             needs_payload_index=True, dataset_tests="search"))
     return rows

@@ -883,8 +883,10 @@ def sweep_tests(engine: str, label: str, queries: int, ef: list[int] | None = No
     queries = min(queries, paths.n_queries(DATASET))
     out = recall_path(label, DATASET, TESTS_COLLECTION, limit, grade=TESTS_GRADE)
     out.parent.mkdir(parents=True, exist_ok=True)
+    # W16's own ACORN, not W12's (`sweep_acorn`): its rows send `--acorn` only
+    # when `workloads.W16_ACORN` says so, and the join matches on it.
     cmd = tests_relevance_argv(engine, label, tests, METRIC, limit, queries, want, out,
-                               sweep_acorn(label))
+                               workloads.W16_ACORN)
     print(f"\n=== {TESTS_COLLECTION} ({COLLECTIONS[TESTS_COLLECTION]}): {tests} ===",
           flush=True)
     r = subprocess.run(cmd, cwd=CONF)

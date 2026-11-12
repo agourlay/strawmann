@@ -594,7 +594,7 @@ load-bearing:
 
 ```
 bfb upload --file W16-upload.upload.yaml -n <bundle n> -b 100 -t 8 -p 8
-bfb search --file W16-ef<ef>.search.yaml -n 50k --search-limit 10 --search-hnsw-ef <ef> -p 64 -t 16 -c 2 --acorn
+bfb search --file W16-ef<ef>.search.yaml -n 50k --search-limit 10 --search-hnsw-ef <ef> -p 64 -t 16 -c 2
 ```
 
 Findings 55. W12 filters bfb's synthetic keywords over `bench12`; laion-small-clip
@@ -605,8 +605,10 @@ and h-and-m-2048-angular-filters ship real filtered queries, and W16 runs them.
 The ladder `W16-ef32` to `W16-ef512` searches it with a `type: dataset` source,
 so every query of `tests.jsonl` goes out with the condition it ships (laion: a
 `range {gt}` on `similarity`, on 2,530 of 5,000; h-and-m: one keyword `match`, on
-all 10,000). W12's client and ACORN, and W12's full-scan threshold on the
-collection, for the reason W12 takes it. `limit` is the tests' k capped at 10,
+all 10,000). W12's client and W12's full-scan threshold on the collection,
+for the reason W12 takes it. Without ACORN on either engine (`W16_ACORN`,
+2026-11-12): the pinned bfb refuses `--acorn` on a dataset source, which
+failed every W16 row of laion 1111. `limit` is the tests' k capped at 10,
 because every published recall is recall@10; h-and-m's first ten of 25 are its
 top ten under the condition.
 

@@ -4685,6 +4685,16 @@ class DatasetTestsTableTests(unittest.TestCase):
             self.assertEqual(kind, "keyword")
             self.assertEqual(schema.get(name), "keyword", name)
 
+    def test_w16_sends_no_acorn_and_says_so(self):
+        """bfb refuses `--acorn` on a dataset source, which failed all 30 of
+        laion 1111's W16 rows; W16 runs without it on both engines."""
+        t = {r.id: r for r in self.w.table()}
+        for ef in self.w.W16_EF:
+            self.assertNotIn("--acorn", t[f"W16-ef{ef}"].args)
+        self.assertIs(self.w.collection_settings()["w16_acorn"], False)
+        # W12 keeps its own ACORN.
+        self.assertEqual("--acorn" in t["W12-sel10"].args, bool(self.w.W12_ACORN))
+
     def test_laion_gains_the_w16_rows_and_runs_them_on_their_own(self):
         ids = self.ids()
         w16 = ["W16-upload", "W16-ef32", "W16-ef64", "W16-ef128", "W16-ef256", "W16-ef512"]
@@ -4771,7 +4781,7 @@ class DatasetTestsTableTests(unittest.TestCase):
                                        "-n", str(self.w.FILTERED_QUERIES),
                                        "--search-limit", "10", "--search-hnsw-ef", "128",
                                        "-p", "64", "-t", "16", "-c", str(self.w.W4_CONNS),
-                                       *self.w.W12_SEARCH_FLAGS])
+                                       *(("--acorn",) if self.w.W16_ACORN else ())])
         self.assertEqual((out / "W16-ef128.search.yaml").read_text(),
                          self.w.tests_search_config("bench16"))
         row = self.w.with_placement(t["W16-upload"], "cached")
