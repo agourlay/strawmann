@@ -428,6 +428,9 @@ def check_regression() -> int:
         noise = base / "noise.json"
         noise.write_text(json.dumps({
             "rsd": {"A": 0.05, "B": 0.05}, "reps": {"A": 5, "B": 5},
+            # The engine the floor was measured on: regression.py refuses a
+            # floor that does not say (compare.floor_covers' rule).
+            "arms": ["strawmann"],
             "source": "synthetic", "discarded": []}))
         results = base / "bench/results"
         for label, vals in (("old", {"A": 1000.0, "B": 1000.0}),
@@ -436,6 +439,7 @@ def check_regression() -> int:
             d = results / label
             d.mkdir(parents=True)
             (d / "rows.json").write_text(rows(vals))
+            (d / "run.json").write_text(json.dumps({"engine_comm": "strawmann"}))
 
         env = dict(os.environ, STRAWMANN_ROOT=str(base), NO_COLOR="1")
         r = subprocess.run([str(reg), "old", "new", "--noise", str(noise)],
