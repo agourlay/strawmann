@@ -1338,13 +1338,8 @@ impl ConformanceRow {
 
     /// The hash a perf row must carry to be accepted.
     pub fn hash(&self) -> u64 {
-        let mut h: u64 = 0xcbf29ce484222325;
-        let mut mix = |bytes: &[u8]| {
-            for &b in bytes {
-                h ^= u64::from(b);
-                h = h.wrapping_mul(0x100000001b3);
-            }
-        };
+        let mut h = crate::oracle::Fnv1a::new();
+        let mut mix = |bytes: &[u8]| h.write(bytes);
         // The dataset *name*. This mixed `self.dataset` when that field held a
         // full path, which made the hash machine-dependent: the same corpus
         // under a different home directory produced a different identity, so a
@@ -1376,7 +1371,7 @@ impl ConformanceRow {
             mix(t.tier.as_str().as_bytes());
             mix(&[u8::from(t.passed)]);
         }
-        h
+        h.finish()
     }
 }
 
@@ -2281,6 +2276,8 @@ mod tests {
             }],
         };
         let h = base.hash();
+        // The value itself: rows already published carry it.
+        assert_eq!(h, 0x8c62_87d3_7c8c_94aa);
 
         // §8.9: "The Qdrant version is pinned and recorded per row."
         let mut v = base.clone();

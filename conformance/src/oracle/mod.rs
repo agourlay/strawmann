@@ -785,14 +785,42 @@ mod nan_as_null {
 /// FNV-1a over the raw bytes. §4.3 wants checksums recorded per result row; the
 /// specific function does not matter, only that it is stable and cheap.
 pub fn checksum_f32(data: &[f32]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
+    let mut h = Fnv1a::new();
     for &x in data {
-        for b in x.to_le_bytes() {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(0x100000001b3);
+        h.write(&x.to_le_bytes());
+    }
+    h.finish()
+}
+
+/// FNV-1a, 64-bit: the one hash behind every checksum, cache key and row
+/// identity here. Written out rather than using `DefaultHasher`, whose output
+/// std does not promise across versions. Its values are persisted (cache file
+/// names, ground-truth checksums, the hashes of published rows), so the
+/// constants and the byte order are pinned by a test.
+pub struct Fnv1a(u64);
+
+impl Fnv1a {
+    pub fn new() -> Self {
+        Fnv1a(0xcbf2_9ce4_8422_2325)
+    }
+
+    #[inline]
+    pub fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
         }
     }
-    h
+
+    pub fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for Fnv1a {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// §4.3: "Ground truth is cached per `(dataset, subset size, metric)` and
@@ -849,14 +877,11 @@ pub fn filtered_cache_key(
 
 /// FNV-1a over the ids' little-endian bytes, as `checksum_f32` over floats.
 pub fn checksum_ids(ids: &[u32]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
+    let mut h = Fnv1a::new();
     for &x in ids {
-        for b in x.to_le_bytes() {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(0x100000001b3);
-        }
+        h.write(&x.to_le_bytes());
     }
-    h
+    h.finish()
 }
 
 /// What a filtered truth must have been computed from to stand in for a fresh
@@ -909,13 +934,9 @@ impl GroundTruth {
 /// does not promise across versions — a cache key that changes when the
 /// toolchain does silently recomputes every ground truth.
 pub fn condition_hash(condition: &str) -> u64 {
-    // FNV-1a, 64-bit.
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in condition.as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
+    let mut h = Fnv1a::new();
+    h.write(condition.as_bytes());
+    h.finish()
 }
 
 pub fn save(gt: &GroundTruth, path: &Path) -> anyhow::Result<()> {
@@ -1223,6 +1244,28 @@ mod tests {
         assert_eq!(a.ids, b.ids);
         assert_eq!(a.base_checksum, b.base_checksum);
         assert_eq!(a.ids.len(), nq * 10);
+    }
+
+    #[test]
+    fn fnv1a_and_the_checksums_over_it_keep_their_published_values() {
+        // The standard FNV-1a 64 test vectors.
+        let of = |b: &[u8]| {
+            let mut h = Fnv1a::new();
+            h.write(b);
+            h.finish()
+        };
+        assert_eq!(of(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(of(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(of(b"foobar"), 0x8594_4171_f739_67e8);
+        // Split writes are one stream.
+        let mut h = Fnv1a::new();
+        h.write(b"foo");
+        h.write(b"bar");
+        assert_eq!(h.finish(), of(b"foobar"));
+        // Little-endian element bytes, in order.
+        assert_eq!(checksum_f32(&[1.0, -2.5]), 0x09e6_29ee_2dfd_b3f8);
+        assert_eq!(checksum_ids(&[0x006f_6f66, 0x0072_6162]), of(b"foo\0bar\0"));
+        assert_eq!(condition_hash("foobar"), of(b"foobar"));
     }
 
     #[test]

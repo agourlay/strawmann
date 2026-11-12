@@ -328,12 +328,9 @@ pub fn parity_of(point: usize) -> &'static str {
 /// FNV-1a 64 over a file's bytes, the hash `oracle::checksum_f32` uses: a
 /// truth names the exact corpus and query files it was computed from (§4.3).
 pub fn checksum_bytes(data: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &b in data {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
+    let mut h = crate::oracle::Fnv1a::new();
+    h.write(data);
+    h.finish()
 }
 
 /// One line of `corpus.jsonl`: a point's field values. The line number is the
@@ -572,13 +569,8 @@ impl TextConformanceRow<'_> {
     /// vectors: the corpus, the tokenizer and query settings, both builds, the
     /// checksums, and every tier's name, engine and outcome.
     pub fn hash(&self) -> u64 {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut mix = |bytes: &[u8]| {
-            for &x in bytes {
-                h ^= u64::from(x);
-                h = h.wrapping_mul(0x0100_0000_01b3);
-            }
-        };
+        let mut h = crate::oracle::Fnv1a::new();
+        let mut mix = |bytes: &[u8]| h.write(bytes);
         mix(b"text");
         mix(self.dataset.as_bytes());
         mix(&ORACLE_REVISION.to_le_bytes());
@@ -602,7 +594,7 @@ impl TextConformanceRow<'_> {
             mix(t.engine.as_bytes());
             mix(&[u8::from(t.pass), u8::from(t.skipped)]);
         }
-        h
+        h.finish()
     }
 }
 
@@ -838,6 +830,8 @@ mod tests {
         let pass = [outcome("T1 score value", "strawmann", true)];
         let fail = [outcome("T1 score value", "strawmann", false)];
         let base = row(&pass).hash();
+        // The value itself: rows already published carry it.
+        assert_eq!(base, 0xc275_a308_e400_f11b);
         assert_eq!(base, row(&pass).hash());
         assert_ne!(base, row(&fail).hash());
         let mut other = row(&pass);
