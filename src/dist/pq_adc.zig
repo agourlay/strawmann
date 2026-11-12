@@ -126,7 +126,17 @@ pub const Pq8Adc = struct {
     /// explicit: "**avoid both.** Gather has historically been slower than
     /// scalar loads plus inserts for our access patterns; benchmark it once,
     /// record the result, move on."
-    pub fn score(table: []const f32, code: []const u8) f32 {
+    ///
+    /// `noinline` and `align(64)`, as `dot_f32.Dot.call` and for its reason
+    /// (findings 69): inlined into `quantized.Query.score`, this loop landed
+    /// wherever that function's other arms left it. ee3dbcc rewrote those
+    /// arms without touching this one and moved the loop off its line, from
+    /// 0x...040 to 0x...1d0 in the release binary, with the same instructions,
+    /// in the range where laion's W8 fell 6.4% at flat instructions (1111
+    /// pair: 18,548 to 17,365 q/s, IPC 4.02 to 3.79). An in-process d=512 x16
+    /// search measured 1.041M cycles a query before, 1.054M after, and 1.034M
+    /// out of line here.
+    pub noinline fn score(table: []const f32, code: []const u8) align(64) f32 {
         std.debug.assert(code.len > 0);
         std.debug.assert(table.len % code.len == 0);
         const c = table.len / code.len;
@@ -444,6 +454,10 @@ test "PQ8 ADC score matches an explicit sum over subquantizers" {
 
     const got = Pq8Adc.score(table, code);
     try std.testing.expect(@abs(@as(f64, got) - want) < 1e-4);
+}
+
+test "the PQ8 ADC kernel starts on a cache line (findings 69)" {
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(&Pq8Adc.score) % 64);
 }
 
 test "PQ8 dot table reconstructs the dot product against the quantized vector" {
