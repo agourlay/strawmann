@@ -3,14 +3,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
+import io
 import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from harness_fixtures import HERE, _reload
 
@@ -804,6 +807,23 @@ class KernelAlignTests(unittest.TestCase):
         bad = self.check.kernel_alignment(self.nm(0x1167650, 0x1167380), self.NAMES)
         self.assertEqual(bad, [("dist.dot_f32.Dot(16,8).call: at 0x1167650, "
                                 "16 bytes past a 64-byte line")])
+
+    def test_a_step_whose_tool_is_missing_fails_and_the_gate_goes_on(self):
+        """`subprocess.run` raised FileNotFoundError on a host without zig,
+        crashing the gate so the steps after it went unrun and unreported."""
+        Step = self.check.Step
+        todo = [Step("missing-tool", "x", ["/nonexistent/zig-not-here", "build"]),
+                Step("after", "y", [sys.executable, "-c", "pass"])]
+        out = io.StringIO()
+        with mock.patch.object(self.check, "steps", return_value=todo), \
+                mock.patch.object(sys, "argv", ["check.py"]), \
+                contextlib.redirect_stdout(out):
+            rc = self.check.main()
+        self.assertEqual(rc, 1)
+        text = out.getvalue()
+        self.assertIn("1 of 2 steps failed: missing-tool", text)
+        self.assertIn("could not run /nonexistent/zig-not-here", text)
+        self.assertIn("=== after ===", text)
 
 
 if __name__ == "__main__":

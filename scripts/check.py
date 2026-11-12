@@ -609,7 +609,13 @@ def main() -> int:
     for s in todo:
         print(f"\n=== {s.label} ===\n    {s.why}", flush=True)
         t0 = time.monotonic()
-        r = subprocess.run(s.argv, cwd=s.cwd, capture_output=True, text=True)
+        try:
+            r = subprocess.run(s.argv, cwd=s.cwd, capture_output=True, text=True)
+        except OSError as exc:
+            # A missing tool (zig, zlint, uv, cargo) raised FileNotFoundError
+            # here and crashed the gate, so the later steps went unrun and
+            # unreported. The step fails with the reason; the gate goes on.
+            r = subprocess.CompletedProcess(s.argv, 127, "", f"could not run {s.argv[0]}: {exc}")
         secs = time.monotonic() - t0
         if r.returncode == 0:
             print(f"    ok in {secs:.1f}s")
