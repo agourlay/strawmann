@@ -433,6 +433,17 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
             notes.append(f"{wid}: statuses disagree across the {n} passes "
                          f"({seen}), not aggregated")
             continue
+        # The same refusal for what the qps column counts. W11's is the whole
+        # search on one pass ("") and the append window on another
+        # ("write-window"), and a median of the two is neither; `compare.py`
+        # and `regression.py` refuse a pair that differs on it, which a fold
+        # carrying pass 1's basis over the others' numbers bypassed.
+        bases = {r.get("qps_basis") or "" for r in got}
+        if len(bases) != 1:
+            seen = ", ".join(repr(x) for x in sorted(bases))
+            notes.append(f"{wid}: qps_basis disagrees across the {n} passes "
+                         f"({seen}), not aggregated")
+            continue
         dirty = [r for r in got if r.get("foreign")]
         merged = dict(got[0])
         # Every numeric column these passes carry, from the passes rather than

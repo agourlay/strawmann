@@ -1667,3 +1667,26 @@ class GraphSeedProvenanceTests(unittest.TestCase):
             "seed=0x57ea3111", "seed=0x1"))
         self.assertEqual(len(doc["graph_builds"]), 2)
         self.assertIn("2 DIFFERENT SEEDS", printed)
+
+
+class FoldAgreementTests(unittest.TestCase):
+    """What `aggregate.fold` must refuse rather than median."""
+
+    @staticmethod
+    def _row(qps, **kw):
+        return {"id": "W11", "status": "ok", "latency": {}, "qps": qps, **kw}
+
+    def test_passes_that_count_different_qps_are_not_folded(self):
+        """W11's whole search ("") and its write window are two numbers;
+        the fold medianed them under pass 1's basis, past the refusals
+        `compare.py` and `regression.py` apply to a pair."""
+        agg = importlib.import_module("aggregate")
+        rows, rsd, notes = agg.fold([[self._row(112.0, qps_basis="")],
+                                     [self._row(60.0, qps_basis="write-window")],
+                                     [self._row(108.0, qps_basis="")]])
+        self.assertEqual(rows, [])
+        self.assertNotIn("W11", rsd)
+        self.assertTrue(any("qps_basis disagrees" in n for n in notes), notes)
+        # Absent and empty are the same basis, the one rows had before the key.
+        rows, _rsd, _notes = agg.fold([[self._row(112.0)], [self._row(110.0, qps_basis="")]])
+        self.assertEqual(len(rows), 1)
