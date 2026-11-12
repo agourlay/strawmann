@@ -34,6 +34,12 @@ eight CPUs. Since 2026-11-11 the engine takes `--rescore-prefetch off|first|whol
 dbpedia-100K's W6 ladder. `--workers 8` did nothing for h-and-m's W4 on
 2026-09-29 (decisions.md), which bounds what to expect from it.
 
+ab-1112 (2026-11-11, dbpedia-100K, three passes): `--rescore-prefetch whole`
+W6 +1.7%, ef256 +2.0%, ef512 +2.1%, demand DRAM -16 to -18%, now the
+default; `--workers 8` +1.4 to +3.1% at more cycles per query and -7 to
+-15% on W10-ef128, not taken. Neither closes the 6 to 14% gap: what is left
+is SQ8's per-query DRAM against Qdrant's.
+
 **75. laion's per-query cost.** laion 1109 W4 reads 1.03x where sift1m reads
 1.94x, so W5 reads 0.86x: Qdrant gains 18% from batching (W4 10,933 to W5
 12,939) and strawmANN nothing (11,247 to 11,095). The fan-out of a batch over
@@ -51,19 +57,11 @@ sets the width, and `ab_chain_1112.py` runs 512 and 2048 on laion and 512 on
 dbpedia-100K beside the rule. The whole 8 KiB row lost on h-and-m
 (decisions.md, 2026-09-29); d=512 was never swept.
 
-**58. Qdrant read 8 to 12% faster on laion 0930 than on 0928, same binary.**
-W10-ef128 +10.4%, W10-ef256 +11.5%, W12-sel1 +10.2%, W11 +10%, with cycles
-per query down 10% at the same recall, a byte-identical binary (sha256
-`dbeb0f73dea2d371`), the same stamp and the same `env_hash`. On sift1m and
-dbpedia the same binary moved under 2.3%. Nothing in the files explains it, so
-part of every laion ratio move between the two pairs is Qdrant's, and the
-laion W4/W10 moves cannot be read as strawmANN's. laion 1003 reproduced the 0930
-level within 1.5% (W10-ef128 8,312 to 8,268, W12-sel1 3,331 to 3,368), on a
-newer kernel and with Qdrant on its compiled-in config rather than the
-checkout's, so 0928 is the odd pair. What it needs: a Qdrant-only same-binary
-reading on laion at two times. `qdrant_rerun.py` measures the pinned native
-binary's W4 and W10-ef128, and `ab_chain_1112.py` runs it first and last.
-(`qdrant_ab.py` drives images, not a native binary.)
+ab-1112 refuted the prefetch width: 512 bytes -2.1% and the whole 2 KiB row
+-10.6% on W4, with demand DRAM down 56%, so laion's stall is not the
+misses a wider hint can buy back; the knob is gone. `--workers 8` reads W4
++2.1%, W5 +2.7%, W3 +11% but W10-ef128 -15%. Open: what bounds laion's IPC
+at 0.52 against Qdrant's 0.80 at the same DRAM per query.
 
 ### P2. What the licensed numbers are made of, and what the run costs
 
@@ -115,38 +113,11 @@ the rebuild only where the writer outruns the drainer
 at 2 ms of core per insertion, keeping up with 1,900 points/s is about four of
 the eight cores.
 
-**10. Exact search at d=1536 is lost to scan contention, and a shared pass
-wins it back.** `W9` read 0.77x on the development-profile dbpedia page and
-parity on 0927 (1.50x on sift1m). Measured on
-2026-09-26 (`w9_ab.py`, pinned, three reps each, no foreign load):
-
-| arm | q/s | cores | IPC | implied GB/s |
-|---|--:|--:|--:|--:|
-| 7 workers, one query a request (W9 as published) | 9.74 | 7.00 | 0.26 | 59 |
-| 4 workers | 13.04 | 4.00 | 0.60 | 79 |
-| 7 workers, 8 queries a request | 51.06 | 6.94 | 1.33 | 311 |
-
-Seven concurrent 6 GB scans get less from the bus than four: 1.34x from
-dropping three workers, about the 12.8 Qdrant read on the development
-profile's 4 threads. In production mode it runs 7.97 cores on the 0927 pair's
-W9 and reads 10.0 q/s, parity with strawmANN's 9.9: the same contention on its
-side.
-And one pass shared by 8 queries is 5.2x: the 2026-09-22 decision against a
-cross-request gather rested on sift1m, where concurrent scans shared lines
-through the cache, and tested a gather onto one worker. At 6 GB there is no
-sharing, and a gather split across the workers is the lever, which reopens
-that decision for d=1536. The smaller lever landed in 99d2776: scans of 4 GB
-and more wait for one of four slots, 10.98 q/s against ~10 (`decisions.md`,
-2026-09-29). The shared pass is what is left. Since
-2026-11-11 it is built behind `--exact-gather` (`collection.ExactGather`: workers
-holding exact queries on one collection of 4 GiB or more meet, and each scans
-a slice of the rows for all of the group's queries), off until `gather-dbpedia`
-measures it. Below the cap
-the same contention is a draw: sift1m's W9 read 202 q/s on 0929 and 186 on
-0930, and in-process two runs of one build read 190 and 182 at 423k and 590k
-demand fills per query, as far apart as any two commits (e149208 to 1fb2e43,
-177 to 189). Instructions are identical; what moves is how much the seven
-0.5 GB scans share lines, which is scheduling and not code.
+2026-11-11: in-process at d=1536 a drained point cost 1,564 us, 1,065 of
+them in its ef_construct search and 477 in re-pruning full neighbour lists.
+`--prune-memo` cut the re-prune to 149 us with the same graph but read flat
+through the server (ab-1112: W11-steady 518 to 524, W11 154 to 153) and was
+reverted; the search is the lever left.
 
 **11. strawmANN's index build ran at the search workers' priority during
 `W11`.** On 0925 strawmANN's `W11` served 102 q/s against Qdrant's 216, with
@@ -189,6 +160,13 @@ cgroup reclaimed through `memory.reclaim` (a running engine's mapped pages are
 out of `posix_fadvise`'s reach, and the server does not reload collections on
 a restart), one warming round, and W10 again on the pages read back. If that
 buys the 5 to 7%, every pass should start from the same page-cache state.
+
+Confirmed on purpose by ab-1112's reclaim-dbpedia (one upload, three rounds
+each): W10-ef128 3,636 resident against 3,851 after the engine's cgroup was
+reclaimed and read back (+5.9%), W10-ef32 10,150 against 10,821 (+6.6%), at
+equal instructions per query. Open: why re-read pages run faster than the
+ones the engine wrote, and whether every pass should start from the same
+state (an operator decision; it changes the stamp).
 
 **73. The filtered planner's constants at saturation.** The walk's fixed
 term moved to 350,000 (4c08d9d) after bfb's with-replacement keyword draw put
@@ -255,39 +233,33 @@ the pin moves.
 
 ## Next
 
-### Ready to run (a quiet machine, a `systemd-run --user` timer)
+### Done 2026-11-11 night (unit `strawmann-night-1112`)
 
-- **`ab_chain_1112.py --commit <HEAD>`**, about 4.5 h, one build for the flag
-  arms. Needs `QDRANT_BINARY` and `BFB` in the unit's environment, as the
-  night runs have them.
-  - `qdrant-early` / `qdrant-late`: the pinned Qdrant's laion W4 and
-    W10-ef128 at both ends of the night (findings 58).
-  - `sq8-dbpedia`: `--rescore-prefetch off|first|whole` and `--workers 8` on
-    dbpedia-100K's W6 ladder (findings 74).
-  - `probe-laion`, `probe-dbpedia`: `--probe-prefetch-bytes 512|2048` and
-    `--workers 8` on W3, W4, W5, W10-ef128 (findings 75).
-  - `reclaim-dbpedia`: W10 on a resident collection, then reclaimed through
-    the engine's cgroup and read back (findings 62).
-  - `gather-dbpedia`: dbpedia-1m's W9 with and without `--exact-gather`
-    (findings 10).
-  - `prune-memo-dbpedia`: dbpedia-1m's W11-steady and W11 with and without
-    `--prune-memo`, the drainer's back-link re-prune from a recorded
-    selection (findings 8; in-process, about 19% less per drained point at
-    d=1536, the same graph).
-  - `query-union-dbpedia`: the quantized `Query` union (ee3dbcc, 16accd6)
-    against its parent 154628e on dbpedia-100K's W6 ladder. A hot-path
-    refactor of the score dispatch, which must read flat.
+The ab-1112 chain (decisions.md, "The 1112 A/B chain's flags"), the BM25 x4
+republish (published a01b629), a laion pair whose W16 rows failed on
+`--acorn` and which carried two regressions (not published), and the
+planner ladder on sift1m and laion (`bench/results/planner-ab-1112-*`,
+within 1% of 1103's costs).
 
-### After the chain
+### Before the next night
 
-- Read each `bench/results/ab-MMDD-<step>/summary.txt`. A flag whose arm wins
-  its target rows without losing the control becomes the default, in a commit
-  that says so and a `decisions.md` entry; one that does not is reverted.
-- The planner refit (findings 73) once 75 says what laion's line cost is.
-- A full republish of every corpus, which also puts the measured BM25 late
-  filter (1.56x to 3.33x on W15-filtered) and the planner's 350,000 walk term
-  (+5.6% on sift1m sel10-ef128) on the pages: every pair is STALE against
-  1109 and 1110 by strawmANN commit.
+- The PQ regression (laion W8 -6.4% at equal instructions against 1109),
+  suspected in the `Query` union (ee3dbcc): in-process, being chased.
+- Short result lists under laion's range conditions at low ef (W16 sweep:
+  `short_lists=32` at ef 32 and 64): engine, being fixed.
+- W16's ACORN: bfb refuses `--acorn` on a dataset source. Operator call:
+  W16 without ACORN on both engines, or a bfb PR first.
+- A pair with FAILED rows still rewrites its page (fullrun publish policy).
+- fp32 +3% instructions per query since 1109: first suspect removed
+  (d37d931); confirm in the next pair.
+
+### Next nights
+
+- **Night 2:** sift1m, laion (with W16 once it measures) and h-and-m, three
+  passes each, on the promoted defaults (`--exact-gather`, rescore prefetch
+  `whole`), about 11 h.
+- **Night 3:** dbpedia-openai-1m, about 10.8 h.
+- **When qdrant/bfb#193 merges:** the pin move and an h-and-m pair with W16.
 
 ### Waiting on a decision
 
