@@ -114,6 +114,11 @@ pub const Engine = struct {
     /// dbpedia-1m's W9 at 27 q/s against 12 one pass per query, demand DRAM
     /// per query -31%. `--no-exact-gather` is the A/B arm.
     exact_gather: bool = true,
+    /// `--build-prefetch`: the fp32 build's and the drainer's ef_construct
+    /// search asks for each neighbour's row before scoring it, as queries do
+    /// (`build.Scorer.prefetch`). Findings 8's drainer cost at d=1536, about
+    /// -9% an insertion in-process; off until the A/B measures it.
+    build_prefetch: bool = false,
     /// Largest vector dimension any worker's scratch can hold.
     ///
     /// §6.3 forbids allocating on the query path, so `Workspace.query` is sized
@@ -268,6 +273,7 @@ pub const Engine = struct {
             prev.join();
             coll.build_thread = null;
         }
+        coll.build_prefetch = self.build_prefetch;
         const t = std.Thread.spawn(.{}, Task.run, .{ coll, self.build_mode, self.build_threads, self.build_cpus }) catch {
             coll.index_state.store(.absent, .release);
             return;
@@ -2478,6 +2484,28 @@ test "a poll on a built collection with a tail starts the drainer, and --no-drai
         }
         // Either way the collection stays on the graph it has.
         try testing.expectEqual(core.collection.IndexState.ready, c.index_state.load(.acquire));
+    }
+}
+
+test "--build-prefetch reaches the scorer the engine's build and drainer use, and only with the flag" {
+    // An arm whose flag never reached the build would measure nothing.
+    const dim = 8;
+    var v: [dim]f32 = undefined;
+    for ([_]bool{ true, false }) |pf| {
+        var e = Engine.init(testing.allocator);
+        defer e.deinit();
+        e.build_threads = 2;
+        e.build_prefetch = pf;
+        const c = try e.create("c", .{ .dim = dim, .metric = .dot, .capacity = 300 });
+        for (0..300) |i| {
+            for (&v, 0..) |*x, j| x.* = @floatFromInt((i * 7 + j * 13) % 17);
+            _ = try c.upsert(.{ .num = i }, &v);
+        }
+        e.ensureIndexBuilding(c);
+        c.build_thread.?.join();
+        c.build_thread = null;
+        try testing.expectEqual(core.collection.IndexState.ready, c.index_state.load(.acquire));
+        try testing.expectEqual(pf, core.collection.scorerFor(c).prefetch != null);
     }
 }
 

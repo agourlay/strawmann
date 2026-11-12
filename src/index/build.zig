@@ -63,6 +63,11 @@ pub const Scorer = struct {
     /// on fp32.
     select_ctx: ?*const anyopaque = null,
     select: ?*const fn (ctx: *const anyopaque, a: u32, b: u32) f32 = null,
+    /// Ask for `node`'s stored row before `between` reads it, as
+    /// `hnsw.Scorer.prefetch` does for a query. Null: the construction's
+    /// search scores each neighbour as it reaches it, one cache miss after
+    /// another. Set by `--build-prefetch` (findings 8), off until measured.
+    prefetch: ?*const fn (ctx: *const anyopaque, node: u32) void = null,
 
     /// The selection similarity, `between` where none is set.
     pub fn selectBetween(self: Scorer) struct { f: *const fn (ctx: *const anyopaque, a: u32, b: u32) f32, ctx: *const anyopaque } {
@@ -567,7 +572,31 @@ pub const Builder = struct {
 
         while (frontier.pop()) |current| {
             if (out.isFull() and current.worse(out.peekWorst())) break;
-            for (g.neighbours(current.id, level)) |n| {
+            const ns = g.neighbours(current.id, level);
+            // The query path's prefetch (`hnsw.Index.searchLayer`): the next
+            // candidate's list, then every neighbour's stamp and row before
+            // the first is scored. This search had its own scorer type, a
+            // pair of stored points with no prefetch hook, so it never got
+            // it. At d=1536 it is 68% of a drained point's cost (1,065 of
+            // 1,564 us, in-process, 2026-11-11). Measured in-process (micro
+            // numbers, not a server run; random unit vectors at d=1536, 30,000
+            // built on four threads, 2,000 drained by `drainLive` on one
+            // thread, m=16, ef_construct=100, 2026-11-12, interleaved): 1,517,
+            // 1,532 and 1,557 us an insertion without it, 1,399, 1,417 and
+            // 1,418 with, about -8%, and the same drained-graph checksum in
+            // all six. Order and scores are untouched, so the graph is too.
+            if (self.scorer.prefetch) |pf| {
+                if (frontier.peek()) |next| {
+                    const row = g.neighbours(next.id, level);
+                    if (row.len > 0) @prefetch(&row[0], .{ .rw = .read, .locality = 3, .cache = .data });
+                }
+                for (ns) |n| {
+                    if (n == empty_neighbour) break;
+                    self.scratch_vis.prefetch(n);
+                    pf(self.scorer.ctx, n);
+                }
+            }
+            for (ns) |n| {
                 if (n == empty_neighbour) break;
                 if (!self.scratch_vis.testAndSet(n)) continue;
                 const s = self.scorer.between(self.scorer.ctx, node, n);
@@ -1083,6 +1112,18 @@ const Corpus = struct {
 
     fn scorer(self: *const Corpus) Scorer {
         return .{ .ctx = @ptrCast(self), .between = between };
+    }
+
+    fn prefetch(ctx: *const anyopaque, node: u32) void {
+        const self: *const Corpus = @ptrCast(@alignCast(ctx));
+        @prefetch(self.row(node).ptr, .{ .rw = .read, .locality = 3, .cache = .data });
+    }
+
+    /// `scorer`, with the build's prefetch on (`Scorer.prefetch`).
+    fn prefetchingScorer(self: *const Corpus) Scorer {
+        var s = self.scorer();
+        s.prefetch = prefetch;
+        return s;
     }
 };
 
@@ -2239,4 +2280,29 @@ test "searches against a graph being mutated see only valid ids" {
         // And the readers actually ran, or the assertion above is vacuous.
         try testing.expect(queries.load(.acquire) > 0);
     }
+}
+
+test "--build-prefetch: the serial build and a one-thread drain write the same graph" {
+    // A prefetch changes when a row arrives, never what is scored or in what
+    // order, so a deterministic build checksums the same with it as
+    // without, and so does a one-thread drain onto it.
+    const built = 1500;
+    const total = built + 300;
+    var corpus = try Corpus.init(testing.allocator, total, 16, 0x3e31, .euclid);
+    defer corpus.deinit(testing.allocator);
+    var sums: [2][2]u64 = undefined;
+    for ([_]bool{ false, true }, 0..) |pf, arm| {
+        const scorer = if (pf) corpus.prefetchingScorer() else corpus.scorer();
+        var g = try Graph.init(testing.allocator, Params.fromM(8, 64, 6), total);
+        defer g.deinit();
+        var b = try Builder.init(testing.allocator, &g, scorer);
+        defer b.deinit(testing.allocator);
+        try b.buildSerial(built);
+        sums[arm][0] = g.checksum();
+        try drainLive(testing.allocator, &g, scorer, built, total, 1);
+        g.count = total;
+        sums[arm][1] = g.checksum();
+    }
+    try testing.expectEqual(sums[0][0], sums[1][0]);
+    try testing.expectEqual(sums[0][1], sums[1][1]);
 }

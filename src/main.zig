@@ -46,6 +46,7 @@ const Flag = enum {
     no_drain,
     no_batch_fanout,
     no_exact_gather,
+    build_prefetch,
     filtered_plan,
     rescore_prefetch,
 
@@ -78,6 +79,7 @@ const Flag = enum {
             .no_drain => "--no-drain",
             .no_batch_fanout => "--no-batch-fanout",
             .no_exact_gather => "--no-exact-gather",
+            .build_prefetch => "--build-prefetch",
             .filtered_plan => "--filtered-plan",
             .rescore_prefetch => "--rescore-prefetch",
         };
@@ -253,6 +255,7 @@ const Options = struct {
     drain_tail: bool = engineDefault(.drain_tail),
     batch_fanout: bool = engineDefault(.batch_fanout),
     exact_gather: bool = engineDefault(.exact_gather),
+    build_prefetch: bool = engineDefault(.build_prefetch),
     filtered_plan: ?api.FilteredPlan = engineDefault(.filtered_plan),
     rescore_prefetch: core.quantized_search.RescorePrefetch = engineDefault(.rescore_prefetch),
     pin: bool = false,
@@ -292,6 +295,9 @@ fn usage(w: *Io.Writer) !void {
         \\  --no-exact-gather    give every exact query on a collection of 4 GiB
         \\                       or more its own pass, instead of sharing one
         \\                       across requests (the A/B arm, findings 10)
+        \\  --build-prefetch     prefetch neighbours' rows in the build's and the
+        \\                       drainer's search, as queries do (same graph;
+        \\                       an A/B arm, findings 8)
         \\  --filtered-plan      auto|scan|two_hop|walk for a counted filter
         \\                       (default auto, the cost model; the others are
         \\                       calibration arms)
@@ -402,6 +408,7 @@ pub fn main(init: std.process.Init) !void {
             .no_drain => opts.drain_tail = false,
             .no_batch_fanout => opts.batch_fanout = false,
             .no_exact_gather => opts.exact_gather = false,
+            .build_prefetch => opts.build_prefetch = true,
             .no_bandwidth_probe => opts.bandwidth_probe = false,
             .probe => opts.probe_only = true,
             .host => opts.host = next(args, &i) orelse return error.MissingValue,
@@ -481,6 +488,7 @@ pub fn main(init: std.process.Init) !void {
     engine.drain_tail = opts.drain_tail;
     engine.batch_fanout = opts.batch_fanout;
     engine.exact_gather = opts.exact_gather;
+    engine.build_prefetch = opts.build_prefetch;
     engine.filtered_plan = opts.filtered_plan;
     engine.rescore_prefetch = opts.rescore_prefetch;
     if (opts.default_placement.isMapped() and opts.data_dir == null) {
@@ -683,6 +691,11 @@ pub fn main(init: std.process.Init) !void {
         try w.print("  appends                : linked into the built graph in the background on {d} threads, until {d}% pending asks for a rebuild\n", .{ engine.build_threads, @as(u32, @intFromFloat(core.collection.rebuild_ratio * 100)) });
     } else {
         try w.print("  appends                : pending tail until a rebuild (--no-drain)\n", .{});
+    }
+    if (engine.build_prefetch) {
+        try w.print("  build search prefetch  : neighbours' rows, whole up to {d} bytes, first line past it (--build-prefetch)\n", .{core.collection.Probe.whole_row_bytes});
+    } else {
+        try w.print("  build search prefetch  : none, each row read as it is scored\n", .{});
     }
     if (engine.batch_fanout) {
         try w.print("  batched search         : spread over the worker queue\n", .{});

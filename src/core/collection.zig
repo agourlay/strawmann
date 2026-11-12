@@ -637,6 +637,10 @@ pub const Collection = struct {
     /// the graph will hold at its old vector's position, so `noteOverwrite`
     /// counts it as the graph's, not as the tail's.
     drain_to: std.atomic.Value(usize) = .init(0),
+    /// `--build-prefetch`: the fp32 build and the drainer ask for each
+    /// neighbour's row before scoring it (`build.Scorer.prefetch`). Set by
+    /// `Engine.ensureIndexBuilding` before it spawns a build.
+    build_prefetch: bool = false,
 
     /// Offsets sorted by external id, built lazily for `Scroll` and dropped on
     /// any mutation.
@@ -1819,11 +1823,7 @@ pub const Probe = struct {
     /// (`quantized.sq8_whole_row_bytes`), measured to the same width.
     pub fn prefetch(ctx: *const anyopaque, node: u32) void {
         const self: *const Probe = @ptrCast(@alignCast(ctx));
-        const row = self.coll.space.rowBytes(node);
-        if (row.len <= whole_row_bytes)
-            dist.common.prefetchRow(row.ptr, row.len)
-        else
-            @prefetch(row.ptr, .{ .rw = .read, .locality = 3, .cache = .data });
+        prefetchStored(self.coll, node);
     }
 
     /// The widest row `prefetch` asks for whole: eight lines, d=128 in fp32.
@@ -1909,14 +1909,34 @@ fn scoreStoredRaw(coll: *const Collection, a: u32, b: u32) f32 {
     };
 }
 
+/// `Probe.prefetch`'s rule, for any reader of a stored row in a traversal:
+/// whole up to `Probe.whole_row_bytes`, its first line past it. `inline`
+/// because `Probe.prefetch` is the query path's per-neighbour hook, where one
+/// extra load and branch read as +3% instructions per query (laion 1111), so
+/// it must compile to what it was before the rule was shared.
+inline fn prefetchStored(coll: *const Collection, node: u32) void {
+    const row = coll.space.rowBytes(node);
+    if (row.len <= Probe.whole_row_bytes)
+        dist.common.prefetchRow(row.ptr, row.len)
+    else
+        @prefetch(row.ptr, .{ .rw = .read, .locality = 3, .cache = .data });
+}
+
 pub fn scorerFor(coll: *const Collection) build_hnsw.Scorer {
     const S = struct {
         fn between(ctx: *const anyopaque, a: u32, b: u32) f32 {
             const c: *const Collection = @ptrCast(@alignCast(ctx));
             return scoreStored(c, a, b);
         }
+        fn prefetch(ctx: *const anyopaque, node: u32) void {
+            prefetchStored(@ptrCast(@alignCast(ctx)), node);
+        }
     };
-    return .{ .ctx = @ptrCast(coll), .between = S.between };
+    return .{
+        .ctx = @ptrCast(coll),
+        .between = S.between,
+        .prefetch = if (coll.build_prefetch) S.prefetch else null,
+    };
 }
 
 /// The build's `between` over a quantized store's codes: binary (dot,
@@ -5271,6 +5291,14 @@ test "live insertion leaves the collection searchable after a rebuild" {
 }
 
 test "the drainer links the tail while searches run, and every point stays findable once" {
+    try drainWhileSearching(false);
+}
+
+test "--build-prefetch: the drainer links the tail while searches run, and every point stays findable once" {
+    try drainWhileSearching(true);
+}
+
+fn drainWhileSearching(build_prefetch: bool) !void {
     // findings 8: every query scans the pending tail, and at d=1536 that is
     // 304 MB a query. `drainTail` links the tail into the graph readers are
     // walking. The two failures it must not have are the two regions
@@ -5290,10 +5318,12 @@ test "the drainer links the tail while searches run, and every point stays finda
     defer testing.allocator.free(stored);
     for (stored) |*x| x.* = rnd.floatNorm(f32);
     for (0..built) |i| _ = try c.upsert(.{ .num = i }, stored[i * dim ..][0..dim]);
+    c.build_prefetch = build_prefetch;
     try buildIndex(&c, .parallel, 4);
     for (built..total) |i| _ = try c.upsert(.{ .num = i }, stored[i * dim ..][0..dim]);
     invalidateIndex(&c);
     try testing.expectEqual(IndexState.ready, c.index_state.load(.acquire));
+    try testing.expectEqual(build_prefetch, scorerFor(&c).prefetch != null);
     const g = c.graph.?;
     const entry = g.entry_point;
     const max_level = g.max_level;
