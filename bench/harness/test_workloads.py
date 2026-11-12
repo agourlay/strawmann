@@ -4888,3 +4888,62 @@ class FullrunSessionPublishTests(unittest.TestCase):
         why = self.f.session_refusals(self.labels, both, session="s1")
         self.assertEqual(len(why), 1)
         self.assertTrue(self.f.is_defect(why[0]))
+
+
+def _drive_fullrun_to_first_arm(f, *extra, at_arm=None):
+    """`fullrun.main` with everything before the first arm stubbed, stopping
+    there: `start_strawmann` calls `at_arm` and returns None, so `main` exits 1
+    without touching an engine, a corpus or the gate."""
+    def first_arm(*_a, **_k):
+        if at_arm:
+            at_arm()
+        return
+
+    err = io.StringIO()
+    with mock.patch.object(f.workloads, "check_bfb_pin", return_value=None), \
+            mock.patch.object(f.workloads, "use_dataset", lambda name: name), \
+            mock.patch.object(f.workloads, "required_capacity", lambda: 1000), \
+            mock.patch.object(f.workloads, "foreign_dataset", lambda *_a: None), \
+            mock.patch.object(f.paths, "dataset", lambda _n: []), \
+            mock.patch.object(f.paths, "tests_files", lambda _n: []), \
+            mock.patch.object(f.paths, "dim", lambda _n: 128), \
+            mock.patch.object(f.paths, "metric", lambda _n: "l2"), \
+            mock.patch.object(f, "preflight_placement", lambda *_a: None), \
+            mock.patch.object(f, "estimated_minutes", lambda *_a: None), \
+            mock.patch.object(f, "wait_until_admitted",
+                              lambda *_a: f.Gate(proceed=True, failed=False)), \
+            mock.patch.object(f, "start_strawmann", first_arm), \
+            contextlib.redirect_stderr(err), \
+            contextlib.redirect_stdout(io.StringIO()):
+        rc = f.main(["fullrun.py", "--server-cpus", "4-11", "--client-cpus", "0-3",
+                     "--rps-reference", "none", "--skip", "build", *extra])
+    return rc, err.getvalue()
+
+
+class FullrunNPinResetTests(unittest.TestCase):
+    """`n_factors.json` outlived the run that wrote it, so a relaunch on a
+    reused label read a previous run's pins in pass 1 and skipped the
+    `--min-duration` escalation that would have set its own."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        _reload(Path(self.tmp.name))
+        self.f = importlib.reload(sys.modules["fullrun"]) \
+            if "fullrun" in sys.modules else importlib.import_module("fullrun")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_pass_one_starts_without_an_earlier_run_s_pins(self):
+        pins = []
+        for label in ("sm-x-1112", "qd-x-1112"):
+            p = self.f.RESULTS / label / "n_factors.json"
+            p.parent.mkdir(parents=True)
+            p.write_text('{"W3": 4}')
+            pins.append(p)
+        seen = {}
+        _drive_fullrun_to_first_arm(
+            self.f, "--strawmann-label", "sm-x-1112", "--qdrant-label", "qd-x-1112",
+            "--reps", "3",
+            at_arm=lambda: seen.update({p: p.exists() for p in pins}))
+        self.assertEqual(seen, dict.fromkeys(pins, False))

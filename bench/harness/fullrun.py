@@ -1145,6 +1145,22 @@ DATASET = "sift1m"
 SESSION = f"{int(time.time())}-{os.getpid()}"
 
 
+def n_pin_path(label: str) -> Path:
+    """Where an arm's `--min-duration` pins live: its base label, every pass."""
+    return RESULTS / re.sub(r"-rep\d+$", "", label) / "n_factors.json"
+
+
+def clear_n_pins(labels: list[str]) -> None:
+    """Forget the pins a previous invocation left under these labels.
+
+    They are this invocation's, shared by its passes, but the file outlived
+    the run: a relaunch on a reused label read the old pins in pass 1 and so
+    skipped the `--min-duration` escalation that would have set its own.
+    """
+    for label in labels:
+        n_pin_path(label).unlink(missing_ok=True)
+
+
 def run_workloads(uri: str, label: str, client_cpus: str, storage: str | None,
                   only: list[str] | None = None, placement: str | None = None) -> int:
     """§4's rows, with the load generator kept off the server's cores.
@@ -1174,7 +1190,7 @@ def run_workloads(uri: str, label: str, client_cpus: str, storage: str | None,
     # qd-dbp1m-perf-rel-0903,. Keyed on the arm's base label, so the
     # two engines pin independently: the slower one's rows are already long
     # enough and should not inherit the faster one's escalation.
-    argv += ["--n-pin", str(RESULTS / re.sub(r"-rep\d+$", "", label) / "n_factors.json")]
+    argv += ["--n-pin", str(n_pin_path(label))]
     if storage:
         argv += ["--storage", storage]
     if RPS_REFERENCE:
@@ -2752,6 +2768,7 @@ def main(argv: list[str]) -> int:
     # §7.4's "three interleaved repetitions per cell", so one mechanism serves
     # both. Each pass writes its own label; `aggregate.py` folds them.
     rep_labels: dict[str, list[str]] = {args.strawmann_label: [], args.qdrant_label: []}
+    clear_n_pins(labels)
     for rep in range(1, max(1, args.reps) + 1):
         multi = args.reps > 1
         sm_label = f"{args.strawmann_label}-rep{rep}" if multi else args.strawmann_label
