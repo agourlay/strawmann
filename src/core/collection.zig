@@ -637,10 +637,6 @@ pub const Collection = struct {
     /// the graph will hold at its old vector's position, so `noteOverwrite`
     /// counts it as the graph's, not as the tail's.
     drain_to: std.atomic.Value(usize) = .init(0),
-    /// `--prune-memo`: graphs this collection builds carry `Graph.prune_memo`,
-    /// so their builds and the drainer's re-prunes decide only the new edge.
-    /// Set by `Engine.ensureIndexBuilding` before it spawns a build.
-    prune_memo: bool = false,
 
     /// Offsets sorted by external id, built lazily for `Scroll` and dropped on
     /// any mutation.
@@ -2054,7 +2050,6 @@ pub fn buildIndex(coll: *Collection, mode: BuildMode, threads: usize) !void {
         coll.config.seed,
     ), coll.config.capacity);
     errdefer g.deinit();
-    if (coll.prune_memo) try g.enablePruneMemo();
     g.cancel = &coll.drop_requested;
 
     // Scratch for widening rows the builder has to re-encode at publish
@@ -5221,14 +5216,6 @@ test "live insertion leaves the collection searchable after a rebuild" {
 }
 
 test "the drainer links the tail while searches run, and every point stays findable once" {
-    try drainWhileSearching(false);
-}
-
-test "--prune-memo: the drainer links the tail while searches run, and every point stays findable once" {
-    try drainWhileSearching(true);
-}
-
-fn drainWhileSearching(memo: bool) !void {
     // findings 8: every query scans the pending tail, and at d=1536 that is
     // 304 MB a query. `drainTail` links the tail into the graph readers are
     // walking. The two failures it must not have are the two regions
@@ -5248,13 +5235,11 @@ fn drainWhileSearching(memo: bool) !void {
     defer testing.allocator.free(stored);
     for (stored) |*x| x.* = rnd.floatNorm(f32);
     for (0..built) |i| _ = try c.upsert(.{ .num = i }, stored[i * dim ..][0..dim]);
-    c.prune_memo = memo;
     try buildIndex(&c, .parallel, 4);
     for (built..total) |i| _ = try c.upsert(.{ .num = i }, stored[i * dim ..][0..dim]);
     invalidateIndex(&c);
     try testing.expectEqual(IndexState.ready, c.index_state.load(.acquire));
     const g = c.graph.?;
-    try testing.expectEqual(memo, g.prune_memo != null);
     const entry = g.entry_point;
     const max_level = g.max_level;
 

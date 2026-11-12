@@ -46,7 +46,6 @@ const Flag = enum {
     no_drain,
     no_batch_fanout,
     exact_gather,
-    prune_memo,
     filtered_plan,
     rescore_prefetch,
 
@@ -79,7 +78,6 @@ const Flag = enum {
             .no_drain => "--no-drain",
             .no_batch_fanout => "--no-batch-fanout",
             .exact_gather => "--exact-gather",
-            .prune_memo => "--prune-memo",
             .filtered_plan => "--filtered-plan",
             .rescore_prefetch => "--rescore-prefetch",
         };
@@ -255,7 +253,6 @@ const Options = struct {
     drain_tail: bool = engineDefault(.drain_tail),
     batch_fanout: bool = engineDefault(.batch_fanout),
     exact_gather: bool = engineDefault(.exact_gather),
-    prune_memo: bool = engineDefault(.prune_memo),
     filtered_plan: ?api.FilteredPlan = engineDefault(.filtered_plan),
     rescore_prefetch: core.quantized_search.RescorePrefetch = engineDefault(.rescore_prefetch),
     pin: bool = false,
@@ -295,10 +292,7 @@ fn usage(w: *Io.Writer) !void {
         \\  --exact-gather       let exact queries of separate requests share one
         \\                       pass of a collection of 4 GiB or more, split
         \\                       across their workers (an A/B arm, findings 10)
-        \\  --prune-memo         re-prune a full neighbour list from its recorded
-        \\                       selection, deciding only the new edge (same
-        \\                       graph, fewer scores; an A/B arm, findings 8)
-        \\  --filtered-plan     auto|scan|two_hop|walk for a counted filter
+        \\  --filtered-plan      auto|scan|two_hop|walk for a counted filter
         \\                       (default auto, the cost model; the others are
         \\                       calibration arms)
         \\  --rescore-prefetch   off|first|whole: how quantized search asks
@@ -408,7 +402,6 @@ pub fn main(init: std.process.Init) !void {
             .no_drain => opts.drain_tail = false,
             .no_batch_fanout => opts.batch_fanout = false,
             .exact_gather => opts.exact_gather = true,
-            .prune_memo => opts.prune_memo = true,
             .no_bandwidth_probe => opts.bandwidth_probe = false,
             .probe => opts.probe_only = true,
             .host => opts.host = next(args, &i) orelse return error.MissingValue,
@@ -488,7 +481,6 @@ pub fn main(init: std.process.Init) !void {
     engine.drain_tail = opts.drain_tail;
     engine.batch_fanout = opts.batch_fanout;
     engine.exact_gather = opts.exact_gather;
-    engine.prune_memo = opts.prune_memo;
     engine.filtered_plan = opts.filtered_plan;
     engine.rescore_prefetch = opts.rescore_prefetch;
     if (opts.default_placement.isMapped() and opts.data_dir == null) {
@@ -691,11 +683,6 @@ pub fn main(init: std.process.Init) !void {
         try w.print("  appends                : linked into the built graph in the background on {d} threads, until {d}% pending asks for a rebuild\n", .{ engine.build_threads, @as(u32, @intFromFloat(core.collection.rebuild_ratio * 100)) });
     } else {
         try w.print("  appends                : pending tail until a rebuild (--no-drain)\n", .{});
-    }
-    if (engine.prune_memo) {
-        try w.print("  back-link re-prune     : from the list's recorded selection, the new edge only (--prune-memo)\n", .{});
-    } else {
-        try w.print("  back-link re-prune     : full selection over the list and the new edge\n", .{});
     }
     if (engine.batch_fanout) {
         try w.print("  batched search         : spread over the worker queue\n", .{});

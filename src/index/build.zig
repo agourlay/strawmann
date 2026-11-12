@@ -170,13 +170,6 @@ pub fn insertLive(b: *Builder, node: u32) error{CsrOverflow}!void {
     @atomicStore(usize, &g.count, @as(usize, node) + 1, .release);
 }
 
-/// A `Graph.prune_memo` word: the hash of a level-0 list beside how many of
-/// its leading entries the selection that wrote it kept.
-pub fn memoWord(list: []const u32, kept: usize) u64 {
-    const h: u32 = @truncate(std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(list)));
-    return (@as(u64, h) << 32) | @as(u32, @intCast(kept));
-}
-
 pub const Builder = struct {
     graph: *Graph,
     scorer: Scorer,
@@ -199,8 +192,6 @@ pub const Builder = struct {
     /// spurious ones were. Deterministic, so the checksum-stability and recall
     /// tests stayed green while the graph was quietly worse.
     link_selected: []u32,
-    /// `pruneFromMemo`'s decision per candidate, `m0 + 1` of them.
-    memo_keep: []bool,
 
     /// Set only by `buildParallel`. When null, `insertOne` runs unsynchronised,
     /// which is both correct and faster for the serial build.
@@ -214,7 +205,7 @@ pub const Builder = struct {
     pub fn init(alloc: std.mem.Allocator, graph: *Graph, scorer: Scorer) !Builder {
         const p = graph.params;
         const ef = @max(p.ef_construct, p.m0 + 1);
-        // Seven allocations, so six errdefers: a struct literal would leak
+        // Six allocations, so five errdefers: a struct literal would leak
         // everything before the one that failed.
         var scratch_vis = try visited.Generation.init(alloc, graph.capacity);
         errdefer scratch_vis.deinit(alloc);
@@ -227,8 +218,6 @@ pub const Builder = struct {
         const selected = try alloc.alloc(u32, p.m0 * (@as(usize, hnsw.level_cap) + 1));
         errdefer alloc.free(selected);
         const link_selected = try alloc.alloc(u32, p.m0);
-        errdefer alloc.free(link_selected);
-        const memo_keep = try alloc.alloc(bool, p.m0 + 1);
         return .{
             .graph = graph,
             .scorer = scorer,
@@ -238,7 +227,6 @@ pub const Builder = struct {
             .candidates = candidates,
             .selected = selected,
             .link_selected = link_selected,
-            .memo_keep = memo_keep,
         };
     }
 
@@ -249,7 +237,6 @@ pub const Builder = struct {
         alloc.free(self.candidates);
         alloc.free(self.selected);
         alloc.free(self.link_selected);
-        alloc.free(self.memo_keep);
     }
 
     /// Insert nodes `0..count` in ascending order.
@@ -518,121 +505,17 @@ pub const Builder = struct {
             }
         }.lt);
 
-        const memo = if (level == 0) g.prune_memo else null;
-        const picked: Picked = (if (memo) |words| self.pruneFromMemo(words[from], list, cands, to, m, sel.f, sel.ctx) else null) orelse full: {
-            const r = hnsw.selectNeighboursCounted(cands, m, sel.f, sel.ctx, self.link_selected[0..m], hnsw.keep_pruned_default);
-            break :full .{ .n = r.n, .kept = r.kept };
-        };
-        const kept = picked.n;
+        const kept = hnsw.selectNeighboursHeuristic(
+            cands,
+            m,
+            sel.f,
+            sel.ctx,
+            self.link_selected[0..m],
+        );
         // In place, tail last: same invariant as `insertOne`, an unlocked
         // reader sees a stale-but-valid list, never an empty one.
         for (self.link_selected[0..kept], 0..) |s, k| list[k] = s;
         @memset(list[kept..], empty_neighbour);
-        if (memo) |words| words[from] = memoWord(list, picked.kept);
-    }
-
-    /// A selection's length, and how many of its leading entries the
-    /// heuristic kept before the top-up.
-    const Picked = struct { n: usize, kept: usize };
-
-    /// The selection `linkBack`'s full re-prune would make, from the one that
-    /// wrote `list` (`word`, `Graph.prune_memo`) and the new edge alone; null
-    /// where the memo cannot say, and the caller runs the full selection.
-    ///
-    /// Why it can: with `keep_pruned_default` a full list holds the
-    /// heuristic's kept candidates in score order, then the top-up. A
-    /// candidate's decision depends only on the kept candidates ranked above
-    /// it, and the one the last selection dropped was rejected or never
-    /// considered, so it decided nothing. Over `list` plus `to` every decision
-    /// above `to` stands; `to` needs testing against the kept ones above it
-    /// only; and if `to` is kept, each kept one below it needs testing against
-    /// `to` only, a rejected one keeping its rejector. A kept one that `to`
-    /// rejects would reopen what it rejected, and returns null. Exact score
-    /// ties, which `hnsw.redundant` and the top-up treat specially, return
-    /// null too. The memo is a function of the node, its list and the vectors,
-    /// so nothing that rewrites a list has to clear it: the hash stops
-    /// matching. Rows overwritten in place make it stale, as they make the
-    /// edges stale, and `overwritten_since_build` sends both to a rebuild.
-    ///
-    /// Measured in-process (micro numbers, not a server run, on a loaded
-    /// host; random unit vectors at d=1536, 30,000 built on four threads
-    /// with the memo recorded, 2,000 then drained by `drainLive` on one
-    /// thread, m=16, ef_construct=100). Instrumented, an insertion cost
-    /// 1,564 us: 1,065 in the ef_construct search (2,948 scores), 477 in
-    /// re-pruning about 8 full neighbour lists (4,112 scores, about 500 a
-    /// list: the heuristic's pairwise pass over 33 candidates), 19 in its
-    /// own selection. With the memo the re-pruning took 149 us (980 scores).
-    /// Uninstrumented, two runs each: 1,535 and 1,514 us an insertion
-    /// without it, 1,250 and 1,216 with, and the same drained-graph checksum
-    /// in all four. A prefetch in the build's search (the query path's two
-    /// passes, plus the next row whole) took an instrumented insertion from
-    /// 1,507 and 1,530 us to 1,378 and 1,397: the larger half, left for its
-    /// own arm.
-    fn pruneFromMemo(
-        self: *Builder,
-        word: u64,
-        list: []const u32,
-        cands: []const Candidate,
-        to: u32,
-        m: usize,
-        f: *const fn (ctx: *const anyopaque, a: u32, b: u32) f32,
-        ctx: *const anyopaque,
-    ) ?Picked {
-        if (word == hnsw.prune_memo_unknown) return null;
-        const k_old: u32 = @truncate(word);
-        if (k_old > list.len or memoWord(list, k_old) != word) return null;
-        // Sorted best first, so a tie is two neighbours.
-        for (cands[1..], cands[0 .. cands.len - 1]) |a, b| if (a.score == b.score) return null;
-
-        const keep = self.memo_keep[0..cands.len];
-        var p: usize = cands.len;
-        for (cands, keep, 0..) |c, *k, i| {
-            if (c.id == to) p = i;
-            k.* = c.id != to and std.mem.indexOfScalar(u32, list[0..k_old], c.id) != null;
-        }
-        // `linkBack` returns before pruning when `to` is already listed.
-        std.debug.assert(p < cands.len);
-        const s_to = cands[p].score;
-
-        // The first pass stops at `m` kept, so `to` is considered only below that.
-        var above: usize = 0;
-        for (keep[0..p]) |k| above += @intFromBool(k);
-        if (above < m) {
-            keep[p] = true;
-            for (cands[0..p], keep[0..p]) |c, k| {
-                if (k and hnsw.redundant(f(ctx, to, c.id), s_to, c.score)) {
-                    keep[p] = false;
-                    break;
-                }
-            }
-            if (keep[p]) {
-                for (cands[p + 1 ..], keep[p + 1 ..]) |c, k| {
-                    if (k and hnsw.redundant(f(ctx, c.id, to), c.score, s_to)) return null;
-                }
-            }
-        }
-
-        // Written as `selectNeighbours` writes it: the kept in order up to
-        // `m`, then the rejected in order. No ties, so its top-up's duplicate
-        // test never fires.
-        const out = self.link_selected[0..m];
-        var n: usize = 0;
-        for (cands, keep) |c, k| {
-            if (n == m) break;
-            if (k) {
-                out[n] = c.id;
-                n += 1;
-            }
-        }
-        const kept = n;
-        for (cands, keep) |c, k| {
-            if (n == m) break;
-            if (!k) {
-                out[n] = c.id;
-                n += 1;
-            }
-        }
-        return .{ .n = n, .kept = kept };
     }
 
     /// Empty slots form a suffix, for a caller holding this node's lock.
@@ -2356,134 +2239,4 @@ test "searches against a graph being mutated see only valid ids" {
         // And the readers actually ran, or the assertion above is vacuous.
         try testing.expect(queries.load(.acquire) > 0);
     }
-}
-
-test "--prune-memo: a re-prune from the memo writes the list the full selection would" {
-    // `pruneFromMemo`'s claim, checked list by list: for every full level-0
-    // list a build recorded, and an edge into it from a point not in it, the
-    // memo's answer is the full selection's, entry for entry, or null.
-    const n = 2000;
-    const dim = 16;
-    var corpus = try Corpus.init(testing.allocator, n + 1, dim, 0x3e30, .euclid);
-    defer corpus.deinit(testing.allocator);
-    var g = try Graph.init(testing.allocator, Params.fromM(8, 64, 5), n + 1);
-    defer g.deinit();
-    try g.enablePruneMemo();
-    var b = try Builder.init(testing.allocator, &g, corpus.scorer());
-    defer b.deinit(testing.allocator);
-    try b.buildSerial(n);
-
-    const m0 = g.params.m0;
-    const sel = corpus.scorer().selectBetween();
-    var cands: [16 + 1]Candidate = undefined;
-    var full: [16]u32 = undefined;
-    var answered: usize = 0;
-    var recorded: usize = 0;
-    for (0..n) |i| {
-        const from: u32 = @intCast(i);
-        const word = g.prune_memo.?[from];
-        if (word == hnsw.prune_memo_unknown) continue;
-        recorded += 1;
-        const list = g.level0Slice(from);
-        // The memo describes the list it was recorded with.
-        try testing.expectEqual(memoWord(list, @as(u32, @truncate(word))), word);
-        if (list[m0 - 1] == empty_neighbour) continue;
-        // Point `n` is in no list: the edge a new point brings.
-        const to: u32 = n;
-        for (list, 0..) |e, k| cands[k] = .{ .id = e, .score = sel.f(sel.ctx, from, e) };
-        cands[m0] = .{ .id = to, .score = sel.f(sel.ctx, from, to) };
-        std.mem.sort(Candidate, cands[0 .. m0 + 1], {}, struct {
-            fn lt(_: void, a: Candidate, c: Candidate) bool {
-                return a.better(c);
-            }
-        }.lt);
-        const want = hnsw.selectNeighboursCounted(cands[0 .. m0 + 1], m0, sel.f, sel.ctx, &full, hnsw.keep_pruned_default);
-        const got = b.pruneFromMemo(word, list, cands[0 .. m0 + 1], to, m0, sel.f, sel.ctx) orelse continue;
-        answered += 1;
-        try testing.expectEqual(want.n, got.n);
-        try testing.expectEqual(want.kept, got.kept);
-        try testing.expectEqualSlices(u32, full[0..want.n], b.link_selected[0..got.n]);
-    }
-    // Not vacuous: the build re-pruned and recorded lists (640 of the 2,000
-    // when written, every one of them answered), and most could answer.
-    try testing.expect(recorded > n / 4);
-    try testing.expect(answered > recorded / 2);
-}
-
-test "--prune-memo: the serial build and a one-thread drain write the same graph" {
-    // The memo changes how many scores a re-prune costs, never what it
-    // writes, so a deterministic build checksums the same with it as
-    // without, and so does a one-thread drain onto it.
-    const built = 1500;
-    const total = built + 300;
-    var corpus = try Corpus.init(testing.allocator, total, 16, 0x3e31, .euclid);
-    defer corpus.deinit(testing.allocator);
-    var sums: [2][2]u64 = undefined;
-    for ([_]bool{ false, true }, 0..) |memo, arm| {
-        var g = try Graph.init(testing.allocator, Params.fromM(8, 64, 6), total);
-        defer g.deinit();
-        if (memo) try g.enablePruneMemo();
-        var b = try Builder.init(testing.allocator, &g, corpus.scorer());
-        defer b.deinit(testing.allocator);
-        try b.buildSerial(built);
-        sums[arm][0] = g.checksum();
-        try drainLive(testing.allocator, &g, corpus.scorer(), built, total, 1);
-        g.count = total;
-        sums[arm][1] = g.checksum();
-    }
-    try testing.expectEqual(sums[0][0], sums[1][0]);
-    try testing.expectEqual(sums[0][1], sums[1][1]);
-}
-
-test "--prune-memo: a parallel drain finds as much as without it" {
-    // On four threads the drain's graph depends on scheduling, so the arms
-    // are compared on recall rather than checksum: both against brute force
-    // over the whole corpus, drained points included.
-    const built = 3000;
-    const total = built + 600;
-    const dim = 24;
-    const k = 10;
-    const queries = 200;
-    var corpus = try Corpus.init(testing.allocator, total, dim, 0x3e32, .euclid);
-    defer corpus.deinit(testing.allocator);
-    var recall: [2]f64 = undefined;
-    for ([_]bool{ false, true }, 0..) |memo, arm| {
-        var g = try Graph.init(testing.allocator, Params.fromM(16, 100, 7), total);
-        defer g.deinit();
-        if (memo) try g.enablePruneMemo();
-        _ = try extendParallel(testing.allocator, &g, corpus.scorer(), 0, built, 4);
-        g.count = built;
-        try drainLive(testing.allocator, &g, corpus.scorer(), built, total, 4);
-        g.count = total;
-
-        var probe = corpus.probe(&.{});
-        const idx = hnsw.Index{ .graph = &g, .scorer = .of(&probe) };
-        var scratch = try hnsw.Index.Scratch.init(testing.allocator, total, 64);
-        defer scratch.deinit(testing.allocator);
-        var prng = std.Random.DefaultPrng.init(0xc0de);
-        const rnd = prng.random();
-        var q: [dim]f32 = undefined;
-        var truth_buf: [k]Candidate = undefined;
-        var got_buf: [k]Candidate = undefined;
-        var hits: usize = 0;
-        for (0..queries) |_| {
-            for (&q) |*x| x.* = rnd.floatNorm(f32);
-            const truth = bruteTop(&corpus, total, &q, k, &truth_buf);
-            probe.query = &q;
-            var out = heap.TopK.init(&got_buf, k);
-            idx.search(64, &scratch, &out);
-            for (out.finish()) |gc| {
-                for (truth) |t| if (t.id == gc.id) {
-                    hits += 1;
-                    break;
-                };
-            }
-        }
-        recall[arm] = @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(queries * k));
-    }
-    // Both arms read 0.9975 when this was written. The selections are the
-    // same, so all that can separate them is the interleaving, and 0.02 is a
-    // bound on that rather than a measured spread.
-    try testing.expect(recall[0] > 0.9);
-    try testing.expect(@abs(recall[1] - recall[0]) <= 0.02);
 }

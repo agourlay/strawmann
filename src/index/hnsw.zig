@@ -54,9 +54,6 @@ pub const Candidate = heap.Candidate;
 /// `maxInt` can never collide with a real one.
 pub const empty_neighbour: u32 = std.math.maxInt(u32);
 
-/// A `Graph.prune_memo` word for a list no selection has recorded.
-pub const prune_memo_unknown: u64 = std.math.maxInt(u64);
-
 pub const Params = struct {
     /// Neighbours per node on upper levels.
     m: usize = 16,
@@ -128,26 +125,6 @@ pub const Graph = struct {
     max_level: u8 = 0,
     count: usize = 0,
 
-    /// Per node, what the last selection that wrote its level-0 list kept:
-    /// `build.memoWord`, the list's hash beside how many of its leading
-    /// entries the heuristic kept (the rest are the top-up). Null, the
-    /// default, and every back-link prune re-runs the whole selection.
-    ///
-    /// `--prune-memo`, an A/B arm for findings 8. Set, `Builder.linkBack`
-    /// re-decides only the new edge against it (`Builder.pruneFromMemo`), and
-    /// the list it writes is the one the full selection would. Owned; see
-    /// `enablePruneMemo`.
-    prune_memo: ?[]u64 = null,
-
-    /// Allocate `prune_memo`, every word unknown. 8 bytes a node, against
-    /// `m0 * 4` (128 at m=16) for its level-0 list.
-    pub fn enablePruneMemo(self: *Graph) !void {
-        std.debug.assert(self.prune_memo == null);
-        const memo = try self.alloc.alloc(u64, self.capacity);
-        @memset(memo, prune_memo_unknown);
-        self.prune_memo = memo;
-    }
-
     /// Take `other`'s nodes, edges and entry point as this graph's starting
     /// state, so a build can insert only what `other` does not already have.
     ///
@@ -175,7 +152,6 @@ pub const Graph = struct {
         @memcpy(self.upper_offsets[0 .. n + 1], other.upper_offsets[0 .. n + 1]);
         const used = other.upper_offsets[n];
         @memcpy(self.upper_neighbours[0..used], other.upper_neighbours[0..used]);
-        if (self.prune_memo) |dst| if (other.prune_memo) |src| @memcpy(dst[0..n], src[0..n]);
         self.entry_point = other.entry_point;
         self.max_level = other.max_level;
         self.count = n;
@@ -217,7 +193,6 @@ pub const Graph = struct {
         self.alloc.free(self.upper_neighbours);
         self.alloc.free(self.upper_offsets);
         self.alloc.free(self.node_levels);
-        if (self.prune_memo) |memo| self.alloc.free(memo);
     }
 
     /// §6.5: "Point *n* lives at `base + n × stride`, computed, never looked up."
@@ -755,7 +730,7 @@ pub const keep_pruned_default = true;
 /// as close to the base as each other, which a group of byte-identical vectors
 /// always is. Strict there, the group never prunes itself, fills every slot and
 /// becomes a sink with no edge leaving it.
-pub fn redundant(to_selected: f32, candidate_score: f32, selected_score: f32) bool {
+fn redundant(to_selected: f32, candidate_score: f32, selected_score: f32) bool {
     if (candidate_score == selected_score) return to_selected >= candidate_score;
     return to_selected > candidate_score;
 }
@@ -772,19 +747,6 @@ pub fn selectNeighbours(
     out: []u32,
     keep_pruned: bool,
 ) usize {
-    return selectNeighboursCounted(candidates, m, score_between, ctx, out, keep_pruned).n;
-}
-
-/// `selectNeighbours`, also saying how many of the `n` it wrote the heuristic
-/// kept (`out[0..kept]`) before the top-up appended the rest.
-pub fn selectNeighboursCounted(
-    candidates: []const Candidate,
-    m: usize,
-    score_between: *const fn (ctx: *const anyopaque, a: u32, b: u32) f32,
-    ctx: *const anyopaque,
-    out: []u32,
-    keep_pruned: bool,
-) struct { n: usize, kept: usize } {
     std.debug.assert(m <= max_selection);
     // Each selected neighbour's score against the base, beside `out`, for the
     // tie test in `redundant`.
@@ -810,7 +772,6 @@ pub fn selectNeighboursCounted(
         }
     }
 
-    const kept = n;
     // Algorithm 4's `keepPrunedConnections`: top the list up from the
     // candidates the heuristic discarded, best first. `candidates` arrives
     // sorted, so a second pass in the same order takes the closest of them.
@@ -837,7 +798,7 @@ pub fn selectNeighboursCounted(
             }
         }
     }
-    return .{ .n = n, .kept = kept };
+    return n;
 }
 
 // -------------------------------------------------------------------------
