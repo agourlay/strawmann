@@ -1727,3 +1727,16 @@ class FoldAgreementTests(unittest.TestCase):
         w6 = next(r for r in rows if r["id"] == "W6")
         self.assertIsNotNone(w6["rep_rsd"])
         self.assertIn("cargo", w6["foreign"])
+
+    def test_an_even_fold_takes_notes_from_the_pass_nearest_the_median(self):
+        """An even number of passes medians to a midpoint no pass read, so the
+        exact match found nothing and pass 1's notes stayed beside the qps."""
+        agg = importlib.import_module("aggregate")
+        rows, _rsd, _notes = agg.fold([
+            [self._row(112.0, notes="(112 over the whole search)")],
+            [self._row(100.0, notes="(100 over the whole search)")],
+            [self._row(108.0, notes="(108 over the whole search)")],
+            [self._row(107.0, notes="(107 over the whole search)")]])
+        self.assertEqual(rows[0]["qps"], 107.5)
+        self.assertIn(rows[0]["notes"], ("(108 over the whole search)",
+                                         "(107 over the whole search)"))

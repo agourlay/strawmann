@@ -502,8 +502,11 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
         # `notes` describe one pass's numbers, so they come from the pass
         # whose qps is the median: dbpedia 1110's strawmANN W11 kept pass 1's
         # "(112 over the whole search)" beside pass 3's folded 108.
-        src = next((r for r in got if r.get("qps") is not None
-                    and r.get("qps") == merged.get("qps")), None)
+        # The nearest one: with an even number of passes the median is a
+        # midpoint no pass read, and an exact match left pass 1's notes.
+        med = merged.get("qps")
+        src = min((r for r in got if isinstance(r.get("qps"), (int, float))),
+                  key=lambda r: abs(r["qps"] - med), default=None) if med is not None else None
         if src is not None and "notes" in src:
             merged["notes"] = src["notes"]
         for key in sorted(numeric & config):
