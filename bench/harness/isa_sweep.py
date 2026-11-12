@@ -146,30 +146,38 @@ def wait_quiet(limit_pct: int = 10, cap_s: int = 300) -> int:
     return waited
 
 
-def kill_stale_servers() -> list[str]:
-    """Kill any strawmann still running, whatever arm it is.
+#: PIDs of the servers this sweep started and has not seen exit.
+STARTED: set[int] = set()
 
-    Matching on `comm == "strawmann"` is not enough: Linux truncates `comm` to
-    15 characters, so `strawmann-avx512-full` appears as `strawmann-avx5` and an
-    exact match silently spares it. A survivor holds the port, the arm under
-    test fails to bind, and bfb happily measures the *previous* binary while the
-    results are filed under the new arm's name. That happened, and nothing in
-    the harness noticed.
+
+def kill_stale_servers() -> list[str]:
+    """Kill any server this sweep started that is still running.
+
+    A survivor holds the port, the arm under test fails to bind, and bfb
+    happily measures the *previous* binary while the results are filed under
+    the new arm's name. That happened, and nothing in the harness noticed.
+
+    Only our own, by PID: matching every process named `strawmann*` also
+    SIGTERMed another driver's engine, a night run's included. A survivor this
+    sweep did not start is left to `port_is_free`, which refuses the arm.
     """
     killed = []
-    for comm in pathlib.Path("/proc").glob("*/comm"):
+    for pid in sorted(STARTED):
         try:
-            name = comm.read_text().strip()
+            name = pathlib.Path(f"/proc/{pid}/comm").read_text().strip()
         except OSError:
+            STARTED.discard(pid)
             continue
+        # A recycled PID is somebody else's process.
         if not name.startswith("strawmann"):
+            STARTED.discard(pid)
             continue
-        pid = comm.parent.name
         try:
-            os.kill(int(pid), signal.SIGTERM)
+            os.kill(pid, signal.SIGTERM)
             killed.append(f"{name}({pid})")
-        except (OSError, ValueError):
+        except OSError:
             pass
+        STARTED.discard(pid)
     if killed:
         time.sleep(2)
     return killed
@@ -252,8 +260,13 @@ def run_arm(arm: Arm, rows: list[str], rep: int, port: int,
         raise SystemExit(f"port {port} is still in use; refusing to run, because "
                          f"bfb would measure whatever is listening there and the "
                          f"numbers would be filed under {arm.name!r}")
-    srv = subprocess.Popen(server_argv(arm, port, server_cpus),
-                           stdout=(out / "server.log").open("w"), stderr=subprocess.STDOUT)
+    argv = server_argv(arm, port, server_cpus)
+    if "--data-dir" in argv:
+        # The engine does not make it, and a fresh cache root has none.
+        Path(argv[argv.index("--data-dir") + 1]).mkdir(parents=True, exist_ok=True)
+    srv = subprocess.Popen(argv, stdout=(out / "server.log").open("w"),
+                           stderr=subprocess.STDOUT)
+    STARTED.add(srv.pid)
     try:
         time.sleep(3)
         if srv.poll() is not None:
@@ -287,6 +300,8 @@ def run_arm(arm: Arm, rows: list[str], rep: int, port: int,
             srv.wait(timeout=15)
         except subprocess.TimeoutExpired:
             srv.kill()
+        if srv.poll() is not None:
+            STARTED.discard(srv.pid)
     return out
 
 

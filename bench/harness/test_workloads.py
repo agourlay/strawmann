@@ -5098,3 +5098,75 @@ class LabelYearTests(unittest.TestCase):
             "--qdrant-label", "qd-sift-perf-0924", at_arm=lambda: armed.append(1))
         self.assertEqual((rc, armed), (1, []))
         self.assertIn("refusing to write into", err)
+
+
+class IsaSweepOwnServersTests(unittest.TestCase):
+    """`kill_stale_servers` SIGTERMed every process named `strawmann*`,
+    another driver's engine too; and the `--data-dir` it passed was never
+    made, so a fresh cache root failed the arm."""
+
+    def setUp(self):
+        self.isa = importlib.reload(importlib.import_module("isa_sweep"))
+        self.tmp = tempfile.TemporaryDirectory()
+        self.procs = []
+
+    def tearDown(self):
+        for p in self.procs:
+            p.kill()
+            p.wait()
+        self.tmp.cleanup()
+
+    def _named(self, name):
+        """A live process whose comm starts with `name`."""
+        import shutil
+        exe = Path(self.tmp.name) / name
+        shutil.copy(shutil.which("sleep"), exe)
+        p = subprocess.Popen([str(exe), "30"])
+        self.procs.append(p)
+        for _ in range(100):
+            if Path(f"/proc/{p.pid}/comm").read_text().strip().startswith("strawmann"):
+                break
+            time.sleep(0.01)
+        return p.pid
+
+    def test_only_the_sweep_s_own_servers_are_killed(self):
+        foreign = self._named("strawmann-other")
+        ours = self._named("strawmann-ours")
+        self.isa.STARTED.add(ours)
+        sent = []
+        with mock.patch.object(self.isa.os, "kill", lambda pid, sig: sent.append(pid)), \
+                mock.patch.object(self.isa.time, "sleep", lambda _s: None):
+            self.isa.kill_stale_servers()
+        self.assertEqual(sent, [ours])
+        self.assertNotIn(foreign, sent)
+        self.assertEqual(self.isa.STARTED, set())
+
+    def test_the_data_dir_exists_before_the_server_starts(self):
+        data = Path(self.tmp.name) / "fresh/cache/storage"
+        arm = self.isa.arms(["avx2"])[0]
+        seen = {}
+
+        class Exited:
+            pid = 999_999_999
+            returncode = 1
+            def poll(self):
+                return 1
+            def terminate(self):
+                pass
+            def wait(self, timeout=None):
+                return 1
+
+        def popen(argv, **_k):
+            seen["data_dir"] = Path(argv[argv.index("--data-dir") + 1]).is_dir()
+            return Exited()
+
+        with mock.patch.object(self.isa, "RESULTS", Path(self.tmp.name) / "isa"), \
+                mock.patch.object(self.isa, "server_argv",
+                                  lambda *_a: ["strawmann", "--data-dir", str(data)]), \
+                mock.patch.object(self.isa, "kill_stale_servers", list), \
+                mock.patch.object(self.isa, "port_is_free", lambda _p: True), \
+                mock.patch.object(self.isa.subprocess, "Popen", popen), \
+                mock.patch.object(self.isa.time, "sleep", lambda _s: None), \
+                self.assertRaises(SystemExit):
+            self.isa.run_arm(arm, ["W3"], 1, 6334, "4-11")
+        self.assertEqual(seen, {"data_dir": True})
