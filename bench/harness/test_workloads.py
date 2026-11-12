@@ -4704,6 +4704,14 @@ class DatasetTestsTableTests(unittest.TestCase):
             up = {r.id: r for r in self.w.table()}["W16-upload"]
             self.assertEqual(self.w.n_of(up), 100_000)
             self.assertGreaterEqual(self.w.required_capacity(), 100_000)
+            # And the capacity's reason names W16 where W16 binds; it named
+            # bench2's or bench12's arithmetic beside W16's figure.
+            with mock.patch.object(self.w, "W12_N", 1000), \
+                    mock.patch.object(self.w, "W11_N", 200):
+                self.assertEqual(self.w.required_capacity(), 100_000)
+                cap = self.w.strawmann_start_requirements("strawmann", {"W16-upload"})
+                self.assertIn("W16 loads 100,000 into bench16, so", cap[0])
+                self.assertIn("--capacity 100000", cap[0])
 
     def test_hnm_is_off_until_the_bfb_pin_sends_keyword_matches(self):
         self.w.use_dataset("h-and-m-2048-angular-filters")

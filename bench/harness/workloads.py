@@ -675,10 +675,15 @@ def strawmann_start_requirements(comm: str, wanted: set[str],
         need = required_capacity()
         # A text run loads its corpus and appends nothing: 1014's BEIR runs
         # explained 5,183 with W11's append arithmetic.
+        # W16's whole bundle binds at a reduced `UPLOAD_N`, and the reason
+        # named W11's arithmetic beside a figure that was W16's.
+        bench2 = upload_n() + w11_n() + w11_steady_n()
         why = (f"W15 loads {upload_n():,} into {W15_COLLECTION}" if text
+               else f"W16 loads {w16_n():,} into {W16_COLLECTION}"
+               if w16_n() > max(bench2, w12_n())
                else f"W11-steady and W11 append {w11_steady_n():,} + {w11_n():,} on top of "
                f"W2's {upload_n():,} in bench2"
-               if upload_n() + w11_n() + w11_steady_n() >= w12_n()
+               if bench2 >= w12_n()
                else f"W12 loads {w12_n():,} into bench12")
         if capacity is not None:
             out.append(f"  ok  --capacity {capacity} covers {need:,} ({why})"
