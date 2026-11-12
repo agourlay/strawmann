@@ -691,6 +691,24 @@ class CompareTests(unittest.TestCase):
         (d / "rows.json").write_text(json.dumps([_row("W3", 1, gate="pass", reps=3)]))
         self.assertEqual(list(fr.publish_refusals("gated")), [])
 
+    def test_a_failed_row_is_a_reason_not_to_publish(self):
+        """laion 1111's five FAILED W16 rows replaced the clean 1109 page."""
+        fr = importlib.import_module("fullrun")
+        d = self.fx.root / "bench/results/failed"
+        d.mkdir(parents=True, exist_ok=True)
+        fr.RESULTS = self.fx.root / "bench/results"
+        (d / "rows.json").write_text(json.dumps(
+            [_row("W3", 1, reps=3), _row("W16-ef32", None, reps=3, status="FAILED")]))
+        why = list(fr.publish_refusals("failed"))
+        self.assertTrue(any("1 row(s) that did not measure (W16-ef32)" in r for r in why), why)
+        (d / "rows.json").write_text(json.dumps(
+            [_row("W3", 1, reps=3), _row("W4", None, reps=3, status="no-output")]))
+        self.assertTrue(any("did not measure (W4)" in r for r in fr.publish_refusals("failed")))
+        # A row the engine declined by name is a boundary, not a failure.
+        (d / "rows.json").write_text(json.dumps(
+            [_row("W3", 1, reps=3), _row("W9", None, reps=3, status="n/a")]))
+        self.assertEqual(list(fr.publish_refusals("failed")), [])
+
     def test_a_single_pass_may_not_be_spliced_into_the_front_page(self):
         """Separate labels do not protect README.md, because it is keyed by
         corpus rather than by label.

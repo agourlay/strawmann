@@ -2042,6 +2042,18 @@ def publish_refusals(label: str) -> list[Refusal]:
                    f"({', '.join(bad_gate[:6])}{', …' if len(bad_gate) > 6 else ''}): "
                    f"those rows are development-grade and cannot be quoted")
 
+    # A row that did not measure. laion 1111's five W16 rows failed on both
+    # engines (bfb refused `--acorn` on a dataset source), the run exited 1,
+    # and the page still replaced the clean 1109 pair with five `FAILED`
+    # rows. `not_applicable` is a documented boundary, not a failure, so it
+    # does not count.
+    failed = [r["id"] for r in rows
+              if r.get("status") in (workloads.Status.failed, workloads.Status.no_output)]
+    if failed:
+        out.append(f"{label} has {len(failed)} row(s) that did not measure "
+                   f"({', '.join(failed[:6])}{', …' if len(failed) > 6 else ''}): "
+                   f"a page with a FAILED row would replace the published one")
+
     # A single pass gives neither §7.2(5)'s alternation nor §7.4's three
     # repetitions, and folds no noise floor, so no ratio is banded. The report
     # banners that; README.md is keyed by corpus, not by label, so a clean
