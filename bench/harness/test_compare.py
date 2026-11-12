@@ -1978,8 +1978,22 @@ class EnvironmentFloorTests(unittest.TestCase):
         noise = reg.Noise({"W4": 0.01}, {"W4": 3}, "src", [], env_hash="smt-off")
         why = reg.floor_refusals(noise, ["a", "b"])
         self.assertTrue(any("environment" in w for w in why), why)
-        clean = reg.Noise({"W4": 0.01}, {"W4": 3}, "src", [], env_hash="smt-on")
+        clean = reg.Noise({"W4": 0.01}, {"W4": 3}, "src", [], env_hash="smt-on",
+                          arms=["a", "b"])
         self.assertEqual(reg.floor_refusals(clean, ["a", "b"]), [])
+
+    def test_the_verdict_tool_refuses_a_floor_from_another_engine(self):
+        """`compare.floor_covers`' rule, which `cmd_compare` did not apply: a
+        Qdrant-only floor banded strawmANN rows (findings 38)."""
+        self._label("a", None)
+        self._label("b", None)
+        reg, cmp = self.m["regression"], self.m["compare"]
+        for arms, ok in ((["b"], False), (None, False), (["a", "b"], True)):
+            noise = reg.Noise({"W4": 0.01}, {"W4": 3}, "src", [], arms=arms)
+            self.assertEqual(reg.floor_refusals(noise, ["a", "b"]) == [], ok, arms)
+            self.assertEqual(cmp.floor_covers({"arms": arms}, "a", "b") is True, ok, arms)
+        # No floor, nothing to refuse.
+        self.assertEqual(reg.floor_refusals(reg.Noise({}, {}, "(none)", []), ["a", "b"]), [])
 
 
 class HarnessBoundRowTests(unittest.TestCase):

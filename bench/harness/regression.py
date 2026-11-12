@@ -188,6 +188,17 @@ def floor_refusals(noise: Noise, labels: list[str]) -> list[str]:
         if rows_env and rows_env != {noise.env_hash}:
             out.append("noise floor was measured under another environment hash than "
                        "these rows (SMT, governor, isolation: findings 46)")
+    # `compare.floor_covers`' rule: a floor bands only the engines it was
+    # measured on, and one that does not say was measured on one engine.
+    # Without it a Qdrant-only floor banded strawmANN rows here (findings 38).
+    if noise.rsd:
+        want = {engine_of(RESULTS / lbl) or lbl for lbl in labels}
+        if not noise.arms:
+            out.append("noise floor does not say which engine it was measured on")
+        elif not want.issubset(noise.arms):
+            out.append(f"noise floor was measured on {', '.join(sorted(noise.arms))} and "
+                       f"these rows are {', '.join(sorted(want))}; spread does not carry "
+                       f"between engines (findings 38)")
     return out
 
 

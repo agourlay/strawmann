@@ -2150,16 +2150,19 @@ class ReportHostTests(unittest.TestCase):
                         {"dataset": {"name": "dbpedia"}, "env_hash": "e1", "engine_comm": "strawmann"}))
                     (d / "rows.json").write_text(_json.dumps([{"id": "W3", "qps": 100.0, "when": "2026-09-01T00:00:00Z"}]))
                 n = regression.Noise.from_dict({"rsd": {"W3": 0.1}, "reps": {"W3": 3}, "source": "s",
-                                                "dataset": "sift1m", "env_hash": "e1"})
+                                                "dataset": "sift1m", "env_hash": "e1",
+                                                "arms": ["strawmann"]})
                 self.assertEqual(n.dataset, "sift1m")
                 why = regression.floor_refusals(n, ["base", "cand"])
                 self.assertEqual(len(why), 1)
                 self.assertIn("sift1m", why[0])
                 same = regression.Noise.from_dict({"rsd": {"W3": 0.1}, "reps": {}, "source": "s",
-                                                   "dataset": "dbpedia", "env_hash": "e2"})
+                                                   "dataset": "dbpedia", "env_hash": "e2",
+                                                   "arms": ["strawmann"]})
                 self.assertIn("environment hash", regression.floor_refusals(same, ["base", "cand"])[0])
                 ok = regression.Noise.from_dict({"rsd": {"W3": 0.1}, "reps": {}, "source": "s",
-                                                 "dataset": "dbpedia", "env_hash": "e1"})
+                                                 "dataset": "dbpedia", "env_hash": "e1",
+                                                 "arms": ["strawmann"]})
                 self.assertEqual(regression.floor_refusals(ok, ["base", "cand"]), [])
                 # And a measured floor records both keys, so it can be refused later.
                 m = regression.measure_noise([regression.RESULTS / "base", regression.RESULTS / "cand"], "s")

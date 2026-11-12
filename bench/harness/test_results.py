@@ -964,7 +964,8 @@ class NoiseTests(unittest.TestCase):
             self._rep(root, "new", [_row("A", 1040.0), _row("B", 500.0, foreign="rustc(100%)")])
             noise = root / "noise.json"
             noise.write_text(json.dumps({"rsd": {"A": 0.05, "B": 0.05}, "reps": {"A": 5, "B": 5},
-                                         "source": "synthetic", "discarded": []}))
+                                         "source": "synthetic", "discarded": [],
+                                         "arms": ["new", "old"]}))
             args = type("A", (), {"baseline": "old", "candidate": "new", "noise": str(noise)})()
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
@@ -1037,7 +1038,8 @@ class NoiseTests(unittest.TestCase):
             noise = root / "noise.json"
             noise.write_text(json.dumps({"rsd": {"W4-sat50": 0.01},
                                          "reps": {"W4-sat50": 3},
-                                         "source": "synthetic", "discarded": []}))
+                                         "source": "synthetic", "discarded": [],
+                                         "arms": ["new", "old"]}))
             args = type("A", (), {"baseline": "old", "candidate": "new",
                                   "noise": str(noise)})()
             buf = io.StringIO()
