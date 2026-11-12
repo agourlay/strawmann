@@ -107,21 +107,39 @@ def worktree_dir(commit: str) -> Path:
     return WORKTREES / commit.replace("^", "-parent")
 
 
+def resolve(ref: str) -> str | None:
+    """The commit a ref names now, as a short hash."""
+    code, out = fullrun.sh(["git", "rev-parse", "--short", "--verify", f"{ref}^{{commit}}"],
+                           60, cwd=fullrun.ROOT)
+    if code != 0:
+        print(out.rstrip(), file=sys.stderr)
+        return None
+    return out.strip()
+
+
 def build(commit: str) -> Path | None:
-    """The commit's ReleaseFast engine, built in a worktree of its own."""
-    wt = worktree_dir(commit)
+    """The commit's ReleaseFast engine, built in a worktree of its own.
+
+    Keyed by the resolved hash, not the ref: the worktree is reused, so one
+    called `HEAD` (the docstring's own `scan=HEAD`) or after a branch built
+    whatever that ref named the first time it was used.
+    """
+    sha = resolve(commit)
+    if sha is None:
+        return None
+    wt = worktree_dir(sha)
     if not wt.exists():
-        code, out = fullrun.sh(["git", "worktree", "add", "--detach", str(wt), commit],
+        code, out = fullrun.sh(["git", "worktree", "add", "--detach", str(wt), sha],
                                120, cwd=fullrun.ROOT)
         if code != 0:
             print(out.rstrip(), file=sys.stderr)
             return None
-    fullrun.say(f"building {commit} (ReleaseFast)")
+    fullrun.say(f"building {commit} at {sha} (ReleaseFast)")
     code, out = fullrun.sh(["zig", "build", "-Doptimize=ReleaseFast"], 900, cwd=wt)
     if code != 0:
         print(out.rstrip(), file=sys.stderr)
         return None
-    return build_path(commit)
+    return build_path(sha)
 
 
 def build_path(commit: str) -> Path:
@@ -242,11 +260,15 @@ def run_sessions(args, out: Path, binaries: dict[str, Path], rows: list[dict]) -
     return 0
 
 
-def write_summary(out: Path, rows: list[dict], commits: list[str]) -> None:
+def write_summary(out: Path, rows: list[dict], commits: list[str],
+                  builds: dict[str, str] | None = None) -> None:
     summary = summarise(rows)
-    (out / "summary.json").write_text(json.dumps(
-        {"commits": commits, "summary": summary, "rows": rows},
-        indent=2, default=str) + "\n")
+    doc = {"commits": commits, "summary": summary, "rows": rows}
+    if builds:
+        # Each arm's engine, whose worktree is named by the hash its ref
+        # resolved to: `scan=HEAD` says nothing once HEAD has moved.
+        doc["builds"] = builds
+    (out / "summary.json").write_text(json.dumps(doc, indent=2, default=str) + "\n")
     text = table_text(summary, commits)
     (out / "summary.txt").write_text(text)
     print("\n" + text, flush=True)
@@ -292,7 +314,7 @@ def main(argv: list[str]) -> int:
     try:
         return run_sessions(args, out, binaries, rows)
     finally:
-        write_summary(out, rows, names)
+        write_summary(out, rows, names, {k: str(v) for k, v in binaries.items()})
 
 
 if __name__ == "__main__":

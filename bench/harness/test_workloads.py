@@ -4995,3 +4995,47 @@ class FullrunSigtermTests(unittest.TestCase):
         before = events[:events.index("gate")]
         self.assertIn(self.f.QDRANT_SCOPE, before)
         self.assertIn(self.f.STRAWMANN_SCOPE, before)
+
+
+class CommitAbRefResolutionTests(unittest.TestCase):
+    """`build` reused a worktree keyed by the ref string, so `scan=HEAD` (the
+    docstring's own example) or a branch built whatever the ref named the
+    first time it was used."""
+
+    def setUp(self):
+        self.ab = importlib.import_module("commit_ab")
+
+    def test_a_moved_ref_builds_the_commit_it_names_now(self):
+        import fullrun
+        calls = []
+
+        def fake_sh(argv, *_a, **_k):
+            calls.append(argv)
+            if argv[:2] == ["git", "rev-parse"]:
+                return 0, "abc1234\n"
+            return 0, ""
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(self.ab, "WORKTREES", Path(tmp)), \
+                mock.patch.object(fullrun, "sh", fake_sh), \
+                contextlib.redirect_stdout(io.StringIO()):
+            # The worktree an earlier session made for HEAD, at an older commit.
+            (Path(tmp) / "HEAD").mkdir()
+            got = self.ab.build("HEAD")
+            self.assertEqual(got, Path(tmp) / "abc1234/zig-out/bin/strawmann")
+        self.assertIn(["git", "worktree", "add", "--detach",
+                       str(Path(tmp) / "abc1234"), "abc1234"], calls)
+
+    def test_an_unknown_ref_builds_nothing(self):
+        import fullrun
+        with mock.patch.object(fullrun, "sh", lambda *_a, **_k: (128, "bad ref")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(self.ab.build("no-such-ref"))
+
+    def test_the_summary_records_each_arm_s_build(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.ab.write_summary(Path(tmp), [], ["scan"],
+                                  {"scan": "/ab/abc1234/zig-out/bin/strawmann"})
+            doc = json.loads((Path(tmp) / "summary.json").read_text())
+        self.assertEqual(doc["builds"], {"scan": "/ab/abc1234/zig-out/bin/strawmann"})
