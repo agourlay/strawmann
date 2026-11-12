@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+from fractions import Fraction
 from pathlib import Path
 
 #: bfb's `wait_index` sleeps 1 s then needs three consecutive Green replies, so
@@ -39,14 +40,16 @@ def percentiles_us(times: list[float]) -> dict[str, float]:
     nearest-rank; `round()` (banker's, to even) put p50 of five samples at the
     second value rather than the third, and p50 of 3,125 (W5's batches) at
     rank 1,562 rather than 1,563: the wrong element wherever `p/100 * n`
-    ends in .5.
+    ends in .5. In exact arithmetic: in floats `99.9 / 100 * 50_000` is
+    49,950.00000000001, so p99.9 took rank 49,951 at n = 2,000, 50,000 and
+    200,000.
     """
     if not times:
         return {}
     xs = sorted(times)
     out = {}
     for p in PERCENTILES:
-        k = max(0, min(len(xs) - 1, math.ceil(p / 100 * len(xs)) - 1))
+        k = max(0, min(len(xs) - 1, math.ceil(Fraction(str(p)) * len(xs) / 100) - 1))
         out[f"p{p:g}".replace(".", "")] = xs[k] * 1e6
     out["max"] = xs[-1] * 1e6
     out["mean"] = sum(xs) / len(xs) * 1e6

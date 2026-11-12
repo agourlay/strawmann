@@ -951,6 +951,12 @@ class WorkloadTests(unittest.TestCase):
         self.assertAlmostEqual(got["p95"], 2969.0)        # ceil(2968.75)
         self.assertAlmostEqual(got["p99"], 3094.0)        # ceil(3093.75)
         self.assertAlmostEqual(got["p999"], 3122.0)       # ceil(3121.875)
+        # Exactly 99.9% of n is the rank; in floats it came out a hair above
+        # and ceil took the next sample.
+        for n in (2_000, 50_000, 200_000):
+            got = w.percentiles_us([1e-6 * (i + 1) for i in range(n)])
+            self.assertAlmostEqual(got["p999"], 0.999 * n, msg=n)
+            self.assertAlmostEqual(got["p99"], 0.99 * n, msg=n)
 
     def test_foreign_between_sees_only_what_ran_during_the_row(self):
         w = self.w
