@@ -4467,6 +4467,17 @@ class TextTableTests(unittest.TestCase):
         self.assertIn("size: 4", cfg)
         self.assertIn("format: tar", cfg)
 
+    def test_the_upload_config_asks_for_what_the_stamp_says(self):
+        """bench15 ran on bfb's on_disk_payload true and Qdrant's 10,000 KB
+        full-scan threshold under a stamp saying false and 10."""
+        cfg = self.w.text_upload_config("bench15")
+        s = self.w.collection_settings()
+        self.assertIn(f"  on_disk_payload: {s['on_disk_payload']}\n", cfg)
+        self.assertIn(f"  hnsw:\n    full_scan_threshold: {s['full_scan_threshold_kb']}\n", cfg)
+        self.assertIn(f"    max_segment_size: {s['max_segment_size_kb']}\n", cfg)
+        with mock.patch.object(self.w, "SEGMENT_POLICY", self.w.SegmentPolicy.as_deployed):
+            self.assertNotIn("max_segment_size", self.w.text_upload_config("bench15"))
+
     def test_w15_takes_the_harness_indexing_threshold_unless_told_otherwise(self):
         """Every collection here asks Qdrant for INDEXING_THRESHOLD_KB under
         either segment policy; W15 did not, and Qdrant served all four BEIR

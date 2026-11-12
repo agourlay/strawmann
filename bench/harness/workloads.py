@@ -1703,12 +1703,20 @@ def text_upload_config(collection: str, memory: str | None = None) -> str:
     src = f"{{ name: {DATASET}, format: tar, path: {tc.bfb} }}"
     text_opts = "".join(f", {k}: {v}" for k, v in (("stopwords", opts.get("stopwords")),
                                                     ("stemmer", opts.get("stemmer"))) if v)
-    seg = segments()
+    seg, ceiling = segments(), max_segment_size_kb()
+    # The collection lines `collection_settings()` claims for every row,
+    # W15's included: without them bench15 took bfb's on_disk_payload true
+    # and Qdrant's 10,000 KB full-scan threshold under a stamp saying false
+    # and 10.
     out = (
         "collection:\n"
         f"  name: {collection}\n"
+        f"  on_disk_payload: {ON_DISK_PAYLOAD}\n"
+        "  hnsw:\n"
+        f"    full_scan_threshold: {FULL_SCAN_THRESHOLD_KB}\n"
     )
     opt = ([f"    default_segment_number: {seg}"] if seg is not None else []) + (
+        [f"    max_segment_size: {ceiling}"] if ceiling is not None else []) + (
         [f"    indexing_threshold: {kb}"]
         if (kb := w15_indexing_threshold_kb()) is not None else [])
     if opt:
