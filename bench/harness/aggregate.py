@@ -50,7 +50,7 @@ import bfb_output
 import procstat
 import recall as recall_mod
 from regression import MIXED_STAMP, stamp_hash_of
-from workloads import W11_SEARCH_N, Gate
+from workloads import BUILD_KEYS, W11_SEARCH_N, Gate
 
 ROOT = Path(os.environ.get("STRAWMANN_ROOT", Path(__file__).resolve().parents[2]))
 
@@ -402,6 +402,23 @@ def pass_spans(reps: list[str], passes: list[list[dict]]) -> list[dict]:
     return out
 
 
+def _identity_split(got: list[dict]) -> str | None:
+    """The build or harness key these passes disagree on, or None.
+
+    `engine_build` is the commit label and may differ when every pass names
+    the same non-null `engine_binary`: one build served them all."""
+    def differs(key: str) -> bool:
+        return len({repr(r.get(key)) for r in got}) > 1
+    for key in (*BUILD_KEYS, "harness_hash"):
+        if not differs(key):
+            continue
+        if (key == "engine_build" and not differs("engine_binary")
+                and got[0].get("engine_binary") is not None):
+            continue
+        return key
+    return None
+
+
 def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
     """`(rows, rsd_by_row, notes)` from one list of rows per pass."""
     by_id: dict[str, list[dict]] = {}
@@ -443,6 +460,13 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
             seen = ", ".join(repr(x) for x in sorted(bases))
             notes.append(f"{wid}: qps_basis disagrees across the {n} passes "
                          f"({seen}), not aggregated")
+            continue
+        # And for which binary and which harness served each pass. Both are
+        # copied from pass 1 below, so a pass re-run on a rebuilt binary was
+        # medianed with the others under pass 1's identity. A commit label
+        # alone may move under one binary (`compare.commit_label_only`).
+        if (who := _identity_split(got)) is not None:
+            notes.append(f"{wid}: {who} differs across the {n} passes, not aggregated")
             continue
         dirty = [r for r in got if r.get("foreign")]
         merged = dict(got[0])

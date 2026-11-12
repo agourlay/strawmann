@@ -1690,3 +1690,23 @@ class FoldAgreementTests(unittest.TestCase):
         # Absent and empty are the same basis, the one rows had before the key.
         rows, _rsd, _notes = agg.fold([[self._row(112.0)], [self._row(110.0, qps_basis="")]])
         self.assertEqual(len(rows), 1)
+
+    def test_passes_from_another_binary_or_harness_are_not_folded(self):
+        """A pass re-run on a rebuilt binary was medianed with the others and
+        published under pass 1's `engine_binary`."""
+        agg = importlib.import_module("aggregate")
+        for key, odd in (("engine_binary", "2222"), ("harness_hash", "h2"),
+                         ("isa_build", "avx2")):
+            base = {"engine_build": "abc", "engine_binary": "1111",
+                    "isa_build": "avx512", "harness_hash": "h1"}
+            rows, rsd, notes = agg.fold([[self._row(100.0, **base)],
+                                         [self._row(101.0, **{**base, key: odd})],
+                                         [self._row(99.0, **base)]])
+            self.assertEqual(rows, [], key)
+            self.assertNotIn("W11", rsd)
+            self.assertTrue(any(f"{key} differs" in n for n in notes), notes)
+        # One binary under two commit labels is one build (`commit_label_only`).
+        same = {"engine_binary": "1111", "harness_hash": "h1"}
+        rows, _rsd, _notes = agg.fold([[self._row(100.0, engine_build="abc", **same)],
+                                       [self._row(101.0, engine_build="def", **same)]])
+        self.assertEqual(len(rows), 1)
