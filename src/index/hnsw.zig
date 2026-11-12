@@ -684,6 +684,28 @@ pub const Index = struct {
         const entries = [_]Candidate{.{ .id = entry, .score = entry_score }};
         self.searchLayer(&entries, 0, ef, scratch, &results, filter);
 
+        // A two-hop walk whose heap is not full ran out of frontier: it only
+        // queues admitted points, so once none is within two hops of what it
+        // holds it stops, and returns what it met (findings 55, laion 1111:
+        // W16's `similarity > x` ranges came back with fewer than 10 hits at
+        // ef 32 on 32 of 2,530 conditioned tests, where Qdrant had none). In
+        // process, a range correlated with the vector, admitting 33% to 1.2%
+        // of 20,000 points, left 1.3% to 55% of queries *empty* at ef 32 and 128:
+        // the unfiltered descent lands where nothing within two hops is
+        // admitted. The plain walk expands rejected nodes too, so it stops
+        // only on a full heap or a spent graph, and none of those queries
+        // came back short under it. Qdrant gets the same guarantee another
+        // way, starting its filtered walk on an admitted entry point or on
+        // filtered seeds (`graph.rs`, `get_entry_point`) over a graph with
+        // per-payload-block links; strawmANN has neither, so a stranded walk
+        // is redone plain. Only stranded queries pay for it.
+        if (filter) |f| if (f.two_hop and results.len < ef) {
+            scratch.vis.beginQuery();
+            var plain = f;
+            plain.two_hop = false;
+            self.searchLayer(&entries, 0, ef, scratch, &results, plain);
+        };
+
         // Copy into the caller's heap, which may want fewer than `ef`.
         for (results.items[0..results.len]) |c| out.push(c);
     }

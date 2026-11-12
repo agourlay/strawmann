@@ -3636,6 +3636,106 @@ test "e2e: a float index answers range gt with the exact filtered top-k, through
     }
 }
 
+test "e2e: a two-hop walk under a float range returns the exact filtered top-k when few points match" {
+    // findings 55, laion 1111: W16's `similarity > x` ranges came back with
+    // fewer than 10 hits at ef 32 where Qdrant returned 10. laion's
+    // `similarity` follows the image, so the admitted points sit together
+    // and the unfiltered descent can land where none is within two hops;
+    // the two-hop walk then ran out of frontier. Here `similarity` is the
+    // first coordinate, a range admits its top `k`, and the queries are the
+    // points at the other end. `k` is under `ef`, so the walk can never fill
+    // its heap and must find every admitted point: the page is the
+    // brute-force one, `min(limit, k)` long.
+    var h = try Harness.start(testing.allocator);
+    defer h.stop();
+    // Forced, because the planner scans a set this small; at laion's size
+    // (d = 512, n = 100,000) it walks two-hop from 3,125 admitted points.
+    h.engine.filtered_plan = .two_hop;
+    var c = try Client.connect(h.port);
+    defer c.close();
+    var req_buf: [1 << 18]u8 = undefined;
+    var out: [1 << 18]u8 = undefined;
+    {
+        var w = wire.Writer.init(&req_buf);
+        try w.writeStringField(1, "rg");
+        {
+            const hc = try w.beginNested(4, 2); // hnsw_config
+            try w.writeVarintFieldAlways(3, 0); // full_scan_threshold: always the graph
+            try w.endNested(hc);
+        }
+        const vc = try w.beginNested(10, 2); // vectors_config
+        const p = try w.beginNested(1, 2);
+        try w.writeVarintFieldAlways(1, 16);
+        try w.writeVarintFieldAlways(2, 2); // Euclid
+        try w.endNested(p);
+        try w.endNested(vc);
+        const cr = try c.call("/qdrant.Collections/Create", w.written(), &out);
+        try testing.expectEqual(grpc.Status.ok, cr.status);
+    }
+    {
+        const cf = try c.call("/qdrant.Points/CreateFieldIndex", try buildCreateFieldIndex(&req_buf, "rg", "similarity", 2), &out);
+        try testing.expectEqual(grpc.Status.ok, cf.status);
+    }
+
+    const n = 1000;
+    var prng = std.Random.DefaultPrng.init(0x55f1);
+    const rnd = prng.random();
+    const stored = try testing.allocator.alloc(f32, n * 16);
+    defer testing.allocator.free(stored);
+    for (stored) |*x| x.* = rnd.floatNorm(f32);
+    const Sim = struct {
+        var vecs: []const f32 = &.{};
+        var gt: f64 = 0;
+        fn of(i: usize) f64 {
+            return vecs[i * 16];
+        }
+        fn above(i: usize) bool {
+            return of(i) > gt;
+        }
+    };
+    Sim.vecs = stored;
+    var batch_ids: [50]u64 = undefined;
+    var batch_vecs: [50][]const f32 = undefined;
+    var batch_sims: [50]f64 = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += 50) {
+        for (0..50) |j| {
+            batch_ids[j] = i + j;
+            batch_vecs[j] = stored[(i + j) * 16 ..][0..16];
+            batch_sims[j] = Sim.of(i + j);
+        }
+        const resp = try c.call("/qdrant.Points/Upsert", try buildUpsertSimilarity(&req_buf, "rg", &batch_ids, &batch_vecs, &batch_sims), &out);
+        try testing.expectEqual(grpc.Status.ok, resp.status);
+    }
+    _ = try waitGreen(&c, "rg", &req_buf, &out);
+
+    // The first coordinates in order: a bound at the `k + 1`-th largest
+    // admits exactly `k`, and the smallest are the queries.
+    var order: [n]f64 = undefined;
+    for (&order, 0..) |*o, j| o.* = Sim.of(j);
+    std.mem.sort(f64, &order, {}, std.sort.asc(f64));
+    var truth: [16]u64 = undefined;
+    var pts: [16]PointPayload = undefined;
+    for ([_]usize{ 5, 20 }) |k| {
+        Sim.gt = order[n - k - 1];
+        for (order[0..8]) |low| {
+            const qi = for (0..n) |j| {
+                if (Sim.of(j) == low) break j;
+            } else unreachable;
+            const q = stored[qi * 16 ..][0..16];
+            const want = @min(10, k);
+            try testing.expectEqual(want, filteredTruth(stored, q, &Sim.above, 10, &truth));
+            const resp = try c.call("/qdrant.Points/QueryBatch", try buildFilteredQuery(&req_buf, "rg", q, .{
+                .hnsw_ef = 32,
+                .filter = .{ .key = "similarity", .range_gt = Sim.gt },
+            }), &out);
+            try testing.expectEqual(grpc.Status.ok, resp.status);
+            try testing.expectEqual(want, try readFirstBatchPayloads(resp.body, &pts));
+            for (pts[0..want], truth[0..want]) |pt, t| try testing.expectEqual(t, pt.id);
+        }
+    }
+}
+
 /// The payload of point `i` in the shape-condition e2e test: `t` cycles
 /// through seven shapes, `d` is a datetime `i` hours after 2024-01-01T00:00Z
 /// written in one of three forms, or an integer Qdrant never reads as one.

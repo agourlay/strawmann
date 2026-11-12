@@ -3752,6 +3752,61 @@ test "a two-hop filtered walk returns only admitted, live points and keeps recal
     }
 }
 
+test "a two-hop walk never returns a short list while enough admitted points exist" {
+    // findings 55, laion 1111: W16's `similarity > x` ranges, which the
+    // planner walks two-hop from 1/m0 of the collection up, came back with
+    // fewer than 10 hits at ef 32. laion's `similarity` follows the image, so
+    // the admitted set sits in one part of the space; here it is `v[0]` plus
+    // noise over a threshold, from 33% of the points to fewer than `limit`.
+    // Before the plain-walk retry (`hnsw.Index.searchFiltered`) up to half
+    // of these queries came back empty.
+    const dim = 8;
+    const n = 8000;
+    const limit = 10;
+    var c = try makeCollection(dim, .euclid, n);
+    defer c.deinit();
+    var prng = std.Random.DefaultPrng.init(0x5107);
+    const rnd = prng.random();
+    const sims = try testing.allocator.alloc(f32, n);
+    defer testing.allocator.free(sims);
+    var v: [dim]f32 = undefined;
+    for (0..n) |i| {
+        for (&v) |*x| x.* = rnd.floatNorm(f32);
+        sims[i] = v[0] + 0.5 * rnd.floatNorm(f32);
+        _ = try c.upsert(.{ .num = i }, &v);
+    }
+    try buildIndex(&c, .parallel, 4);
+    var scratch = try hnsw.Index.Scratch.init(testing.allocator, n, 256);
+    defer scratch.deinit(testing.allocator);
+    var bits: [(n + 63) / 64]u64 = undefined;
+    for (0..40) |_| {
+        // A threshold from the bulk to past the tail's last few points.
+        const t = 0.5 + 3.0 * rnd.float(f32);
+        @memset(&bits, 0);
+        var admitted: usize = 0;
+        for (sims, 0..) |s, i| if (s > t) {
+            bits[i / 64] |= @as(u64, 1) << @intCast(i % 64);
+            admitted += 1;
+        };
+        const bctx = payload_mod.BitsCtx{ .bits = &bits, .bound = n };
+        const efs = [_]usize{ 32, 64, 128, 256 };
+        const ef = efs[rnd.uintLessThan(usize, efs.len)];
+        for (0..10) |_| {
+            for (&v) |*x| x.* = rnd.floatNorm(f32);
+            var gb: [limit]Candidate = undefined;
+            var got = heap.TopK.init(&gb, limit);
+            searchFiltered(&c, &v, ef, .approximate, &scratch, .{
+                .pred = payload_mod.BitsCtx.pred,
+                .ctx = &bctx,
+                .two_hop = true,
+            }, &got);
+            const g = got.finish();
+            try testing.expectEqual(@min(limit, admitted), g.len);
+            for (g) |gc| try testing.expect(payload_mod.testBit(&bits, gc.id));
+        }
+    }
+}
+
 test "a build asked to stop publishes nothing, on either path" {
     inline for (.{ BuildMode.serial, BuildMode.parallel }) |mode| {
         var c = try makeCollection(4, .dot, 4096);
