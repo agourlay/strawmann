@@ -1710,3 +1710,20 @@ class FoldAgreementTests(unittest.TestCase):
         rows, _rsd, _notes = agg.fold([[self._row(100.0, engine_build="abc", **same)],
                                        [self._row(101.0, engine_build="def", **same)]])
         self.assertEqual(len(rows), 1)
+
+    def test_a_contaminated_fold_writes_no_floor(self):
+        """One dirty W6 pass set the floor's W6 spread, and
+        `widest_per_configuration` gave clean W6-ef128 the same +-64% band."""
+        agg = importlib.import_module("aggregate")
+        def row(wid, qps, foreign=""):
+            return {"id": wid, "status": "ok", "latency": {}, "qps": qps, "foreign": foreign}
+        rows, rsd, _notes = agg.fold([
+            [row("W6", 1000.0), row("W6-ef128", 900.0)],
+            [row("W6", 600.0, foreign="cargo 2.1 cores"), row("W6-ef128", 905.0)],
+            [row("W6", 1010.0), row("W6-ef128", 898.0)]])
+        self.assertNotIn("W6", rsd)
+        self.assertIn("W6-ef128", rsd)
+        # The row itself still carries its passes' spread and the flag.
+        w6 = next(r for r in rows if r["id"] == "W6")
+        self.assertIsNotNone(w6["rep_rsd"])
+        self.assertIn("cargo", w6["foreign"])

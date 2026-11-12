@@ -568,7 +568,13 @@ def fold(passes: list[list[dict]]) -> tuple[list[dict], dict, list[str]]:
             merged["gate"] = Gate.passed
         s = _rsd([r.get("qps") for r in got])
         if s is not None:
-            rsd[wid] = s
+            # Not into the floor when a pass was contaminated: that spread is
+            # interference (`regression.measure_noise` drops such reps), and
+            # `widest_per_configuration` hands it to every row of the same
+            # invocation, so one dirty W6 widened clean W6-ef128's band to
+            # about +-64%. The row still says what its passes read.
+            if not dirty:
+                rsd[wid] = s
             merged["rep_rsd"] = s
         if (odd := _rep_outlier([r.get("qps") for r in got])) is not None:
             merged["rep_outlier"] = odd
