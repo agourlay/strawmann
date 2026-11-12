@@ -107,6 +107,12 @@ HERE = Path(__file__).resolve().parent
 DESCRIPTOR = HERE / "datasets.json"
 
 
+#: The keys of `[paths]`. A copy of `bench/harness/paths.py`'s `CONFIG_KEYS`:
+#: this script stays importable from a fresh clone with the standard library
+#: alone, and `test_paths` holds the two tuples equal.
+CONFIG_KEYS = ("cache", "datasets", "qdrant_storage", "strawmann_storage")
+
+
 def config_file(env: dict[str, str] | None = None) -> Path:
     """Where the per-user config lives; `$STRAWMANN_CONFIG` names another file."""
     env = os.environ if env is None else env
@@ -129,7 +135,7 @@ def read_config(path: Path) -> dict[str, str]:
             doc = tomllib.load(fh)
     except (OSError, tomllib.TOMLDecodeError) as e:
         raise SystemExit(f"{path}: {e}") from e
-    keys = ("cache", "datasets", "qdrant_storage")
+    keys = CONFIG_KEYS
     stray = sorted(set(doc) & set(keys))
     if stray:
         raise SystemExit(f"{path}: {', '.join(stray)} must be under a [paths] table")

@@ -474,15 +474,25 @@ _OUR_SCRIPT_NAMES = ("workloads.py", "setup.py", "compare.py", "recall.py", "ful
                      "headline.py", "check.py", "doctor.py")
 
 
-def _is_ours(cmdline: str) -> bool:
+def _is_ours(cmdline: str, scripts: tuple[str, ...] = _OUR_SCRIPTS) -> bool:
+    """Whether `cmdline` is a process this harness runs. The one copy: the gate
+    here and the per-row check in `host_load` once each had their own, and only
+    the per-row one knew the `perf stat` sidecar."""
     argv = cmdline.split()
     if not argv:
         return False
     name = os.path.basename(argv[0])
     if any(name.startswith(p) for p in _OURS) or name in _OUR_SCRIPT_NAMES:
         return True
+    # The sidecar this harness starts for the row it is measuring. Matched on
+    # `perf stat -x,` — this harness's invocation and nobody else's — rather
+    # than by adding `perf` to `_OURS`, because an operator's own `perf record`
+    # during a row *is* foreign load. Without the exemption the harness condemns
+    # its own measurement and re-runs it, naming a process it started itself.
+    if name.startswith("perf") and " stat " in cmdline and "-x," in cmdline:
+        return True
     if name.startswith(("python", "uv")):
-        return (any(p in cmdline for p in _OUR_SCRIPTS)
+        return (any(p in cmdline for p in scripts)
                 or any(os.path.basename(a) in _OUR_SCRIPT_NAMES for a in argv[1:]))
     return False
 

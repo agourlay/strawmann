@@ -667,6 +667,10 @@ class ConfigFileTests(unittest.TestCase):
         self.addCleanup(sys.modules.pop, spec.name, None)
         spec.loader.exec_module(cli)
 
+        # The accepted keys too: the fetcher's copy lacked `strawmann_storage`
+        # and refused a config file the harness reads.
+        self.assertEqual(cli.CONFIG_KEYS, importlib.import_module("paths").CONFIG_KEYS)
+
         cases = [
             ({}, {}),
             ({}, {"datasets": "/from/file"}),

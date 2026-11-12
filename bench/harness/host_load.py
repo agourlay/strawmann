@@ -40,42 +40,15 @@ def load_pct() -> int:
 _OURS = setup._OURS
 
 
-#: An interpreter is ours only when it is running one of the harness's own
-#: scripts. `python3` and `uv` used to be exempt by name, so a foreign
-#: `python3 train.py` at 800% CPU was invisible to the very check that exists
-#: to see it. Matched against the full command line (`ps -o args`).
-_OUR_SCRIPTS = ("bench/harness/", "bench/setup.py", "scripts/check.py", "scripts/doctor.py",
-                # The reference-rate calibration `perfstat` runs, which is a
-                # bare `python3 -c` and therefore foreign by the rule above.
-                perfstat.CALIBRATION_TAG)
-
-
-#: ...and by basename, for a script run from its own directory (`./workloads.py`,
-#: `python3 setup.py check` from `bench/`), where no path prefix is visible.
-_OUR_SCRIPT_NAMES = ("workloads.py", "setup.py", "compare.py", "recall.py", "fullrun.py",
-                     "report.py", "regression.py", "isa_sweep.py", "qdrant_ab.py",
-                     "headline.py", "check.py", "doctor.py")
-
+#: `setup`'s scripts, plus the reference-rate calibration `perfstat` runs,
+#: which is a bare `python3 -c` and therefore foreign by `setup`'s rule.
+_OUR_SCRIPTS = (*setup._OUR_SCRIPTS, perfstat.CALIBRATION_TAG)
+_OUR_SCRIPT_NAMES = setup._OUR_SCRIPT_NAMES
 
 
 def _is_ours(cmdline: str) -> bool:
-    argv = cmdline.split()
-    if not argv:
-        return False
-    name = os.path.basename(argv[0])
-    if any(name.startswith(p) for p in _OURS) or name in _OUR_SCRIPT_NAMES:
-        return True
-    # The sidecar this harness starts for the row it is measuring. Matched on
-    # `perf stat -x,` — this harness's invocation and nobody else's — rather
-    # than by adding `perf` to `_OURS`, because an operator's own `perf record`
-    # during a row *is* foreign load. Without the exemption the harness condemns
-    # its own measurement and re-runs it, naming a process it started itself.
-    if name.startswith("perf") and " stat " in cmdline and "-x," in cmdline:
-        return True
-    if name.startswith(("python", "uv")):
-        return (any(p in cmdline for p in _OUR_SCRIPTS)
-                or any(os.path.basename(a) in _OUR_SCRIPT_NAMES for a in argv[1:]))
-    return False
+    """`setup._is_ours`, which also knows the calibration run."""
+    return setup._is_ours(cmdline, _OUR_SCRIPTS)
 
 
 

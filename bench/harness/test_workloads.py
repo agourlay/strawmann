@@ -722,6 +722,13 @@ class WorkloadTests(unittest.TestCase):
             self.assertFalse(f("psql -h db -c 'select 1'"))
             self.assertFalse(f("/usr/bin/psi-notify"))
             self.assertFalse(f("pserve app.ini"))
+        # The row's own `perf stat` sidecar is ours to both; an operator's
+        # `perf record` is not. One function, so the two cannot disagree.
+        for f in (self.w._is_ours, setup._is_ours):
+            self.assertTrue(f("perf stat -x, -e cycles -p 123"))
+            self.assertFalse(f("perf record -g -p 123"))
+        self.assertIs(self.w._OUR_SCRIPT_NAMES, setup._OUR_SCRIPT_NAMES)
+        self.assertEqual(self.w._OUR_SCRIPTS[:-1], setup._OUR_SCRIPTS)
         # And the two samplers share one list rather than two copies of it.
         self.assertIs(self.w._OURS, setup._OURS)
         self.assertIs(self.w.FOREIGN_BUDGET_CORES, setup.FOREIGN_BUDGET_CORES)
