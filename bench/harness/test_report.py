@@ -2670,6 +2670,25 @@ class InstrumentTests(unittest.TestCase):
         self.assertAlmostEqual(seen["W3"][label], 2.0)
         self.assertAlmostEqual(seen["W4"][label], 1.0)
 
+    def test_per_row_tables_drop_rows_that_did_not_measure(self):
+        """A FAILED or no-output row can carry a previous pass's latency and
+        counters; the latency, storage and stalls tables printed them as this
+        run's, where the workload sections already dropped the row."""
+        report = self.report
+        lat = {"client_p50_us": 777_001.0, "client_p99_us": 777_002.0,
+               "client_p999_us": 777_003.0}
+        stale = dict(latency=lat, disk_read_bytes=9.0e9, runqueue_wait_s=4.321,
+                     load_mode="open-loop")
+        for status in ("FAILED", "no-output"):
+            ok = _row("W3", 1.0, latency={"client_p50_us": 1000.0}, disk_read_bytes=1.0e6,
+                      runqueue_wait_s=0.01)
+            runs = self._runs([ok, _row("W4-p50", 1.0, status=status, **stale)])
+            for fn in (report.latency_table, report.compact_latency_table,
+                       report.storage_rows_table, report.stalls_rows_table):
+                html = fn(runs)
+                self.assertTrue(html, fn.__name__)
+                self.assertNotIn("W4-p50", html, f"{fn.__name__} {status}")
+
     def test_per_engine_tables_name_each_engine_once(self):
         """Every column header repeated the label: seven times per engine in the
         scheduler table, five in stalls, six in hardware, two in sharing."""

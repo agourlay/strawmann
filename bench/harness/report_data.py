@@ -958,6 +958,17 @@ ENCODINGS = [("bench2", "fp32 (no quantization)", "#C97A00"),
              ("bench6", "SQ8 scalar", "#A970FF")]
 
 
+def measured_row(run: Run, wid: str) -> dict:
+    """`wid`'s row if it measured (status ok), else {}.
+
+    A FAILED or no-output row may still carry a previous pass's latency and
+    counters, which the per-row tables printed as this run's. The workload
+    sections already drop such rows; these tables now do too.
+    """
+    row = run.by_id().get(wid) or {}
+    return row if row.get("status") == Status.ok else {}
+
+
 def row_bracket_s(r) -> float | None:
     """The seconds a row's engine counters span: the search's wall, or its
     writer's on a mixed row whose append outlived the search. The CPU is

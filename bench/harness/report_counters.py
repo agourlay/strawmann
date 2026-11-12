@@ -10,7 +10,7 @@ import html
 import perfstat
 
 import procstat
-from report_data import Run, describe, row_bracket_s
+from report_data import Run, describe, measured_row, row_bracket_s
 
 
 def storage_rows_table(runs: list[Run]) -> str:
@@ -25,7 +25,7 @@ def storage_rows_table(runs: list[Run]) -> str:
     for wid in ids:
         cells, any_value = [], False
         for run in runs:
-            row = run.by_id().get(wid, {})
+            row = measured_row(run, wid)
             for key, fmt in (("disk_read_bytes", procstat.human_bytes),
                              ("disk_write_bytes", procstat.human_bytes),
                              ("disk_read_ops", procstat.human_count),
@@ -285,7 +285,7 @@ def stalls_rows_table(runs: list[Run]) -> str:
     for wid in ids:
         cells, any_value = [], False
         for run in runs:
-            row = run.by_id().get(wid, {})
+            row = measured_row(run, wid)
             for i, (text, present) in enumerate((
                     _cell(row, "runqueue_wait_s", 1000, " ms", 1),
                     _cell(row, "blkio_delay_s", 1000, " ms", 0),

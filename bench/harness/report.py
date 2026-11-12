@@ -116,6 +116,7 @@ from report_data import (  # noqa: F401
     load_run,
     matched_ratios,
     matched_recall_refusal,
+    measured_row,
     populated_of,
     purposes,
     ratio_value,
@@ -1453,7 +1454,7 @@ def latency_table(runs: list[Run], which: str = "client") -> str:
         cells, any_value = [], False
         mode = ""
         for run in runs:
-            row = run.by_id().get(wid, {})
+            row = measured_row(run, wid)
             lat = row.get("latency") or {}
             mode = mode or row.get("load_mode", "")
             for _, key in LAT_COLS:
@@ -1541,7 +1542,7 @@ def compact_latency_table(runs: list[Run]) -> str:
     for wid in keep:
         cells, any_value = [], False
         for run in runs:
-            lat = run.by_id().get(wid, {}).get("latency") or {}
+            lat = measured_row(run, wid).get("latency") or {}
             for i, (_, key) in enumerate(COMPACT_LAT_COLS):
                 v = lat.get(f"client_{key}")
                 any_value = any_value or v is not None
