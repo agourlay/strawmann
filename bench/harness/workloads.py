@@ -3068,11 +3068,15 @@ def unmeasured_blanked(status: Status, perf_row: dict, io: dict,
     laion 1111's W16 rows failed in 0 s, and their counter sidecar and
     scheduler window still produced figures (`W16-ef64 | 0.63 | 2.11 1.058x
     nominal` in the report), which the fold then counted as a pass that had
-    measured them. Blank as a row measured without the sidecar is blank.
+    measured them. Blank as a row measured without the sidecar is blank. The
+    I/O, pressure and RSS-split figures came from the same 0 s bracket, so
+    they go as well; `rss_peak_bytes` and `storage_bytes` stay, as levels of
+    the engine rather than of the row.
     """
     if status not in (Status.failed, Status.no_output):
         return perf_row, io
-    return perfstat.blank(perf or ""), {**io, **dict.fromkeys(procstat.SCHED_FIELDS)}
+    return perfstat.blank(perf or ""), {**io, **dict.fromkeys(
+        procstat.SCHED_FIELDS + procstat.IO_FIELDS + procstat.PSI_FIELDS + procstat.RSS_FIELDS)}
 
 
 def run_one(w: Workload, uri: str, results: Path, common: list[str],
@@ -3097,6 +3101,12 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
     # A mixed row is measured over its writer's span (`write_window_qps`), so
     # the reader stamps each search as it completes.
     search_jsonl = results / f"{w.id}-search.jsonl" if w.background else None
+    # The previous pass's JSON goes too: a re-run that failed read its
+    # latency, upload_s, index_wait_s and bfb_precision as its own, and one
+    # that exited 0 without writing was filed ok on the old qps rather than
+    # no-output.
+    (results / f"{w.id}.json").unlink(missing_ok=True)
+    (results / f"{w.id}-write.json").unlink(missing_ok=True)
     if search_jsonl is not None:
         search_jsonl.unlink(missing_ok=True)
         cmd = [*cmd, "--jsonl-searches", str(search_jsonl), "--absolute-time", "true"]
@@ -3300,7 +3310,10 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
     return Result(
         w.id, status, secs, l0, l1, foreign, qps, rps, detail,
         when=when, session=SESSION,
-        load_mode=load_mode_of(w), latency=latency_of(results, w.id),
+        load_mode=load_mode_of(w),
+        # Not from a row that did not measure, whatever JSON it left behind.
+        latency=(latency_of(results, w.id)
+                 if status not in (Status.failed, Status.no_output) else {}),
         **client_concurrency(w),
         ef=ef_of(w),
         exact=exact_of(w),

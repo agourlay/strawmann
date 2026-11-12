@@ -781,6 +781,31 @@ class WorkloadTests(unittest.TestCase):
         # ...and no stamp given, no hash invented.
         self.assertIsNone(w.run_one(t["W3"], "http://localhost:1", results, []).harness_hash)
 
+    def test_a_rerun_does_not_inherit_the_previous_passs_json(self):
+        """A re-run that wrote no JSON read the last pass's as its own: exit 0
+        was filed ok on the old qps, and a failure kept the old latency and
+        the old writer's figures."""
+        w = self.w
+        self._fake_bfb()
+        t = {x.id: x for x in w.table()}
+        results = Path(self.tmp.name) / "r"
+        results.mkdir()
+        for rid in ("W3", "W11"):
+            self.assertEqual(w.run_one(t[rid], "http://l", results, []).status, w.Status.ok)
+        self.assertTrue((results / "W11-write.json").exists())
+        for rc, want in ((0, w.Status.no_output), (1, w.Status.failed)):
+            silent = Path(self.tmp.name) / "bfb"
+            silent.write_text(f"#!/bin/sh\nexit {rc}\n")
+            r3 = w.run_one(t["W3"], "http://l", results, [])
+            self.assertEqual(r3.status, want)
+            self.assertIsNone(r3.qps)
+            self.assertEqual(r3.latency, {})
+            r11 = w.run_one(t["W11"], "http://l", results, [])
+            self.assertIsNone(r11.background_pps)
+            self._fake_bfb()
+            w.run_one(t["W3"], "http://l", results, [])
+            w.run_one(t["W11"], "http://l", results, [])
+
     def test_the_isolated_encodings_have_rows_on_every_corpus(self):
         """Binary's 2- and 1.5-bit encodings and TurboQuant's four widths,
         each in its own phase (`isolated_groups`), so dbpedia-openai-1m's arm
@@ -841,12 +866,14 @@ class WorkloadTests(unittest.TestCase):
 
         import procstat
         perf = dict.fromkeys(perfstat.PERF_FIELDS, 1.0)
-        io = dict.fromkeys(procstat.SCHED_FIELDS, 2.0) | {"rss_peak_bytes": 7}
+        blanked = (procstat.SCHED_FIELDS + procstat.IO_FIELDS + procstat.PSI_FIELDS
+                   + procstat.RSS_FIELDS)
+        io = dict.fromkeys(blanked, 2.0) | {"rss_peak_bytes": 7}
         for st in (workloads.Status.failed, workloads.Status.no_output):
             p2, io2 = workloads.unmeasured_blanked(st, perf, io, "default")
             # `blank` keeps the event set's name; no counter is a number.
             self.assertFalse([k for k, v in p2.items() if isinstance(v, (int, float))])
-            self.assertTrue(all(io2[k] is None for k in procstat.SCHED_FIELDS))
+            self.assertEqual([k for k in blanked if io2[k] is not None], [])
             self.assertEqual(io2["rss_peak_bytes"], 7)
         same = workloads.unmeasured_blanked(workloads.Status.ok, perf, io, "default")
         self.assertEqual(same, (perf, io))
