@@ -2140,7 +2140,41 @@ def unindexed_remainders(label: str, rows: list | None = None) -> list[str]:
     return out
 
 
-def render(labels: list[str], lax: bool = False) -> int:
+def session_refusals(labels: list[str], skipped: list[str],
+                     session: str | None = None) -> list[Refusal]:
+    """Why this invocation's two labels are not one measurement.
+
+    `--skip qdrant` still rendered and published, pairing today's strawmANN arm
+    with whatever an earlier run left under the Qdrant label on the same stamp:
+    `compare.stale_reasons` compares stamps, not `session`, so nothing saw two
+    runs. Skipping one engine is the run that was asked for (by design); a label
+    whose `run.json` names another session is a defect.
+
+    Skipping both is `compare.conformance_recovery`'s documented way to license
+    rows already on disk, so there the two labels need only share a session
+    with each other.
+    """
+    session = session or SESSION
+    ran = [e for e in ("strawmann", "qdrant") if e not in skipped]
+    if len(ran) == 1:
+        gone = "qdrant" if ran == ["strawmann"] else "strawmann"
+        return [Refusal(f"--skip {gone}: this run measured one engine, so the "
+                        f"other label holds an earlier run's rows", by_design=True)]
+    seen = {}
+    for label in labels:
+        try:
+            meta = json.loads((RESULTS / label / "run.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+        seen[label] = meta.get("session") if isinstance(meta, dict) else None
+    want = session if ran else next(iter(seen.values()), None)
+    return [Refusal(f"{label}: run.json names session {theirs!r}, not "
+                    f"{want!r}; the pair is two runs")
+            for label, theirs in seen.items() if not theirs or theirs != want]
+
+
+def render(labels: list[str], lax: bool = False,
+           refusals: list[str] | None = None) -> int:
     """Record, then render, then decide whether the README may change.
 
     Three refusals, each printed with what would have been done:
@@ -2184,7 +2218,7 @@ def render(labels: list[str], lax: bool = False) -> int:
             conf = {}
     comparative = bool(conf.get("licenses_comparative"))
 
-    reasons = []
+    reasons = list(refusals or [])
     if not sink_ok:
         reasons.append("the §8 sink refused the rows (see above)")
     for label in labels:
@@ -2797,7 +2831,8 @@ def main(argv: list[str]) -> int:
         rc |= 1
 
     if "render" not in args.skip:
-        rc |= render(labels, lax=verdict.failed)
+        rc |= render(labels, lax=verdict.failed,
+                     refusals=session_refusals(labels, args.skip))
 
     say("done")
     print(f"  rows:   {RESULTS / args.strawmann_label / 'rows.json'}")

@@ -4812,3 +4812,79 @@ class DatasetTestsTableTests(unittest.TestCase):
         s = self.w.collection_settings()
         self.assertEqual(s["w16_fields"], [["similarity", "float"]])
         self.assertEqual((s["w16_limit"], s["w16_n"]), (10, 100_000))
+
+
+class FullrunSessionPublishTests(unittest.TestCase):
+    """`render` may publish only a pair this invocation measured, both arms.
+
+    `--skip qdrant` still spliced README.md, pairing today's strawmANN arm with
+    whatever an earlier run left under the Qdrant label on the same stamp;
+    `compare.stale_reasons` does not compare `session`, so nothing noticed.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        _reload(Path(self.tmp.name))
+        self.f = importlib.reload(sys.modules["fullrun"]) \
+            if "fullrun" in sys.modules else importlib.import_module("fullrun")
+        self.labels = ["sm-x-1112", "qd-x-1112"]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run_json(self, label, session):
+        d = self.f.RESULTS / label
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "run.json").write_text(json.dumps({"session": session}))
+
+    def _published(self, refusals):
+        calls = []
+
+        def fake_sh(argv, *_a, **_k):
+            calls.append(argv)
+            return 0, ""
+
+        with mock.patch.object(self.f, "sh", fake_sh), \
+                mock.patch.object(self.f, "publish_refusals", lambda _l: []), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.f.render(self.labels, refusals=refusals)
+        return any("--write-readme" in a for a in calls)
+
+    def test_a_skipped_engine_refuses_publication_by_design(self):
+        self._run_json(self.labels[0], "s1")
+        self._run_json(self.labels[1], "old")
+        why = self.f.session_refusals(self.labels, ["qdrant"], session="s1")
+        self.assertTrue(why and not any(self.f.is_defect(r) for r in why), why)
+        self.assertFalse(self._published(why))
+
+    def test_a_label_from_another_session_is_a_defect(self):
+        self._run_json(self.labels[0], "s1")
+        self._run_json(self.labels[1], "old")
+        why = self.f.session_refusals(self.labels, [], session="s1")
+        self.assertEqual(len(why), 1)
+        self.assertIn(self.labels[1], why[0])
+        self.assertTrue(self.f.is_defect(why[0]))
+        self.assertFalse(self._published(why))
+
+    def test_one_session_for_both_arms_still_publishes(self):
+        self._run_json(self.labels[0], "s1")
+        self._run_json(self.labels[1], "s1")
+        why = self.f.session_refusals(self.labels, ["build"], session="s1")
+        self.assertEqual(why, [])
+        # A conformance.json that licenses, so only the session decides.
+        (self.f.RESULTS / self.labels[0] / "conformance.json").write_text(
+            json.dumps({"licenses_comparative": True}))
+        self.assertTrue(self._published(why))
+
+    def test_the_differ_alone_on_one_earlier_pair_may_still_publish(self):
+        """`compare.conformance_recovery` skips both engines to license rows on
+        disk: one earlier session is a pair, two are not."""
+        both = ["build", "strawmann", "qdrant"]
+        self._run_json(self.labels[0], "old")
+        self._run_json(self.labels[1], "old")
+        self.assertEqual(self.f.session_refusals(self.labels, both, session="s1"), [])
+        self._run_json(self.labels[1], "older")
+        why = self.f.session_refusals(self.labels, both, session="s1")
+        self.assertEqual(len(why), 1)
+        self.assertTrue(self.f.is_defect(why[0]))
