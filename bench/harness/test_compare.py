@@ -2068,6 +2068,26 @@ class HarnessBoundRowTests(unittest.TestCase):
         self.assertEqual(rows["W9"].ratio, "-")
         self.assertIn("one pass apart from the other two", rows["W9"].refusal)
 
+    def test_the_parity_band_is_symmetric_when_the_columns_swap(self):
+        """At band 0.21, 0.80x read parity and the same pair swapped, 1.25x,
+        a ratio: strawmANN is column a, so a Qdrant lead was the one absorbed."""
+        cmp = self.m["compare"]
+        for a, b in ((800.0, 1000.0), (1000.0, 800.0)):
+            with mock.patch.object(cmp, "parity_band", lambda *_: 0.21):
+                rows = self._joined([_row("W9", a)], [_row("W9", b)])
+            self.assertNotEqual(rows["W9"].ratio, "parity", (a, b))
+        for a, b in ((1200.0, 1000.0), (1000.0, 1200.0)):
+            with mock.patch.object(cmp, "parity_band", lambda *_: 0.21):
+                rows = self._joined([_row("W9", a)], [_row("W9", b)])
+            self.assertEqual(rows["W9"].ratio, "parity", (a, b))
+        # `_clears_either_way` reads the same rule: 0.80x and 1.25x on the
+        # agreeing passes, both clearing 0.21 with the odd pass further out.
+        for a, b in ((800.0, 1000.0), (1000.0, 800.0)):
+            odd = {"pass": 3, "move": +0.30 if a > b else -0.30}
+            with mock.patch.object(cmp, "parity_band", lambda *_: 0.21):
+                rows = self._joined([_row("W9", a, rep_outlier=odd)], [_row("W9", b)])
+            self.assertNotEqual(rows["W9"].ratio, "-", (a, b, rows["W9"].note_text))
+
     def test_a_steady_row_is_not_called_drifted(self):
         rows = self._joined([_row("W4", 1000.0)], [_row("W4", 900.0)])
         self.assertNotIn("monotonically", rows["W4"].note_text)

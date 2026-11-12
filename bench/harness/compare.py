@@ -37,6 +37,7 @@ import argparse
 import contextlib
 import html
 import json
+import math
 import os
 import re
 import sys
@@ -834,7 +835,7 @@ class Row:
         decomp = self._decomposition(ra, rb)
         if decomp:
             self.notes.append(decomp)
-        if band is not None and abs(self.qa / self.qb - 1.0) <= band:
+        if band is not None and band_side(self.qa / self.qb, band) == 0:
             self.notes.append(
                 f"[within the ±{100 * band:.1f}% band this dataset's noise floor "
                 f"puts on {self.id}: no measured difference, not a small one]")
@@ -935,7 +936,7 @@ class Row:
             return q * (1 + o["move"]) if o else q
         pair = self.qa / self.qb
         with_odd = odd(self.qa, ra) / odd(self.qb, rb)
-        side = [(x > 1 + band) - (x < 1 - band) for x in (pair, with_odd)]
+        side = [band_side(x, band) for x in (pair, with_odd)]
         if side[0] == 0 or side[0] != side[1]:
             return None
         return (f"[one pass apart, but the ratio clears the ±{100 * band:.1f}% band either "
@@ -1202,6 +1203,19 @@ def dataset_spec_of(a_label: str, b_label: str) -> dict:
         if spec.get("name"):
             return spec
     return {}
+
+
+def band_side(ratio: float, band: float) -> int:
+    """+1 above `band`, -1 below it, 0 inside: symmetric in log space.
+
+    `abs(ratio - 1) <= band` was not: at band 0.21 it called 0.80x parity and
+    the same pair swapped, 1.25x, a ratio. strawmANN is column a, so Qdrant
+    leads were absorbed into parity more easily than strawmANN's. Here 1.21x
+    and 1/1.21x sit on the band's two edges alike.
+    """
+    edge = math.log1p(band)
+    x = math.log(ratio)
+    return (x > edge) - (x < -edge)
 
 
 def parity_band(wid: str, a_label: str, b_label: str) -> float | None:
