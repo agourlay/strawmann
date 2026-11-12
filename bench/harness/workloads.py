@@ -994,6 +994,13 @@ def harness_stamp() -> dict:
                           # is part of what a settle *is*.
                           "dropped_not_settled": rows_writing_dead_collections()},
         "filtered_queries": FILTERED_QUERIES,
+        # Hashed: the grades are what a W12 row *is*. `w12_n` alone was
+        # recorded and not hashed, and the keyword count and match-any width
+        # were not recorded at all, so W12-sel1 at 1% (`W12_KEYWORDS=100`) and
+        # at 0.1% (`1000`, its value before) hashed alike and ratioed against
+        # each other. Only where W12 runs, so no text corpus's stamp moves.
+        **({"w12": {"n": w12_n(), "keywords": W12_KEYWORDS, "match_any": W12_MATCH_ANY}}
+           if not paths.is_text(DATASET) else {}),
         # Hashed: the write rate is what the mixed rows measure, and 0925's
         # moved 10x on a harness change with nothing in the stamp to say so.
         "w11_append_rate": {"W11-steady": w11_append_rate(w11_steady_n(), W11_STEADY_SPAN_S),
@@ -1039,7 +1046,7 @@ def harness_stamp() -> dict:
 #: serves a 28.16% floor over rows whose spread is 0.66%.
 STAMP_KEYS = ["metric", "query_source", "upload_n", "w11_n", "queries",
               "exact_queries", "collection", "ef", "bfb_pin", "engine_settle",
-              "oversampling_policy", "w11_append_rate", "client"]
+              "oversampling_policy", "w11_append_rate", "client", "w12"]
 
 #: Keys that did *not* earn the invalidation above, so a stamp from before one
 #: of them hashes exactly as its rows were hashed when they were measured.
@@ -1052,7 +1059,9 @@ STAMP_KEYS = ["metric", "query_source", "upload_n", "w11_n", "queries",
 #: `w11_append_rate` likewise: every run before it recorded no rate, and its
 #: rows are still its rows. `client` too: a run before it is still the run it
 #: was, and the label-level check refuses a ratio across the two eras.
-STAMP_KEYS_SINCE = ("oversampling_policy", "w11_append_rate", "client")
+#: `w12` as well, and a new key rather than `w12_n` hashed: every stamp
+#: already records `w12_n`, so hashing it would re-key every published row.
+STAMP_KEYS_SINCE = ("oversampling_policy", "w11_append_rate", "client", "w12")
 
 
 def stamp_hash(stamp: dict) -> str:

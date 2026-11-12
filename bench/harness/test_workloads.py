@@ -1935,6 +1935,23 @@ class FullrunRowInvocationTests(unittest.TestCase):
         self.assertEqual(w.stamp_hash(old), hashlib.sha256(
             json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:12])
 
+    def test_w12s_grades_are_in_the_hash_and_old_stamps_keep_theirs(self):
+        """W12-sel1 at 1% (100 keywords) and at 0.1% (1000) hashed alike."""
+        w = self.f.workloads
+        stamp = w.harness_stamp()
+        self.assertEqual(stamp["w12"], {"n": w.w12_n(), "keywords": w.W12_KEYWORDS,
+                                        "match_any": w.W12_MATCH_ANY})
+        for name, v in (("W12_KEYWORDS", 1000), ("W12_MATCH_ANY", 5), ("W12_N", 70_000)):
+            with mock.patch.object(w, name, v):
+                self.assertNotEqual(w.stamp_hash(w.harness_stamp()), w.stamp_hash(stamp), name)
+        # A stamp from before the key hashes as its rows were hashed.
+        old = {k: v for k, v in stamp.items() if k != "w12"}
+        key = {k: old.get(k) for k in w.STAMP_KEYS if k != "w12"
+               and (k in old or k not in w.STAMP_KEYS_SINCE)}
+        import hashlib
+        self.assertEqual(w.stamp_hash(old), hashlib.sha256(
+            json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:12])
+
     def _dirs(self, *names):
         for n in names:
             (self.f.ROOT / "bench/results" / n).mkdir(parents=True, exist_ok=True)
@@ -4412,6 +4429,8 @@ class TextTableTests(unittest.TestCase):
         self.assertEqual(t["W15-filtered"].needs_payload_index, True)
         self.assertIn("-p 1", " ".join(map(str, t["W15"].args)))
         self.assertEqual(self.w.corpus_rows(), 5183)
+        # No W12 here, so its grades stay out of a BEIR pair's stamp.
+        self.assertNotIn("w12", self.w.harness_stamp())
 
     def test_the_upload_config_indexes_the_corpus_tokenizer_with_bm25(self):
         cfg = self.w.text_upload_config("bench15")
