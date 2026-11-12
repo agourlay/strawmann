@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from harness_fixtures import CONF_T2, CONF_T3, Fixture, _reload, _row, _sweep, good_stamp
+from harness_fixtures import CONF_T1_FAILED, CONF_T2, CONF_T3, Fixture, _reload, _row, _sweep, good_stamp
 
 from workloads import stamp_hash
 
@@ -805,6 +805,28 @@ class ReportHostTests(unittest.TestCase):
             report, vruns, _df = self._pair(root, [_row("W3", 4000)], [_row("W3", 2000)])
             self.assertFalse(report.is_text_pair(vruns))
             self.assertIn("T3", report.licence_of(vruns)["detail"])
+
+    def test_an_unlicensed_text_pair_states_no_equal_results_ratio(self):
+        """A BM25 pair whose T1/T2 failed printed "serves N.NNx ... at equal
+        results: every row's top 10 matches the f64 BM25 oracle" under the
+        banner saying they did not, because the text branch returned before
+        the licence and STALE checks."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for conf, stamp_b in ((CONF_T1_FAILED, None), (CONF_T3, good_stamp(queries=1))):
+                d = Path(tempfile.mkdtemp(dir=root))
+                fx = Fixture(d)
+                _reload(d)
+                report = importlib.reload(self.report)
+                rows = lambda q: [_row("W15", q, ef=None, collection="bench15")]
+                fx.label("a", rows(4917), good_stamp(), conf, dataset="scifact")
+                fx.label("b", rows(820), stamp_b or good_stamp(), conf, dataset="scifact")
+                runs = [report.load_run("a"), report.load_run("b")]
+                self.assertTrue(report.is_text_pair(runs))
+                summ = report.summary(runs, report.frame(runs))
+                self.assertNotIn("text", summ)
+                self.assertTrue(summ["matched_refusal"])
+                self.assertNotIn("matches the f64 BM25 oracle", report.build(runs, "t"))
 
     def test_licence_carries_the_delta_behind_the_tier(self):
         """§8.9 lists max|Δscore| and p99|Δscore| as row fields. They were

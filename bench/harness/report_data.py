@@ -792,15 +792,20 @@ def matched_recall_refusal(runs: list[Run], row_prefix: str = "W10-ef") -> str:
     """
     if len(runs) != 2:
         return ""
-    # W15 has no ef sweep: text-differ's T1 and T2 make every row's results
-    # the oracle's, so its rows are compared as they stand (`text_summary`).
-    if is_text_pair(runs):
-        return ""
     a, b = runs
     stale = compare.stale_reasons(a.label, b.label)
     if stale:
         return "STALE: " + "; ".join(stale)
     lic = compare.licence(a.label, b.label)
+    # W15 has no ef sweep: text-differ's T1 and T2 make every row's results
+    # the oracle's, so its rows are compared as they stand (`text_summary`).
+    # That holds only on a licensed, non-STALE pair: returning "" first let a
+    # pair whose T1/T2 failed print "at equal results: every row's top 10
+    # matches the f64 BM25 oracle" under the banner saying they did not.
+    if is_text_pair(runs):
+        if not lic.get("comparative"):
+            return lic.get("banner") or "licenses_comparative is false"
+        return ""
     # A T3 failure alone no longer withholds the table. T3 says the two engines
     # differ in ANN recall at a fixed `ef`, which is the condition this table
     # exists to correct: it does not assume equal recall, it constructs it at

@@ -2003,7 +2003,8 @@ def summary(runs: list[Run], df: pd.DataFrame) -> dict:
         a, b = runs
         ratios = [v for jr in compare.joined(a.label, b.label, a.by_id(), b.by_id())
                   if jr.id.startswith("W15") and (v := ratio_value(jr.ratio)) is not None]
-        if ratios:
+        # Gated on the refusal: "at equal results" is the licence's claim.
+        if ratios and not out["matched_refusal"]:
             out["text"] = {"lo": min(ratios), "hi": max(ratios), "a": a.label, "b": b.label,
                            "note": text_segment_note(runs)}
         return out
