@@ -342,6 +342,7 @@ def compare(db, workload):
         cur = latest.setdefault(chash, {}).get(eng)
         if cur is None or (when or "", rowid) > (cur[2], cur[3]):
             latest[chash][eng] = (rec, qps, when or "", rowid, comparative, tier)
+    from compare import RECALL_FLOOR
     pairs = [(h, d) for h, d in latest.items() if "strawmann" in d and "qdrant" in d]
     if pairs:
         # Newest pair by the later of the two measurements, then by rowid.
@@ -354,6 +355,11 @@ def compare(db, workload):
             print(f"NOT COMPARABLE: conformance run {h} reached {tier} and does not "
                   f"license a comparative claim (§8.5 T3, licenses_comparative=false).")
             print("Per-engine numbers above may be quoted; no ratio between them may.")
+        elif max(s_rec, q_rec) < RECALL_FLOOR:
+            # `compare.RECALL_FLOOR`, which this table claimed to share: two
+            # engines equal at 0.027 recall are equally wrong, not comparable.
+            print(f"NOT COMPARABLE: recall@10 below {RECALL_FLOOR:.2f} on both engines "
+                  f"({s_rec:.4f} vs {q_rec:.4f}).")
         elif abs(s_rec - q_rec) > 0.01:
             print(f"NOT COMPARABLE: recall@10 differs ({s_rec:.4f} vs {q_rec:.4f}).")
             print("§7.4: QPS is compared at equal recall, never at equal ef.")
@@ -441,6 +447,12 @@ def ingest_run(db, label: str, root: Path) -> int:
     # file under the build the row names.
     isa = meta.get("isa_build") or (((conf or {}).get("isa_build")) if qd and not sm else None)
     dataset = (meta.get("dataset") or {}).get("name", "unknown")
+    # The engine, not the label: `compare` pairs on "strawmann" and "qdrant",
+    # and a label like `sm-sift-perf-1109` never paired with anything.
+    # Normalised as `compare.engine_name` does, so a Qdrant build copied under
+    # its own name (`qdrant-dev-bfc0eab31`) is still Qdrant.
+    engine = meta.get("engine_comm") or label
+    engine = "qdrant" if engine.startswith("qdrant") else engine
 
     # A file whose rows were served by more than one build is not a run:
     # `rows.json` merges in place, and a subset re-run on a rebuilt binary
@@ -507,7 +519,7 @@ def ingest_run(db, label: str, root: Path) -> int:
         lat = r.get("latency") or {}
         rec = recall_for(r)
         row = {
-            "workload": r["id"], "engine": label, "dataset": dataset,
+            "workload": r["id"], "engine": engine, "dataset": dataset,
             # The row's own build stamp where it has one; the label-level
             # value only for rows measured before rows were stamped.
             "isa_build": r.get("isa_build") or isa, "env_hash": env_hash,

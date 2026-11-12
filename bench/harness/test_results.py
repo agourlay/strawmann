@@ -1559,6 +1559,43 @@ class ResultsSinkTests(unittest.TestCase):
         # whatever order the rows arrive in.
         self.assertIn("3.00x", buf.getvalue())
 
+    def test_ingest_files_rows_under_the_engine_not_the_label(self):
+        """`compare` pairs on "strawmann" and "qdrant", and the sink stored the
+        label, so `sm-sift-perf-1109` against `qd-sift-perf-1109` never paired."""
+        res = self.res
+        root = Path(self.tmp.name)
+        db = res.connect(":memory:")
+        for label, meta in (
+                ("sm-sift-perf-1109", {"engine_comm": "strawmann", "isa_build": "avx512",
+                                       "strawmann": {"commit": "abcdef123456", "dirty": True}}),
+                ("qd-sift-perf-1109", {"engine_comm": "qdrant-dev-bfc0",
+                                       "qdrant": {"version": "1.19.0"}})):
+            self._label(label, {"dataset": {"name": "sift1m"}, **meta}, self.CONF)
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(res.ingest_run(db, label, root), 0)
+        self.assertEqual(sorted(e for (e,) in db.execute("SELECT engine FROM perf")),
+                         ["qdrant", "strawmann"])
+
+    def test_compare_refuses_a_pair_below_the_recall_floor(self):
+        """`compare.RECALL_FLOOR`: binary quantization at d=128 read 0.0273
+        against 0.0265, equal within tolerance and both wrong."""
+        res = self.res
+        db = res.connect(":memory:")
+        res.insert_conformance(db, {**self.CONF, "tier_reached": "T3", "licenses_comparative": True})
+        base = {"workload": "W7", "dataset": "sift1m", "env_hash": "e", "conformance_hash": "c1",
+                "strawmann_commit": "abcdef123456-dirty", "measured_at": "2026-02-01T00:00:00Z"}
+        res.insert_perf(db, {**base, "engine": "strawmann", "isa_build": "avx512",
+                             "qps": 3000.0, "recall_at_10": 0.0273})
+        res.insert_perf(db, {**base, "engine": "qdrant", "isa_build": "avx512", "qps": 1000.0,
+                             "recall_at_10": 0.0265, "strawmann_commit": None,
+                             "qdrant_version": "1.19.0"})
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            res.compare(db, "W7")
+        self.assertIn("NOT COMPARABLE", buf.getvalue())
+        self.assertNotIn("x qdrant", buf.getvalue())
+
     def test_a_zero_qps_arm_is_refused_rather_than_divided_by(self):
         """A row that served nothing is not a measurement, and `qps` is only
         ever filtered for `None` on the way in."""
