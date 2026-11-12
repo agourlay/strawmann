@@ -2597,3 +2597,34 @@ measured `--no-batch-fanout` (73936bd) against the default on both corpora,
 three passes each: laion W5 11,160 serial against 11,156 fanned out, sift1m
 W4 and W5 within 1.1%. Not the cause, so the default stays and the flag stays
 as the A/B arm. What laion's W5 does measure is findings 75.
+
+## The 1112 A/B chain's flags, decided 2026-11-12
+
+ab-1112 measured every flag the 1110 analyses produced on one build
+(7874a23), three passes per arm (`bench/results/ab-1112-<step>/`).
+
+- **Exact queries share one pass, on by default.** dbpedia-1m's W9 read 27
+  q/s with `--exact-gather` against 12 one pass per query (passes 27, 23,
+  30 against 12, 12, 11), demand DRAM per query -31% at equal instructions.
+  This reverses the 2026-09-22 decision only where that decision's evidence
+  does not reach: at d=1536 concurrent scans share no lines, and the gather
+  splits the shared pass over the members' own workers rather than putting
+  it on one (findings 10). `--no-exact-gather` is the A/B arm.
+- **Stage 2 prefetches its rescore rows whole.** On dbpedia-100K's SQ8
+  ladder `--rescore-prefetch whole` read W6 +1.7%, ef256 +2.0%, ef512 +2.1%
+  over `off` in every pass, demand DRAM per query -16 to -18%; `first` read
+  about half that. It does not close SQ8's 6 to 14% gap (findings 74 stays
+  open).
+- **No wider fp32 prefetch.** `--probe-prefetch-bytes` lost on every row:
+  laion W4 -2.1% at 512 bytes and -10.6% at the whole 2 KiB row although
+  demand DRAM fell 56%, dbpedia W4 -0.9% at 512. Removed (d37d931).
+- **No `--workers 8`.** W3 +11% and W4/W5 +2% on laion, but W10-ef128 -15%
+  on laion and -7% on dbpedia: the I/O thread on a worker's core costs the
+  batched ladder more than the saturating rows gain. 1 I/O thread and 7
+  workers stay.
+- **No prune memo.** `--prune-memo` cut the drainer's instructions 12% with
+  throughput flat (W11-steady 518 to 524, W11 154 to 153, build -0.7%):
+  reverted (13b2be9), findings 8 stays open.
+- **The `Query` union is neutral on SQ8** (W6 -0.1 to -0.4%). The A/B
+  covered W6 only; laion 1111's W8 (PQ) read -6.4% against 1109, which is
+  being chased separately.

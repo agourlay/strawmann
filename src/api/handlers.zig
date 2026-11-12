@@ -104,13 +104,16 @@ pub const Engine = struct {
     /// a segment's share of the batch on one thread.
     batch_fanout: bool = true,
     /// `--rescore-prefetch`: how quantized search's stage 2 asks for its fp32
-    /// rows. An A/B arm (findings 74); off is the measured default.
-    rescore_prefetch: core.quantized_search.RescorePrefetch = .off,
-    /// `--exact-gather`: exact queries from separate requests on a collection
-    /// past `exact_scan_large_bytes` share one pass, split across their
-    /// workers (`collection.ExactGather`, findings 10). Off is the default
-    /// until the A/B measures it.
-    exact_gather: bool = false,
+    /// rows (findings 74). `whole` since ab-1112 measured it on dbpedia-100K's
+    /// SQ8 ladder: W6 +1.7%, ef256 +2.0%, ef512 +2.1% over `off`, demand DRAM
+    /// per query -16 to -18%, in every pass; `first` read about half that.
+    rescore_prefetch: core.quantized_search.RescorePrefetch = .whole,
+    /// Exact queries from separate requests on a collection past
+    /// `exact_scan_large_bytes` share one pass, split across their workers
+    /// (`collection.ExactGather`, findings 10). On since ab-1112 measured
+    /// dbpedia-1m's W9 at 27 q/s against 12 one pass per query, demand DRAM
+    /// per query -31%. `--no-exact-gather` is the A/B arm.
+    exact_gather: bool = true,
     /// Largest vector dimension any worker's scratch can hold.
     ///
     /// §6.3 forbids allocating on the query path, so `Workspace.query` is sized

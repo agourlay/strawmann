@@ -74,8 +74,10 @@ pub const QuantParams = struct {
     /// `params.quantization.oversampling`.
     oversampling: f64 = 1.0,
     /// Whether stage 2 asks for its fp32 rows ahead (`--rescore-prefetch`).
-    /// An A/B arm until it is measured (findings 74), so off by default.
-    rescore_prefetch: RescorePrefetch = .off,
+    /// `whole` is the engine's default since ab-1112 (findings 74,
+    /// `api.Engine.rescore_prefetch`); the same default here keeps a direct
+    /// caller on the path the server takes.
+    rescore_prefetch: RescorePrefetch = .whole,
 };
 
 /// How stage 2 asks for the rows it is about to rescore.

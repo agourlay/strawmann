@@ -45,7 +45,7 @@ const Flag = enum {
     build_mode,
     no_drain,
     no_batch_fanout,
-    exact_gather,
+    no_exact_gather,
     filtered_plan,
     rescore_prefetch,
 
@@ -77,7 +77,7 @@ const Flag = enum {
             .build_mode => "--build-mode",
             .no_drain => "--no-drain",
             .no_batch_fanout => "--no-batch-fanout",
-            .exact_gather => "--exact-gather",
+            .no_exact_gather => "--no-exact-gather",
             .filtered_plan => "--filtered-plan",
             .rescore_prefetch => "--rescore-prefetch",
         };
@@ -289,15 +289,15 @@ fn usage(w: *Io.Writer) !void {
         \\  --no-batch-fanout    run each QueryBatch on its dispatching worker
         \\                       instead of spreading it over the queue
         \\                       (the A/B arm for batched search)
-        \\  --exact-gather       let exact queries of separate requests share one
-        \\                       pass of a collection of 4 GiB or more, split
-        \\                       across their workers (an A/B arm, findings 10)
+        \\  --no-exact-gather    give every exact query on a collection of 4 GiB
+        \\                       or more its own pass, instead of sharing one
+        \\                       across requests (the A/B arm, findings 10)
         \\  --filtered-plan      auto|scan|two_hop|walk for a counted filter
         \\                       (default auto, the cost model; the others are
         \\                       calibration arms)
         \\  --rescore-prefetch   off|first|whole: how quantized search asks
-        \\                       for the fp32 rows it rescores (default off;
-        \\                       an A/B arm)
+        \\                       for the fp32 rows it rescores (default whole;
+        \\                       the others are A/B arms)
         \\  --pin               pin threads to cores   (§6.3, §7.1)
         \\  --cpus <list>        which cpus --pin may use, e.g. 4-11 or 0,2,4-6
         \\                       (default 0..; name them on a heterogeneous part)
@@ -401,7 +401,7 @@ pub fn main(init: std.process.Init) !void {
             .no_huge_pages => opts.huge_pages = false,
             .no_drain => opts.drain_tail = false,
             .no_batch_fanout => opts.batch_fanout = false,
-            .exact_gather => opts.exact_gather = true,
+            .no_exact_gather => opts.exact_gather = false,
             .no_bandwidth_probe => opts.bandwidth_probe = false,
             .probe => opts.probe_only = true,
             .host => opts.host = next(args, &i) orelse return error.MissingValue,
@@ -690,9 +690,9 @@ pub fn main(init: std.process.Init) !void {
         try w.print("  batched search         : on the dispatching worker (--no-batch-fanout)\n", .{});
     }
     if (engine.exact_gather) {
-        try w.print("  exact scans >= 4 GiB   : gathered across requests, one pass split over their workers (--exact-gather)\n", .{});
+        try w.print("  exact scans >= 4 GiB   : gathered across requests, one pass split over their workers\n", .{});
     } else {
-        try w.print("  exact scans >= 4 GiB   : one pass per query, at most {d} at once\n", .{core.collection.exact_scan_cap});
+        try w.print("  exact scans >= 4 GiB   : one pass per query, at most {d} at once (--no-exact-gather)\n", .{core.collection.exact_scan_cap});
     }
     if (engine.filtered_plan) |p| {
         try w.print("  filtered plan          : forced {s} (--filtered-plan), not the cost model\n", .{@tagName(p)});
