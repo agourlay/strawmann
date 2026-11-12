@@ -2392,6 +2392,16 @@ def header_block(a_label: str, b_label: str,
     return "```\n" + "\n".join(lines) + "\n```"
 
 
+def md_note(notes: str) -> str:
+    """A row's bracketed notes as one markdown cell.
+
+    Notes are bracketed and joined by a space. The brackets are dropped for
+    the table, so the boundary between two notes becomes "; " first, or
+    dbpedia 1110's W7 read "...is not a noise band one pass apart, ...".
+    """
+    return notes.replace("] [", "; ").replace("[", "").replace("]", "")
+
+
 def full_block(a_label: str, b_label: str,
                a: dict[str, dict], b: dict[str, dict]) -> str:
     """The full W0-W13 markdown table `docs/comparison-<dataset>.md` embeds.
@@ -2414,7 +2424,7 @@ def full_block(a_label: str, b_label: str,
     for r in detail_rows(a_label, b_label, a, b):
         wid = r["id"]
         name = purpose.get(wid, "")
-        note = r["notes"].replace("[", "").replace("]", "")
+        note = md_note(r["notes"])
         # Recall is a property of the configuration, not of the engine, when
         # both engines searched the same ef; two cells that always agree are
         # one cell.

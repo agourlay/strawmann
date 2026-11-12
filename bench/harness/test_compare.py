@@ -2065,6 +2065,13 @@ class HarnessBoundRowTests(unittest.TestCase):
         self.assertIsNone(re.fullmatch(r"[\d.]+x", rows["W4"].ratio or ""),
                           f"outlying row published a ratio: {rows['W4'].ratio!r}")
 
+    def test_a_markdown_note_keeps_its_notes_apart(self):
+        """dbpedia 1110's W7 read "...is not a noise band one pass apart, ..."."""
+        md = self.m["compare"].md_note
+        self.assertEqual(md("[first note] [second note]"), "first note; second note")
+        self.assertEqual(md("[only]"), "only")
+        self.assertEqual(md(""), "")
+
     def test_one_pass_apart_keeps_a_ratio_that_clears_the_band_either_way(self):
         """dbpedia 1110's W7: 1.71x on Qdrant's agreeing passes, 2.02x with
         its odd one, refused all the same."""
