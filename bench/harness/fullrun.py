@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import glob
 import json
 import os
 import re
@@ -326,16 +327,69 @@ def resolve_rps_reference(arg: str | None, labels: list[str]) -> float | None:
     return seen[slower]
 
 
-def previous_pair(labels: list[str]) -> list[str] | None:
+def label_started(label: str) -> dt.datetime | None:
+    """When the run under `label` started, from its `run.json`."""
+    try:
+        meta = json.loads((RESULTS / label / "run.json").read_text())
+        return iso(meta["started"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def label_time(label: str, now: dt.datetime | None = None) -> dt.datetime:
+    """When a dated label was measured: its `run.json`'s `started`, else its
+    trailing MMDD in the year that puts it nearest `now`.
+
+    Labels carry no year, and published documents cite them, so the format
+    stays. Read as a bare MMDD, December's pairs sorted after January's.
+    """
+    if (started := label_started(label)) is not None:
+        return started
+    now = now or dt.datetime.now(dt.UTC)
+    month, day = int(label[-4:-2]), int(label[-2:])
+    days = []
+    for year in (now.year - 1, now.year, now.year + 1):
+        try:
+            days.append(dt.datetime(year, month, day, tzinfo=dt.UTC))
+        except ValueError:
+            continue
+    return min(days, key=lambda d: abs(d - now)) if days else now
+
+
+#: How long after a label's run started a relaunch into it is still that run.
+#: A day, not a calendar date: a night launched at 18:30 that failed is
+#: relaunched the next morning under the same label.
+RELAUNCH_WINDOW = dt.timedelta(hours=24)
+
+
+def reused_label(label: str, now: dt.datetime | None = None) -> str | None:
+    """Why `label` (or one of its passes) belongs to an earlier run, or None.
+
+    Labels carry MMDD and no year, so a 2027 night on a reused date would
+    write into the label 2026's documents cite, and `rows.json` merges in
+    place. A same-day relaunch stays allowed.
+    """
+    now = now or dt.datetime.now(dt.UTC)
+    for d in [RESULTS / label, *sorted(RESULTS.glob(f"{glob.escape(label)}-rep*"))]:
+        started = label_started(d.name)
+        if started is not None and now - started > RELAUNCH_WINDOW:
+            return (f"{d} holds a run started {started:%Y-%m-%d %H:%M}Z, more than "
+                    f"a day ago; pick a new label, or move it aside")
+    return None
+
+
+def previous_pair(labels: list[str], now: dt.datetime | None = None) -> list[str] | None:
     """The newest earlier `sm-`/`qd-` pair of the family these labels belong to.
 
     A family is a label with its date taken off: `sm-sift-perf-0924` and
     `sm-sift-perf-rel-0921` are both `sm-sift-perf`, and `-rel-` is how every
     published pair is spelled, so it is part of the date suffix and not of the
-    family. Ordered by the trailing MMDD, not lexicographically: `rel-0903`
-    sorted after `0910` on `r` > `0`, and the older pair won. A `-repN` pass
-    directory does not end in a date and is not a pair. None for labels that
-    do not follow the convention, or a family with no earlier pair.
+    family. Ordered by when each was measured (`label_time`), not
+    lexicographically: `rel-0903` sorted after `0910` on `r` > `0`, and the
+    older pair won; nor by MMDD alone, which put a January run's December pair
+    after it. A `-repN` pass directory does not end in a date and is not a
+    pair. None for labels that do not follow the convention, or a family with
+    no earlier pair.
     """
     dated = [re.fullmatch(r"(sm|qd)-(.+?)(?:-rel)?-\d{4}", x) for x in labels]
     if len(labels) != 2 or not all(dated):
@@ -346,12 +400,13 @@ def previous_pair(labels: list[str]) -> list[str] | None:
     # Strictly earlier than these labels, as the name says. "Newest other
     # than these" let a walk over pairs (the old W11 sizing) step from the
     # newest pair to the second and back to the newest, and stop there.
-    own = min(int(x[-4:]) for x in labels)
+    own = min(label_time(x, now) for x in labels)
     found = []
     for d in (ROOT / "bench/results").glob(f"{stem}-*"):
         m = re.fullmatch(re.escape(stem) + r"(-rel)?-(\d{4})", d.name)
-        if m and d.is_dir() and d.name not in labels and int(m.group(2)) < own:
-            found.append((int(m.group(2)), d.name))
+        if m and d.is_dir() and d.name not in labels and \
+                (when := label_time(d.name, now)) < own:
+            found.append((when, d.name))
     if not found:
         return None
     prev = max(found)[1]
@@ -2705,6 +2760,13 @@ def main(argv: list[str]) -> int:
     # the early, cheap half.
     for label in (args.strawmann_label, args.qdrant_label):
         if why := workloads.foreign_dataset(RESULTS / label, DATASET):
+            print(f"refusing to write into {RESULTS / label}\n  {why}", file=sys.stderr)
+            return 1
+    # Only the labels this run writes: the differ alone (`--skip strawmann
+    # --skip qdrant`) is how rows measured days ago are licensed.
+    for engine, label in (("strawmann", args.strawmann_label),
+                          ("qdrant", args.qdrant_label)):
+        if engine in engines and (why := reused_label(label)):
             print(f"refusing to write into {RESULTS / label}\n  {why}", file=sys.stderr)
             return 1
 

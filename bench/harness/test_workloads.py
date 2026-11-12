@@ -5039,3 +5039,62 @@ class CommitAbRefResolutionTests(unittest.TestCase):
                                   {"scan": "/ab/abc1234/zig-out/bin/strawmann"})
             doc = json.loads((Path(tmp) / "summary.json").read_text())
         self.assertEqual(doc["builds"], {"scan": "/ab/abc1234/zig-out/bin/strawmann"})
+
+
+class LabelYearTests(unittest.TestCase):
+    """Labels carry MMDD and no year. `previous_pair` compared MMDD, so a
+    January night found no December pair, and a run a year later on the same
+    date wrote into the label last year's documents cite."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        _reload(Path(self.tmp.name))
+        self.f = importlib.reload(sys.modules["fullrun"]) \
+            if "fullrun" in sys.modules else importlib.import_module("fullrun")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _label(self, name, started=None):
+        d = self.f.RESULTS / name
+        d.mkdir(parents=True, exist_ok=True)
+        if started:
+            (d / "run.json").write_text(json.dumps({"started": started}))
+
+    def test_a_january_night_finds_december_s_pair(self):
+        import datetime as dt
+        now = dt.datetime(2027, 1, 5, 18, tzinfo=dt.UTC)
+        self._label("sm-sift-perf-1220")
+        self.assertEqual(self.f.previous_pair(["sm-sift-perf-0105", "qd-sift-perf-0105"],
+                                              now=now),
+                         ["sm-sift-perf-1220", "qd-sift-perf-1220"])
+
+    def test_pairs_are_ordered_by_when_they_started(self):
+        import datetime as dt
+        now = dt.datetime(2027, 1, 5, 18, tzinfo=dt.UTC)
+        self._label("sm-sift-perf-1220", "2026-12-20T17:30:00Z")
+        # Same MMDD as tonight's would be later, but it ran a year ago.
+        self._label("sm-sift-perf-rel-0104", "2026-01-04T17:30:00Z")
+        self.assertEqual(self.f.previous_pair(["sm-sift-perf-0105", "qd-sift-perf-0105"],
+                                              now=now)[0], "sm-sift-perf-1220")
+
+    def test_a_label_from_another_day_is_refused_and_a_relaunch_is_not(self):
+        import datetime as dt
+        now = dt.datetime(2027, 9, 24, 20, tzinfo=dt.UTC)
+        self._label("sm-sift-perf-0924", "2026-09-24T17:30:00Z")
+        self.assertIn("more than a day ago", self.f.reused_label("sm-sift-perf-0924", now))
+        self._label("qd-sift-perf-0924", "2027-09-24T17:30:00Z")
+        self.assertIsNone(self.f.reused_label("qd-sift-perf-0924", now))
+        # A pass directory left by last year's run counts as the label.
+        self._label("qd-sift-perf-0924-rep1", "2026-09-24T17:30:00Z")
+        self.assertIsNotNone(self.f.reused_label("qd-sift-perf-0924", now))
+        self.assertIsNone(self.f.reused_label("sm-never-run-0924", now))
+
+    def test_main_refuses_before_any_arm(self):
+        self._label("sm-sift-perf-0924", "2020-09-24T17:30:00Z")
+        armed = []
+        rc, err = _drive_fullrun_to_first_arm(
+            self.f, "--strawmann-label", "sm-sift-perf-0924",
+            "--qdrant-label", "qd-sift-perf-0924", at_arm=lambda: armed.append(1))
+        self.assertEqual((rc, armed), (1, []))
+        self.assertIn("refusing to write into", err)
