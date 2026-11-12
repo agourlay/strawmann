@@ -1059,13 +1059,15 @@ pub const OutBuf = struct {
 
 const testing = std.testing;
 
-fn testBuffers(alloc: std.mem.Allocator, n: usize, size: usize) ![]([]u8) {
+/// Test buffers for a `Connection`. `pub` for `grpc.zig`'s tests, which had
+/// their own copy of this pair.
+pub fn testBuffers(alloc: std.mem.Allocator, n: usize, size: usize) ![]([]u8) {
     const bufs = try alloc.alloc([]u8, n);
     for (bufs) |*b| b.* = try alloc.alloc(u8, size);
     return bufs;
 }
 
-fn freeBuffers(alloc: std.mem.Allocator, bufs: []([]u8)) void {
+pub fn freeBuffers(alloc: std.mem.Allocator, bufs: []([]u8)) void {
     for (bufs) |b| alloc.free(b);
     alloc.free(bufs);
 }

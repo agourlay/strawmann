@@ -391,16 +391,8 @@ test "path parsing handles the paths bfb issues" {
     try testing.expectEqual(@as(?Path, null), Path.parse("/service/"));
 }
 
-fn testBuffers(alloc: std.mem.Allocator, n: usize, size: usize) ![]([]u8) {
-    const bufs = try alloc.alloc([]u8, n);
-    for (bufs) |*b| b.* = try alloc.alloc(u8, size);
-    return bufs;
-}
-
-fn freeBuffers(alloc: std.mem.Allocator, bufs: []([]u8)) void {
-    for (bufs) |b| alloc.free(b);
-    alloc.free(bufs);
-}
+const testBuffers = h2.testBuffers;
+const freeBuffers = h2.freeBuffers;
 
 fn testConn(bufs: []([]u8)) h2.Connection {
     var c = h2.Connection.init(bufs);
