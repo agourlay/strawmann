@@ -4456,6 +4456,10 @@ class TextTableTests(unittest.TestCase):
         self.assertEqual(t["W15-filtered"].needs_payload_index, True)
         self.assertIn("-p 1", " ".join(map(str, t["W15"].args)))
         self.assertEqual(self.w.corpus_rows(), 5183)
+        # Every search row is a closed loop; it was filed as an upload.
+        self.assertEqual({r.id: self.w.load_mode_of(r) for r in self.w.table()},
+                         {r: (self.w.LoadMode.upload if r == "W15-upload"
+                              else self.w.LoadMode.closed_loop) for r in ids})
         # No W12 here, so its grades stay out of a BEIR pair's stamp.
         self.assertNotIn("w12", self.w.harness_stamp())
 

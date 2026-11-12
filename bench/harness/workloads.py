@@ -2573,8 +2573,10 @@ def load_mode_of(w: Workload) -> LoadMode:
     # this function exists to prevent.
     if "--rps" in w.args or w.rps_fraction is not None:
         return LoadMode.open_loop
-    # W16 searches on the config path, which spells no `--search`.
-    if "--search" in w.args or "--scroll" in w.args or w.dataset_tests == "search":
+    # W16 searches on the config path, which spells no `--search`, and so
+    # does W15: every BM25 search row was filed as an upload.
+    if ("--search" in w.args or "--scroll" in w.args or w.dataset_tests == "search"
+            or (w.text is not None and w.text.kind == "search")):
         return LoadMode.closed_loop
     return LoadMode.upload
 
