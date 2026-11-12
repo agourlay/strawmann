@@ -181,7 +181,12 @@ matched row the scan costs about 137, 769, 1,440 and 2,270 cycles at
 d = 128, 512, 1,536 and 2,048, about 17 cycles per cache line
 everywhere but laion, at 24. laion's rows are dear to read in the scan as in
 the traversal (item 75), so the refit waits on item 75's A/B: a prefetch
-that moves laion's line cost moves this break-even with it.
+that moves laion's line cost moves this break-even with it. Refit 11-12 in
+cycles from the 1112 and 1103 ladders: the scan as a per-row table over `d`
+(145, 800, 1,530, 2,250), the walk as 1,000,000 + 580 per `ef · m0`. It picks
+right at all forty points (twenty, each at 10 and 9 keywords), laion's
+9,000 at ef 256 now walking. Open: a W12-sel10 A/B against the parent on
+laion (ef 256 should rise) and sift1m (unchanged picks, flat).
 
 ### P3. What the datasets offer that no row measures yet
 

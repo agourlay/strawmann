@@ -20,6 +20,7 @@ measures before the model may pick it.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import subprocess
 import sys
@@ -53,12 +54,30 @@ def argv(dataset: str, commit: str, tag: str, server_cpus: str, client_cpus: str
             *(x for p in PLANS for x in ("--flags", f"{p}=--filtered-plan {p}"))]
 
 
+#: `handlers.scanRowCycles`'s table: cycles per matched row at each width.
+SCAN_ROW_CYCLES = ((128, 145), (512, 800), (1536, 1530), (2048, 2250))
+
+
+def scan_row_cycles(dim: int) -> int:
+    """`handlers.scanRowCycles`: the table, joined by lines, proportional outside."""
+    (d0, c0), (d1, c1) = SCAN_ROW_CYCLES[0], SCAN_ROW_CYCLES[-1]
+    if dim <= d0:
+        return dim * c0 // d0
+    if dim >= d1:
+        return dim * c1 // d1
+    for (lo, clo), (hi, chi) in itertools.pairwise(SCAN_ROW_CYCLES):
+        if dim <= hi:
+            return clo + (chi - clo) * (dim - lo) // (hi - lo)
+    raise AssertionError("unreachable")
+
+
 def model_break_even(selected: int, dim: int, m0: int = M0) -> float:
-    """The ef at which `filteredPlan` flips: `selected d = 560 ef m0 + 350,000`.
+    """The ef at which `filteredPlan` flips:
+    `selected * scan_row_cycles(d) = 580 ef m0 + 1,000,000`.
 
     The same constants as handlers.zig, which this cannot import: change both.
     """
-    return (selected * dim - 350_000) / (560 * m0)
+    return (selected * scan_row_cycles(dim) - 1_000_000) / (580 * m0)
 
 
 def selected_rows() -> int:

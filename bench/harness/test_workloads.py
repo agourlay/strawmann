@@ -3817,10 +3817,27 @@ class PlannerAbTests(unittest.TestCase):
 
     def test_the_model_break_even_is_where_filtered_plan_flips(self):
         # handlers.zig's points at the sizes a query selects, m0=32: laion
-        # (10,000 at d=512, ten distinct keywords) walks two-hop at ef 256
-        # and scans at 512; sift1m (20,000 at d=128) between 64 and 128.
+        # (10,000 or 9,000 at d=512, ten or nine distinct keywords) walks
+        # two-hop at ef 256 and scans at 512; sift1m (20,000 or 18,000 at
+        # d=128) between 64 and 128; dbpedia and h-and-m past 512.
         self.assertTrue(256 < self.pa.model_break_even(10_000, 512) < 512)
+        self.assertTrue(256 < self.pa.model_break_even(9_000, 512) < 512)
         self.assertTrue(64 < self.pa.model_break_even(20_000, 128) < 128)
+        self.assertTrue(64 < self.pa.model_break_even(18_000, 128) < 128)
+        self.assertGreater(self.pa.model_break_even(9_000, 1536), 512)
+        self.assertGreater(self.pa.model_break_even(9_459, 2048), 512)
+        # The exact flips handlers.zig's tests assert either side of.
+        self.assertEqual(int(self.pa.model_break_even(20_000, 128)), 102)
+        self.assertEqual(int(self.pa.model_break_even(9_000, 512)), 334)
+        self.assertEqual(int(self.pa.model_break_even(10_000, 512)), 377)
+
+    def test_the_scan_row_cost_mirrors_handlers(self):
+        rc = self.pa.scan_row_cycles
+        self.assertEqual([rc(d) for d in (64, 128, 512, 1536, 2048, 4096)],
+                         [72, 145, 800, 1530, 2250, 4500])
+        self.assertEqual(rc(1024), 800 + 730 * 512 // 1024)
+        costs = [rc(d) for d in range(4097)]
+        self.assertEqual(costs, sorted(costs))
 
     def test_the_fit_names_a_wrong_pick(self):
         summary = [{"row": f"W12-sel10-ef{ef}", "commit": plan, "qps": q}
@@ -3829,11 +3846,11 @@ class PlannerAbTests(unittest.TestCase):
                    for ef, q in zip((32, 128, 512), qs, strict=True)]
         got = self.pa.ladder(summary)
         self.assertEqual(got["two_hop"], {32: 3000, 128: 1500, 512: 600})
-        # Model break-even ef (9,562 x 512 - 350,000) / 17,920 = 254: it walks
-        # at 128 (right) and scans at 512 (right); at a measured break-even
-        # under 128 it would be wrong at 128.
+        # Model break-even ef (9,562 x 800 - 1,000,000) / 18,560 = 358: it
+        # walks at 128 (right) and scans at 512 (right); at a measured
+        # break-even under 128 it would be wrong at 128.
         line = self.pa.fit_line("laion", 512, got, 9_562)
-        self.assertIn("model 254", line)
+        self.assertIn("model 358", line)
         self.assertNotIn("(wrong)", line)
         got["two_hop"][128] = 900
         self.assertIn("ef128:two_hop(wrong)", self.pa.fit_line("laion", 512, got, 9_562))
