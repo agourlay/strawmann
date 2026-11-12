@@ -835,6 +835,22 @@ class WorkloadTests(unittest.TestCase):
         self.assertIsNone(w.write_window_qps(stamps, 1, 130.0, 140.0))
         self.assertIsNone(w.write_window_qps([], 1, 104.0, 110.0))
 
+    def test_a_row_that_did_not_measure_carries_no_counters(self):
+        """laion 1111's FAILED W16 rows rendered counters from a 0 s window."""
+        import perfstat
+
+        import procstat
+        perf = dict.fromkeys(perfstat.PERF_FIELDS, 1.0)
+        io = dict.fromkeys(procstat.SCHED_FIELDS, 2.0) | {"rss_peak_bytes": 7}
+        for st in (workloads.Status.failed, workloads.Status.no_output):
+            p2, io2 = workloads.unmeasured_blanked(st, perf, io, "default")
+            # `blank` keeps the event set's name; no counter is a number.
+            self.assertFalse([k for k, v in p2.items() if isinstance(v, (int, float))])
+            self.assertTrue(all(io2[k] is None for k in procstat.SCHED_FIELDS))
+            self.assertEqual(io2["rss_peak_bytes"], 7)
+        same = workloads.unmeasured_blanked(workloads.Status.ok, perf, io, "default")
+        self.assertEqual(same, (perf, io))
+
     def test_huge_pages_reads_the_rollup_and_is_blank_without_one(self):
         import procstat
         roll = ("Rss:  100 kB\nAnonHugePages:  4096 kB\nFilePmdMapped:  2048 kB\n")

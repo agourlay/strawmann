@@ -3052,6 +3052,20 @@ def settle_engine(pid: int | None, what: str) -> dict[str, float | None]:
             "engine_settle_cores": None if cores is None else round(cores, 3)}
 
 
+def unmeasured_blanked(status: Status, perf_row: dict, io: dict,
+                       perf: str | None) -> tuple[dict, dict]:
+    """A row that did not measure carries no measurement.
+
+    laion 1111's W16 rows failed in 0 s, and their counter sidecar and
+    scheduler window still produced figures (`W16-ef64 | 0.63 | 2.11 1.058x
+    nominal` in the report), which the fold then counted as a pass that had
+    measured them. Blank as a row measured without the sidecar is blank.
+    """
+    if status not in (Status.failed, Status.no_output):
+        return perf_row, io
+    return perfstat.blank(perf or ""), {**io, **dict.fromkeys(procstat.SCHED_FIELDS)}
+
+
 def run_one(w: Workload, uri: str, results: Path, common: list[str],
             storage: str | None = None, n_factor: int = 1,
             stamp: dict | None = None, build: dict | None = None,
@@ -3271,6 +3285,8 @@ def run_one(w: Workload, uri: str, results: Path, common: list[str],
                              f"({covered_pct:.0f}% of the append was covered)")
             if bgd.get("background_pps") is not None:
                 notes.append(f"append {bgd['background_pps']:,.0f} points/s")
+
+    perf_row, io = unmeasured_blanked(status, perf_row, io, perf)
 
     return Result(
         w.id, status, secs, l0, l1, foreign, qps, rps, detail,
