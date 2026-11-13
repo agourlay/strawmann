@@ -31,6 +31,7 @@ pub const hamming = @import("hamming.zig");
 pub const dot_i8 = @import("dot_i8.zig");
 pub const dot_f16 = @import("dot_f16.zig");
 pub const pq_adc = @import("pq_adc.zig");
+pub const simd = @import("simd.zig");
 pub const dispatch = @import("dispatch.zig");
 
 pub const Metric = metric.Metric;
@@ -88,6 +89,7 @@ test {
     _ = datatype;
     _ = reference;
     _ = dot_f32;
+    _ = simd;
     _ = l2_f32;
     _ = norm;
     _ = hamming;

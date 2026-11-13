@@ -37,62 +37,10 @@
 //! is a different file format rather than a narrower PQ8.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const common = @import("common.zig");
+const simd = @import("simd.zig");
 
-/// Is a 3-operand `vpshufb` available at `L` bytes?
-///
-/// Same reasoning as the `vpdpbusd` gate in `dot_i8.zig`: Zig has no portable
-/// builtin for a *runtime*-indexed vector shuffle (`@shuffle` requires a
-/// comptime mask), so the in-register table lookup that makes FastScan worth
-/// having has to be written as one instruction of inline assembly. Everything
-/// else falls back to the scalar loop, which is correct but is not FastScan.
-///
-/// VEX encoding (AVX) is required for the non-destructive 3-operand form; with
-/// only SSSE3 the instruction overwrites its table operand, which would force a
-/// reload of the LUT on every subquantizer. The 256-bit form is AVX2 and the
-/// 512-bit form is AVX512BW (`vpshufb zmm` is a BW instruction, not an F one).
-fn hasVpshufb(comptime L: usize) bool {
-    if (builtin.zig_backend != .stage2_llvm) return false;
-    return switch (L) {
-        16 => builtin.target.cpu.has(.x86, .avx),
-        32 => builtin.target.cpu.has(.x86, .avx2),
-        64 => builtin.target.cpu.has(.x86, .avx512bw),
-        else => false,
-    };
-}
-
-/// `L / 16` independent 16-entry table lookups, one per 128-bit lane:
-/// `out[j] = tbl[(j & ~15) + (idx[j] & 0x0f)]`.
-///
-/// This is exactly `vpshufb`'s semantics at every width: the instruction never
-/// crosses a 128-bit lane, so a 32- or 64-byte shuffle is two or four
-/// side-by-side 16-byte shuffles, each with its own table. That is what makes
-/// the wide form useful for FastScan, each lane can hold a *different*
-/// subquantizer's table and score it against that subquantizer's codes, so one
-/// AVX-512 instruction does 64 lookups over four subquantizers.
-///
-/// Note `vpshufb` zeroes the output byte when the index has bit 7 set. The
-/// callers here always mask to 4 bits first, so that behaviour is unreachable -
-/// but the scalar fallback masks explicitly so the two paths agree on inputs
-/// that would otherwise diverge.
-inline fn shuffleBytes(comptime L: usize, tbl: @Vector(L, u8), idx: @Vector(L, u8)) @Vector(L, u8) {
-    comptime std.debug.assert(L == 16 or L == 32 or L == 64);
-    if (comptime hasVpshufb(L)) {
-        // "v" rather than "x": with AVX-512 enabled it admits xmm/ymm/zmm16-31
-        // as well, and without it LLVM treats it as "x".
-        return asm ("vpshufb %[idx], %[tbl], %[out]"
-            : [out] "=v" (-> @Vector(L, u8)),
-            : [tbl] "v" (tbl),
-              [idx] "v" (idx),
-        );
-    }
-    const t: [L]u8 = tbl;
-    const i: [L]u8 = idx;
-    var o: [L]u8 = undefined;
-    inline for (0..L) |j| o[j] = t[(j & ~@as(usize, 15)) + (i[j] & 0x0f)];
-    return o;
-}
+const shuffleBytes = simd.shuffleBytes;
 
 /// The 16-byte form, kept under its old name for the tail and for readers.
 inline fn shuffle16(tbl: @Vector(16, u8), idx: @Vector(16, u8)) @Vector(16, u8) {
@@ -565,24 +513,6 @@ test "PQ4 FastScan reports the subquantizers each width scores per instruction" 
     try std.testing.expectEqual(@as(usize, 2), Pq4FastScan(32).subquantizers_per_op);
     try std.testing.expectEqual(@as(usize, 4), Pq4FastScan(64).subquantizers_per_op);
     try std.testing.expectEqual(pq4_native.lanes / 16, pq4_native.subquantizers_per_op);
-}
-
-test "shuffleBytes never crosses a 128-bit lane, at any width" {
-    // Table lane g holds bytes g*16 .. g*16+15 = 0x10*g + k; every index in
-    // lane g must pick from that lane only, so the result's high nibble names
-    // its own lane.
-    inline for (.{ 16, 32, 64 }) |L| {
-        var t: [L]u8 = undefined;
-        var i: [L]u8 = undefined;
-        for (0..L) |j| {
-            t[j] = @intCast(((j / 16) << 4) | (j % 16));
-            i[j] = @intCast((j * 7 + 3) % 16);
-        }
-        const o: [L]u8 = shuffleBytes(L, t, i);
-        for (0..L) |j| {
-            try std.testing.expectEqual(@as(u8, @intCast(((j / 16) << 4) | ((j * 7 + 3) % 16))), o[j]);
-        }
-    }
 }
 
 test "PQ4 FastScan u16 accumulator does not overflow at the maximum" {

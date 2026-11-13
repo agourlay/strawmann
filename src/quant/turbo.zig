@@ -29,6 +29,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const simd = @import("../dist/simd.zig");
 
 /// Bits per coordinate, as Qdrant's `TurboQuantBitSize` names them.
 pub const Bits = enum {
@@ -377,8 +378,7 @@ pub fn planeBytes(bits: Bits, padded: usize) usize {
 }
 
 pub fn hasIntKernel() bool {
-    return builtin.zig_backend == .stage2_llvm and builtin.target.cpu.has(.x86, .avx512bw) and
-        builtin.target.cpu.has(.x86, .avx512vnni);
+    return simd.hasVpshufb(64) and simd.hasVnniAt(64);
 }
 
 /// Integerise the prepared query for the 2- and 4-bit kernels: Qdrant's
@@ -557,33 +557,16 @@ fn dotInt(comptime cb: comptime_int, pq: *const PreparedQuery, codes: []const u8
         const base = (i / bc) * 2 * bc;
         inline for (0..streams) |k| {
             const idx = (raw >> @as(@Vector(64, u3), @splat(@intCast(k * cb)))) & mask;
-            const cu = shuffle64(tbl, idx);
+            const cu = simd.shuffleBytes(64, tbl, idx);
             const hi: S = planes[base + k * 128 ..][0..64].*;
             const lo: S = planes[base + k * 128 + 64 ..][0..64].*;
-            acc_hi = dpbusd(acc_hi, cu, hi);
-            acc_lo = dpbusd(acc_lo, cu, lo);
+            acc_hi = simd.vpdpbusd(64, acc_hi, cu, hi);
+            acc_lo = simd.vpdpbusd(64, acc_lo, cu, lo);
         }
         off += 64;
     }
     const s: i64 = 128 * @as(i64, @reduce(.Add, acc_hi)) + @as(i64, @reduce(.Add, acc_lo)) - 128 * pq.sum_i;
     return pq.post * @as(f32, @floatFromInt(s));
-}
-
-inline fn shuffle64(tbl: @Vector(64, u8), idx: @Vector(64, u8)) @Vector(64, u8) {
-    return asm ("vpshufb %[idx], %[tbl], %[out]"
-        : [out] "=v" (-> @Vector(64, u8)),
-        : [tbl] "v" (tbl),
-          [idx] "v" (idx),
-    );
-}
-
-inline fn dpbusd(acc: @Vector(16, i32), a: @Vector(64, u8), b: @Vector(64, i8)) @Vector(16, i32) {
-    return asm ("vpdpbusd %[b], %[a], %[acc]"
-        : [acc] "=v" (-> @Vector(16, i32)),
-        : [_] "0" (acc),
-          [a] "v" (a),
-          [b] "v" (b),
-    );
 }
 
 /// Sixteen codes as `u32` lanes, whole-vector: masks and shifts over the

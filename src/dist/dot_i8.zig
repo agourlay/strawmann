@@ -54,38 +54,10 @@
 //! sequence on every VNNI build and answered §11's open question 8 backwards.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const common = @import("common.zig");
+const simd = @import("simd.zig");
 
-/// Is `vpdpbusd` available at a register width of `bytes`?
-///
-/// 512-bit needs AVX512_VNNI. 256- and 128-bit need either AVX-VNNI (the VEX
-/// encoding, Alder Lake+ / Zen 4+) or AVX512_VNNI together with AVX512VL (the
-/// EVEX encoding at reduced width). §6.6.2 insists the AVX-VNNI case be its own
-/// matrix row rather than folded into "AVX2", and this predicate is what makes
-/// the `avx2-vnni` arm actually differ from `avx2`.
-fn hasVnniAt(comptime bytes: usize) bool {
-    // The `v` register constraint is an LLVM constraint. Zig's self-hosted
-    // x86_64 backend, the default for Debug builds in 0.16, rejects it, so
-    // the asm path is only compiled under the LLVM backend and the portable
-    // path covers everything else. `std.simd.suggestVectorLength` guards on the
-    // same condition for the same reason.
-    //
-    // This costs nothing where it matters: §9 says results are only ever quoted
-    // from `ReleaseFast`, which is an LLVM build. `build.zig` additionally
-    // forces LLVM for the test step so the VNNI path is exercised by the
-    // equality test below rather than silently skipped.
-    if (builtin.zig_backend != .stage2_llvm) return false;
-
-    const has_512 = builtin.target.cpu.has(.x86, .avx512vnni);
-    const has_vl = builtin.target.cpu.has(.x86, .avx512vl);
-    const has_vex = builtin.target.cpu.has(.x86, .avxvnni);
-    return switch (bytes) {
-        64 => has_512,
-        32, 16 => has_vex or (has_512 and has_vl),
-        else => false,
-    };
-}
+const hasVnniAt = simd.hasVnniAt;
 
 /// `Σ a[i] · b[i]` over unsigned × signed bytes, accumulating in i32.
 ///
@@ -116,18 +88,8 @@ pub fn DotU8I8(comptime L: usize) type {
         const nacc = 4;
         const block = L * nacc;
 
-        /// One `vpdpbusd`: `acc += Σ₄ (u8 × i8)` per dword lane.
-        ///
-        /// Not marked `volatile`, it is a pure function of its operands, and
-        /// letting LLVM schedule and unroll around it is the entire point of
-        /// keeping four independent accumulator chains.
         inline fn vpdpbusd(acc: Acc, a: Bytes, b: SBytes) Acc {
-            return asm ("vpdpbusd %[b], %[a], %[acc]"
-                : [acc] "=v" (-> Acc),
-                : [_] "0" (acc),
-                  [a] "v" (a),
-                  [b] "v" (b),
-            );
+            return simd.vpdpbusd(L, acc, a, b);
         }
 
         pub fn call(a: []const u8, b: []const i8) i32 {
