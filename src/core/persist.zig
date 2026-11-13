@@ -159,53 +159,15 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
 
     // --- ids.bin ---
     {
-        const p = try Persistence.path(&pbuf, dir, "ids.bin");
-        const bytes = n * id_record_size;
-        const fd = try storage.openSized(p, storage.header_size + bytes, true);
-        defer storage.closeFd(fd);
-        var h = storage.Header{
-            .magic = 0,
-            .format_version = 0,
-            .kind = .ids,
-            .dim = 0,
-            .count = n,
-            .capacity = coll.config.capacity,
-            .stride = id_record_size,
-            .kind_field = 0,
-            .flags = 0,
-            .seed = 0,
-            .graph_checksum = 0,
-            .header_crc = 0,
-        };
-        try storage.writeHeader(fd, &h);
-        const buf = try coll.alloc.alloc(u8, bytes);
+        const buf = try coll.alloc.alloc(u8, n * id_record_size);
         defer coll.alloc.free(buf);
         for (coll.id_space.table.ids[0..n], 0..) |id, i| encodeId(id, buf[i * id_record_size ..][0..id_record_size]);
-        try storage.writeData(fd, buf);
+        try writeSideFile(dir, "ids.bin", .init(.ids, n, coll.config.capacity, id_record_size), buf);
     }
 
     // --- deleted.bits ---
     {
-        const p = try Persistence.path(&pbuf, dir, "deleted.bits");
         const words = (coll.config.capacity + 63) / 64;
-        const bytes = words * @sizeOf(u64);
-        const fd = try storage.openSized(p, storage.header_size + bytes, true);
-        defer storage.closeFd(fd);
-        var h = storage.Header{
-            .magic = 0,
-            .format_version = 0,
-            .kind = .deleted,
-            .dim = 0,
-            .count = coll.deleted_count,
-            .capacity = coll.config.capacity,
-            .stride = 8,
-            .kind_field = 0,
-            .flags = 0,
-            .seed = 0,
-            .graph_checksum = 0,
-            .header_crc = 0,
-        };
-        try storage.writeHeader(fd, &h);
         // Serialise the bitmap word by word rather than casting the bit set's
         // internals, whose representation is not part of its API.
         const tmp = try coll.alloc.alloc(u64, words);
@@ -215,7 +177,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         while (i < coll.config.capacity) : (i += 1) {
             if (coll.deleted.isSet(i)) tmp[i / 64] |= @as(u64, 1) << @intCast(i % 64);
         }
-        try storage.writeData(fd, std.mem.sliceAsBytes(tmp));
+        try writeSideFile(dir, "deleted.bits", .init(.deleted, coll.deleted_count, coll.config.capacity, 8), std.mem.sliceAsBytes(tmp));
     }
 
     // --- payload.bin ---
@@ -225,26 +187,8 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
     // header is the point count, so a load walks the records in offset order
     // and needs nothing else. Written whenever any point has a payload.
     if (coll.payload.with_payload > 0) {
-        const p = try Persistence.path(&pbuf, dir, "payload.bin");
         var total: usize = 0;
         for (0..n) |i| total += 4 + coll.payload.get(@intCast(i)).len;
-        const fd = try storage.openSized(p, storage.header_size + total, true);
-        defer storage.closeFd(fd);
-        var h = storage.Header{
-            .magic = 0,
-            .format_version = 0,
-            .kind = .payload,
-            .dim = 0,
-            .count = n,
-            .capacity = coll.config.capacity,
-            .stride = 0,
-            .kind_field = 0,
-            .flags = 0,
-            .seed = 0,
-            .graph_checksum = 0,
-            .header_crc = 0,
-        };
-        try storage.writeHeader(fd, &h);
         const buf = try coll.alloc.alloc(u8, total);
         defer coll.alloc.free(buf);
         var w: usize = 0;
@@ -256,7 +200,7 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
             w += blob.len;
         }
         std.debug.assert(w == total);
-        try storage.writeData(fd, buf);
+        try writeSideFile(dir, "payload.bin", .init(.payload, n, coll.config.capacity, 0), buf);
     }
 
     // --- payload.schema ---
@@ -268,26 +212,8 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
     // 2 English stemmer). A file from before text fields holds none, so it
     // reads as it always did.
     if (coll.payload.fields.items.len > 0) {
-        const p = try Persistence.path(&pbuf, dir, "payload.schema");
         var total: usize = 0;
         for (coll.payload.fields.items) |f| total += 3 + f.name.len + @intFromBool(f.index == .text);
-        const fd = try storage.openSized(p, storage.header_size + total, true);
-        defer storage.closeFd(fd);
-        var h = storage.Header{
-            .magic = 0,
-            .format_version = 0,
-            .kind = .payload_schema,
-            .dim = 0,
-            .count = coll.payload.fields.items.len,
-            .capacity = coll.config.capacity,
-            .stride = 0,
-            .kind_field = 0,
-            .flags = 0,
-            .seed = 0,
-            .graph_checksum = 0,
-            .header_crc = 0,
-        };
-        try storage.writeHeader(fd, &h);
         const buf = try coll.alloc.alloc(u8, total);
         defer coll.alloc.free(buf);
         var w: usize = 0;
@@ -304,21 +230,18 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
                 w += 1;
             }
         }
-        try storage.writeData(fd, buf);
+        try writeSideFile(dir, "payload.schema", .init(.payload_schema, coll.payload.fields.items.len, coll.config.capacity, 0), buf);
     }
 
     // --- graph.bin ---
     if (coll.graph) |g| {
-        const p = try Persistence.path(&pbuf, dir, "graph.bin");
         const l0 = std.mem.sliceAsBytes(g.level0);
         const upper = std.mem.sliceAsBytes(g.upper_neighbours);
         const offs = std.mem.sliceAsBytes(g.upper_offsets);
         const levels = g.node_levels;
         const total = l0.len + upper.len + offs.len + levels.len;
 
-        const fd = try storage.openSized(p, storage.header_size + total, true);
-        defer storage.closeFd(fd);
-        var h = storage.Header{
+        const h = storage.Header{
             .magic = 0,
             .format_version = 0,
             .kind = .graph,
@@ -332,7 +255,6 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
             .graph_checksum = g.checksum(),
             .header_crc = 0,
         };
-        try storage.writeHeader(fd, &h);
         // Concatenated in a fixed order; the header's counts are what let the
         // reader split them again without a manifest.
         // `total` is computed from the four lengths above and the four
@@ -354,8 +276,35 @@ pub fn save(coll: *const Collection, dir: []const u8) !void {
         w += offs.len;
         @memcpy(buf[w..][0..levels.len], levels);
         std.debug.assert(w + levels.len == total);
-        try storage.writeData(fd, buf);
+        try writeSideFile(dir, "graph.bin", h, buf);
     }
+}
+
+/// One file written by `save` other than `vectors.bin` (whose size is the
+/// arena's capacity, not its contents): `header` then `bytes`, in a file sized
+/// to hold exactly those.
+fn writeSideFile(dir: []const u8, name: []const u8, header: storage.Header, bytes: []const u8) !void {
+    var pbuf: [512]u8 = undefined;
+    const p = try Persistence.path(&pbuf, dir, name);
+    const fd = try storage.openSized(p, storage.header_size + bytes.len, true);
+    defer storage.closeFd(fd);
+    var h = header;
+    try storage.writeHeader(fd, &h);
+    try storage.writeData(fd, bytes);
+}
+
+/// Everything after the header of a file whose records carry their own
+/// lengths (`payload.bin`, `payload.schema`), so the file's size is the only
+/// byte count there is. The caller owns the returned slice.
+fn readBody(alloc: std.mem.Allocator, fd: std.os.linux.fd_t) ![]u8 {
+    const size = try storage.fileSize(fd);
+    if (size < storage.header_size) return error.ShortFile;
+    const bytes: usize = @intCast(size - storage.header_size);
+    const buf = try alloc.alloc(u8, bytes);
+    errdefer alloc.free(buf);
+    const read = try storage.readData(fd, buf);
+    if (read < bytes) return error.ShortFile;
+    return buf;
 }
 
 /// Reopen a collection from `dir`.
@@ -532,13 +481,9 @@ pub fn load(alloc: std.mem.Allocator, name: []const u8, dir: []const u8, placeme
             defer storage.closeFd(pfd);
             const ph = try storage.readHeader(pfd, .payload);
             if (ph.count != vh.count) return error.Mismatch;
-            const size = try storage.fileSize(pfd);
-            if (size < storage.header_size) return error.ShortFile;
-            const bytes: usize = @intCast(size - storage.header_size);
-            const buf = try alloc.alloc(u8, bytes);
+            const buf = try readBody(alloc, pfd);
             defer alloc.free(buf);
-            const read = try storage.readData(pfd, buf);
-            if (read < bytes) return error.ShortFile;
+            const bytes = buf.len;
             var r: usize = 0;
             for (0..n) |i| {
                 if (r + 4 > bytes) return error.ShortFile;
@@ -557,13 +502,9 @@ pub fn load(alloc: std.mem.Allocator, name: []const u8, dir: []const u8, placeme
         if (storage.openSized(sp, 0, false)) |sfd| {
             defer storage.closeFd(sfd);
             const sh = try storage.readHeader(sfd, .payload_schema);
-            const size = try storage.fileSize(sfd);
-            if (size < storage.header_size) return error.ShortFile;
-            const bytes: usize = @intCast(size - storage.header_size);
-            const buf = try alloc.alloc(u8, bytes);
+            const buf = try readBody(alloc, sfd);
             defer alloc.free(buf);
-            const read = try storage.readData(sfd, buf);
-            if (read < bytes) return error.ShortFile;
+            const bytes = buf.len;
             var r: usize = 0;
             for (0..@intCast(sh.count)) |_| {
                 if (r + 3 > bytes) return error.ShortFile;

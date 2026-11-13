@@ -285,6 +285,28 @@ pub const Header = extern struct {
         pub const normalised: u32 = 1 << 0;
     };
 
+    /// A header with every kind-specific field zero: what the side files
+    /// (`ids`, `deleted`, `payload`, `payload_schema`) write, and the base a
+    /// `.vectors` writer fills in. A constructor rather than field defaults,
+    /// so the struct's layout and its CRC region stay exactly as declared.
+    /// `magic`, `format_version` and `header_crc` are set by `finalise`.
+    pub fn init(kind: Kind, count: u64, capacity: u64, stride: u64) Header {
+        return .{
+            .magic = 0,
+            .format_version = 0,
+            .kind = kind,
+            .dim = 0,
+            .count = count,
+            .capacity = capacity,
+            .stride = stride,
+            .kind_field = 0,
+            .flags = 0,
+            .seed = 0,
+            .graph_checksum = 0,
+            .header_crc = 0,
+        };
+    }
+
     /// `kind_field` read as what a `.vectors` header stores in it: the metric,
     /// as a `Distance` proto value for `Metric.fromProto`.
     pub fn metricField(self: *const Header) u32 {
@@ -699,20 +721,11 @@ pub fn testPath(buf: []u8, name: []const u8) []const u8 {
 }
 
 test "header round-trips and the CRC covers only the header" {
-    var h = Header{
-        .magic = 0,
-        .format_version = 0,
-        .kind = .vectors,
-        .dim = 768,
-        .count = 1000,
-        .capacity = 1_100_000,
-        .stride = 3072,
-        .kind_field = 3,
-        .flags = Header.Flags.normalised,
-        .seed = 0xdeadbeef,
-        .graph_checksum = 0,
-        .header_crc = 0,
-    };
+    var h = Header.init(.vectors, 1000, 1_100_000, 3072);
+    h.dim = 768;
+    h.kind_field = 3;
+    h.flags = Header.Flags.normalised;
+    h.seed = 0xdeadbeef;
     h.finalise();
     try testing.expectEqual(magic, h.magic);
     try testing.expectEqual(format_version, h.format_version);
@@ -766,20 +779,10 @@ test "write then read a file under every placement" {
     {
         const fd = try openSized(path, size, true);
         defer closeFd(fd);
-        var h = Header{
-            .magic = 0,
-            .format_version = 0,
-            .kind = .vectors,
-            .dim = 16,
-            .count = capacity,
-            .capacity = capacity,
-            .stride = stride,
-            .kind_field = 3,
-            .flags = 0,
-            .seed = 1,
-            .graph_checksum = 0,
-            .header_crc = 0,
-        };
+        var h = Header.init(.vectors, capacity, capacity, stride);
+        h.dim = 16;
+        h.kind_field = 3;
+        h.seed = 1;
         try writeHeader(fd, &h);
 
         const data = try testing.allocator.alloc(u8, capacity * stride);
@@ -819,20 +822,9 @@ test "§5.5: the pinned placement requests huge pages, the mapped ones do not" {
     const size = arenaFileSize(64, 4096);
     const fd = try openSized(path, size, true);
     defer closeFd(fd);
-    var h = Header{
-        .magic = 0,
-        .format_version = 0,
-        .kind = .vectors,
-        .dim = 1024,
-        .count = 64,
-        .capacity = 64,
-        .stride = 4096,
-        .kind_field = 3,
-        .flags = 0,
-        .seed = 0,
-        .graph_checksum = 0,
-        .header_crc = 0,
-    };
+    var h = Header.init(.vectors, 64, 64, 4096);
+    h.dim = 1024;
+    h.kind_field = 3;
     try writeHeader(fd, &h);
 
     var resident = try mapRegion(fd, header_size, 64 * 4096, .pinned);
@@ -867,20 +859,9 @@ test "§5.5: the pinned placement is actually huge-backed when THP allows it" {
     const size = arenaFileSize(rows, stride);
     const fd = try openSized(path, size, true);
     defer closeFd(fd);
-    var h = Header{
-        .magic = 0,
-        .format_version = 0,
-        .kind = .vectors,
-        .dim = 1024,
-        .count = rows,
-        .capacity = rows,
-        .stride = stride,
-        .kind_field = 3,
-        .flags = 0,
-        .seed = 0,
-        .graph_checksum = 0,
-        .header_crc = 0,
-    };
+    var h = Header.init(.vectors, rows, rows, stride);
+    h.dim = 1024;
+    h.kind_field = 3;
     try writeHeader(fd, &h);
     const payload = try testing.allocator.alloc(u8, rows * stride);
     defer testing.allocator.free(payload);
@@ -943,20 +924,9 @@ test "a mapped placement is writable and changes are visible through a fresh rea
     const size = arenaFileSize(16, 64);
     const fd = try openSized(path, size, true);
     defer closeFd(fd);
-    var h = Header{
-        .magic = 0,
-        .format_version = 0,
-        .kind = .vectors,
-        .dim = 16,
-        .count = 16,
-        .capacity = 16,
-        .stride = 64,
-        .kind_field = 3,
-        .flags = 0,
-        .seed = 0,
-        .graph_checksum = 0,
-        .header_crc = 0,
-    };
+    var h = Header.init(.vectors, 16, 16, 64);
+    h.dim = 16;
+    h.kind_field = 3;
     try writeHeader(fd, &h);
 
     {
@@ -1025,20 +995,9 @@ test "cached prefaults its pages and cold does not" {
     {
         const fd = try openSized(path, arenaFileSize(capacity, stride), true);
         defer closeFd(fd);
-        var h = Header{
-            .magic = 0,
-            .format_version = 0,
-            .kind = .vectors,
-            .dim = 1024,
-            .count = capacity,
-            .capacity = capacity,
-            .stride = stride,
-            .kind_field = 3,
-            .flags = 0,
-            .seed = 0,
-            .graph_checksum = 0,
-            .header_crc = 0,
-        };
+        var h = Header.init(.vectors, capacity, capacity, stride);
+        h.dim = 1024;
+        h.kind_field = 3;
         try writeHeader(fd, &h);
         const data = try testing.allocator.alloc(u8, size);
         defer testing.allocator.free(data);

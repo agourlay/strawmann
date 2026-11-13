@@ -252,29 +252,16 @@ pub const VectorSpace = struct {
         const fd = try storage.openSized(path, storage.header_size + size, true);
         errdefer storage.closeFd(fd);
 
-        var h = storage.Header{
-            .magic = storage.magic,
-            .format_version = storage.format_version,
-            .kind = .vectors,
-            .dim = dim,
-            .count = 0,
-            .capacity = capacity,
-            .stride = stride,
-            // The metric, because for a `.vectors` file that is what
-            // `kind_field` means (`storage.Header.metricField`). Writing 0 here
-            // produced a header that passed every structural check and named a
-            // metric that does not exist, which is precisely the "plausible
-            // garbage" the kind discriminator exists to prevent.
-            .kind_field = @intCast(metric.toProto()),
-            .flags = if (dt.normalisesAtIngest(metric))
-                storage.Header.Flags.normalised
-            else
-                0,
-            .seed = 0,
-            .datatype = @backingInt(dt),
-            .graph_checksum = 0,
-            .header_crc = 0,
-        };
+        var h = storage.Header.init(.vectors, 0, capacity, stride);
+        h.dim = dim;
+        // The metric, because for a `.vectors` file that is what
+        // `kind_field` means (`storage.Header.metricField`). Writing 0 here
+        // produced a header that passed every structural check and named a
+        // metric that does not exist, which is precisely the "plausible
+        // garbage" the kind discriminator exists to prevent.
+        h.kind_field = @intCast(metric.toProto());
+        h.flags = if (dt.normalisesAtIngest(metric)) storage.Header.Flags.normalised else 0;
+        h.datatype = @backingInt(dt);
         try storage.writeHeader(fd, &h);
 
         const region = try storage.mapRegion(fd, storage.header_size, size, placement);
