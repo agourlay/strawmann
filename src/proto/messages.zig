@@ -637,67 +637,67 @@ pub fn invalidJsonPath(key: []const u8) DecodeError {
     return invalidArgument(std.fmt.bufPrint(&path_detail, "Invalid json path: '{s}'", .{shown}) catch "Invalid json path");
 }
 
-/// `ValuesCount { optional uint64 lt = 1; optional uint64 gt = 2; optional
-/// uint64 gte = 3; optional uint64 lte = 4; }` (VERIFIED, qdrant_common.proto).
-fn decodeValuesCount(r: *Reader) DecodeError!payload.ValuesCount {
-    var b: [4]?u64 = .{ null, null, null, null };
+/// The four `optional` bounds `lt = 1; gt = 2; gte = 3; lte = 4;` of a range
+/// message, each read by `readOne` given its wire type, folded into `R`. A
+/// bound is present when it is on the wire, zero included.
+fn decodeBounds(comptime R: type, comptime T: type, r: *Reader, comptime readOne: fn (*Reader, wire.WireType) DecodeError!T) DecodeError!R {
+    var b: [4]?T = .{ null, null, null, null };
     while (!r.atEnd()) {
         const t = try r.tag();
         if (t.field < 1 or t.field > 4) {
             try r.skip(t.wire_type);
             continue;
         }
-        if (t.wire_type != .varint) return invalidArgument("ValuesCount bound is not a uint64");
-        b[t.field - 1] = try r.varint();
+        b[t.field - 1] = try readOne(r, t.wire_type);
     }
-    return payload.ValuesCount.fromBounds(b[0], b[1], b[2], b[3]);
+    return R.fromBounds(b[0], b[1], b[2], b[3]);
+}
+
+/// `ValuesCount { optional uint64 lt = 1; optional uint64 gt = 2; optional
+/// uint64 gte = 3; optional uint64 lte = 4; }` (VERIFIED, qdrant_common.proto).
+fn decodeValuesCount(r: *Reader) DecodeError!payload.ValuesCount {
+    return decodeBounds(payload.ValuesCount, u64, r, readCountBound);
+}
+
+fn readCountBound(r: *Reader, wt: wire.WireType) DecodeError!u64 {
+    if (wt != .varint) return invalidArgument("ValuesCount bound is not a uint64");
+    return r.varint();
 }
 
 /// `DatetimeRange { optional google.protobuf.Timestamp lt = 1; gt = 2;
 /// gte = 3; lte = 4; }` (VERIFIED, qdrant_common.proto), each a
 /// `Timestamp { int64 seconds = 1; int32 nanos = 2; }`.
 fn decodeDatetimeRange(r: *Reader) DecodeError!payload.DatetimeRange {
-    var b: [4]?payload.Instant = .{ null, null, null, null };
-    while (!r.atEnd()) {
-        const t = try r.tag();
-        if (t.field < 1 or t.field > 4) {
-            try r.skip(t.wire_type);
-            continue;
+    return decodeBounds(payload.DatetimeRange, payload.Instant, r, readTimestampBound);
+}
+
+fn readTimestampBound(r: *Reader, wt: wire.WireType) DecodeError!payload.Instant {
+    if (wt != .length_delimited) return invalidArgument("DatetimeRange bound is not a Timestamp");
+    var ts = try r.nested();
+    var seconds: i64 = 0;
+    var nanos: i32 = 0;
+    while (!ts.atEnd()) {
+        const tt = try ts.tag();
+        switch (tt.field) {
+            1 => seconds = @bitCast(try ts.varint()),
+            2 => nanos = @bitCast(try ts.varint32()),
+            else => try ts.skip(tt.wire_type),
         }
-        if (t.wire_type != .length_delimited) return invalidArgument("DatetimeRange bound is not a Timestamp");
-        var ts = try r.nested();
-        var seconds: i64 = 0;
-        var nanos: i32 = 0;
-        while (!ts.atEnd()) {
-            const tt = try ts.tag();
-            switch (tt.field) {
-                1 => seconds = @bitCast(try ts.varint()),
-                2 => nanos = @bitCast(try ts.varint32()),
-                else => try ts.skip(tt.wire_type),
-            }
-        }
-        // Qdrant's message (`try_date_time_from_proto`).
-        b[t.field - 1] = payload.instantFromTimestamp(seconds, nanos) orelse
-            return invalidArgument("Unable to parse timestamp");
     }
-    return payload.DatetimeRange.fromBounds(b[0], b[1], b[2], b[3]);
+    // Qdrant's message (`try_date_time_from_proto`).
+    return payload.instantFromTimestamp(seconds, nanos) orelse
+        invalidArgument("Unable to parse timestamp");
 }
 
 /// `Range { optional double lt = 1; optional double gt = 2; optional double
 /// gte = 3; optional double lte = 4; }` (VERIFIED, qdrant_common.proto).
-/// `optional`, so a bound is present when it is on the wire, zero included.
 fn decodeRange(r: *Reader) DecodeError!payload.Range {
-    var b: [4]?f64 = .{ null, null, null, null };
-    while (!r.atEnd()) {
-        const t = try r.tag();
-        if (t.field < 1 or t.field > 4) {
-            try r.skip(t.wire_type);
-            continue;
-        }
-        if (t.wire_type != .fixed64) return invalidArgument("Range bound is not a double");
-        b[t.field - 1] = try r.double();
-    }
-    return payload.Range.fromBounds(b[0], b[1], b[2], b[3]);
+    return decodeBounds(payload.Range, f64, r, readDoubleBound);
+}
+
+fn readDoubleBound(r: *Reader, wt: wire.WireType) DecodeError!f64 {
+    if (wt != .fixed64) return invalidArgument("Range bound is not a double");
+    return r.double();
 }
 
 /// `Match { keyword = 1; integer = 2; boolean = 3; text = 4; keywords = 5;

@@ -125,66 +125,79 @@ pub const Match = union(enum) {
 /// every number, `gt: NaN` none). A NaN *value* never matches: Qdrant cannot
 /// hold one (`proto_to_json` refuses a NaN `double_value` at upsert,
 /// lib/api/src/conversions/json.rs), and the float index does not store it.
-pub const Range = struct {
-    lo: f64 = -std.math.inf(f64),
-    lo_strict: bool = false,
-    hi: f64 = std.math.nan(f64),
-    hi_strict: bool = false,
+pub const Range = Bounded(f64, orderedCmp, -std.math.inf(f64), std.math.nan(f64));
 
-    pub fn fromBounds(lt: ?f64, gt: ?f64, gte: ?f64, lte: ?f64) Range {
-        var r = Range{};
-        if (gt) |x| r.tightenLo(x, true);
-        if (gte) |x| r.tightenLo(x, false);
-        if (lt) |x| r.tightenHi(x, true);
-        if (lte) |x| r.tightenHi(x, false);
-        return r;
-    }
+/// A lower and an upper bound over `T` in the total order `order`, each
+/// strict or not, the absent ones `lo_end` and `hi_end`. `fromBounds` folds
+/// a request's four bounds into the strictest on each side, the strict one
+/// winning at an equal bound. A float `T` never admits a NaN value.
+fn Bounded(comptime T: type, comptime order: fn (T, T) std.math.Order, comptime lo_end: T, comptime hi_end: T) type {
+    return struct {
+        const Self = @This();
 
-    fn tightenLo(self: *Range, x: f64, strict: bool) void {
-        switch (orderedCmp(x, self.lo)) {
-            .gt => {
-                self.lo = x;
-                self.lo_strict = strict;
-            },
-            .eq => self.lo_strict = self.lo_strict or strict,
-            .lt => {},
+        lo: T = lo_end,
+        lo_strict: bool = false,
+        hi: T = hi_end,
+        hi_strict: bool = false,
+
+        pub fn fromBounds(lt: ?T, gt: ?T, gte: ?T, lte: ?T) Self {
+            var r = Self{};
+            if (gt) |x| r.tightenLo(x, true);
+            if (gte) |x| r.tightenLo(x, false);
+            if (lt) |x| r.tightenHi(x, true);
+            if (lte) |x| r.tightenHi(x, false);
+            return r;
         }
-    }
 
-    fn tightenHi(self: *Range, x: f64, strict: bool) void {
-        switch (orderedCmp(x, self.hi)) {
-            .lt => {
-                self.hi = x;
-                self.hi_strict = strict;
-            },
-            .eq => self.hi_strict = self.hi_strict or strict,
-            .gt => {},
+        fn tightenLo(self: *Self, x: T, strict: bool) void {
+            switch (order(x, self.lo)) {
+                .gt => {
+                    self.lo = x;
+                    self.lo_strict = strict;
+                },
+                .eq => self.lo_strict = self.lo_strict or strict,
+                .lt => {},
+            }
         }
-    }
 
-    /// `v` clears the lower bound. Monotone in `v`, which the float index's
-    /// binary search relies on.
-    fn aboveLo(self: Range, v: f64) bool {
-        return switch (orderedCmp(v, self.lo)) {
-            .gt => true,
-            .eq => !self.lo_strict,
-            .lt => false,
-        };
-    }
+        fn tightenHi(self: *Self, x: T, strict: bool) void {
+            switch (order(x, self.hi)) {
+                .lt => {
+                    self.hi = x;
+                    self.hi_strict = strict;
+                },
+                .eq => self.hi_strict = self.hi_strict or strict,
+                .gt => {},
+            }
+        }
 
-    fn belowHi(self: Range, v: f64) bool {
-        return switch (orderedCmp(v, self.hi)) {
-            .lt => true,
-            .eq => !self.hi_strict,
-            .gt => false,
-        };
-    }
+        /// `v` clears the lower bound. Monotone in `v`, which the sorted
+        /// indexes' binary search relies on. An integer compares directly:
+        /// through `order` LLVM no longer inlines `SortedIndex.span`.
+        fn aboveLo(self: Self, v: T) bool {
+            if (@typeInfo(T) == .int) return v > self.lo or (v == self.lo and !self.lo_strict);
+            return switch (order(v, self.lo)) {
+                .gt => true,
+                .eq => !self.lo_strict,
+                .lt => false,
+            };
+        }
 
-    pub fn contains(self: Range, v: f64) bool {
-        if (std.math.isNan(v)) return false;
-        return self.aboveLo(v) and self.belowHi(v);
-    }
-};
+        fn belowHi(self: Self, v: T) bool {
+            if (@typeInfo(T) == .int) return v < self.hi or (v == self.hi and !self.hi_strict);
+            return switch (order(v, self.hi)) {
+                .lt => true,
+                .eq => !self.hi_strict,
+                .gt => false,
+            };
+        }
+
+        pub fn contains(self: Self, v: T) bool {
+            if (@typeInfo(T) == .float and std.math.isNan(v)) return false;
+            return self.aboveLo(v) and self.belowHi(v);
+        }
+    };
+}
 
 /// `OrderedFloat`'s order: NaN equal to NaN and above everything else.
 fn orderedCmp(a: f64, b: f64) std.math.Order {
@@ -240,57 +253,7 @@ pub const Instant = struct {
 /// is. Instants are totally ordered, so the strictest bound on each side
 /// is exactly Qdrant's four ANDed comparisons (`Range::check_range`); the
 /// absent ends are sentinels no parsed instant reaches.
-pub const DatetimeRange = struct {
-    lo: Instant = Instant.min,
-    lo_strict: bool = false,
-    hi: Instant = Instant.max,
-    hi_strict: bool = false,
-
-    pub fn fromBounds(lt: ?Instant, gt: ?Instant, gte: ?Instant, lte: ?Instant) DatetimeRange {
-        var r = DatetimeRange{};
-        if (gt) |x| r.tightenLo(x, true);
-        if (gte) |x| r.tightenLo(x, false);
-        if (lt) |x| r.tightenHi(x, true);
-        if (lte) |x| r.tightenHi(x, false);
-        return r;
-    }
-
-    fn tightenLo(self: *DatetimeRange, x: Instant, strict: bool) void {
-        switch (x.order(self.lo)) {
-            .gt => {
-                self.lo = x;
-                self.lo_strict = strict;
-            },
-            .eq => self.lo_strict = self.lo_strict or strict,
-            .lt => {},
-        }
-    }
-
-    fn tightenHi(self: *DatetimeRange, x: Instant, strict: bool) void {
-        switch (x.order(self.hi)) {
-            .lt => {
-                self.hi = x;
-                self.hi_strict = strict;
-            },
-            .eq => self.hi_strict = self.hi_strict or strict,
-            .gt => {},
-        }
-    }
-
-    pub fn contains(self: DatetimeRange, v: Instant) bool {
-        const above = switch (v.order(self.lo)) {
-            .gt => true,
-            .eq => !self.lo_strict,
-            .lt => false,
-        };
-        const below = switch (v.order(self.hi)) {
-            .lt => true,
-            .eq => !self.hi_strict,
-            .gt => false,
-        };
-        return above and below;
-    }
-};
+pub const DatetimeRange = Bounded(Instant, Instant.order, Instant.min, Instant.max);
 
 /// Days from 1970-01-01 to a proleptic Gregorian date (Hinnant's
 /// `days_from_civil`), the calendar chrono uses.
@@ -1099,40 +1062,28 @@ fn microsKey(i: Instant) i64 {
 /// A `DatetimeRange` over `microsKey`s. Every bound a request can give fits
 /// in an `i64` of microseconds (chrono's years, `timestamp_min_secs`), and the
 /// absent ends map to the type's.
-const MicrosRange = struct {
-    lo: i64,
-    lo_strict: bool,
-    hi: i64,
-    hi_strict: bool,
-    /// Admits exactly the keys of the instants `DatetimeRange` admits, when
-    /// no stored instant is a leap second. A leap-second bound is made
-    /// inclusive instead, a superset.
-    exact: bool,
+const MicrosRange = Bounded(i64, microsOrder, std.math.minInt(i64), std.math.maxInt(i64));
 
-    fn of(r: DatetimeRange) MicrosRange {
-        const lo_leap = r.lo.secs != Instant.min.secs and r.lo.micros >= 1_000_000;
-        const hi_leap = r.hi.secs != Instant.max.secs and r.hi.micros >= 1_000_000;
-        return .{
+fn microsOrder(a: i64, b: i64) std.math.Order {
+    return std.math.order(a, b);
+}
+
+/// `r` as a `MicrosRange`, and whether that is `exact`: it admits exactly
+/// the keys of the instants `r` admits when no stored instant is a leap
+/// second. A leap-second bound is made inclusive instead, a superset.
+fn microsRange(r: DatetimeRange) struct { range: MicrosRange, exact: bool } {
+    const lo_leap = r.lo.secs != Instant.min.secs and r.lo.micros >= 1_000_000;
+    const hi_leap = r.hi.secs != Instant.max.secs and r.hi.micros >= 1_000_000;
+    return .{
+        .range = .{
             .lo = if (r.lo.secs == Instant.min.secs) std.math.minInt(i64) else microsKey(r.lo),
             .lo_strict = r.lo_strict and !lo_leap,
             .hi = if (r.hi.secs == Instant.max.secs) std.math.maxInt(i64) else microsKey(r.hi),
             .hi_strict = r.hi_strict and !hi_leap,
-            .exact = !lo_leap and !hi_leap,
-        };
-    }
-
-    fn aboveLo(self: MicrosRange, v: i64) bool {
-        return v > self.lo or (v == self.lo and !self.lo_strict);
-    }
-
-    fn belowHi(self: MicrosRange, v: i64) bool {
-        return v < self.hi or (v == self.hi and !self.hi_strict);
-    }
-
-    fn contains(self: MicrosRange, v: i64) bool {
-        return self.aboveLo(v) and self.belowHi(v);
-    }
-};
+        },
+        .exact = !lo_leap and !hi_leap,
+    };
+}
 
 /// `(value, offset)` entries sorted by value, plus an unsorted tail of the
 /// writes since the last merge, answering a range `R` (one with `aboveLo`,
@@ -1929,7 +1880,7 @@ pub const Store = struct {
             },
             .datetime => |r| {
                 if (f.index != .datetime) return null;
-                return f.index.datetime.sorted.count(MicrosRange.of(r));
+                return f.index.datetime.sorted.count(microsRange(r).range);
             },
             // No index holds what these ask: the blobs decide, as for an
             // unindexed field.
@@ -1973,8 +1924,8 @@ pub const Store = struct {
             .datetime => |*di| {
                 // Keys stand for instants exactly only without a leap second
                 // (`DatetimeIndex`); otherwise every entry is verified.
-                const r = MicrosRange.of(pick.c.match.datetime);
-                di.sorted.admitRange(r, self, filter, bits, bound, trusted and r.exact and !di.leap);
+                const m = microsRange(pick.c.match.datetime);
+                di.sorted.admitRange(m.range, self, filter, bits, bound, trusted and m.exact and !di.leap);
             },
             else => {},
         }
@@ -3526,7 +3477,7 @@ const DatetimeModel = struct {
             const bound: usize = if (q % 4 == 0) self.rnd.uintAtMost(usize, written) else written;
             // The planner's count is the index's entries in range.
             var want_entries: usize = 0;
-            const mr = MicrosRange.of(r);
+            const mr = microsRange(r).range;
             for (self.entries.items) |e| {
                 if (mr.contains(e.v)) want_entries += 1;
             }
@@ -3590,12 +3541,12 @@ test "a leap second's key ties with the second's last microsecond, and a range o
     try testing.expectEqual(microsKey(next), microsKey(leap) + 1);
     // `gt: last` excludes `last` and admits `leap`; over keys it is made
     // inclusive only when a bound is a leap second.
-    const r = MicrosRange.of(DatetimeRange.fromBounds(null, last, null, null));
-    try testing.expect(r.exact and !r.contains(microsKey(last)));
-    const rl = MicrosRange.of(DatetimeRange.fromBounds(leap, null, null, null));
-    try testing.expect(!rl.exact and rl.contains(microsKey(leap)) and rl.contains(microsKey(last)));
-    const open = MicrosRange.of(.{});
-    try testing.expect(open.exact and open.contains(std.math.minInt(i64)) and open.contains(std.math.maxInt(i64)));
+    const r = microsRange(DatetimeRange.fromBounds(null, last, null, null));
+    try testing.expect(r.exact and !r.range.contains(microsKey(last)));
+    const rl = microsRange(DatetimeRange.fromBounds(leap, null, null, null));
+    try testing.expect(!rl.exact and rl.range.contains(microsKey(leap)) and rl.range.contains(microsKey(last)));
+    const open = microsRange(.{});
+    try testing.expect(open.exact and open.range.contains(std.math.minInt(i64)) and open.range.contains(std.math.maxInt(i64)));
     try testing.expectEqual(@as(u32, 7), Kind.datetime.schemaType());
     try testing.expectEqual(Kind.datetime, Kind.fromFieldType(6).?);
 }
