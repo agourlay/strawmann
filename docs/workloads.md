@@ -14,7 +14,7 @@ manifest and digest work in Python.
 Pinned reference, per §8.9 and §4.1:
 
 ```
-qdrant/bfb  branch dev  HEAD d2a6b6c  "Bump qdrant-client for the renumbered TextQuery scoring oneof (#189)"  2026-10-13
+qdrant/bfb  branch dev  HEAD 1498125  "Send dataset string match conditions as keyword matches (#193)"  2026-11-13
 ```
 
 Advanced from `96fd5f0` on 2026-10-13. #189 only moves `Cargo.lock`'s
@@ -620,12 +620,12 @@ sweeps are. bfb's own precision@10 is on each row as `bfb_precision`, a sanity
 check: it counts no ties. Both phases run in `fullrun`'s isolated stage, rows then
 sweep then drop, like the W7 and W14 encodings.
 
-**h-and-m is off until the bfb pin moves.** The pinned bfb sends a `match` value
-with whitespace ("Light Orange", 4,255 of h-and-m's tests) as a full-text match,
-which strawmANN refuses and Qdrant answers as a substring match. qdrant/bfb#193
-fixes it; the commit that moves the pin past it sets
-`paths.BFB_SENDS_KEYWORD_MATCH`, and h-and-m's table gains the rows. Every
-other corpus's table and stamp is unchanged by W16.
+**h-and-m runs W16 since the pin moved past qdrant/bfb#193** (1498125,
+2026-11-13). Before it, bfb sent a `match` value with whitespace ("Light
+Orange", 4,255 of h-and-m's tests) as a full-text match, which strawmANN
+refuses and Qdrant answers as a substring match; `paths.BFB_SENDS_KEYWORD_MATCH`
+records that the pin no longer does. Every other corpus's table is unchanged by
+W16.
 
 ### W13, scroll / pagination, **new**
 

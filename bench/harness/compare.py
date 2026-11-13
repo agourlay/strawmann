@@ -1608,8 +1608,9 @@ def dataset_tests_note(a: dict[str, dict], b: dict[str, dict]) -> str:
             "(`recall.<dataset>.bench16.tests.json`, which records how many tests "
             "carry one); bfb's own precision is on each row as `bfb_precision`, a "
             "check rather than the recall. W12 filters bfb's synthetic keywords "
-            "instead. h-and-m's W16 rows are off until the bfb pin sends "
-            "whitespace values as keyword matches (qdrant/bfb#193).")
+            "instead. h-and-m's run on a bfb pin that sends its match strings as "
+            "keyword matches (qdrant/bfb#193); before it, a value with whitespace "
+            "went out as a full-text match.")
 
 
 def relevance(a_label: str, b_label: str | None) -> list[dict]:

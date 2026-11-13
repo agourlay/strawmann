@@ -366,14 +366,14 @@ class FilteredTests(NamedTuple):
 
 
 #: Whether the pinned bfb sends a dataset condition's `match` string as a
-#: keyword match. It does not: qdrant-client's `From<String> for MatchValue`
-#: makes any value with whitespace a `text` match, which strawmANN refuses
-#: (§1) and which Qdrant answers as a substring match on a keyword field, not
-#: the dataset's question. 4,255 of h-and-m's 10,000 tests carry such a value
-#: ("Light Orange"). qdrant/bfb#193 fixes it; **set this to True in the commit
-#: that moves the bfb pin (`workloads.BFB_PIN`) past it**, and h-and-m's W16
-#: rows join its table. laion's conditions are float ranges and never needed it.
-BFB_SENDS_KEYWORD_MATCH = False
+#: keyword match. Before qdrant/bfb#193 it did not: qdrant-client's
+#: `From<String> for MatchValue` made any value with whitespace a `text` match,
+#: which strawmANN refuses (§1) and which Qdrant answers as a substring match on
+#: a keyword field, not the dataset's question. 4,255 of h-and-m's 10,000 tests
+#: carry such a value ("Light Orange"). True since the pin moved past #193
+#: (`workloads.BFB_PIN`, 2026-11-13), which is what puts h-and-m's W16 rows in
+#: its table. laion's conditions are float ranges and never needed it.
+BFB_SENDS_KEYWORD_MATCH = True
 
 #: The corpora W16 runs on, keyed as `_CORPUS`. The bundle directories are
 #: `datasets.json`'s `extract.dir`. The fields are written down rather than read

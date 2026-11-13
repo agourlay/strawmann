@@ -226,12 +226,9 @@ Built on 2026-11-11; what is left is measuring it.
 - **Engine:** laion's 2,530 conditioned tests are `range {gt}` on
   `similarity`; the engine decodes `range` and builds a float index
   (`Kind.float = 3`) since 2026-11-11.
-- **h-and-m waits on bfb.** qdrant-client's `From<String> for MatchValue`
-  sends a value with whitespace ("Light Orange", 4,255 of the 10,000 tests)
-  as a full-text `text` match: strawmANN refuses it (§1), and Qdrant answers it
-  by token rather than by equality, which is not the dataset's query.
-  qdrant/bfb#193 fixes it; `paths.BFB_SENDS_KEYWORD_MATCH` turns h-and-m's
-  rows on in the commit that moves the pin past it.
+- **h-and-m's W16 is on.** qdrant/bfb#193 merged and the pin moved to
+  1498125 on 2026-11-13, so a value with whitespace ("Light Orange", 4,255 of
+  the 10,000 tests) goes out as a keyword match, not a full-text one.
 
 What it needs: a laion pair with W16 (a quiet machine), then h-and-m's once
 the pin moves.
@@ -264,15 +261,10 @@ within 1% of 1103's costs).
   passes each, on the promoted defaults (`--exact-gather`, rescore prefetch
   `whole`), about 11 h.
 - **Night 3:** dbpedia-openai-1m, about 10.8 h.
-- **When qdrant/bfb#193 merges:** the pin move and an h-and-m pair with W16.
+- **An h-and-m pair with W16** (bfb pin 1498125, a new stamp for h-and-m).
 
 ### Waiting on a decision
 
-- **bfb's keyword match (findings 55).** qdrant/bfb#193 (branch
-  `fix/dataset-keyword-match`, 95aa8b5 on `dev` 820eaf9) sends dataset
-  `match` strings as keyword matches; 4,255 of h-and-m's 10,000 test queries
-  went out as full-text matches. Once it merges, moving the pin is a new
-  stamp, so it belongs with the next full republish.
 - **Occupancy at 1% selectivity (findings 7):** splitting one query's scan
   across idle workers is an occupancy choice, not a cheaper scan.
 

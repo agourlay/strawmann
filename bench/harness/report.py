@@ -145,8 +145,8 @@ from workloads import Direction, Gate, Status
 #: W16's caveat: its filters are not ours, and its recall is not bfb's.
 W16_CAVEAT = ("filtered search under the dataset's own conditions: each query of "
               "tests.jsonl is sent with the condition it ships (laion: a similarity "
-              "range on about half of them; h-and-m: a keyword match, off until the "
-              "bfb pin sends whitespace values as keywords, qdrant/bfb#193). Recall "
+              "range on about half of them; h-and-m: a keyword match on one of ten "
+              "fields, sent as a keyword since qdrant/bfb#193). Recall "
               "is scored against the neighbours the dataset ships under each "
               "condition; bfb's own precision is on the row as a check only")
 

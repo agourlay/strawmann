@@ -4690,11 +4690,10 @@ class DatasetTestsTableTests(unittest.TestCase):
         self.assertTrue(required["W3"])
 
     def test_a_corpus_without_w16_neither_reads_back_nor_drops_bench16(self):
-        """h-and-m runs no W16 until bfb sends keyword matches, and printed
-        `bench16: absent` twelve times a night, read back and dropped."""
-        self.w.use_dataset("h-and-m-2048-angular-filters")
-        if any(r.id.startswith("W16") for r in self.w.table()):
-            self.skipTest("h-and-m runs W16 here")
+        """h-and-m, before it ran W16, printed `bench16: absent` twelve times a
+        night, read back and dropped. sift1m has no filtered tests at all."""
+        self.w.use_dataset("sift1m")
+        self.assertFalse([r.id for r in self.w.table() if r.id.startswith("W16")])
         self.assertNotIn("bench16", self.w.collections_droppable_after_sweeps())
         self.w.use_dataset("laion-small-clip")
         # On laion it is still handled, by its own isolated phase.
@@ -4731,21 +4730,22 @@ class DatasetTestsTableTests(unittest.TestCase):
                 self.assertIn("W16 loads 100,000 into bench16, so", cap[0])
                 self.assertIn("--capacity 100000", cap[0])
 
-    def test_hnm_is_off_until_the_bfb_pin_sends_keyword_matches(self):
+    def test_hnm_runs_w16_only_on_a_bfb_pin_that_sends_keyword_matches(self):
         self.w.use_dataset("h-and-m-2048-angular-filters")
-        self.assertFalse(self.w.paths.BFB_SENDS_KEYWORD_MATCH)
-        self.assertIsNone(self.w.paths.filtered_tests("h-and-m-2048-angular-filters"))
-        self.assertFalse([i for i in self.ids() if i.startswith("W16")])
-        self.assertEqual(self.w.paths.tests_files("h-and-m-2048-angular-filters"), [])
-        self.assertNotIn("w16_fields", self.w.collection_settings())
-        with mock.patch.object(self.w.paths, "BFB_SENDS_KEYWORD_MATCH", True):
-            self.assertIn("W16-ef128", self.ids())
-            # k=25 capped at the harness's recall@10.
-            self.assertEqual(self.w.w16_limit(), 10)
-            cfg = self.w.tests_upload_config("bench16")
-            self.assertIn("    - { name: colour_group_name, type: keyword }\n", cfg)
-            self.assertEqual(cfg.count("type: keyword"), 10)
-            self.assertIn("      distance: cosine\n", cfg)
+        # The pin is past qdrant/bfb#193 (1498125), so the rows are in.
+        self.assertTrue(self.w.paths.BFB_SENDS_KEYWORD_MATCH)
+        self.assertIn("W16-ef128", self.ids())
+        with mock.patch.object(self.w.paths, "BFB_SENDS_KEYWORD_MATCH", False):
+            self.assertIsNone(self.w.paths.filtered_tests("h-and-m-2048-angular-filters"))
+            self.assertFalse([i for i in self.ids() if i.startswith("W16")])
+            self.assertEqual(self.w.paths.tests_files("h-and-m-2048-angular-filters"), [])
+            self.assertNotIn("w16_fields", self.w.collection_settings())
+        # k=25 capped at the harness's recall@10.
+        self.assertEqual(self.w.w16_limit(), 10)
+        cfg = self.w.tests_upload_config("bench16")
+        self.assertIn("    - { name: colour_group_name, type: keyword }\n", cfg)
+        self.assertEqual(cfg.count("type: keyword"), 10)
+        self.assertIn("      distance: cosine\n", cfg)
 
     def test_the_upload_config_loads_the_bundle_and_indexes_the_tested_fields(self):
         cfg = self.w.tests_upload_config("bench16", "cached")
@@ -4816,15 +4816,16 @@ class DatasetTestsTableTests(unittest.TestCase):
             self.w.use_dataset(name)
             return self.w.stamp_hash(self.w.harness_stamp())
 
-        for name in ("sift1m", "dbpedia-openai-100K-1536-angular",
-                     "h-and-m-2048-angular-filters"):
+        for name in ("sift1m", "dbpedia-openai-100K-1536-angular"):
             with_w16 = stamp(name)
             self.assertFalse([i for i in self.ids() if i.startswith("W16")], name)
             with mock.patch.object(self.w.paths, "FILTERED_TESTS", {}):
                 self.assertEqual(stamp(name), with_w16, name)
-        with_w16 = stamp("laion-small-clip")
-        with mock.patch.object(self.w.paths, "FILTERED_TESTS", {}):
-            self.assertNotEqual(stamp("laion-small-clip"), with_w16)
+        # h-and-m since the bfb pin moved past qdrant/bfb#193.
+        for name in ("h-and-m-2048-angular-filters", "laion-small-clip"):
+            with_w16 = stamp(name)
+            with mock.patch.object(self.w.paths, "FILTERED_TESTS", {}):
+                self.assertNotEqual(stamp(name), with_w16, name)
         s = self.w.collection_settings()
         self.assertEqual(s["w16_fields"], [["similarity", "float"]])
         self.assertEqual((s["w16_limit"], s["w16_n"]), (10, 100_000))

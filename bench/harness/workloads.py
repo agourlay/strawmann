@@ -810,15 +810,21 @@ W9_PARALLEL = int(os.environ.get("W9_PARALLEL", 8))
 #: 2. A Qdrant before 1cb0f1800 holds field 2 reserved and drops it, so this
 #: pin needs a BM25 Qdrant at or after that commit, or the k1/b ladder runs at
 #: the defaults with no error, as under qdrant#11012. No other request moves.
-#: The pin that includes qdrant/bfb#193 also flips `paths.BFB_SENDS_KEYWORD_MATCH`,
-#: which is what puts h-and-m's W16 rows in its table.
-BFB_PIN = ("dev @ d2a6b6c (qdrant/bfb#189, TextQuery's scoring oneof at field 2 for "
-           "qdrant#11112; carries #187's dependency update, #185's text requests and "
-           "#172, findings 32's --rps reaping fix)")
+#: Moved forward to `1498125` on 2026-11-13, two commits on: #193 sends a
+#: dataset condition's `match` string as a keyword match (qdrant-client's
+#: `From<String>` made one with whitespace a full-text match), and adds
+#: `match_any` and `match_text`; #190 adds an example. `Cargo.lock` is
+#: unchanged, so the client, its codec and every request a row sends outside
+#: `src/dataset/conditions.rs` (W16's conditions) are the same bytes. It flips
+#: `paths.BFB_SENDS_KEYWORD_MATCH`, which puts h-and-m's W16 rows in its table.
+BFB_PIN = ("dev @ 1498125 (qdrant/bfb#193, dataset match strings sent as keyword "
+           "matches; carries #189's TextQuery oneof at field 2 for qdrant#11112, "
+           "#187's dependency update, #185's text requests and #172, findings 32's "
+           "--rps reaping fix)")
 
 #: The short hash inside `BFB_PIN`, which is what the checkout is checked
 #: against. Written once, parsed once, rather than repeated.
-BFB_COMMIT = "d2a6b6c"
+BFB_COMMIT = "1498125"
 BFB_CLIENT = "qdrant-client 1.16.1-dev (git dev branch)"
 HARNESS_CLIENT = "qdrant-client git 0309260 (dev, qdrant/rust-client#302 merged, 1.16.1-dev line)"
 
