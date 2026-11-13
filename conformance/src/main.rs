@@ -670,6 +670,27 @@ fn read_pair(
     Ok((b, q))
 }
 
+/// Create the directory `path` is to be written in, if it has one.
+fn create_parent(path: &Path) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok(())
+}
+
+/// Write `contents` to `path`, creating its directory first.
+fn write_file(path: &Path, contents: impl AsRef<[u8]>) -> anyhow::Result<()> {
+    create_parent(path)?;
+    std::fs::write(path, contents)?;
+    Ok(())
+}
+
+/// Write `value` to `path` as pretty-printed JSON, creating its directory
+/// first.
+fn write_json(path: &Path, value: &impl serde::Serialize) -> anyhow::Result<()> {
+    write_file(path, serde_json::to_string_pretty(value)?)
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -1078,10 +1099,7 @@ fn run_bm25_truth(a: Bm25TruthRun) -> anyhow::Result<()> {
     let (queries, query_checksum) = text::read_queries(&t.queries)?;
     let truth =
         text::Bm25Truth::compute(settings, &docs, corpus_checksum, &queries, query_checksum);
-    if let Some(dir) = a.out.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&a.out, serde_json::to_string(&truth)?)?;
+    write_file(&a.out, serde_json::to_string(&truth)?)?;
     eprintln!(
         "wrote {}: {} queries over {} documents (avgdl {}), k1 {} b {}",
         a.out.display(),
@@ -1232,10 +1250,7 @@ fn run_token_sample(a: TokenSampleRun) -> anyhow::Result<()> {
         out.push('\n');
         n += 1;
     }
-    if let Some(dir) = a.out.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&a.out, out)?;
+    write_file(&a.out, out)?;
     eprintln!("wrote {}: {n} values", a.out.display());
     Ok(())
 }
@@ -1266,10 +1281,7 @@ fn run_stem_vocabulary(a: StemVocabularyRun) -> anyhow::Result<()> {
         out.push_str(&stemmer.stem(word));
         out.push('\n');
     }
-    if let Some(dir) = a.out.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&a.out, out)?;
+    write_file(&a.out, out)?;
     eprintln!("wrote {}: {} words", a.out.display(), words.len());
     Ok(())
 }
@@ -1594,10 +1606,11 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
     if let Some(path) = &a.json {
         // The build identity, as the vector differ reads it (`fullrun.py`
         // sets all three).
-        let env = |k: &str, unset: &str| std::env::var(k).unwrap_or_else(|_| unset.into());
-        let qdrant_version = env("QDRANT_VERSION", differ::QDRANT_UNSET);
-        let strawmann_commit = env("STRAWMANN_COMMIT", differ::COMMIT_UNSET);
-        let isa_build = env("STRAWMANN_ISA_BUILD", differ::ISA_UNSET);
+        let differ::BuildIdentity {
+            qdrant_version,
+            strawmann_commit,
+            isa_build,
+        } = differ::BuildIdentity::from_env();
         let conf = text::TextConformanceRow {
             dataset: &a.dataset,
             params,
@@ -1649,10 +1662,7 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
             "semantic": semantic,
             "licenses_comparative": licenses,
         });
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, serde_json::to_string_pretty(&row)?)?;
+        write_json(path, &row)?;
     }
     anyhow::ensure!(licenses, "text conformance failed");
     Ok(())
@@ -1738,9 +1748,6 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
         );
     }
     if let Some(path) = &a.json {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         // What was searched beside how it agreed, so a reader joins a row
         // only to the variant it ran.
         let mut row = serde_json::to_value(&agreement)?;
@@ -1750,7 +1757,7 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
         row["parity"] = a.parity.clone().into();
         row["corpus_checksum"] = format!("{corpus_checksum:016x}").into();
         row["query_checksum"] = format!("{query_checksum:016x}").into();
-        std::fs::write(path, serde_json::to_string_pretty(&row)?)?;
+        write_json(path, &row)?;
     }
     Ok(())
 }
@@ -1864,9 +1871,7 @@ async fn run_filtered_truth(a: FilteredTruthRun) -> anyhow::Result<()> {
     );
     oracle::save(&gt, &a.out)?;
     if let Some(p) = &cached {
-        if let Some(dir) = p.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+        create_parent(p)?;
         oracle::save(&gt, p)?;
     }
     println!(
@@ -2665,10 +2670,7 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
                 .map(|t| t.iter().filter(|x| x.conditions.is_none()).count()),
             points,
         };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, serde_json::to_string_pretty(&sweep)?)?;
+        write_json(path, &sweep)?;
         eprintln!("wrote {}", path.display());
     }
     println!();
@@ -2799,6 +2801,17 @@ mod dataset_name_tests {
     }
 }
 
+/// Print one tier's line and add it to the row.
+fn report(tiers: &mut Vec<differ::TierResult>, r: differ::TierResult) {
+    println!(
+        "{}: {} - {}",
+        r.tier.as_str(),
+        if r.passed { "PASS" } else { "FAIL" },
+        r.detail
+    );
+    tiers.push(r);
+}
+
 /// §8.5 — drive both engines through identical operation sequences.
 #[tokio::main(flavor = "multi_thread")]
 async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
@@ -2882,14 +2895,7 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
         let b = engines[1]
             .wire_shape(collection, &queries.data[..queries.dim], limit as u64)
             .await?;
-        let r = differ::compare_shape(&a, &b);
-        println!(
-            "{}: {} - {}",
-            r.tier.as_str(),
-            if r.passed { "PASS" } else { "FAIL" },
-            r.detail
-        );
-        tiers.push(r);
+        report(&mut tiers, differ::compare_shape(&a, &b));
     }
 
     // --- T1: exact-search value equality ---
@@ -2950,26 +2956,18 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
     let rescorer = oracle::Rescorer::new(m, &base.data, base.n, &queries.data, queries.n, base.dim);
 
     if max_tier >= 1 {
-        let r = differ::compare_exact(&ours_exact, &theirs_exact, &gt, &eps, limit);
-        println!(
-            "{}: {} - {}",
-            r.tier.as_str(),
-            if r.passed { "PASS" } else { "FAIL" },
-            r.detail
+        report(
+            &mut tiers,
+            differ::compare_exact(&ours_exact, &theirs_exact, &gt, &eps, limit),
         );
-        tiers.push(r);
     }
 
     if max_tier >= 2 {
         // --- T2: rank agreement under ties ---
-        let r = differ::compare_ranks(&ours_exact, &theirs_exact, &eps);
-        println!(
-            "{}: {} - {}",
-            r.tier.as_str(),
-            if r.passed { "PASS" } else { "FAIL" },
-            r.detail
+        report(
+            &mut tiers,
+            differ::compare_ranks(&ours_exact, &theirs_exact, &eps),
         );
-        tiers.push(r);
     }
 
     if max_tier >= 3 {
@@ -3037,14 +3035,7 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
                 theirs,
             });
         }
-        let r = differ::t3_verdict(&steps);
-        println!(
-            "{}: {} - {}",
-            r.tier.as_str(),
-            if r.passed { "PASS" } else { "FAIL" },
-            r.detail
-        );
-        tiers.push(r);
+        report(&mut tiers, differ::t3_verdict(&steps));
     }
 
     // §8.9: "metamorphic + T0 + T1 on a 100k slice per commit" — so the
@@ -3054,13 +3045,7 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
     // measure a different index than the one that went green.
     if max_tier >= 1 {
         let r = run_metamorphic(&engines, collection, &base, &queries, limit, m, &eps).await?;
-        println!(
-            "{}: {} - {}",
-            r.tier.as_str(),
-            if r.passed { "PASS" } else { "FAIL" },
-            r.detail
-        );
-        tiers.push(r);
+        report(&mut tiers, r);
     }
 
     // --- T4: quantization fidelity ---
@@ -3164,13 +3149,7 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
             // row; strawmann's is the tier of the row under test
             // (`TierResult::advisory`).
             r.advisory = i != 0;
-            println!(
-                "{}: {} - {}",
-                r.tier.as_str(),
-                if r.passed { "PASS" } else { "FAIL" },
-                r.detail
-            );
-            tiers.push(r);
+            report(&mut tiers, r);
         }
     }
 
@@ -3190,12 +3169,11 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
     // one thing "the same build, on the same data" names first. `fullrun.py`
     // sets all three; a run that does not is warned about rather than left to
     // produce a confidently anonymous row.
-    let qdrant_version =
-        std::env::var("QDRANT_VERSION").unwrap_or_else(|_| differ::QDRANT_UNSET.into());
-    let strawmann_commit =
-        std::env::var("STRAWMANN_COMMIT").unwrap_or_else(|_| differ::COMMIT_UNSET.into());
-    let isa_build =
-        std::env::var("STRAWMANN_ISA_BUILD").unwrap_or_else(|_| differ::ISA_UNSET.into());
+    let differ::BuildIdentity {
+        qdrant_version,
+        strawmann_commit,
+        isa_build,
+    } = differ::BuildIdentity::from_env();
     // The same rule the licence bit uses, so the warning and the bit cannot
     // disagree. It used to test two of the three variables it asks for.
     if !differ::identity_known(&strawmann_commit, &qdrant_version, &isa_build) {
@@ -3277,10 +3255,7 @@ the row licenses no claim (`ConformanceRow::build_identity_known`)."
                 "distribution": t.distribution,
             })).collect::<Vec<_>>(),
         });
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, serde_json::to_string_pretty(&out)?)?;
+        write_json(path, &out)?;
         eprintln!("wrote {}", path.display());
     }
 

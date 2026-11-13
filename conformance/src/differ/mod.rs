@@ -1241,6 +1241,26 @@ pub fn identity_known(strawmann_commit: &str, qdrant_version: &str, isa_build: &
     strawmann_commit != COMMIT_UNSET && qdrant_version != QDRANT_UNSET && isa_build != ISA_UNSET
 }
 
+/// The builds a row is about, from `QDRANT_VERSION`, `STRAWMANN_COMMIT` and
+/// `STRAWMANN_ISA_BUILD` (`fullrun.py` sets all three), each defaulting to its
+/// `*_UNSET` spelling. The vector and the text differ read it the same way.
+pub struct BuildIdentity {
+    pub qdrant_version: String,
+    pub strawmann_commit: String,
+    pub isa_build: String,
+}
+
+impl BuildIdentity {
+    pub fn from_env() -> Self {
+        let env = |k: &str, unset: &str| std::env::var(k).unwrap_or_else(|_| unset.into());
+        BuildIdentity {
+            qdrant_version: env("QDRANT_VERSION", QDRANT_UNSET),
+            strawmann_commit: env("STRAWMANN_COMMIT", COMMIT_UNSET),
+            isa_build: env("STRAWMANN_ISA_BUILD", ISA_UNSET),
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConformanceRow {
     /// The dataset's **name**, not the path it was read from. See `hash`.
