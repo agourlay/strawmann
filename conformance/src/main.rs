@@ -2143,6 +2143,11 @@ struct RelevanceRun {
     /// was measured at, the thing §7.4 forbids.
     #[arg(long)]
     json: Option<PathBuf>,
+    /// One JSON line per ef and query: `{"ef", "query", "recall_at_10",
+    /// "returned"}`. For finding which queries an engine answers worst;
+    /// nothing reads it back.
+    #[arg(long)]
+    per_query: Option<PathBuf>,
     /// The payload field a filtered sweep conditions on (bfb's first keyword
     /// field is `a`). Only read when `--filter-values` is given.
     #[arg(long, default_value = "a")]
@@ -2608,6 +2613,33 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
         };
         let elapsed = t.elapsed().as_secs_f64();
         let g = relevance::evaluate(&gt, &res, &eps, r.limit as usize, Some(&rescorer));
+        if let Some(path) = &r.per_query {
+            use std::io::Write as _;
+            let each = relevance::recall_at_10_per_query(
+                &gt,
+                &res,
+                &eps,
+                r.limit as usize,
+                Some(&rescorer),
+            );
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            for (qi, v) in each.iter().enumerate() {
+                let recall = if v.is_nan() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(v)
+                };
+                writeln!(
+                    f,
+                    "{}",
+                    serde_json::json!({"ef": e, "query": qi, "recall_at_10": recall,
+                                       "returned": res[qi].ids.len()})
+                )?;
+            }
+        }
         println!(
             "{:>6}  {:>10.4}  {:>10.4}  {:>10}  {:>10.5}  [{:.4}, {:.4}]   {:.1} q/s{}{}{}",
             if r.exact {

@@ -307,6 +307,25 @@ pub fn wilson_interval(successes: f64, trials: usize) -> Ci95 {
     }
 }
 
+/// Each query's recall@10, in query order: what `evaluate` averages, kept
+/// apart so a run can say which queries an engine answers worst. `NaN` where
+/// recall@10 is not measurable (see `recall_one`).
+pub fn recall_at_10_per_query(
+    gt: &GroundTruth,
+    results: &[Returned],
+    eps: &Epsilon,
+    limit: usize,
+    rescorer: Option<&Rescorer>,
+) -> Vec<f64> {
+    let mut tally = Tally::default();
+    results
+        .iter()
+        .enumerate()
+        .take(gt.n_queries)
+        .map(|(qi, r)| recall_one(gt, qi, r, 10, eps, limit, rescorer, &mut tally))
+        .collect()
+}
+
 /// Evaluate a full run against ground truth.
 ///
 /// `limit` is what every query asked for; it decides which recall depths are
@@ -705,6 +724,32 @@ mod tests {
         let out = evaluate(&g, &r, &abs_eps(1e-9), 3, None);
         assert_eq!(out.recall_at_1, 1.0);
         assert!(out.mean_relative_distance_error.abs() < 1e-12);
+    }
+
+    #[test]
+    fn per_query_recall_is_what_evaluate_averages() {
+        // Two queries at k = 10: one answered whole, one with half its
+        // neighbours. The per-query values are 1.0 and 0.5, and `evaluate`
+        // reports their mean.
+        let ids: Vec<u32> = (0..20).collect();
+        let scores: Vec<f64> = (0..20).map(|i| 0.1 + f64::from(i % 10) * 0.1).collect();
+        let g = gt(Metric::Euclid, 10, ids, scores, 2);
+        let r = vec![
+            Returned {
+                ids: (0..10).collect(),
+                scores: (0..10).map(|i| 0.1 + f64::from(i) * 0.1).collect(),
+            },
+            Returned {
+                ids: vec![10, 11, 12, 13, 14, 900, 901, 902, 903, 904],
+                scores: vec![0.1, 0.2, 0.3, 0.4, 0.5, 9.0, 9.1, 9.2, 9.3, 9.4],
+            },
+        ];
+        let eps = abs_eps(1e-9);
+        let each = recall_at_10_per_query(&g, &r, &eps, 10, None);
+        assert_eq!(each, vec![1.0, 0.5]);
+        assert_eq!(evaluate(&g, &r, &eps, 10, None).recall_at_10, 0.75);
+        // Not measurable at a limit below 10: NaN, as `recall_one` says.
+        assert!(recall_at_10_per_query(&g, &r, &eps, 5, None)[0].is_nan());
     }
 
     #[test]
