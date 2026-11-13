@@ -651,6 +651,25 @@ fn read_vectors(path: &Path, limit: Option<usize>) -> anyhow::Result<datasets::V
     }
 }
 
+/// A base file and a query file of one dataset, each capped, refused when
+/// their dimensions differ.
+fn read_pair(
+    base: &Path,
+    base_limit: Option<usize>,
+    queries: &Path,
+    query_limit: Option<usize>,
+) -> anyhow::Result<(datasets::Vectors, datasets::Vectors)> {
+    let b = read_vectors(base, base_limit)?;
+    let q = read_vectors(queries, query_limit)?;
+    anyhow::ensure!(
+        b.dim == q.dim,
+        "base dim {} != query dim {} — these are not the same dataset",
+        b.dim,
+        q.dim
+    );
+    Ok((b, q))
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -907,14 +926,7 @@ fn run_oracle(a: OracleRun) -> anyhow::Result<()> {
     } = a;
 
     let m = parse_metric(&metric)?;
-    let b = read_vectors(&base, limit)?;
-    let q = read_vectors(&queries, None)?;
-    anyhow::ensure!(
-        b.dim == q.dim,
-        "base dim {} != query dim {} — these are not the same dataset",
-        b.dim,
-        q.dim
-    );
+    let (b, q) = read_pair(&base, limit, &queries, None)?;
 
     eprintln!(
         "computing fp64 ground truth: {} base x {} queries, d={}, {}, k={} ({} comparisons)",
@@ -1807,14 +1819,7 @@ async fn run_filtered_truth(a: FilteredTruthRun) -> anyhow::Result<()> {
         t.elapsed().as_secs_f64()
     );
 
-    let b = read_vectors(&a.base, a.limit)?;
-    let q = read_vectors(&a.queries, None)?;
-    anyhow::ensure!(
-        b.dim == q.dim,
-        "base dim {} != query dim {} — these are not the same dataset",
-        b.dim,
-        q.dim
-    );
+    let (b, q) = read_pair(&a.base, a.limit, &a.queries, None)?;
     let cached = a.cache_dir.as_ref().map(|d| {
         d.join(oracle::filtered_cache_key(
             &a.collection,
@@ -2033,14 +2038,7 @@ struct DumpRun {
 #[tokio::main(flavor = "multi_thread")]
 async fn run_dump_scores(d: DumpRun) -> anyhow::Result<()> {
     let m = parse_metric(&d.metric)?;
-    let base = read_vectors(&d.base, None)?;
-    let q = read_vectors(&d.queries, d.limit_queries)?;
-    anyhow::ensure!(
-        base.dim == q.dim,
-        "dim mismatch: base {} queries {}",
-        base.dim,
-        q.dim
-    );
+    let (base, q) = read_pair(&d.base, None, &d.queries, d.limit_queries)?;
 
     let eng = engine::Engine::connect_quiet("dump", &d.engine)?;
     if !d.skip_upload {
@@ -2525,16 +2523,7 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
     // dot, euclid and manhattan scale with vector magnitude. Passing the
     // bare f64 through made it absolute for all four, so on euclid the
     // tie clause never fired.
-    let (eps, eps_source) = {
-        let (mut e, src) = differ::tolerance::default_epsilon(m, b.dim);
-        match r.epsilon {
-            Some(v) => {
-                e.value = v;
-                (e, differ::tolerance::EpsilonSource::Flag)
-            }
-            None => (e, src),
-        }
-    };
+    let (eps, eps_source) = differ::tolerance::resolve_epsilon(m, b.dim, r.epsilon);
     eprintln!(
         "tie tolerance: {} [{}]",
         eps.describe(),
@@ -2689,7 +2678,7 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
             limit: r.limit,
             epsilon: eps.value,
             epsilon_relative: eps.relative,
-            epsilon_source: format!("{eps_source:?}").to_lowercase(),
+            epsilon_source: eps_source.as_str().to_string(),
             condition: condition.clone(),
             queries: n_q,
             ground_truth: ground_truth_name.clone(),
@@ -2977,20 +2966,19 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
     // `docs/tolerance.md` when there is one for this (metric, dim); else the
     // floor from the expected summation error, and the run says so rather
     // than a round number being invented.
-    let (mut eps, eps_source) = differ::tolerance::default_epsilon(m, base.dim);
-    if let Some(v) = epsilon_override {
-        eps.value = v;
-        eprintln!("using epsilon from --epsilon: {v:.3e} (§8.4)");
-    } else if eps_source == differ::tolerance::EpsilonSource::Calibrated {
-        eprintln!(
+    let (eps, eps_source) = differ::tolerance::resolve_epsilon(m, base.dim, epsilon_override);
+    match eps_source {
+        differ::tolerance::EpsilonSource::Flag => {
+            eprintln!("using epsilon from --epsilon: {:.3e} (§8.4)", eps.value);
+        }
+        differ::tolerance::EpsilonSource::Calibrated => eprintln!(
             "using the calibrated epsilon from docs/tolerance.md: {} (§8.4)",
             eps.describe()
-        );
-    } else {
-        eprintln!(
+        ),
+        differ::tolerance::EpsilonSource::Floor => eprintln!(
             "NOTE: using the §8.4 floor for epsilon ({}); run `calibrate` with per-ISA score dumps to derive it properly",
             eps.describe()
-        );
+        ),
     }
     // §4.3's tie clause judged on the oracle's own fp64 score for each
     // returned point (T3 and T4 go through `relevance::evaluate`).
@@ -3296,7 +3284,7 @@ the row licenses no claim (`ConformanceRow::build_identity_known`)."
             "licenses_comparative": row.licenses_comparative_claim(),
             "epsilon": row.epsilon,
             "epsilon_relative": row.epsilon_relative,
-            "epsilon_source": if epsilon_override.is_some() { "flag".to_string() } else { format!("{eps_source:?}").to_lowercase() },
+            "epsilon_source": eps_source.as_str(),
             "limit": row.limit,
             "base_checksum": format!("{:016x}", row.base_checksum),
             "query_checksum": format!("{:016x}", row.query_checksum),

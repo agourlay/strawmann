@@ -402,6 +402,30 @@ pub enum EpsilonSource {
     Flag,
 }
 
+impl EpsilonSource {
+    /// The spelling the JSON rows carry as `epsilon_source`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EpsilonSource::Calibrated => "calibrated",
+            EpsilonSource::Floor => "floor",
+            EpsilonSource::Flag => "flag",
+        }
+    }
+}
+
+/// The ε a run uses: `default_epsilon`'s, with its value replaced by
+/// `--epsilon` when one was given (the metric's tolerance kind is kept).
+pub fn resolve_epsilon(metric: Metric, dim: usize, flag: Option<f64>) -> (Epsilon, EpsilonSource) {
+    let (mut e, src) = default_epsilon(metric, dim);
+    match flag {
+        Some(v) => {
+            e.value = v;
+            (e, EpsilonSource::Flag)
+        }
+        None => (e, src),
+    }
+}
+
 /// The ε a run should use when none is passed: the calibrated cell if
 /// `docs/tolerance.md` has one for this `(metric, dim)`, else the §8.4 floor.
 ///
@@ -813,5 +837,30 @@ mod tests {
         assert_eq!(src, EpsilonSource::Floor);
         assert_eq!(e.value, expected_summation_error(960));
         assert!(e.relative);
+    }
+
+    #[test]
+    fn a_flag_replaces_the_value_keeps_the_kind_and_is_recorded_as_flag() {
+        let (e, src) = resolve_epsilon(Metric::Euclid, 960, Some(1e-3));
+        assert_eq!(
+            (e.value, e.relative, src),
+            (1e-3, true, EpsilonSource::Flag)
+        );
+        let (e, src) = resolve_epsilon(Metric::Cosine, 1536, Some(2e-6));
+        assert_eq!(
+            (e.value, e.relative, src),
+            (2e-6, false, EpsilonSource::Flag)
+        );
+        let (e, src) = resolve_epsilon(Metric::Euclid, 960, None);
+        let (d, dsrc) = default_epsilon(Metric::Euclid, 960);
+        assert_eq!((e.value, e.relative, src), (d.value, d.relative, dsrc));
+        // The JSON spelling both commands wrote, `{:?}` lowercased.
+        for s in [
+            EpsilonSource::Calibrated,
+            EpsilonSource::Floor,
+            EpsilonSource::Flag,
+        ] {
+            assert_eq!(s.as_str(), format!("{s:?}").to_lowercase());
+        }
     }
 }
