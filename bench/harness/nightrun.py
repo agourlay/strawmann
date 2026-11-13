@@ -43,7 +43,9 @@ import sys
 import time
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+import results_io
+
+HERE =Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 
 #: Exit codes a caller can tell apart, both before anything runs.
@@ -145,10 +147,7 @@ def qdrant_build_recorded(meta_path: Path) -> str | None:
     """The Qdrant build the run recorded, for the line the pre-run one could not
     finish: before the server runs, a binary outside a git tree has no commit to
     read, and `run.json` then carries the one its banner named."""
-    try:
-        q = json.loads(meta_path.read_text()).get("qdrant") or {}
-    except (OSError, ValueError):
-        return None
+    q = results_io.read_json(meta_path).get("qdrant") or {}
     if not q.get("commit"):
         return None
     return f"qdrant build {q['commit']} ({q.get('commit_source') or 'checkout'}, run.json)"

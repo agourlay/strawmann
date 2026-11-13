@@ -45,6 +45,8 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
+import results_io
+
 import procstat
 import recall as recall_mod
 import regression
@@ -55,23 +57,16 @@ ROOT = Path(os.environ.get("STRAWMANN_ROOT", Path(__file__).resolve().parents[2]
 
 def load(label: str, required: bool = True) -> dict[str, dict]:
     path = ROOT / "bench/results" / label / "rows.json"
-    if not path.exists():
+    if (rows := results_io.rows_of(path)) is None:
         if not required:
             return {}
         raise SystemExit(f"no results for {label!r} at {path}\n"
                          f"run: bench/harness/workloads.py run <uri> {label}")
-    return {r["id"]: r for r in json.loads(path.read_text())}
+    return {r["id"]: r for r in rows}
 
 
 def read_json(label: str, name: str) -> dict:
-    p = ROOT / "bench/results" / label / name
-    if not p.exists():
-        return {}
-    try:
-        d = json.loads(p.read_text())
-    except json.JSONDecodeError:
-        return {}
-    return d if isinstance(d, dict) else {}
+    return results_io.read_json(ROOT / "bench/results" / label / name)
 
 
 def gate_of_rows(rows, env: str = "") -> str:

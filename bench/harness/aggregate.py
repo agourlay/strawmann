@@ -45,6 +45,7 @@ import sys
 from pathlib import Path
 
 import perfstat
+import results_io
 
 import bfb_output
 import procstat
@@ -383,19 +384,14 @@ def _rsd(vals: list) -> float | None:
 
 
 def load_rows(label: str) -> list[dict]:
-    p = ROOT / "bench/results" / label / "rows.json"
-    return json.loads(p.read_text()) if p.exists() else []
+    return results_io.rows_of(ROOT / "bench/results" / label / "rows.json") or []
 
 
 def pass_spans(reps: list[str], passes: list[list[dict]]) -> list[dict]:
     """`[{label, started, last_row}]`, one per pass, from what each recorded."""
     out = []
     for rep, rows in zip(reps, passes, strict=True):
-        p = ROOT / "bench/results" / rep / "run.json"
-        try:
-            started = json.loads(p.read_text()).get("started")
-        except (OSError, json.JSONDecodeError):
-            started = None
+        started = results_io.read_json(ROOT / "bench/results" / rep / "run.json").get("started")
         stamps = sorted(r.get("when") for r in rows if isinstance(r.get("when"), str))
         out.append({"label": rep, "started": started,
                     "last_row": stamps[-1] if stamps else None})

@@ -55,7 +55,9 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-ROOT = Path(os.environ.get("STRAWMANN_ROOT", Path(__file__).resolve().parents[2]))
+from results_io import read_json, rows_of
+
+ROOT =Path(os.environ.get("STRAWMANN_ROOT", Path(__file__).resolve().parents[2]))
 RESULTS = ROOT / "bench/results"
 DEFAULT_NOISE = RESULTS / "noise.json"
 
@@ -144,33 +146,16 @@ def engine_of(d: Path) -> str | None:
     (`sm-dbp1m`, `qdrant`, `nf/rep3`) and the engine is what a spread belongs
     to.
     """
-    p = d / "run.json"
-    if not p.exists():
-        return None
-    try:
-        return json.loads(p.read_text()).get("engine_comm")
-    except (OSError, json.JSONDecodeError, AttributeError):
-        return None
+    return read_json(d / "run.json").get("engine_comm")
 
 
 def dataset_of(d: Path) -> str | None:
-    p = d / "run.json"
-    if not p.exists():
-        return None
-    try:
-        return (json.loads(p.read_text()).get("dataset") or {}).get("name")
-    except (OSError, json.JSONDecodeError, AttributeError):
-        return None
+    ds = read_json(d / "run.json").get("dataset")
+    return ds.get("name") if isinstance(ds, dict) else None
 
 
 def env_hash_of(d: Path) -> str | None:
-    p = d / "run.json"
-    if not p.exists():
-        return None
-    try:
-        return json.loads(p.read_text()).get("env_hash")
-    except (OSError, json.JSONDecodeError, AttributeError):
-        return None
+    return read_json(d / "run.json").get("env_hash")
 
 
 def floor_refusals(noise: Noise, labels: list[str]) -> list[str]:
@@ -204,13 +189,7 @@ def floor_refusals(noise: Noise, labels: list[str]) -> list[str]:
 
 def stamp_hash_of(d: Path) -> str | None:
     """The harness stamp hash a result directory's `run.json` carries, or None."""
-    p = d / "run.json"
-    if not p.exists():
-        return None
-    try:
-        stamp = json.loads(p.read_text()).get("harness")
-    except (json.JSONDecodeError, AttributeError):
-        return None
+    stamp = read_json(d / "run.json").get("harness")
     if not stamp:
         return None
     from workloads import stamp_hash
@@ -240,17 +219,11 @@ def floor_for(labels: list[str]) -> dict:
     """
     found = []
     for label in labels:
-        p = RESULTS / label / "noise.json"
-        if not p.exists():
-            continue
-        try:
-            d = json.loads(p.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(d, dict) and d.get("rsd"):
+        d = read_json(RESULTS / label / "noise.json")
+        if d.get("rsd"):
             found.append((label, d))
     if not found:
-        return _read_floor(DEFAULT_NOISE)
+        return read_json(DEFAULT_NOISE)
     rows = set.intersection(*(set(d["rsd"]) for _, d in found))
     rsd = {r: (sum(d["rsd"][r] ** 2 for _, d in found) / len(found)) ** 0.5
            for r in rows}
@@ -285,21 +258,11 @@ def floor_for(labels: list[str]) -> dict:
     }
 
 
-def _read_floor(p: Path) -> dict:
-    if not p.exists():
-        return {}
-    try:
-        d = json.loads(p.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return d if isinstance(d, dict) else {}
-
-
 def load_rows(label: str) -> dict[str, dict]:
     p = RESULTS / label / "rows.json"
-    if not p.exists():
+    if (rows := rows_of(p)) is None:
         raise SystemExit(f"no results for {label!r} at {p}")
-    return {r["id"]: r for r in json.loads(p.read_text())}
+    return {r["id"]: r for r in rows}
 
 
 def measure_noise(dirs: list[Path], source: str) -> Noise:

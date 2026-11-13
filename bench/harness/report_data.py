@@ -26,6 +26,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import NamedTuple
 
+import results_io
+
 import compare
 import recall as recall_mod
 from workloads import Gate, Status
@@ -409,14 +411,9 @@ def load_run(label: str) -> Run:
         if p.exists():
             with contextlib.suppress(json.JSONDecodeError):
                 detail[r["id"]] = json.loads(p.read_text())
+
     def read_json(name: str) -> dict:
-        p = d / name
-        if not p.exists():
-            return {}
-        try:
-            return json.loads(p.read_text())
-        except json.JSONDecodeError:
-            return {}
+        return results_io.read_json(d / name)
 
     meta = read_json("run.json")
     # `bench2`'s sweep, by (dataset, collection): `recall.json` used to be
