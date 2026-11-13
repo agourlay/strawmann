@@ -499,7 +499,11 @@ pub const Index = struct {
                 }
             }
             if (hop) {
-                self.expandTwoHop(ns, level, scratch, &frontier, out, filter.?);
+                if (noneAdmitted(ns, self.bound, filter.?)) {
+                    self.bridge(ns, scratch, &frontier, out, filter.?);
+                } else {
+                    self.expandTwoHop(ns, level, scratch, &frontier, out, filter.?);
+                }
                 continue;
             }
             for (ns) |n| {
@@ -520,7 +524,8 @@ pub const Index = struct {
     /// 2024): an admitted neighbour is scored as usual; a rejected one is
     /// never scored, and its own neighbours stand in for it, admitted ones
     /// only. So the frontier holds only points the caller can keep and no
-    /// distance is spent on one it cannot.
+    /// distance is spent on one it cannot, except at a node with no admitted
+    /// neighbour at all, which `bridge` takes.
     ///
     /// The plain rule scores every neighbour and expands rejected ones too,
     /// which at 10% selectivity is nine distances in ten on points that can
@@ -581,6 +586,68 @@ pub const Index = struct {
                 if (!scratch.vis.testAndSet(n2)) continue;
                 scored += 1;
                 self.consider(n2, frontier, out);
+            }
+        }
+    }
+
+    /// How many of a node's neighbours a two-hop walk scores to cross a
+    /// stretch of rejected points (`bridge`). Measured on laion-small-clip's
+    /// W16, in engine instructions per query at ef 32 against the walk
+    /// without it (1.02M): all 32 neighbours 2.56M, eight 2.32M, four 1.94M,
+    /// for recall@10 of 0.9733, 0.9719 and 0.9695 (2026-11-13,
+    /// development-grade).
+    pub const bridge_width = 4;
+
+    /// Whether none of a node's neighbours is admitted.
+    fn noneAdmitted(ns: []const u32, bound: u32, filter: Filter) bool {
+        for (ns) |n| {
+            if (n == empty_neighbour) break;
+            if (n < bound and filter.admits(n)) return false;
+        }
+        return true;
+    }
+
+    /// One expansion of a two-hop walk at a node with no admitted neighbour:
+    /// its first `bridge_width` unvisited neighbours are scored and queued,
+    /// rejected though they are, so the walk can go on through them.
+    ///
+    /// `expandTwoHop` queues admitted points only, so an admitted point more
+    /// than two rejected hops from every other one is out of its reach. When
+    /// the filter follows the vector the admitted points near a query are
+    /// exactly those: laion-small-clip's `similarity > x` ranges admitting 3%
+    /// to 20% read recall@10 of 0.85 to 0.95 at ef 32 where the plain walk
+    /// read 0.99 (W16, 2026-11-13). More admitted seeds, a wider budget and
+    /// redoing a thinly filled walk all left that where it was; crossing
+    /// rejected points is what the plain walk does and the two-hop walk did
+    /// not.
+    ///
+    /// Only at a node with *no* admitted neighbour, and only through a few:
+    /// a filter spread evenly over the points leaves about `(1 - s)^m0` of
+    /// the nodes that way (4% at W12's 9.6% and m0 = 32), so the walk that
+    /// was already good pays little for it (W12-sel10 on laion: +4%
+    /// instructions per query at ef 32 and +6% at ef 128, recall@10 0.9810 to
+    /// 0.9818 and 0.9973 to 0.9979).
+    fn bridge(
+        self: *const Index,
+        ns: []const u32,
+        scratch: *Scratch,
+        frontier: *heap.Frontier,
+        out: *heap.TopK,
+        filter: Filter,
+    ) void {
+        var crossed: usize = 0;
+        for (ns) |n| {
+            if (n == empty_neighbour) break;
+            if (n >= self.bound) continue;
+            if (crossed >= bridge_width) break;
+            if (!scratch.vis.testAndSet(n)) continue;
+            crossed += 1;
+            const c = Candidate{ .id = n, .score = self.scorer.call(self.scorer.ctx, n) };
+            if (!out.isFull() or c.better(out.peekWorst())) {
+                frontier.push(c);
+                // None is admitted when this is called; asked again so the
+                // heap can never hold a point the filter rejects.
+                if (filter.admits(n)) out.push(c);
             }
         }
     }
@@ -1137,6 +1204,55 @@ test "searchLayer at ef = 1 returns the single best neighbour of a tiny graph" {
     const got = out.finish();
     try testing.expectEqual(@as(usize, 1), got.len);
     try testing.expectEqual(@as(u32, 2), got[0].id);
+}
+
+test "a two-hop walk crosses rejected points to an admitted one more than two hops away" {
+    // laion-small-clip's W16 in seven nodes. Higher is better, and the filter
+    // admits 2 and 6:
+    //
+    //     0 (entry) - 1 - 2          the admitted point two hops away
+    //         \
+    //          3 - 4 - 5 - 6         the best one, behind three rejected
+    //
+    // The two-hop walk queued admitted points only: from 0 it met 2 through
+    // 1, filled its heap with it, and had no way on to 6. A full heap is not
+    // a stranded walk, so nothing redid it.
+    const Ctx = struct {
+        pub fn score(_: *const anyopaque, node: u32) f32 {
+            return @floatFromInt(node);
+        }
+        pub fn admits(_: *const anyopaque, node: u32) bool {
+            return node == 2 or node == 6;
+        }
+    };
+    var g = try Graph.init(testing.allocator, Params.fromM(4, 8, 1), 8);
+    defer g.deinit();
+    g.count = 7;
+    g.entry_point = 0;
+    const edges = [_][2]u32{ .{ 0, 1 }, .{ 1, 2 }, .{ 0, 3 }, .{ 3, 4 }, .{ 4, 5 }, .{ 5, 6 } };
+    var degree: [7]usize = @splat(0);
+    for (edges) |e| {
+        for ([_][2]u32{ .{ e[0], e[1] }, .{ e[1], e[0] } }) |d| {
+            g.level0Slice(d[0])[degree[d[0]]] = d[1];
+            degree[d[0]] += 1;
+        }
+    }
+
+    const ctx: u8 = 0;
+    const idx = Index{ .graph = &g, .scorer = .{ .ctx = @ptrCast(&ctx), .call = Ctx.score } };
+    var scratch = try Index.Scratch.init(testing.allocator, 8, 8);
+    defer scratch.deinit(testing.allocator);
+    var buf: [1]Candidate = undefined;
+    var out = heap.TopK.init(&buf, 1);
+    idx.searchFiltered(1, &scratch, &out, .{ .pred = Ctx.admits, .ctx = @ptrCast(&ctx), .two_hop = true });
+    const got = out.finish();
+    try testing.expectEqual(@as(usize, 1), got.len);
+    try testing.expectEqual(@as(u32, 6), got[0].id);
+
+    // The plain walk always could; the two agree now.
+    out = heap.TopK.init(&buf, 1);
+    idx.searchFiltered(1, &scratch, &out, .{ .pred = Ctx.admits, .ctx = @ptrCast(&ctx) });
+    try testing.expectEqual(@as(u32, 6), out.finish()[0].id);
 }
 
 test "searchFrom starts where it is told and ignores the entry point" {

@@ -2126,6 +2126,12 @@ pub const FilteredPlan = enum { scan, two_hop, walk };
 /// at ef 512 is ~21,600), so the scan wins while the matching set is smaller
 /// than that. Below the floor the choice is the one it always was, between
 /// the scan and the plain walk.
+/// `filteredPlan` prefers the exact scan for a filter admitting fewer than
+/// one point in this many, while the scan costs less than
+/// `selective_scan_bias` times the two-hop walk.
+const selective_scan_below = 20;
+const selective_scan_bias = 3;
+
 fn filteredPlan(selected: usize, bound: usize, ef: usize, m0: usize, dim: usize) FilteredPlan {
     const reach = std.math.mul(usize, selected, @max(m0, 1)) catch std.math.maxInt(usize);
     if (reach >= bound) {
@@ -2164,7 +2170,22 @@ fn filteredPlan(selected: usize, bound: usize, ef: usize, m0: usize, dim: usize)
         const per_walk = std.math.mul(usize, @max(ef, 1), @max(m0, 1)) catch std.math.maxInt(usize);
         const walk_cost = (std.math.mul(usize, per_walk, 580) catch std.math.maxInt(usize)) +| 1_000_000;
         const scan_cost = std.math.mul(usize, selected, scanRowCycles(dim)) catch std.math.maxInt(usize);
-        return if (scan_cost < walk_cost) .scan else .two_hop;
+        if (scan_cost < walk_cost) return .scan;
+        // Recall, which the costs above do not price. A filter that follows
+        // the vector leaves its admitted points where a two-hop walk reaches
+        // them worst (`hnsw.Index.bridge`), and the tighter the filter the
+        // more of the walk is spent crossing rejected points to find them.
+        // Under `selective_scan_below` of the collection the scan is taken
+        // while it costs less than `selective_scan_bias` walks: it is exact,
+        // and on laion-small-clip's W16 it took the walk's instructions per
+        // query at ef 32 from 1.94M to 1.36M and recall@10 on the ranges
+        // admitting 3.1% to 5% from 0.974 to 1.000 (2026-11-13,
+        // development-grade; Qdrant scans those ranges too). The bias is a
+        // ceiling, not a fit: at 1M points of d=1536 the scan of 5% is 76M
+        // cycles against a 1.6M walk and is never taken.
+        const selective = (std.math.mul(usize, selected, selective_scan_below) catch std.math.maxInt(usize)) < bound;
+        if (selective and scan_cost < walk_cost *| selective_scan_bias) return .scan;
+        return .two_hop;
     }
     return if (plainFilteredSearch(selected, bound, ef, m0)) .scan else .walk;
 }
@@ -2268,6 +2289,25 @@ test "a selective filter scores its matching set; a permissive one traverses" {
     try testing.expect(plainFilteredSearch(0, 0, 0, 0));
     try testing.expect(!plainFilteredSearch(std.math.maxInt(usize), 1, 1, 1));
     try testing.expect(plainFilteredSearch(1, std.math.maxInt(usize), std.math.maxInt(usize), 2));
+}
+
+test "a filter admitting under one point in twenty is scanned while the scan is within three walks" {
+    // laion-small-clip's W16 shape (n = 100,000, m0 = 32, d = 512): the
+    // ranges admitting 3.1% to 5% walked two-hop and read recall@10 of 0.85
+    // at ef 32. The scan of 4,000 rows is 3.2M cycles against a 1.59M walk.
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(4_000, 100_000, 32, 32, 512));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(4_999, 100_000, 32, 32, 512));
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(4_999, 100_000, 256, 32, 512));
+    // At 5% and above the costs alone decide, as they did: W12's ten
+    // keywords admit 9.6% and walk.
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(5_000, 100_000, 32, 32, 512));
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(9_600, 100_000, 32, 32, 512));
+    // And never at any price: 4% of a million d=1536 points is a 61M-cycle
+    // scan against a 1.59M walk, and 4% of bench12 at that width is 12M.
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(40_000, 1_000_000, 32, 32, 1536));
+    try testing.expectEqual(FilteredPlan.two_hop, filteredPlan(8_000, 200_000, 32, 32, 1536));
+    // Narrow rows are cheap to scan: 4% of bench12 at d = 128 is 1.16M.
+    try testing.expectEqual(FilteredPlan.scan, filteredPlan(8_000, 200_000, 32, 32, 128));
 }
 
 test "an indexed filter scans below 1/m0, walks two-hop above it, and scans again at a wide ef" {
