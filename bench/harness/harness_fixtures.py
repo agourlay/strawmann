@@ -8,12 +8,17 @@ number in a file too large to hold in one's head.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
+import io
 import json
 import os
 import sys
+import tempfile
+import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -161,3 +166,63 @@ CONF_T1_FAILED = {
 #: row to have taken measurable time. It sat between two test classes in the
 #: single-file suite; it is a fixture, so it lives with the fixtures.
 FAKE_BFB = '#!/usr/bin/env python3\n"""A stand-in bfb: writes the JSON the harness reads, and takes its time.\n\nThe concurrent append (`--skip-create`) finishes in 0.1 s; a search runs 0.5 s\nand reports 100 requests, so W11\'s overlap is a fifth of the row. SIGINT\nends nothing early here and still writes the files, as it does in bfb.\n"""\nimport json, signal, sys, time\nsignal.signal(signal.SIGINT, lambda *a: None)\nargv = sys.argv[1:]\nout = argv[argv.index("--json") + 1]\nif "--skip-create" in argv:\n    time.sleep(0.1)\n    json.dump({"results": {"upload": {"points_per_sec": 1000.0, "duration_secs": 0.1}}},\n              open(out, "w"))\nelse:\n    t0 = time.time()\n    time.sleep(0.5)\n    if "--jsonl-searches" in argv:\n        with open(argv[argv.index("--jsonl-searches") + 1], "w") as f:\n            for i in range(100):\n                f.write(json.dumps({"timestamp": 1000 * (t0 + 0.005 * (i + 1)),\n                                    "request_latency": 0.0005}) + "\\n")\n    json.dump({"config": {"collection_name": "bench2"},\n               "results": {"search": {"duration_secs": 0.5, "full_timings": [0.001] * 100,\n                                      "server_timings": [0.0005] * 100}}}, open(out, "w"))\n    print("Median qps: 200.0\\nMedian rps: 200.0")\n'
+
+
+class FullrunCase(unittest.TestCase):
+    """A temporary result root, the harness modules reloaded at it, and
+    `fullrun` reloaded after them.
+
+    `fullrun` is an entry point rather than a library and is not in
+    `_reload`'s dependency order; imported here, after it, so the module it
+    binds is the reloaded `workloads`. `self.m` is `_reload`'s modules,
+    `self.w` its `workloads`, `self.f` the reloaded `fullrun`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = _reload(Path(self.tmp.name))
+        self.w = self.m["workloads"]
+        self.f = importlib.reload(sys.modules["fullrun"]) \
+            if "fullrun" in sys.modules else importlib.import_module("fullrun")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+
+class Dead:
+    """A `Popen` whose process has already exited."""
+    pid = 1
+
+    def poll(self):
+        return 0
+
+
+class Started:
+    """A `Popen` whose process is still running."""
+    pid = 4321
+
+    def poll(self):
+        return None
+
+
+@contextlib.contextmanager
+def engine_start_stubbed(fullrun, proc: type = Dead, wipe: bool = True):
+    """`fullrun.start_strawmann` run as far as its `Popen`, and no further.
+
+    No process, no scope, no sleeps, nothing printed, and the storage wipe
+    skipped unless `wipe` is false. Yields the list each `Popen` call's argv
+    is appended to; each call returns a `proc()`.
+    """
+    seen: list[list[str]] = []
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.object(
+            fullrun.subprocess, "Popen", lambda argv, *_a, **_k: seen.append(argv) or proc()))
+        if wipe:
+            stack.enter_context(mock.patch.object(fullrun, "wipe_strawmann_storage",
+                                                  lambda: None))
+        stack.enter_context(mock.patch.object(fullrun.time, "sleep", lambda _s: None))
+        stack.enter_context(mock.patch.object(fullrun, "maybe_scope", lambda argv, _unit: argv))
+        stack.enter_context(mock.patch.object(fullrun, "stop_scope", lambda _unit: None))
+        stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+        yield seen

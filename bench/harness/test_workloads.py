@@ -23,7 +23,10 @@ from unittest import mock
 
 from harness_fixtures import (
     FAKE_BFB,
+    FullrunCase,
+    Started,
     _reload,
+    engine_start_stubbed,
 )
 
 import workloads
@@ -1747,7 +1750,7 @@ class BfbPinTests(unittest.TestCase):
                 binary.unlink()
                 self.assertIsNone(workloads.stale_bfb_binary(repo))
 
-class PlacementInvariantTests(unittest.TestCase):
+class PlacementInvariantTests(FullrunCase):
     """§7.4 compares at one residency or not at all.
 
     The run used to leave each engine at its own default — strawmANN holding
@@ -1755,19 +1758,6 @@ class PlacementInvariantTests(unittest.TestCase):
     "residency can move throughput too", and print the throughput ratios
     anyway. The confound was named on the page and bounded nowhere.
     """
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.m = _reload(Path(self.tmp.name))
-        self.w = self.m["workloads"]
-        # `fullrun` is an entry point rather than a library and is not in
-        # `_reload`'s dependency order; imported here, after it, so the module
-        # it binds is the reloaded `workloads`.
-        self.f = importlib.reload(sys.modules["fullrun"]) \
-            if "fullrun" in sys.modules else importlib.import_module("fullrun")
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_qdrant_segments_are_read_one_by_one_from_telemetry(self):
         """gRPC gives `segments_count` only, so "2 segments" could not say
@@ -1833,7 +1823,7 @@ class PlacementInvariantTests(unittest.TestCase):
         self.assertIsNotNone(f.placement_mismatch(["a", "b"]))
 
 
-class FullrunRowInvocationTests(unittest.TestCase):
+class FullrunRowInvocationTests(FullrunCase):
     """What `fullrun.py` actually asks `workloads.py` for.
 
     `workloads.py` has had `--min-duration` — re-run a row that came in under
@@ -1845,15 +1835,6 @@ class FullrunRowInvocationTests(unittest.TestCase):
     again. This asserts the argv, because "the whole benchmark is one command"
     is only true of the flags that command passes.
     """
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        _reload(Path(self.tmp.name))
-        self.f = importlib.reload(sys.modules["fullrun"]) \
-            if "fullrun" in sys.modules else importlib.import_module("fullrun")
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def _argv(self, **kw):
         seen = []
@@ -2244,7 +2225,7 @@ class FullrunRowInvocationTests(unittest.TestCase):
         self.assertRegex(text, r"load has stopped falling at 3\.0 \(12% per core\) after \d+ s")
 
 
-class FullrunPreflightTests(unittest.TestCase):
+class FullrunPreflightTests(FullrunCase):
     """What `fullrun.py` refuses before it spends the hours.
 
     `check_bfb_pin` is called once per `workloads.py` invocation, of which a
@@ -2255,15 +2236,6 @@ class FullrunPreflightTests(unittest.TestCase):
     Both halves are asserted: the run stops at the pin, and the log directory
     exists whether or not anything wrote to it first.
     """
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        _reload(Path(self.tmp.name))
-        self.f = importlib.reload(sys.modules["fullrun"]) \
-            if "fullrun" in sys.modules else importlib.import_module("fullrun")
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def _main(self, *extra, pin=None):
         """`fullrun.py` up to the point it refuses, with the pin's verdict forced.
@@ -2326,20 +2298,7 @@ class FullrunPreflightTests(unittest.TestCase):
         is where the machine would start."""
         log = self.f.RESULTS / "a-label-no-row-created" / "server-conformance.log"
         self.assertFalse(log.parent.exists())
-
-        class Started:
-            pid = 4321
-
-            def poll(self):
-                return None
-
-        with mock.patch.object(self.f, "wipe_strawmann_storage", lambda: None), \
-                mock.patch.object(self.f, "maybe_scope", lambda argv, _u: argv), \
-                mock.patch.object(self.f.subprocess, "Popen",
-                                  lambda *_a, **_k: Started()), \
-                mock.patch.object(self.f.time, "sleep", lambda _s: None), \
-                contextlib.redirect_stdout(io.StringIO()), \
-                contextlib.redirect_stderr(io.StringIO()):
+        with engine_start_stubbed(self.f, Started):
             # It gives up after the wait loop without a "listening" line; the
             # subject is the open, which happens before the loop.
             self.f.start_strawmann("4-11", 6344, log, 8, 1_000_000)
@@ -2364,22 +2323,11 @@ class FullrunPreflightTests(unittest.TestCase):
         strawmANN's was assumed. With it gone (2026-11-07), the engine refused
         the first collection, `could not create or map the arena file`, and
         every run on the host failed within seconds of starting."""
-        class Started:
-            pid = 4321
-
-            def poll(self):
-                return None
-
         with tempfile.TemporaryDirectory() as td:
             storage = Path(td) / "cache" / "strawmann-storage"
             with mock.patch.object(self.f.paths, "STRAWMANN_STORAGE", storage), \
                     mock.patch.object(self.f, "PLACEMENT", self.f.workloads.Placement.cached), \
-                    mock.patch.object(self.f, "maybe_scope", lambda argv, _u: argv), \
-                    mock.patch.object(self.f.subprocess, "Popen",
-                                      lambda *_a, **_k: Started()), \
-                    mock.patch.object(self.f.time, "sleep", lambda _s: None), \
-                    contextlib.redirect_stdout(io.StringIO()), \
-                    contextlib.redirect_stderr(io.StringIO()):
+                    engine_start_stubbed(self.f, Started, wipe=False):
                 self.f.start_strawmann("4-11", 6344, Path(td) / "server.log", 8, 1_000_000)
             self.assertTrue(storage.is_dir())
 
@@ -2584,7 +2532,7 @@ class SchedCoverageTests(unittest.TestCase):
             self.assertIsNone(procstat.store_bytes_for(1, "strawmann", None))
 
 
-class RunEstimateTests(unittest.TestCase):
+class RunEstimateTests(FullrunCase):
     """The run must say how long it will take before it takes it.
 
     A `--reps 3 --dataset dbpedia-openai-1m` run held the machine
@@ -2600,10 +2548,7 @@ class RunEstimateTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.m = _reload(Path(self.tmp.name))
-        self.f = importlib.reload(sys.modules["fullrun"]) \
-            if "fullrun" in sys.modules else importlib.import_module("fullrun")
+        super().setUp()
         self.f.RESULTS = Path(self.tmp.name) / "bench/results"
         # Priced as each basis ran, except where a test names the table.
         self._planned = self.f.planned_rows
@@ -2611,7 +2556,7 @@ class RunEstimateTests(unittest.TestCase):
 
     def tearDown(self):
         self.f.planned_rows = self._planned
-        self.tmp.cleanup()
+        super().tearDown()
 
     def test_the_basis_is_priced_for_the_rows_this_run_will_make(self):
         """The table grew from 32 rows to 43 between rel-0903 and perf-0924,
@@ -3823,21 +3768,7 @@ class CommitAbTests(unittest.TestCase):
 
     def test_the_engine_binary_is_the_one_given(self):
         import fullrun
-        seen = []
-
-        class Dead:
-            pid = 1
-            def poll(self):
-                return 0
-
-        with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.object(fullrun.subprocess, "Popen",
-                                  lambda argv, **k: seen.append(argv) or Dead()), \
-                mock.patch.object(fullrun, "wipe_strawmann_storage", lambda: None), \
-                mock.patch.object(fullrun.time, "sleep", lambda _s: None), \
-                mock.patch.object(fullrun, "maybe_scope", lambda argv, _unit: argv), \
-                mock.patch.object(fullrun, "stop_scope", lambda _unit: None), \
-                contextlib.redirect_stderr(io.StringIO()):
+        with tempfile.TemporaryDirectory() as tmp, engine_start_stubbed(fullrun) as seen:
             fullrun.start_strawmann("4-11", 1, Path(tmp) / "server.log", 7, 10,
                                     binary=Path("/x/zig-out/bin/strawmann"))
         self.assertIn("/x/zig-out/bin/strawmann", seen[0])
@@ -3881,20 +3812,7 @@ class CommitAbTests(unittest.TestCase):
 
     def test_an_arms_flags_reach_the_engine(self):
         import fullrun
-        seen = []
-
-        class Dead:
-            pid = 1
-            def poll(self):
-                return 0
-
-        with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.object(fullrun.subprocess, "Popen",
-                                  lambda argv, **k: seen.append(argv) or Dead()), \
-                mock.patch.object(fullrun, "wipe_strawmann_storage", lambda: None), \
-                mock.patch.object(fullrun.time, "sleep", lambda _s: None), \
-                mock.patch.object(fullrun, "maybe_scope", lambda argv, _unit: argv), \
-                contextlib.redirect_stderr(io.StringIO()):
+        with tempfile.TemporaryDirectory() as tmp, engine_start_stubbed(fullrun) as seen:
             fullrun.start_strawmann("4-11", 1, Path(tmp) / "server.log", 7, 10,
                                     extra=["--filtered-plan", "scan"])
         self.assertEqual(seen[0][-2:], ["--filtered-plan", "scan"])
@@ -4624,20 +4542,15 @@ class TextTableTests(unittest.TestCase):
         self.assertNotIn("W15", [r.id for r in self.w.table()])
 
 
-class TextArmTests(unittest.TestCase):
+class TextArmTests(FullrunCase):
     """What a text arm runs beside W15's rows: one recall per variant, the
     text differ, and the joins that bring both back to the rows."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+        super().setUp()
         saved = os.environ.get("STRAWMANN_DATASET")
         self.addCleanup(lambda: os.environ.__setitem__("STRAWMANN_DATASET", saved)
                         if saved is not None else os.environ.pop("STRAWMANN_DATASET", None))
-        self.m = _reload(Path(self.tmp.name))
-        self.w = self.m["workloads"]
-        self.f = importlib.reload(sys.modules["fullrun"]) \
-            if "fullrun" in sys.modules else importlib.import_module("fullrun")
         self.f.DATASET = self.w.use_dataset("scifact")
 
     def test_each_variant_is_measured_once(self):
@@ -4917,7 +4830,7 @@ class DatasetTestsTableTests(unittest.TestCase):
         self.assertEqual((s["w16_limit"], s["w16_n"]), (10, 100_000))
 
 
-class FullrunSessionPublishTests(unittest.TestCase):
+class FullrunSessionPublishTests(FullrunCase):
     """`render` may publish only a pair this invocation measured, both arms.
 
     `--skip qdrant` still spliced README.md, pairing today's strawmANN arm with
@@ -4926,14 +4839,8 @@ class FullrunSessionPublishTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        _reload(Path(self.tmp.name))
-        self.f = importlib.reload(sys.modules["fullrun"]) \
-            if "fullrun" in sys.modules else importlib.import_module("fullrun")
+        super().setUp()
         self.labels = ["sm-x-1112", "qd-x-1112"]
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def _run_json(self, label, session):
         d = self.f.RESULTS / label
@@ -5029,19 +4936,10 @@ def _drive_fullrun_to_first_arm(f, *extra, at_arm=None, events=None):
     return rc, err.getvalue()
 
 
-class FullrunNPinResetTests(unittest.TestCase):
+class FullrunNPinResetTests(FullrunCase):
     """`n_factors.json` outlived the run that wrote it, so a relaunch on a
     reused label read a previous run's pins in pass 1 and skipped the
     `--min-duration` escalation that would have set its own."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        _reload(Path(self.tmp.name))
-        self.f = importlib.reload(sys.modules["fullrun"]) \
-            if "fullrun" in sys.modules else importlib.import_module("fullrun")
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_pass_one_starts_without_an_earlier_run_s_pins(self):
         pins = []
@@ -5058,20 +4956,11 @@ class FullrunNPinResetTests(unittest.TestCase):
         self.assertEqual(seen, dict.fromkeys(pins, False))
 
 
-class FullrunSigtermTests(unittest.TestCase):
+class FullrunSigtermTests(FullrunCase):
     """`systemctl --user stop` of a night unit sent SIGTERM, Python died where
     it stood, the `finally` blocks that stop the engines never ran, and both
     engines outlived the run in their own scopes. The next night's port check
     then waited out `--wait-for-gate` on them."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        _reload(Path(self.tmp.name))
-        self.f = importlib.reload(sys.modules["fullrun"]) \
-            if "fullrun" in sys.modules else importlib.import_module("fullrun")
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_sigterm_is_an_exit_that_runs_finally_blocks(self):
         installed = {}
@@ -5143,19 +5032,10 @@ class CommitAbRefResolutionTests(unittest.TestCase):
         self.assertEqual(doc["builds"], {"scan": "/ab/abc1234/zig-out/bin/strawmann"})
 
 
-class LabelYearTests(unittest.TestCase):
+class LabelYearTests(FullrunCase):
     """Labels carry MMDD and no year. `previous_pair` compared MMDD, so a
     January night found no December pair, and a run a year later on the same
     date wrote into the label last year's documents cite."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        _reload(Path(self.tmp.name))
-        self.f = importlib.reload(sys.modules["fullrun"]) \
-            if "fullrun" in sys.modules else importlib.import_module("fullrun")
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def _label(self, name, started=None):
         d = self.f.RESULTS / name

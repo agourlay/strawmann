@@ -23,8 +23,9 @@ from harness_fixtures import CONF_T1_FAILED, CONF_T2, CONF_T3, Fixture, _reload,
 from workloads import stamp_hash
 
 
-class ReportHostTests(unittest.TestCase):
-    """report.py: one machine is one Host card; the page opens with its bandwidth."""
+class ReportCase(unittest.TestCase):
+    """A case that needs `report`: skipped outside the uv project, which alone
+    has jinja2, pandas and plotly; `cls.report` is the module."""
 
     @classmethod
     def setUpClass(cls):
@@ -38,6 +39,10 @@ class ReportHostTests(unittest.TestCase):
             raise unittest.SkipTest(
                 "report.py needs the uv project (jinja2/pandas/plotly)") from e
         cls.report = importlib.import_module("report")
+
+
+class ReportHostTests(ReportCase):
+    """report.py: one machine is one Host card; the page opens with its bandwidth."""
 
     ENV = ("§7.1 host discipline:\n  ok   CPU X (24 logical)\n  FAIL governor=powersave\n"
            "       a scaling governor makes throughput depend on how warm the run is\n"
@@ -2243,24 +2248,13 @@ class ReportHostTests(unittest.TestCase):
             self.assertNotIn("2.00x", html)
 
 
-class LevelSeedNoteTests(unittest.TestCase):
+class LevelSeedNoteTests(ReportCase):
     """The page names the seed its graphs were drawn at.
 
     §8.7 provenance. The note once claimed the seed was worth 0.00216 of
     recall@10, from a table that did not reproduce; it now says what was
     re-measured, and must not repeat the old figure.
     """
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            import jinja2  # noqa: F401
-            import pandas  # noqa: F401
-            import plotly  # noqa: F401
-        except ImportError as e:
-            raise unittest.SkipTest(
-                "report.py needs the uv project (jinja2/pandas/plotly)") from e
-        cls.report = importlib.import_module("report")
 
     def _run(self, label, builds):
         return self.report.Run(label, [], "", False, "h",
@@ -2289,7 +2283,7 @@ class LevelSeedNoteTests(unittest.TestCase):
         self.assertIn("2 DIFFERENT SEEDS", note)
 
 
-class ReportNamingTests(unittest.TestCase):
+class ReportNamingTests(ReportCase):
     """One page per (dataset, labels), and no page across two datasets.
 
     `report.html` was one path for every combination of engine, arm and corpus,
@@ -2297,19 +2291,6 @@ class ReportNamingTests(unittest.TestCase):
     same mistake one directory down and it cost real time, which is why
     `recall_path` is keyed by (label, dataset, collection, limit).
     """
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            # Imported to find out whether they are installed, not to use
-            # them: this suite skips rather than fails outside the uv project.
-            import jinja2  # noqa: F401
-            import pandas  # noqa: F401
-            import plotly  # noqa: F401
-        except ImportError as e:  # the uv project only
-            raise unittest.SkipTest(
-                "report.py needs the uv project (jinja2/pandas/plotly)") from e
-        cls.report = importlib.import_module("report")
 
     def _runs(self, tmp: Path, **labels_to_dataset):
         fx = Fixture(tmp)
@@ -2501,7 +2482,7 @@ class NetworkPathTests(unittest.TestCase):
         self.assertIn("pill bad", unknown)
 
 
-class InstrumentTests(unittest.TestCase):
+class InstrumentTests(ReportCase):
     """The counters beside the rate: switches, stalls and hardware.
 
     Every test here is about a *blank*. Each of these columns has more than one
@@ -2510,17 +2491,6 @@ class InstrumentTests(unittest.TestCase):
     extrapolated, or simply measured before the column existed — and each of
     them, printed as a zero, is a specific and wrong claim about a machine.
     """
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            import jinja2  # noqa: F401
-            import pandas  # noqa: F401
-            import plotly  # noqa: F401
-        except ImportError as e:
-            raise unittest.SkipTest(
-                "report.py needs the uv project (jinja2/pandas/plotly)") from e
-        cls.report = importlib.import_module("report")
 
     def _runs(self, *rowsets):
         return [self.report.Run(f"e{i}", list(rows), "", True, "h")
@@ -3023,18 +2993,8 @@ class SegmentPolicyReportTests(unittest.TestCase):
 
 
 
-class RowConfigAndStorageTests(unittest.TestCase):
+class RowConfigAndStorageTests(ReportCase):
     """What the page says a row ran at, and where its end state came from."""
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            import jinja2  # noqa: F401
-            import pandas  # noqa: F401
-            import plotly  # noqa: F401
-        except ImportError as e:
-            raise unittest.SkipTest(
-                "report.py needs the uv project (jinja2/pandas/plotly)") from e
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -3100,11 +3060,10 @@ class RowConfigAndStorageTests(unittest.TestCase):
         self.assertNotIn("allocated at --capacity", qd)
 
 
-class ReportReadabilityTests(unittest.TestCase):
+class ReportReadabilityTests(ReportCase):
     """The page a reader meets first: one row per question, engine names
     rather than run labels, and everything else one disclosure down."""
 
-    setUpClass = ReportHostTests.__dict__["setUpClass"]
     _pair = ReportHostTests._pair
 
     def _sweep_pair(self, tmp: Path):
