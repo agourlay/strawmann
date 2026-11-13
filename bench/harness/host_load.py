@@ -94,9 +94,10 @@ def foreign_load(threshold: float = 20.0) -> str:
 class CpuSample:
     """Every process's CPU seconds so far, and the machine's, at one instant."""
     t: float
-    #: pid -> (user+system seconds, command line). Kernel threads carry their
-    #: `comm` in place of a command line.
-    procs: dict[int, tuple[float, str]]
+    #: pid -> (user+system seconds, command line), with the process's start
+    #: ticks third when they were read (`setup._cpu_before`). Kernel threads
+    #: carry their `comm` in place of a command line.
+    procs: dict[int, tuple]
     #: Non-idle seconds summed over all cores from `/proc/stat`, or None.
     busy_s: float | None
     #: pids with no command line: kernel threads, whose CPU is the kernel's
@@ -131,7 +132,7 @@ def _system_busy_s() -> float | None:
 
 
 def cpu_sample() -> CpuSample:
-    procs: dict[int, tuple[float, str]] = {}
+    procs: dict[int, tuple] = {}
     kernel = set()
     for name in os.listdir("/proc"):
         if not name.isdigit():
@@ -145,7 +146,8 @@ def cpu_sample() -> CpuSample:
         if not cmd:
             kernel.add(pid)
             cmd = st[st.find("(") + 1:st.rfind(")")]
-        procs[pid] = (parsed["cpu_user_s"] + parsed["cpu_system_s"], cmd)
+        cpu, start = parsed["cpu_user_s"] + parsed["cpu_system_s"], setup._start_ticks(st)
+        procs[pid] = (cpu, cmd) if start is None else (cpu, cmd, start)
     ru = resource.getrusage(resource.RUSAGE_CHILDREN)
     return CpuSample(time.monotonic(), procs, _system_busy_s(), frozenset(kernel),
                      ru.ru_utime + ru.ru_stime)
@@ -186,11 +188,11 @@ def foreign_between(before: CpuSample, after: CpuSample,
         budget_cores = FOREIGN_BUDGET_CORES
     busy: list[tuple[float, str]] = []
     accounted = seen_foreign = 0.0
-    for pid, (cpu1, cmd) in after.procs.items():
-        prev = before.procs.get(pid)
-        # A pid whose command line changed was reused; its earlier time was
-        # someone else's.
-        cpu0 = prev[0] if prev is not None and prev[1] == cmd else 0.0
+    for pid, cur in after.procs.items():
+        cpu1, cmd = cur[0], cur[1]
+        # A reused pid's earlier time was someone else's; a process that
+        # re-executed in place keeps its own.
+        cpu0 = setup._cpu_before(before.procs.get(pid), cur)
         d = max(0.0, cpu1 - cpu0)
         if pid in after.kernel or _is_ours(cmd):
             accounted += d

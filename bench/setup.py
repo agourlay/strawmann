@@ -540,8 +540,35 @@ FOREIGN_BUDGET_CORES = float(os.environ.get("FOREIGN_BUDGET_CORES", 1.0))
 LOAD_PER_CORE_MAX_PCT = 10.0
 
 
-def _cpu_seconds() -> dict[int, tuple[float, str]]:
-    """user+system CPU seconds and command line per pid, from `/proc`.
+def _start_ticks(stat: str) -> int | None:
+    """`starttime`, proc(5)'s field 22 of `/proc/<pid>/stat`: fixed for the
+    life of a process, and different for whatever reuses its pid."""
+    rest = stat[stat.rfind(")") + 2:].split()   # field N of proc(5) is rest[N - 3]
+    try:
+        return int(rest[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def _cpu_before(prev: tuple | None, cur: tuple) -> float:
+    """The CPU seconds this process already had at the earlier sample, or 0.0
+    when the pid belonged to another process then.
+
+    A sample entry is `(cpu seconds, command line)` or, when the start time
+    was read, `(cpu seconds, command line, start ticks)`. The start time
+    decides when both have it. The command line alone used to: an upgrade
+    re-executed systemd in place on 2026-11-13, pid 1's command line changed,
+    and its twenty minutes of lifetime CPU were charged to one 48 s row as
+    `24.13 cores: systemd(2399%)`.
+    """
+    if prev is None:
+        return 0.0
+    same = prev[2] == cur[2] if len(prev) > 2 and len(cur) > 2 else prev[1] == cur[1]
+    return prev[0] if same else 0.0
+
+
+def _cpu_seconds() -> dict[int, tuple]:
+    """user+system CPU seconds, command line and start time per pid, from `/proc`.
 
     Kernel threads (no command line) are left out: their time is the kernel's
     on someone's behalf, not a foreign process's.
@@ -563,13 +590,15 @@ def _cpu_seconds() -> dict[int, tuple[float, str]]:
         if len(rest) < 13:
             continue
         try:
-            out[int(name)] = ((int(rest[11]) + int(rest[12])) / tck, cmd)
+            cpu = (int(rest[11]) + int(rest[12])) / tck
         except ValueError:
             continue
+        start = _start_ticks(st)
+        out[int(name)] = (cpu, cmd) if start is None else (cpu, cmd, start)
     return out
 
 
-def foreign_cores(before: dict[int, tuple[float, str]], after: dict[int, tuple[float, str]],
+def foreign_cores(before: dict[int, tuple], after: dict[int, tuple],
                   wall_s: float) -> float:
     """Total foreign CPU between the two samples, in cores.
 
@@ -581,15 +610,15 @@ def foreign_cores(before: dict[int, tuple[float, str]], after: dict[int, tuple[f
     if wall_s <= 0:
         return 0.0
     total = 0.0
-    for pid, (cpu1, cmd) in after.items():
-        prev = before.get(pid)
-        cpu0 = prev[0] if prev is not None and prev[1] == cmd else 0.0
+    for pid, cur in after.items():
+        cpu1, cmd = cur[0], cur[1]
+        cpu0 = _cpu_before(before.get(pid), cur)
         if not _is_ours(cmd):
             total += max(0.0, cpu1 - cpu0)
     return total / wall_s
 
 
-def busy_processes(before: dict[int, tuple[float, str]], after: dict[int, tuple[float, str]],
+def busy_processes(before: dict[int, tuple], after: dict[int, tuple],
                    wall_s: float, threshold: float = FOREIGN_PCT) -> list[str]:
     """Foreign processes worth naming, as `name(N%)`, busiest first, at most eight.
 
@@ -600,9 +629,9 @@ def busy_processes(before: dict[int, tuple[float, str]], after: dict[int, tuple[
     if wall_s <= 0:
         return []
     found = []
-    for pid, (cpu1, cmd) in after.items():
-        prev = before.get(pid)
-        cpu0 = prev[0] if prev is not None and prev[1] == cmd else 0.0
+    for pid, cur in after.items():
+        cpu1, cmd = cur[0], cur[1]
+        cpu0 = _cpu_before(before.get(pid), cur)
         pct = 100 * max(0.0, cpu1 - cpu0) / wall_s
         if pct > threshold and not _is_ours(cmd):
             found.append((pct, f"{os.path.basename(cmd.split()[0])}({pct:.0f}%)"))

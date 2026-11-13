@@ -1010,6 +1010,35 @@ class WorkloadTests(unittest.TestCase):
         self.assertIn("cc1(30%)", w.foreign_between(before, reused, budget_cores=0.5))
         self.assertEqual(w.foreign_between(before, before), "")
 
+    def test_a_process_that_re_executes_in_place_is_not_a_reused_pid(self):
+        """An unattended upgrade re-executed systemd during h-and-m 1112: pid
+        1's command line gained `--deserialize=198`, the change was read as
+        pid reuse, and its lifetime CPU was charged to one 48 s row as
+        `24.13 cores: systemd(2399%)`. The start time tells the two apart."""
+        w = self.w
+        setup = importlib.import_module("setup")
+        before = w.CpuSample(0.0, {1: (1100.0, "/sbin/init splash", 12)}, 0.0, frozenset())
+        reexec = "/usr/lib/systemd/systemd --system --deserialize=198"
+        after = w.CpuSample(48.0, {1: (1150.0, reexec, 12)}, 50.0, frozenset())
+        self.assertEqual(w.foreign_between(before, after), "1.04 cores: systemd(104%)")
+        quiet = w.CpuSample(48.0, {1: (1100.5, after.procs[1][1], 12)}, 0.5, frozenset())
+        self.assertEqual(w.foreign_between(before, quiet), "")
+        # Another start time is another process, whatever it is called.
+        reused = w.CpuSample(48.0, {1: (60.0, "/sbin/init splash", 99)}, 60.0, frozenset())
+        self.assertEqual(w.foreign_between(before, reused), "1.25 cores: init(125%)")
+        # The gate's two readers go by the same rule.
+        b, a = before.procs, after.procs
+        self.assertAlmostEqual(setup.foreign_cores(b, a, 48.0), 50.0 / 48.0)
+        self.assertEqual(setup.busy_processes(b, a, 48.0), ["systemd(104%)"])
+        self.assertAlmostEqual(setup.foreign_cores(b, reused.procs, 48.0), 60.0 / 48.0)
+        # Without a start time on either side, the command line still decides.
+        self.assertEqual(setup._cpu_before((5.0, "a"), (9.0, "a")), 5.0)
+        self.assertEqual(setup._cpu_before((5.0, "a"), (9.0, "b", 3)), 0.0)
+        self.assertEqual(setup._start_ticks("1 (a b) S " + " ".join(map(str, range(40)))), 18)
+        self.assertIsNone(setup._start_ticks("1 (short) S 1 2"))
+        self.assertEqual(len(setup._cpu_seconds()[os.getpid()]), 3)
+        self.assertEqual(len(w.cpu_sample().procs[os.getpid()]), 3)
+
     def test_foreign_load_is_judged_as_a_total_not_per_process(self):
         """The verdict was each process against 20% of *one* core. It condemned
         0.2 cores, which `docs/decisions.md` measures as inside run-to-run
