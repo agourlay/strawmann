@@ -457,6 +457,47 @@ def _sweep_row(fam: str, members: list[str], a: str, b: str | None, df: pd.DataF
     return "<tr>" + "".join(cells) + "</tr>", rescore
 
 
+def _pair_rows(runs: list[Run]) -> tuple[str, str | None, dict[str, compare.Row]]:
+    """The two labels the throughput tables compare, and `compare.joined`'s
+    rows by id: `b` is None, and the rows empty, for a one-run report."""
+    a = runs[0].label
+    b = runs[1].label if len(runs) > 1 else None
+    joined_rows = ({r.id: r for r in compare.joined(a, b, runs[0].by_id(), runs[1].by_id())}
+                   if b else {})
+    return a, b, joined_rows
+
+
+def _pair_xy(df: pd.DataFrame, wid: str, a: str, b: str | None):
+    """Each engine's dataframe row for `wid`, or None where it has none."""
+    sub = df[df["id"] == wid]
+    ra = sub[sub["engine"] == a]
+    rb = sub[sub["engine"] == b] if b else pd.DataFrame()
+    return (ra.iloc[0] if len(ra) else None), (rb.iloc[0] if len(rb) else None)
+
+
+def _pair_lead(wid: str, x) -> list[str]:
+    """A throughput row's first three cells: id, description, `a`'s rate."""
+    return [f'<td class="wid">{wid}</td>', f'<td class="desc">{describe(wid)}</td>',
+            _num_cell(x)]
+
+
+def _pair_head(a: str, b: str | None, numeric: bool) -> str:
+    """The throughput tables' header; `numeric` is the compact table's
+    right-aligned columns and the ratio's tooltip."""
+    th = '<th class="num"' if numeric else "<th"
+    head = f"<th>workload</th><th></th>{th}>{a}</th>"
+    if b:
+        tip = f' title="{a} throughput divided by {b} throughput"' if numeric else ""
+        head += f"{th}>{b}</th>{th}{tip}>ratio</th>"
+    return head + "<th>notes</th>"
+
+
+def _pair_banners(a: str, b: str | None) -> str:
+    """`compare.banners` above a throughput table, as the page draws them."""
+    banners = compare.banners(a, b) if b else []
+    return "".join(f'<div class="banner"><b>{html.escape(bnr)}</b></div>' for bnr in banners)
+
+
 def compact_throughput_table(runs: list[Run], df: pd.DataFrame) -> str:
     """The throughput table a reader needs: one row per question.
 
@@ -470,10 +511,7 @@ def compact_throughput_table(runs: list[Run], df: pd.DataFrame) -> str:
     """
     noise = load_noise(runs)
     reps = reps_of(runs)
-    a = runs[0].label
-    b = runs[1].label if len(runs) > 1 else None
-    joined_rows = ({r.id: r for r in compare.joined(a, b, runs[0].by_id(), runs[1].by_id())}
-                   if b else {})
+    a, b, joined_rows = _pair_rows(runs)
     order = [w for w in dict.fromkeys(df["id"])
              if w not in UPLOAD_ROWS and w not in COMPACT_SKIP and not _is_open_loop_id(w)]
     families: dict[str, list[str]] = {}
@@ -492,15 +530,10 @@ def compact_throughput_table(runs: list[Run], df: pd.DataFrame) -> str:
             body.append(row)
             any_rescore |= rs_
             continue
-        sub = df[df["id"] == wid]
-        ra = sub[sub["engine"] == a]
-        rb = sub[sub["engine"] == b] if b else pd.DataFrame()
-        x = ra.iloc[0] if len(ra) else None
-        y = rb.iloc[0] if len(rb) else None
+        x, y = _pair_xy(df, wid, a, b)
         if x is None and y is None:
             continue
-        cells = [f'<td class="wid">{wid}</td>', f'<td class="desc">{describe(wid)}</td>',
-                 _num_cell(x)]
+        cells = _pair_lead(wid, x)
         jr = joined_rows.get(wid)
         notes, rs_ = short_notes(jr)
         any_rescore |= rs_
@@ -511,13 +544,8 @@ def compact_throughput_table(runs: list[Run], df: pd.DataFrame) -> str:
         body.append("<tr>" + "".join(cells) + "</tr>")
     if not body:
         return ""
-    head = f"<th>workload</th><th></th><th class=\"num\">{a}</th>"
-    if b:
-        head += (f'<th class="num">{b}</th>'
-                 f'<th class="num" title="{a} throughput divided by {b} throughput">ratio</th>')
-    head += "<th>notes</th>"
-    banners = compare.banners(a, b) if b else []
-    top = "".join(f'<div class="banner"><b>{html.escape(bnr)}</b></div>' for bnr in banners)
+    head = _pair_head(a, b, numeric=True)
+    top = _pair_banners(a, b)
     foot = (f'<p class="note">{RESCORE_FOOTNOTE}</p>' if any_rescore else "")
     return (f'{top}<div class="tablewrap"><table class="throughput"><thead><tr>{head}</tr>'
             f'</thead><tbody>{"".join(body)}</tbody></table></div>{foot}')
@@ -534,35 +562,20 @@ def throughput_table(runs: list[Run], df: pd.DataFrame) -> str:
     this one too.
     """
     noise = load_noise(runs)
-    a = runs[0].label
-    b = runs[1].label if len(runs) > 1 else None
+    a, b, joined_rows = _pair_rows(runs)
     order = list(dict.fromkeys(df["id"]))
-    head = f"<th>workload</th><th></th><th>{a}</th>"
-    if b:
-        head += f"<th>{b}</th><th>ratio</th>"
-    head += "<th>notes</th>"
-
-    joined_rows: dict[str, compare.Row] = {}
-    banners: list[str] = []
-    if b:
-        joined_rows = {r.id: r for r in compare.joined(a, b, runs[0].by_id(), runs[1].by_id())}
-        banners = compare.banners(a, b)
+    head = _pair_head(a, b, numeric=False)
+    top = _pair_banners(a, b)
 
     body = []
     for wid in order:
         if wid in UPLOAD_ROWS:
             continue
-        sub = df[df["id"] == wid]
-        ra = sub[sub["engine"] == a]
-        rb = sub[sub["engine"] == b] if b else pd.DataFrame()
-        x = ra.iloc[0] if len(ra) else None
-        y = rb.iloc[0] if len(rb) else None
+        x, y = _pair_xy(df, wid, a, b)
         if x is None and y is None:
             continue
 
-        desc = describe(wid)
-        cells = [f'<td class="wid">{wid}</td>', f'<td class="desc">{desc}</td>',
-                 _num_cell(x)]
+        cells = _pair_lead(wid, x)
 
         notes = []
         jr = joined_rows.get(wid)
@@ -595,7 +608,6 @@ def throughput_table(runs: list[Run], df: pd.DataFrame) -> str:
         cells.append(f'<td class="notes">{" ".join(notes)}</td>')
         body.append("<tr>" + "".join(cells) + "</tr>")
 
-    top = "".join(f'<div class="banner"><b>{html.escape(bnr)}</b></div>' for bnr in banners)
     return (f'{top}<div class="tablewrap"><table class="throughput"><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
@@ -1505,14 +1517,20 @@ def latency_table(runs: list[Run], which: str = "client") -> str:
     head = "<th>workload</th><th></th>"
     for run in runs:
         head += "".join(f'<th class="num">{run.label} {name}</th>' for name, _ in LAT_COLS)
-    mismatch = open_loop_mismatch(runs)
-    warn = (f'<div class="banner soft"><b>Not compared.</b> {mismatch}</div>'
-            if mismatch else "")
-    instrument = open_loop_is_instrument_limited(runs)
-    if instrument:
-        warn = f'<div class="banner">{instrument}</div>' + warn
-    return (warn + f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
+    return (_open_loop_banners(runs)
+            + f'<div class="tablewrap"><table><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
+
+
+def _open_loop_banners(runs: list[Run]) -> str:
+    """What both latency tables say above themselves about the open-loop rows:
+    the instrument limit first, then the offered-rate mismatch."""
+    warn = ""
+    if mismatch := open_loop_mismatch(runs):
+        warn = f'<div class="banner soft"><b>Not compared.</b> {mismatch}</div>'
+    if instrument := open_loop_is_instrument_limited(runs):
+        warn = f'<div class="banner">{instrument}</div>' + warn
+    return warn
 
 
 #: The summary latency table's percentiles. p95 sits between two columns a
@@ -1552,12 +1570,7 @@ def compact_latency_table(runs: list[Run]) -> str:
                         f'</span></td>{"".join(cells)}</tr>')
     if not body:
         return ""
-    warn = ""
-    if mismatch := open_loop_mismatch(runs):
-        warn = f'<div class="banner soft"><b>Not compared.</b> {mismatch}</div>'
-    if instrument := open_loop_is_instrument_limited(runs):
-        warn = f'<div class="banner">{instrument}</div>' + warn
-    return warn + _engine_grouped(runs, [n for n, _ in COMPACT_LAT_COLS], body)
+    return _open_loop_banners(runs) + _engine_grouped(runs, [n for n, _ in COMPACT_LAT_COLS], body)
 
 
 def relevance_table(runs: list[Run]) -> str:
@@ -2553,6 +2566,8 @@ def provenance_table(runs: list[Run]) -> str:
                 commit = f"commit {code}"
                 pill = ('<span class="pill warn">native binary: pinned by commit, '
                         'not by image digest (§8.9)</span>')
+                outside = ('<span class="pill warn">native binary outside a checkout: '
+                           'sha256 is the identity (§8.9)</span>')
                 # A binary older than its checkout was not built from it, so
                 # the commit is only where the tree stood when the run began.
                 if q.get("binary_predates_commit"):
@@ -2564,17 +2579,14 @@ def provenance_table(runs: list[Run]) -> str:
                 # The server's own banner may still name the build it was.
                 elif not q.get("commit"):
                     commit = "commit unknown (no checkout around the binary)"
-                    pill = ('<span class="pill warn">native binary outside a checkout: '
-                            'sha256 is the identity (§8.9)</span>')
+                    pill = outside
                 elif str(q.get("commit_source", "")).startswith("sidecar"):
                     commit = (f"build {code} (from {_fmt(q['commit_source'])}, "
                               f"written beside the copy, not a checkout)")
-                    pill = ('<span class="pill warn">native binary outside a checkout: '
-                            'sha256 is the identity (§8.9)</span>')
+                    pill = outside
                 elif q.get("commit_source") == "server banner":
                     commit = f"build {code} (from the server's banner, not a checkout)"
-                    pill = ('<span class="pill warn">native binary outside a checkout: '
-                            'sha256 is the identity (§8.9)</span>')
+                    pill = outside
                 bits = [f"version {_fmt(q.get('version'))}",
                         f"binary <code>{_tilde(q.get('binary'))}</code>"
                         + (f" (cargo profile <code>{q['cargo_profile']}</code>)"

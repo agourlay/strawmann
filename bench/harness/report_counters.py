@@ -6,11 +6,52 @@ Moved out of `report.py`, which re-exports every name here.
 from __future__ import annotations
 
 import html
+from collections.abc import Callable, Iterable, Iterator
 
 import perfstat
 
 import procstat
 from report_data import Run, describe, measured_row, row_bracket_s
+
+
+def _row_ids(runs: list[Run]) -> list[str]:
+    """Every row id across the runs, first appearance first."""
+    return list(dict.fromkeys(r["id"] for run in runs for r in run.rows))
+
+
+def _by_id(run: Run, wid: str) -> dict:
+    """The row as stored, for the tables that do not want `measured_row`."""
+    return run.by_id().get(wid, {})
+
+
+def _counter_body(runs: list[Run], cells_of_row: Callable[[dict], Iterable[tuple[str, bool]]],
+                  row_of: Callable[[Run, str], dict] = measured_row,
+                  grp: bool = True) -> list[str]:
+    """One `<tr>` per row id that any run measured, its cells repeating per run.
+
+    `cells_of_row` gives `(text, present)` per column for one run's row; a row
+    id where no cell is present is left out. `grp` marks each run's first
+    column with the group rule `_engine_grouped` draws.
+    """
+    body = []
+    for wid in _row_ids(runs):
+        cells, any_value = [], False
+        for run in runs:
+            for i, (text, present) in enumerate(cells_of_row(row_of(run, wid))):
+                any_value = any_value or present
+                cells.append(f'<td class="num{" grp" if grp and i == 0 else ""}">{text}</td>')
+        if any_value:
+            body.append(f'<tr><td class="wid" title="{describe(wid)}">{wid}</td>'
+                        f'{"".join(cells)}</tr>')
+    return body
+
+
+def _counter_table(runs: list[Run], headers: list[str],
+                   cells_of_row: Callable[[dict], Iterable[tuple[str, bool]]],
+                   row_of: Callable[[Run, str], dict] = measured_row) -> str:
+    """`_counter_body` under `_engine_grouped`'s header, or "" when empty."""
+    body = _counter_body(runs, cells_of_row, row_of)
+    return _engine_grouped(runs, headers, body) if body else ""
 
 
 def storage_rows_table(runs: list[Run]) -> str:
@@ -20,22 +61,15 @@ def storage_rows_table(runs: list[Run]) -> str:
     is the interesting part: ingest writes, search should not, and a search row
     doing block-layer reads is an engine going to disk to answer a query.
     """
-    ids = list(dict.fromkeys(r["id"] for run in runs for r in run.rows))
-    body = []
-    for wid in ids:
-        cells, any_value = [], False
-        for run in runs:
-            row = measured_row(run, wid)
-            for key, fmt in (("disk_read_bytes", procstat.human_bytes),
-                             ("disk_write_bytes", procstat.human_bytes),
-                             ("disk_read_ops", procstat.human_count),
-                             ("disk_write_ops", procstat.human_count)):
-                v = row.get(key)
-                any_value = any_value or v is not None
-                cells.append(f'<td class="num">{fmt(v) if v is not None else "-"}</td>')
-        if any_value:
-            body.append(f'<tr><td class="wid" title="{describe(wid)}">{wid}</td>'
-                        f'{"".join(cells)}</tr>')
+    def cells(row: dict) -> Iterator[tuple[str, bool]]:
+        for key, fmt in (("disk_read_bytes", procstat.human_bytes),
+                         ("disk_write_bytes", procstat.human_bytes),
+                         ("disk_read_ops", procstat.human_count),
+                         ("disk_write_ops", procstat.human_count)):
+            v = row.get(key)
+            yield (fmt(v) if v is not None else "-"), v is not None
+
+    body = _counter_body(runs, cells, grp=False)
     if not body:
         return ""
     head = "<th>workload</th>" + "".join(
@@ -157,32 +191,20 @@ def scheduler_rows_table(runs: list[Run]) -> str:
     for the rest: an index build spends its time in threads that exit before the
     row does. A dash is "not measurable here", not a zero.
     """
-    ids = list(dict.fromkeys(r["id"] for run in runs for r in run.rows))
-    body = []
-    for wid in ids:
-        cells, any_value = [], False
-        for run in runs:
-            row = run.by_id().get(wid, {})
-            cpu = (row.get("cpu_user_s") or 0) + (row.get("cpu_system_s") or 0)
-            wall = row_bracket_s(row)
-            busy = (f"{cpu / wall * 100:,.0f}%" if cpu and wall else "-")
-            for i, (text, present) in enumerate((
-                    (f"{cpu:,.1f} s" if cpu else "-", bool(cpu)),
-                    (busy, busy != "-"),
-                    _cell(row, "runqueue_wait_s", 1000, " ms", 1),
-                    _switches_cell(row),
-                    _cell(row, "migrations"),
-                    _faults_cell(row),
-                    _threads_cell(row))):
-                any_value = any_value or present
-                cells.append(f'<td class="num{" grp" if i == 0 else ""}">{text}</td>')
-        if any_value:
-            body.append(f'<tr><td class="wid" title="{describe(wid)}">{wid}</td>'
-                        f'{"".join(cells)}</tr>')
-    if not body:
-        return ""
-    return _engine_grouped(runs, ["cpu", "of wall", "waiting", "switches vol/invol",
-                                  "migrations", "faults min/maj", "threads"], body)
+    def cells(row: dict) -> tuple[tuple[str, bool], ...]:
+        cpu = (row.get("cpu_user_s") or 0) + (row.get("cpu_system_s") or 0)
+        wall = row_bracket_s(row)
+        busy = (f"{cpu / wall * 100:,.0f}%" if cpu and wall else "-")
+        return ((f"{cpu:,.1f} s" if cpu else "-", bool(cpu)),
+                (busy, busy != "-"),
+                _cell(row, "runqueue_wait_s", 1000, " ms", 1),
+                _switches_cell(row),
+                _cell(row, "migrations"),
+                _faults_cell(row),
+                _threads_cell(row))
+
+    return _counter_table(runs, ["cpu", "of wall", "waiting", "switches vol/invol",
+                                 "migrations", "faults min/maj", "threads"], cells, _by_id)
 
 
 
@@ -280,27 +302,15 @@ def stalls_rows_table(runs: list[Run]) -> str:
     counters, and each is withheld rather than guessed when its source is missing
     or its cgroup is shared.
     """
-    ids = list(dict.fromkeys(r["id"] for run in runs for r in run.rows))
-    body = []
-    for wid in ids:
-        cells, any_value = [], False
-        for run in runs:
-            row = measured_row(run, wid)
-            for i, (text, present) in enumerate((
-                    _cell(row, "runqueue_wait_s", 1000, " ms", 1),
-                    _cell(row, "blkio_delay_s", 1000, " ms", 0),
-                    _psi_pair_cell(row, "psi_cpu"),
-                    _psi_pair_cell(row, "psi_io"),
-                    _psi_pair_cell(row, "psi_mem"))):
-                any_value = any_value or present
-                cells.append(f'<td class="num{" grp" if i == 0 else ""}">{text}</td>')
-        if any_value:
-            body.append(f'<tr><td class="wid" title="{describe(wid)}">{wid}</td>'
-                        f'{"".join(cells)}</tr>')
-    if not body:
-        return ""
-    return _engine_grouped(runs, ["waiting", "blocked on disk", "cpu some/full",
-                                  "io some/full", "memory some/full"], body)
+    def cells(row: dict) -> tuple[tuple[str, bool], ...]:
+        return (_cell(row, "runqueue_wait_s", 1000, " ms", 1),
+                _cell(row, "blkio_delay_s", 1000, " ms", 0),
+                _psi_pair_cell(row, "psi_cpu"),
+                _psi_pair_cell(row, "psi_io"),
+                _psi_pair_cell(row, "psi_mem"))
+
+    return _counter_table(runs, ["waiting", "blocked on disk", "cpu some/full",
+                                 "io some/full", "memory some/full"], cells)
 
 
 
@@ -431,36 +441,30 @@ def hardware_rows_table(runs: list[Run]) -> str:
     sidecar touches its subject, so it is opt-in and its cost is measured
     (`perfstat.py --overhead`) rather than assumed.
     """
-    ids = list(dict.fromkeys(r["id"] for run in runs for r in run.rows))
-    body, writer = [], False
-    for wid in ids:
-        cells, any_value = [], False
-        for run in runs:
-            row = run.by_id().get(wid, {})
-            writer = writer or (procstat.is_mutating(row) and row.get("perf_cycles") is not None)
-            for i, (text, present) in enumerate((
-                    _perf_cell(row, "ipc", 2),
-                    _freq_cell(row),
-                    _perf_cell(row, "branch_mpki", 2),
-                    _per_query_cell(row, "perf_cycles", 0),
-                    # Fills times the line size, in KiB: the same conversion
-                    # `perfstat.derive` uses, read from the measuring host
-                    # (recorded on the row) rather than the rendering one.
-                    _per_query_cell(row, "perf_dram_fills", 1,
-                                    perfstat.row_line_bytes(row) / 1024, " KiB"),
-                    _per_query_cell(row, "perf_dtlb_walks", 1))):
-                any_value = any_value or present
-                cells.append(f'<td class="num{" grp" if i == 0 else ""}">{text}</td>')
-        if any_value:
-            body.append(f'<tr><td class="wid" title="{describe(wid)}">{wid}</td>'
-                        f'{"".join(cells)}</tr>')
-    if not body:
+    writer = False
+
+    def cells(row: dict) -> tuple[tuple[str, bool], ...]:
+        nonlocal writer
+        writer = writer or (procstat.is_mutating(row) and row.get("perf_cycles") is not None)
+        return (_perf_cell(row, "ipc", 2),
+                _freq_cell(row),
+                _perf_cell(row, "branch_mpki", 2),
+                _per_query_cell(row, "perf_cycles", 0),
+                # Fills times the line size, in KiB: the same conversion
+                # `perfstat.derive` uses, read from the measuring host
+                # (recorded on the row) rather than the rendering one.
+                _per_query_cell(row, "perf_dram_fills", 1,
+                                perfstat.row_line_bytes(row) / 1024, " KiB"),
+                _per_query_cell(row, "perf_dtlb_walks", 1))
+
+    table = _counter_table(runs, ["IPC", "GHz", "branch MPKI", "cycles/query",
+                                  "demand DRAM/query", "TLB walks/query"], cells, _by_id)
+    if not table:
         return ""
     note = ('<p class="muted">Per-query columns are blank on rows with a concurrent '
             'writer (W11): the counters include its indexing and the query count '
             'does not.</p>' if writer else "")
-    return _engine_grouped(runs, ["IPC", "GHz", "branch MPKI", "cycles/query",
-                                  "demand DRAM/query", "TLB walks/query"], body) + note
+    return table + note
 
 
 
@@ -499,26 +503,15 @@ def sharing_rows_table(runs: list[Run]) -> str:
     default group, and multiplexing them would extrapolate both rather than
     measure either.
     """
-    ids = list(dict.fromkeys(r["id"] for run in runs for r in run.rows))
-    body = []
-    for wid in ids:
-        cells, any_value = [], False
-        for run in runs:
-            row = run.by_id().get(wid, {})
-            c2c, allf = _c2c_fills(row), row.get("perf_fills_all")
-            per_q = perfstat.per_query(c2c, row.get("n_queries"))
-            share = (c2c / allf * 100) if (c2c is not None and allf) else None
-            for i, (text, present) in enumerate((
-                    ("-" if per_q is None else f"{per_q:,.1f}", per_q is not None),
-                    ("-" if share is None else f"{share:.1f}%", share is not None))):
-                any_value = any_value or present
-                cells.append(f'<td class="num{" grp" if i == 0 else ""}">{text}</td>')
-        if any_value:
-            body.append(f'<tr><td class="wid" title="{describe(wid)}">{wid}</td>'
-                        f'{"".join(cells)}</tr>')
-    if not body:
-        return ""
-    return _engine_grouped(runs, ["cache-to-cache fills/query", "of all fills"], body)
+    def cells(row: dict) -> tuple[tuple[str, bool], ...]:
+        c2c, allf = _c2c_fills(row), row.get("perf_fills_all")
+        per_q = perfstat.per_query(c2c, row.get("n_queries"))
+        share = (c2c / allf * 100) if (c2c is not None and allf) else None
+        return (("-" if per_q is None else f"{per_q:,.1f}", per_q is not None),
+                ("-" if share is None else f"{share:.1f}%", share is not None))
+
+    return _counter_table(runs, ["cache-to-cache fills/query", "of all fills"], cells,
+                          _by_id)
 
 
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 import html
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -129,6 +130,16 @@ def row_label(wid: str, extra: str = "") -> str:
     return head + desc + extra
 
 
+def _label_margin(label: dict[str, str]) -> dict:
+    """The margin a horizontal chart reserves for its row labels.
+
+    Sized from the longest label rather than by a constant that goes stale
+    the moment a description is reworded, and capped at `_LABEL_PX`.
+    """
+    widest = max((len(v) for v in label.values()), default=0)
+    return dict(l=min(30 + 7 * widest, _LABEL_PX), r=24, t=10, b=52)
+
+
 def matched_count(pt: dict) -> str | None:
     """A sweep point's matched-point count, as the range across its builds when
     a folded point carries one (`aggregate.fold_recall`)."""
@@ -198,12 +209,10 @@ def chart_throughput(runs: list[Run], df: pd.DataFrame) -> dict | None:
             hovertemplate="%{y}<br>%{x:,.0f} qps<extra>" + run.label + "</extra>")
     # The left margin has to fit the category labels, which are the workload id
     # plus its description: "W13  scroll, id-ordered pagination" is 34
-    # characters and the shared 64 px margin truncated every one of them.
-    # Sized from the longest label rather than by a constant that goes stale
-    # the moment a description is reworded.
-    widest = max((len(v) for v in label.values()), default=0)
+    # characters and the shared 64 px margin truncated every one of them
+    # (`_label_margin`).
     fig.update_layout(**layout(barmode="group", height=90 + 42 * len(present),
-                              margin=dict(l=min(30 + 7 * widest, _LABEL_PX), r=24, t=10, b=52),
+                              margin=_label_margin(label),
                               xaxis_title="queries per second"))
     fig.update_yaxes(autorange="reversed")
     note = "Higher is better."
@@ -475,10 +484,8 @@ def chart_build(runs: list[Run], df: pd.DataFrame) -> dict | None:
                 meta=run_meta_tag(run),
                 hovertemplate="%{y}<br>" + phase + " %{x:,.2f} s<extra>"
                               + run.label + "</extra>")
-    widest = max((len(v) for v in label.values()), default=0)
     fig.update_layout(**layout(barmode="stack", height=90 + 46 * len(present),
-                              margin=dict(l=min(30 + 7 * widest, _LABEL_PX), r=24,
-                                          t=10, b=52),
+                              margin=_label_margin(label),
                               xaxis_title="seconds"))
     fig.update_yaxes(autorange="reversed")
     return dict(
@@ -508,47 +515,12 @@ def chart_runqueue(runs: list[Run], df: pd.DataFrame) -> dict | None:
     """
     if "runqueue_wait_s" not in df.columns:
         return None
-    ms = {}
-    for _i, run in enumerate(runs):
-        for _, r in df[df["engine"] == run.label].iterrows():
-            v = r.get("runqueue_wait_s")
-            if pd.notna(v) and v > 0:
-                ms.setdefault(r["id"], {})[run.label] = float(v) * 1000
+    ms = _collect(df, runs, lambda r: _positive(r.get("runqueue_wait_s"), 1000))
     order = [w for w in dict.fromkeys(df["id"]) if w in ms]
     if not order:
         return None
-    label = {w: row_label(w) for w in order}
-
-    fig = go.Figure()
-    # Connectors first, so the markers sit on top of them.
-    xs, ys = [], []
-    for w in order:
-        vals = list(ms[w].values())
-        if len(vals) > 1:
-            xs += [min(vals), max(vals), None]
-            ys += [label[w], label[w], None]
-    if xs:
-        fig.add_scatter(x=xs, y=ys, mode="lines", showlegend=False,
-                        line=dict(color="#8a8781", width=1.5),
-                        hoverinfo="skip")
-    for i, run in enumerate(runs):
-        pts = [(label[w], ms[w][run.label]) for w in order if run.label in ms[w]]
-        if not pts:
-            continue
-        fig.add_scatter(
-            x=[v for _, v in pts], y=[y for y, _ in pts], mode="markers",
-            name=run.label, marker=dict(color=run_colour(run, i), size=11,
-                                        line=dict(color="#fbfbfa", width=1.5)),
-            meta=run_meta_tag(run),
-            hovertemplate="%{y}<br>%{x:,.1f} ms waiting<extra>"
-                          + run.label + "</extra>")
-    widest = max((len(v) for v in label.values()), default=0)
-    fig.update_layout(**layout(height=90 + 26 * len(order),
-                              margin=dict(l=min(30 + 7 * widest, _LABEL_PX), r=24,
-                                          t=10, b=52),
-                              xaxis_title="time waiting for a core (ms, log scale)"))
-    fig.update_xaxes(type="log", tickformat=SI_TICKS)
-    fig.update_yaxes(autorange="reversed")
+    fig, _ = _dumbbell(runs, ms, order, "time waiting for a core (ms, log scale)",
+                       "ms waiting", si=True, force_log=True)
     missing = [w for w in dict.fromkeys(df["id"]) if w not in ms]
     note = "Lower is better; the bar between a pair is the gap."
     if missing:
@@ -576,25 +548,13 @@ def chart_memory(runs: list[Run], df: pd.DataFrame) -> dict | None:
              if df[(df["id"] == w)]["rss_peak_bytes"].notna().any()]
     if not order:
         return None
-    label = {w: row_label(w) for w in order}
-    fig = go.Figure()
-    for i, run in enumerate(runs):
+    def xs_of(run: Run) -> list | None:
         by = {r["id"]: r.get("rss_peak_bytes") for _, r in
               df[df["engine"] == run.label].iterrows()}
         xs = [(by.get(w) or 0) / 1e9 for w in order]
-        if not any(xs):
-            continue
-        fig.add_bar(name=run.label, orientation="h",
-                    y=[label[w] for w in order], x=xs,
-                    marker_color=run_colour(run, i), meta=run_meta_tag(run),
-                    hovertemplate="%{y}<br>%{x:,.2f} GB peak RSS<extra>"
-                                  + run.label + "</extra>")
-    widest = max((len(v) for v in label.values()), default=0)
-    fig.update_layout(**layout(barmode="group", height=90 + 30 * len(order),
-                              margin=dict(l=min(30 + 7 * widest, _LABEL_PX), r=24,
-                                          t=10, b=52),
-                              xaxis_title="peak resident set (GB)"))
-    fig.update_yaxes(autorange="reversed")
+        return xs if any(xs) else None
+
+    fig = _hbar(runs, order, xs_of, "GB peak RSS", "peak resident set (GB)")
     return dict(section="scheduler", title="Peak memory per row",
                 html=fig_html(fig),
                 note="Peak RSS while the row ran, from the engine's own process. "
@@ -644,7 +604,8 @@ _LOG_SPREAD = 20.0
 
 def _dumbbell(runs: list[Run], values: dict[str, dict[str, float]],
               order: list[str], axis_title: str, hover: str,
-              digits: str = ":,.1f", si: bool = False) -> tuple[go.Figure, bool]:
+              digits: str = ":,.1f", si: bool = False,
+              force_log: bool = False) -> tuple[go.Figure, bool]:
     """One dot per engine per row, joined by the gap between them.
 
     `chart_runqueue`'s shape, factored out once three more charts wanted it. A
@@ -666,6 +627,9 @@ def _dumbbell(runs: list[Run], values: dict[str, dict[str, float]],
     values already labelled `(ms)` it renders 0.02 as `20m` — twenty
     milli-milliseconds. Right for a cycle count that runs to six figures,
     wrong for every stall chart, and it took a screenshot to see it.
+
+    `force_log` is `chart_runqueue`'s: always log, whatever the spread, and
+    `axis_title` is then used as given, so it says "log scale" itself.
     """
     label = {w: row_label(w) for w in order}
     fig = go.Figure()
@@ -691,12 +655,11 @@ def _dumbbell(runs: list[Run], values: dict[str, dict[str, float]],
             hovertemplate="%{y}<br>%{x" + digits + "} " + hover
                           + "<extra>" + run.label + "</extra>")
     flat = [v for row in values.values() for v in row.values()]
-    log = bool(flat) and min(flat) > 0 and max(flat) / min(flat) >= _LOG_SPREAD
-    widest = max((len(v) for v in label.values()), default=0)
+    log = force_log or (bool(flat) and min(flat) > 0 and max(flat) / min(flat) >= _LOG_SPREAD)
     fig.update_layout(**layout(height=90 + 26 * len(order),
-                               margin=dict(l=min(30 + 7 * widest, _LABEL_PX), r=24,
-                                           t=10, b=52),
-                               xaxis_title=axis_title + (" (log scale)" if log else "")))
+                               margin=_label_margin(label),
+                               xaxis_title=axis_title + (" (log scale)"
+                                                         if log and not force_log else "")))
     ticks = dict(tickformat=SI_TICKS) if si else {}
     if log:
         fig.update_xaxes(type="log", **ticks)
@@ -706,6 +669,57 @@ def _dumbbell(runs: list[Run], values: dict[str, dict[str, float]],
         fig.update_xaxes(rangemode="tozero", **ticks)
     fig.update_yaxes(autorange="reversed")
     return fig, log
+
+
+def _collect(df: pd.DataFrame, runs: list[Run],
+             fn: Callable[[pd.Series], float | None]) -> dict[str, dict[str, float]]:
+    """`{row id: {run label: fn(row)}}` over `df`, skipping rows where `fn`
+    gives None. `_per_query` is the per-query special case."""
+    out: dict[str, dict[str, float]] = {}
+    for run in runs:
+        for _, r in df[df["engine"] == run.label].iterrows():
+            v = fn(r)
+            if v is not None:
+                out.setdefault(r["id"], {})[run.label] = v
+    return out
+
+
+def _positive(v, scale: float = 1) -> float | None:
+    """`v * scale` where `v` is a measured positive number, else None."""
+    return float(v) * scale if pd.notna(v) and v > 0 else None
+
+
+def _hbar(runs: list[Run], order: list[str], xs_of: Callable[[Run], list | None],
+          hover: str, axis_title: str) -> go.Figure:
+    """Grouped horizontal bars, one per engine per row, on a linear axis.
+
+    `xs_of` gives a run's values in `order`, or None to draw no bar for it.
+    """
+    label = {w: row_label(w) for w in order}
+    fig = go.Figure()
+    for i, run in enumerate(runs):
+        xs = xs_of(run)
+        if xs is None:
+            continue
+        fig.add_bar(name=run.label, orientation="h",
+                    y=[label[w] for w in order], x=xs,
+                    marker_color=run_colour(run, i), meta=run_meta_tag(run),
+                    hovertemplate="%{y}<br>%{x:,.2f} " + hover + "<extra>"
+                                  + run.label + "</extra>")
+    fig.update_layout(**layout(barmode="group", height=90 + 30 * len(order),
+                               margin=_label_margin(label),
+                               xaxis_title=axis_title))
+    fig.update_yaxes(autorange="reversed")
+    return fig
+
+
+def _xs_present(values: dict[str, dict[str, float]],
+                order: list[str]) -> Callable[[Run], list | None]:
+    """`_hbar`'s `xs_of` for collected values: None where a run has none."""
+    def xs_of(run: Run) -> list | None:
+        xs = [values[w].get(run.label) for w in order]
+        return xs if any(x is not None for x in xs) else None
+    return xs_of
 
 
 def _per_query(df: pd.DataFrame, runs: list[Run], key: str,
@@ -817,32 +831,16 @@ def chart_ipc(runs: list[Run], df: pd.DataFrame) -> dict | None:
     """
     if "perf_cycles" not in df.columns or "perf_instructions" not in df.columns:
         return None
-    ipc: dict[str, dict[str, float]] = {}
-    for run in runs:
-        for _, r in df[df["engine"] == run.label].iterrows():
-            c, i_ = r.get("perf_cycles"), r.get("perf_instructions")
-            if pd.notna(c) and pd.notna(i_) and c:
-                ipc.setdefault(r["id"], {})[run.label] = float(i_) / float(c)
+    def ipc_of(r: pd.Series) -> float | None:
+        c, i_ = r.get("perf_cycles"), r.get("perf_instructions")
+        return float(i_) / float(c) if pd.notna(c) and pd.notna(i_) and c else None
+
+    ipc = _collect(df, runs, ipc_of)
     order = [w for w in dict.fromkeys(df["id"]) if w in ipc]
     if not order:
         return None
-    label = {w: row_label(w) for w in order}
-    fig = go.Figure()
-    for i, run in enumerate(runs):
-        xs = [ipc[w].get(run.label) for w in order]
-        if not any(x is not None for x in xs):
-            continue
-        fig.add_bar(name=run.label, orientation="h",
-                    y=[label[w] for w in order], x=xs,
-                    marker_color=run_colour(run, i), meta=run_meta_tag(run),
-                    hovertemplate="%{y}<br>%{x:,.2f} instructions per cycle<extra>"
-                                  + run.label + "</extra>")
-    widest = max((len(v) for v in label.values()), default=0)
-    fig.update_layout(**layout(barmode="group", height=90 + 30 * len(order),
-                               margin=dict(l=min(30 + 7 * widest, _LABEL_PX), r=24,
-                                           t=10, b=52),
-                               xaxis_title="instructions per cycle"))
-    fig.update_yaxes(autorange="reversed")
+    fig = _hbar(runs, order, _xs_present(ipc, order), "instructions per cycle",
+                "instructions per cycle")
     return dict(section="hardware", title="Instructions per cycle",
                 html=fig_html(fig),
                 note="How well the core was fed while it ran. Not a score: a low "
@@ -887,32 +885,16 @@ def chart_branch_mpki(runs: list[Run], df: pd.DataFrame) -> dict | None:
     """
     if "perf_branch_misses" not in df.columns or "perf_instructions" not in df.columns:
         return None
-    mpki: dict[str, dict[str, float]] = {}
-    for run in runs:
-        for _, r in df[df["engine"] == run.label].iterrows():
-            m, i_ = r.get("perf_branch_misses"), r.get("perf_instructions")
-            if pd.notna(m) and pd.notna(i_) and i_:
-                mpki.setdefault(r["id"], {})[run.label] = float(m) / (float(i_) / 1000)
+    def mpki_of(r: pd.Series) -> float | None:
+        m, i_ = r.get("perf_branch_misses"), r.get("perf_instructions")
+        return float(m) / (float(i_) / 1000) if pd.notna(m) and pd.notna(i_) and i_ else None
+
+    mpki = _collect(df, runs, mpki_of)
     order = [w for w in dict.fromkeys(df["id"]) if w in mpki]
     if not order or not _worth_plotting(mpki):
         return None
-    label = {w: row_label(w) for w in order}
-    fig = go.Figure()
-    for i, run in enumerate(runs):
-        xs = [mpki[w].get(run.label) for w in order]
-        if not any(x is not None for x in xs):
-            continue
-        fig.add_bar(name=run.label, orientation="h",
-                    y=[label[w] for w in order], x=xs,
-                    marker_color=run_colour(run, i), meta=run_meta_tag(run),
-                    hovertemplate="%{y}<br>%{x:,.2f} misses per 1k instructions"
-                                  "<extra>" + run.label + "</extra>")
-    widest = max((len(v) for v in label.values()), default=0)
-    fig.update_layout(**layout(barmode="group", height=90 + 30 * len(order),
-                               margin=dict(l=min(30 + 7 * widest, _LABEL_PX), r=24,
-                                           t=10, b=52),
-                               xaxis_title="mispredicted branches per 1k instructions"))
-    fig.update_yaxes(autorange="reversed")
+    fig = _hbar(runs, order, _xs_present(mpki, order), "misses per 1k instructions",
+                "mispredicted branches per 1k instructions")
     return dict(section="hardware", title="Branch mispredictions per 1k instructions",
                 html=fig_html(fig),
                 note="A graph traversal is a chain of data-dependent branches and none "
@@ -939,12 +921,7 @@ def _pressure_chart(runs: list[Run], df: pd.DataFrame, resource: str,
     key = f"psi_{resource}_full_s"
     if key not in df.columns:
         return None
-    ms: dict[str, dict[str, float]] = {}
-    for run in runs:
-        for _, r in df[df["engine"] == run.label].iterrows():
-            v = r.get(key)
-            if pd.notna(v) and v > 0:
-                ms.setdefault(r["id"], {})[run.label] = float(v) * 1000
+    ms = _collect(df, runs, lambda r: _positive(r.get(key), 1000))
     order = [w for w in dict.fromkeys(df["id"]) if w in ms]
     if not order or not _worth_plotting(ms):
         return None
