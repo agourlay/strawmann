@@ -28,6 +28,7 @@
 const std = @import("std");
 const dist = @import("../dist/dist.zig");
 const tu = @import("../testing_util.zig");
+const parallel = @import("../parallel.zig");
 const pq_adc = dist.pq_adc;
 
 //: k-means passes per subspace. 25 was a literal at the one call site, beside
@@ -311,22 +312,8 @@ pub fn train(
             .step = t,
         };
     }
-    if (t == 1) {
-        workers[0].run();
-        return cb;
-    }
-    const handles = alloc.alloc(std.Thread, t - 1) catch return Error.OutOfMemory;
-    defer alloc.free(handles);
-    var spawned: usize = 0;
-    for (workers[1..], 0..) |*w, i| {
-        handles[i] = std.Thread.spawn(.{}, SubspaceWorker.run, .{w}) catch break;
-        spawned += 1;
-    }
-    // Whatever did not get a thread is done here, after this thread's own
-    // share: a spawn failure costs wall clock, never a subspace.
-    workers[0].run();
-    for (workers[1 + spawned ..]) |*w| w.run();
-    for (handles[0..spawned]) |h| h.join();
+    // A spawn failure costs wall clock, never a subspace (`runTasks`).
+    try parallel.runTasks(SubspaceWorker, alloc, workers, SubspaceWorker.run);
     return cb;
 }
 

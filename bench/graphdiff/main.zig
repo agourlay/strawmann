@@ -498,15 +498,8 @@ pub fn groundTruth(
     };
     var job: Job = .{ .c = c, .queries = queries, .gt = gt, .nq = nq, .k = k };
 
-    const pool = try alloc.alloc(std.Thread, threads);
-    defer alloc.free(pool);
-    var spawned: usize = 0;
-    for (pool) |*t| {
-        t.* = std.Thread.spawn(.{}, Job.work, .{&job}) catch break;
-        spawned += 1;
-    }
-    if (spawned == 0) job.work();
-    for (pool[0..spawned]) |t| t.join();
+    // No thread at all: the work is done here instead.
+    if (try strawmann.parallel.spawnWorkers(alloc, threads, Job.work, .{&job}) == 0) job.work();
     return gt;
 }
 

@@ -35,6 +35,7 @@ const std = @import("std");
 const hnsw = @import("hnsw.zig");
 const heap = @import("heap.zig");
 const visited = @import("visited.zig");
+const parallel = @import("../parallel.zig");
 
 const Graph = hnsw.Graph;
 const Params = hnsw.Params;
@@ -834,15 +835,7 @@ pub fn extendParallel(
         }
     };
 
-    const n_threads = @max(1, threads);
-    const handles = try alloc.alloc(std.Thread, n_threads);
-    defer alloc.free(handles);
-    var spawned: usize = 0;
-    for (handles) |*h| {
-        h.* = std.Thread.spawn(.{}, Worker.run, .{&shared}) catch break;
-        spawned += 1;
-    }
-    for (handles[0..spawned]) |h| h.join();
+    const spawned = try parallel.spawnWorkers(alloc, @max(1, threads), Worker.run, .{&shared});
     if (spawned == 0) return error.SpawnFailed;
     if (shared.err.load(.acquire)) return error.OutOfMemory;
     // Stopped part-way: the graph is not a graph of `count` nodes, and the
@@ -949,15 +942,7 @@ pub fn drainLive(
     };
 
     const n_threads = @max(1, @min(threads, to - from));
-    const handles = try alloc.alloc(std.Thread, n_threads);
-    defer alloc.free(handles);
-    var spawned: usize = 0;
-    for (handles) |*h| {
-        h.* = std.Thread.spawn(.{}, Worker.run, .{&shared}) catch break;
-        spawned += 1;
-    }
-    for (handles[0..spawned]) |h| h.join();
-    if (spawned == 0) return error.SpawnFailed;
+    if (try parallel.spawnWorkers(alloc, n_threads, Worker.run, .{&shared}) == 0) return error.SpawnFailed;
     // A worker that could not allocate leaves its share to the others; only
     // when none ran is a node left unlinked, and `next` is what says so.
     if (shared.err.load(.acquire) and shared.next.load(.acquire) < to) return error.OutOfMemory;

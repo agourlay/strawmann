@@ -19,6 +19,7 @@ pub const index = @import("index/index.zig");
 pub const api = @import("api/api.zig");
 pub const quant = @import("quant/quant.zig");
 pub const text = @import("text/text.zig");
+pub const parallel = @import("parallel.zig");
 
 test {
     // Zig 0.16 dropped `refAllDeclsRecursive`; the module tree is walked
@@ -34,5 +35,6 @@ test {
     _ = api;
     _ = quant;
     _ = text;
+    _ = parallel;
     _ = @import("testing_util.zig");
 }

@@ -24,6 +24,7 @@ const std = @import("std");
 const dist = @import("../dist/dist.zig");
 const quant = @import("../quant/quant.zig");
 const heap = @import("../index/heap.zig");
+const parallel = @import("../parallel.zig");
 
 pub const Mode = quant.Mode;
 pub const Candidate = heap.Candidate;
@@ -318,20 +319,7 @@ fn encodeAllTurbo(alloc: std.mem.Allocator, store: *Store.Turbo, src: Source, th
         .lo = @min(i * per, src.count),
         .hi = @min((i + 1) * per, src.count),
     };
-    if (t == 1) {
-        tasks[0].run();
-        return;
-    }
-    const handles = alloc.alloc(std.Thread, t - 1) catch return Error.OutOfMemory;
-    defer alloc.free(handles);
-    var spawned: usize = 0;
-    for (tasks[1..], 0..) |*task, i| {
-        handles[i] = std.Thread.spawn(.{}, Task.run, .{task}) catch break;
-        spawned += 1;
-    }
-    tasks[0].run();
-    for (tasks[1 + spawned ..]) |*task| task.run();
-    for (handles[0..spawned]) |h| h.join();
+    try parallel.runTasks(Task, alloc, tasks, Task.run);
 }
 
 fn sampleStride(count: usize) usize {
@@ -507,16 +495,7 @@ fn encodeAllProduct(alloc: std.mem.Allocator, cb: *const quant.pq.Codebook, code
             .hi = @min((i + 1) * per, src.count),
         };
     }
-    const handles = alloc.alloc(std.Thread, t - 1) catch return Error.OutOfMemory;
-    defer alloc.free(handles);
-    var spawned: usize = 0;
-    for (tasks[1..], 0..) |*task, i| {
-        handles[i] = std.Thread.spawn(.{}, Task.run, .{task}) catch break;
-        spawned += 1;
-    }
-    tasks[0].run();
-    for (tasks[1 + spawned ..]) |*task| task.run();
-    for (handles[0..spawned]) |h| h.join();
+    try parallel.runTasks(Task, alloc, tasks, Task.run);
 }
 
 // =========================================================================
