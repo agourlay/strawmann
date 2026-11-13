@@ -3223,6 +3223,30 @@ class NightrunTests(unittest.TestCase):
         self.assertIn("exists", err.getvalue())
         self.assertEqual((night / "night.log").read_text().count("\n"), 1)
 
+    def test_analysis_only_redoes_the_analysis_and_measures_nothing(self):
+        """1113's h-and-m analysis died on a network error after the night's
+        226 minutes; the only way to redo it was by hand."""
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = self.n.main(["--analysis-only", "2026-11-12", "sift1m"], root=self.root)
+        self.assertEqual(rc, self.n.EXIT_NO_NIGHT)
+        self.assertIn("already ran", err.getvalue())
+        night = self.n.night_dir(self.root, "2026-11-12", "sift1m")
+        self.assertFalse(night.exists())
+
+        night.mkdir(parents=True)
+        (night / "night.log").write_text("2026-11-12 22:00:43 night run starting\n")
+        seen = []
+        with mock.patch.object(self.n, "analyse",
+                               lambda root, night, *rest: seen.append((night, rest[:3]))), \
+                mock.patch.object(self.n.subprocess, "run",
+                                  side_effect=AssertionError("nothing is run")):
+            rc = self.n.main(["--analysis-only", "2026-11-12", "sift1m"], root=self.root)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, [(night, ("sift1m", "sm-sift-perf-1112", "qd-sift-perf-1112"))])
+        text = (night / "night.log").read_text()
+        self.assertTrue(text.startswith("2026-11-12 22:00:43 night run starting\n"))
+        self.assertIn("analysis redone", text)
+
     def test_two_datasets_on_one_night_get_a_directory_each(self):
         """2026-09-27's laion-small-clip run found that morning's dbpedia
         night in `night-20260927` and refused to start."""
@@ -4706,6 +4730,22 @@ class DatasetTestsTableTests(unittest.TestCase):
         self.assertIs(self.w.collection_settings()["w16_acorn"], False)
         # W12 keeps its own ACORN.
         self.assertEqual("--acorn" in t["W12-sel10"].args, bool(self.w.W12_ACORN))
+
+    def test_w16_rows_are_held_to_equal_recall(self):
+        """W16 searches through bfb's config file, so its args spell no
+        `--search`, and `compare` read that as "not a search": laion 1112
+        printed W16-ef32 1.17x at recall 0.9551 against 0.9710."""
+        required = self.m["compare"].recall_required_of()
+        for ef in self.w.W16_EF:
+            self.assertTrue(required[f"W16-ef{ef}"], ef)
+        self.assertNotIn("W16-upload", required)
+        # The exemptions that are meant stay: exact rows and scrolls.
+        t = {r.id: r for r in self.w.table()}
+        exact = [i for i, r in t.items() if "--search-exact" in r.args]
+        self.assertTrue(exact)
+        for i in exact:
+            self.assertFalse(required[i], i)
+        self.assertTrue(required["W3"])
 
     def test_laion_gains_the_w16_rows_and_runs_them_on_their_own(self):
         ids = self.ids()

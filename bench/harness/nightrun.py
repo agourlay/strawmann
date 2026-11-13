@@ -49,6 +49,7 @@ ROOT = HERE.parent.parent
 #: Exit codes a caller can tell apart, both before anything runs.
 EXIT_LOG_EXISTS = 96
 EXIT_NO_QDRANT = 97
+EXIT_NO_NIGHT = 95
 
 #: How long `fullrun.py` asks a busy host again before giving up: two hours.
 WAIT_FOR_GATE_MIN = float(os.environ.get("WAIT_FOR_GATE_MIN", 120))
@@ -281,6 +282,10 @@ def main(argv: list[str], root: Path = ROOT) -> int:
                      help="print the pair this run would take its reference from, and exit")
     ask.add_argument("--print-ref", action="store_true",
                      help="print the reference it would take from that pair, and exit")
+    # 1113's h-and-m analysis died on a network error twelve minutes in, after
+    # 226 minutes of measurement. Redoing it must not need the night again.
+    ap.add_argument("--analysis-only", action="store_true",
+                    help="redo the analysis of a night that already ran, into its directory")
     ap.add_argument("date", help="YYYY-MM-DD, which names the labels and the night directory")
     ap.add_argument("dataset", nargs="?", default="sift1m")
     args = ap.parse_args(argv)
@@ -313,6 +318,15 @@ def main(argv: list[str], root: Path = ROOT) -> int:
     # landed in the middle of the live one's log. A second run of one dataset
     # on one night needs the first moved aside.
     night = night_dir(root, args.date, args.dataset)
+    if args.analysis_only:
+        if not (night / "night.log").exists():
+            print(f"nightrun: no {night / 'night.log'}; --analysis-only reads a night "
+                  f"that already ran.", file=sys.stderr)
+            return EXIT_NO_NIGHT
+        log = Log(night / "night.log")
+        log("analysis redone (--analysis-only)")
+        analyse(root, night, args.dataset, sm, qd, pair[0] if pair else None, log)
+        return 0
     if (night / "night.log").exists():
         print(f"nightrun: {night / 'night.log'} exists; another {args.dataset} run of "
               f"{args.date} has used this directory.\n  move it aside, or pass a "
