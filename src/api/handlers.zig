@@ -879,7 +879,11 @@ fn upsert(ctx: *Context, req: *const server.Request, body: []const u8, out: *ser
     // the arena synchronously here, so they are already visible; the flag
     // changes only which status we report.
     const status: msg.UpdateStatus = if (up.wait) .completed else .acknowledged;
+    return writeOperationResponse(req, out, coll, status);
+}
 
+/// `PointsOperationResponse`, with the collection's next operation id.
+fn writeOperationResponse(req: *const server.Request, out: *server.ResponseBuf, coll: *core.Collection, status: msg.UpdateStatus) server.Completion {
     var w = wire.Writer.init(out.available());
     const resp = msg.PointsOperationResponse{
         .operation_id = coll.nextOperationId(),
@@ -935,16 +939,9 @@ fn createFieldIndex(ctx: *Context, req: *const server.Request, body: []const u8,
         else => err(req, .internal, "payload index build failed"),
     };
 
-    var w = wire.Writer.init(out.available());
-    const resp = msg.PointsOperationResponse{
-        .operation_id = coll.nextOperationId(),
-        // Built synchronously, so it is complete whether or not `wait` was
-        // asked; the status says what happened rather than what was asked.
-        .status = .completed,
-        .time = 0,
-    };
-    resp.encode(&w) catch return err(req, .internal, "response buffer overflow");
-    return ok(req, out.commit(w.pos));
+    // Built synchronously, so it is complete whether or not `wait` was
+    // asked; the status says what happened rather than what was asked.
+    return writeOperationResponse(req, out, coll, .completed);
 }
 
 /// `textIndexOptions`'s answer: the options to build, or the refusal.
@@ -1013,15 +1010,7 @@ fn deletePoints(ctx: *Context, req: *const server.Request, body: []const u8, out
             return err(req, .invalid_argument, "malformed point id");
         _ = coll.delete(external);
     }
-
-    var w = wire.Writer.init(out.available());
-    const resp = msg.PointsOperationResponse{
-        .operation_id = coll.nextOperationId(),
-        .status = .completed,
-        .time = 0,
-    };
-    resp.encode(&w) catch return err(req, .internal, "response buffer overflow");
-    return ok(req, out.commit(w.pos));
+    return writeOperationResponse(req, out, coll, .completed);
 }
 
 /// §2 phase 2: `/qdrant.Points/SetPayload`, `--set-payload`. Merges the
@@ -1049,15 +1038,7 @@ fn setPayload(ctx: *Context, req: *const server.Request, body: []const u8, out: 
         // Qdrant: `No point with id ... found`, NOT_FOUND.
         if (!found) return err(req, .not_found, "point not found");
     }
-
-    var w = wire.Writer.init(out.available());
-    const resp = msg.PointsOperationResponse{
-        .operation_id = coll.nextOperationId(),
-        .status = if (sp.wait) .completed else .acknowledged,
-        .time = 0,
-    };
-    resp.encode(&w) catch return err(req, .internal, "response buffer overflow");
-    return ok(req, out.commit(w.pos));
+    return writeOperationResponse(req, out, coll, if (sp.wait) .completed else .acknowledged);
 }
 
 // =========================================================================

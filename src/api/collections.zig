@@ -292,16 +292,23 @@ fn writeBoolResult(req: *const server.Request, out: *server.ResponseBuf, value: 
     return ok(req, out.commit(w.pos));
 }
 
-pub fn deleteCollection(ctx: *Context, req: *const server.Request, body: []const u8, out: *server.ResponseBuf) server.Completion {
-    var r = wire.Reader.init(body);
+/// Field 1, the collection name, of a request that carries nothing else
+/// read: empty when absent, the last one when repeated.
+fn readNameOnly(r: *wire.Reader) wire.Error![]const u8 {
     var name: []const u8 = &.{};
     while (!r.atEnd()) {
-        const t = r.tag() catch |e| return decodeErr(req, e);
+        const t = try r.tag();
         switch (t.field) {
-            1 => name = r.bytes() catch |e| return decodeErr(req, e),
-            else => r.skip(t.wire_type) catch |e| return decodeErr(req, e),
+            1 => name = try r.bytes(),
+            else => try r.skip(t.wire_type),
         }
     }
+    return name;
+}
+
+pub fn deleteCollection(ctx: *Context, req: *const server.Request, body: []const u8, out: *server.ResponseBuf) server.Completion {
+    var r = wire.Reader.init(body);
+    const name = readNameOnly(&r) catch |e| return decodeErr(req, e);
     // Deleting a nonexistent collection is not an error for Qdrant, but it
     // is not a `true` either: `TableOfContent::delete_collection` returns
     // `Ok(false)` when nothing was loaded under that name (VERIFIED,
@@ -317,14 +324,7 @@ pub fn deleteCollection(ctx: *Context, req: *const server.Request, body: []const
 /// `CollectionExists { bool exists = 1; }`
 pub fn collectionExists(ctx: *Context, req: *const server.Request, body: []const u8, out: *server.ResponseBuf) server.Completion {
     var r = wire.Reader.init(body);
-    var name: []const u8 = &.{};
-    while (!r.atEnd()) {
-        const t = r.tag() catch |e| return decodeErr(req, e);
-        switch (t.field) {
-            1 => name = r.bytes() catch |e| return decodeErr(req, e),
-            else => r.skip(t.wire_type) catch |e| return decodeErr(req, e),
-        }
-    }
+    const name = readNameOnly(&r) catch |e| return decodeErr(req, e);
     const exists = ctx.engine.find(name) != null;
 
     var w = wire.Writer.init(out.available());
@@ -371,14 +371,7 @@ fn writePayloadSchema(w: *wire.Writer, coll: *core.Collection) wire.Writer.Error
 
 pub fn getCollectionInfo(ctx: *Context, req: *const server.Request, body: []const u8, out: *server.ResponseBuf) server.Completion {
     var r = wire.Reader.init(body);
-    var name: []const u8 = &.{};
-    while (!r.atEnd()) {
-        const t = r.tag() catch |e| return decodeErr(req, e);
-        switch (t.field) {
-            1 => name = r.bytes() catch |e| return decodeErr(req, e),
-            else => r.skip(t.wire_type) catch |e| return decodeErr(req, e),
-        }
-    }
+    const name = readNameOnly(&r) catch |e| return decodeErr(req, e);
     const held = ctx.engine.acquire(name) orelse
         return err(req, .not_found, "collection not found");
     defer held.release();
