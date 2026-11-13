@@ -205,9 +205,12 @@ struct FilteredTruthRun {
 // either; a truth is over the query file, and how many of it a sweep reads is
 // the sweep's business.
 
-/// `bm25-truth`'s arguments.
+/// The corpus, the queries and the BM25 settings every text command takes.
+///
+/// `--limit` stays with each command: its default is 100 for `bm25-truth` and
+/// 10 for the two that query an engine.
 #[derive(clap::Args)]
-struct Bm25TruthRun {
+struct TextArgs {
     #[arg(long)]
     corpus: PathBuf,
     #[arg(long)]
@@ -225,6 +228,32 @@ struct Bm25TruthRun {
     k1: f64,
     #[arg(long, default_value_t = text::DEFAULT_B)]
     b: f64,
+}
+
+impl TextArgs {
+    fn params(&self) -> text::TextParams {
+        text::TextParams {
+            lowercase: self.lowercase,
+            english_stopwords: self.english_stopwords,
+            english_stemmer: self.english_stemmer,
+        }
+    }
+
+    fn settings(&self, limit: usize) -> text::Bm25Settings {
+        text::Bm25Settings {
+            params: self.params(),
+            k1: self.k1,
+            b: self.b,
+            limit,
+        }
+    }
+}
+
+/// `bm25-truth`'s arguments.
+#[derive(clap::Args)]
+struct Bm25TruthRun {
+    #[command(flatten)]
+    text: TextArgs,
     #[arg(long, default_value_t = 100)]
     limit: usize,
     #[arg(long)]
@@ -243,10 +272,8 @@ struct TextRelevanceRun {
     /// The payload field the corpus is stored under and the text index is on.
     #[arg(long, default_value = "body")]
     field: String,
-    #[arg(long)]
-    corpus: PathBuf,
-    #[arg(long)]
-    queries: PathBuf,
+    #[command(flatten)]
+    text: TextArgs,
     /// `bm25-truth`'s output for the same corpus, queries and settings.
     /// Absent, the truth is computed here, from the index this command builds
     /// anyway to score what the engine returns.
@@ -256,16 +283,6 @@ struct TextRelevanceRun {
     /// rows, `keyword_1` the odd), against a truth over those rows alone.
     #[arg(long, value_parser = ["keyword_0", "keyword_1"])]
     parity: Option<String>,
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    lowercase: bool,
-    #[arg(long)]
-    english_stopwords: bool,
-    #[arg(long)]
-    english_stemmer: bool,
-    #[arg(long, default_value_t = text::DEFAULT_K1)]
-    k1: f64,
-    #[arg(long, default_value_t = text::DEFAULT_B)]
-    b: f64,
     #[arg(long, default_value_t = 10)]
     limit: usize,
     /// Relative score difference within which a point outside the truth
@@ -293,25 +310,13 @@ struct TextDifferRun {
     collection: String,
     #[arg(long, default_value = "body")]
     field: String,
-    #[arg(long)]
-    corpus: PathBuf,
-    #[arg(long)]
-    queries: PathBuf,
+    #[command(flatten)]
+    text: TextArgs,
     /// `bm25-truth`'s output; absent, computed here from the oracle's index.
     #[arg(long)]
     truth: Option<PathBuf>,
     #[arg(long)]
     qrels: Option<PathBuf>,
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    lowercase: bool,
-    #[arg(long)]
-    english_stopwords: bool,
-    #[arg(long)]
-    english_stemmer: bool,
-    #[arg(long, default_value_t = text::DEFAULT_K1)]
-    k1: f64,
-    #[arg(long, default_value_t = text::DEFAULT_B)]
-    b: f64,
     #[arg(long, default_value_t = 10)]
     limit: usize,
     /// T1: the largest relative difference from the oracle a score may show.
@@ -969,20 +974,96 @@ fn check_bm25_params(k1: f64, b: f64) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_bm25_truth(a: Bm25TruthRun) -> anyhow::Result<()> {
-    check_bm25_params(a.k1, a.b)?;
-    let settings = text::Bm25Settings {
-        params: text::TextParams {
-            lowercase: a.lowercase,
-            english_stopwords: a.english_stopwords,
-            english_stemmer: a.english_stemmer,
-        },
-        k1: a.k1,
-        b: a.b,
-        limit: a.limit,
+/// The parity filter of a text collection: `parity == value`
+/// (`engine::TEXT_PARITY_KEY`).
+fn parity_filter(value: &str) -> qdrant_client::qdrant::Filter {
+    qdrant_client::qdrant::Filter::must([qdrant_client::qdrant::Condition::matches(
+        engine::TEXT_PARITY_KEY,
+        value.to_string(),
+    )])
+}
+
+/// What every engine-facing text command reads and builds before it connects.
+struct TextInputs {
+    docs: Vec<Vec<String>>,
+    corpus_checksum: u64,
+    queries: Vec<String>,
+    query_checksum: u64,
+    index: text::Bm25Index,
+    truth: text::Bm25Truth,
+}
+
+/// The corpus, the queries, the oracle's index over them, and the truth:
+/// `truth_path` when given (refused when it was computed for anything else),
+/// else from the index over the points `allowed` keeps.
+fn load_text_inputs(
+    t: &TextArgs,
+    truth_path: Option<&Path>,
+    limit: usize,
+    allowed: Option<&(dyn Fn(usize) -> bool + Sync)>,
+) -> anyhow::Result<TextInputs> {
+    check_bm25_params(t.k1, t.b)?;
+    let params = t.params();
+    let (docs, corpus_checksum) = text::read_corpus(&t.corpus)?;
+    let (queries, query_checksum) = text::read_queries(&t.queries)?;
+    let index = text::Bm25Index::build(params, &docs);
+    let truth = match truth_path {
+        Some(path) => load_bm25_truth(
+            path,
+            params,
+            t.k1,
+            t.b,
+            limit,
+            corpus_checksum,
+            query_checksum,
+        )?,
+        None => text::Bm25Truth::from_index(
+            &index,
+            t.settings(limit),
+            corpus_checksum,
+            &queries,
+            query_checksum,
+            allowed,
+        ),
     };
-    let (docs, corpus_checksum) = text::read_corpus(&a.corpus)?;
-    let (queries, query_checksum) = text::read_queries(&a.queries)?;
+    Ok(TextInputs {
+        docs,
+        corpus_checksum,
+        queries,
+        query_checksum,
+        index,
+        truth,
+    })
+}
+
+/// Recreate `collection` as a text collection on `eng`, load `docs` into it
+/// and wait for green.
+async fn load_text_collection(
+    eng: &engine::Engine,
+    collection: &str,
+    field: &str,
+    params: text::TextParams,
+    docs: &[Vec<String>],
+    timeout_secs: u64,
+) -> anyhow::Result<()> {
+    eprintln!(
+        "[{}] loading {} documents into {}",
+        eng.label,
+        docs.len(),
+        collection
+    );
+    eng.recreate_text_collection(collection, field, params, docs.len() as u64)
+        .await?;
+    eng.upsert_text(collection, field, docs).await?;
+    eng.wait_green(collection, timeout_secs).await
+}
+
+fn run_bm25_truth(a: Bm25TruthRun) -> anyhow::Result<()> {
+    let t = &a.text;
+    check_bm25_params(t.k1, t.b)?;
+    let settings = t.settings(a.limit);
+    let (docs, corpus_checksum) = text::read_corpus(&t.corpus)?;
+    let (queries, query_checksum) = text::read_queries(&t.queries)?;
     let truth =
         text::Bm25Truth::compute(settings, &docs, corpus_checksum, &queries, query_checksum);
     if let Some(dir) = a.out.parent() {
@@ -997,8 +1078,8 @@ fn run_bm25_truth(a: Bm25TruthRun) -> anyhow::Result<()> {
         truth
             .avgdl
             .map_or_else(|| "n/a".to_string(), |v| format!("{v:.2}")),
-        a.k1,
-        a.b
+        t.k1,
+        t.b
     );
     Ok(())
 }
@@ -1260,59 +1341,26 @@ fn text_tiers(
 
 #[tokio::main(flavor = "multi_thread")]
 async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
-    check_bm25_params(a.k1, a.b)?;
-    let params = text::TextParams {
-        lowercase: a.lowercase,
-        english_stopwords: a.english_stopwords,
-        english_stemmer: a.english_stemmer,
-    };
-    let (docs, corpus_checksum) = text::read_corpus(&a.corpus)?;
-    let (queries, query_checksum) = text::read_queries(&a.queries)?;
-    let index = text::Bm25Index::build(params, &docs);
-    let truth = match &a.truth {
-        Some(path) => load_bm25_truth(
-            path,
-            params,
-            a.k1,
-            a.b,
-            a.limit,
-            corpus_checksum,
-            query_checksum,
-        )?,
-        None => text::Bm25Truth::from_index(
-            &index,
-            text::Bm25Settings {
-                params,
-                k1: a.k1,
-                b: a.b,
-                limit: a.limit,
-            },
-            corpus_checksum,
-            &queries,
-            query_checksum,
-            None,
-        ),
-    };
+    let TextInputs {
+        docs,
+        corpus_checksum,
+        queries,
+        query_checksum,
+        index,
+        truth,
+    } = load_text_inputs(&a.text, a.truth.as_deref(), a.limit, None)?;
+    let params = a.text.params();
     let engines = [
         engine::Engine::connect("strawmann", &a.strawmann)?,
         engine::Engine::connect("qdrant", &a.qdrant)?,
     ];
     if !a.skip_upload {
         for eng in &engines {
-            eprintln!(
-                "[{}] loading {} documents into {}",
-                eng.label,
-                docs.len(),
-                a.collection
-            );
-            eng.recreate_text_collection(&a.collection, &a.field, params, docs.len() as u64)
-                .await?;
-            eng.upsert_text(&a.collection, &a.field, &docs).await?;
-            eng.wait_green(&a.collection, 900).await?;
+            load_text_collection(eng, &a.collection, &a.field, params, &docs, 900).await?;
         }
     }
     #[allow(clippy::cast_possible_truncation)]
-    let (k1, b) = (a.k1 as f32, a.b as f32);
+    let (k1, b) = (a.text.k1 as f32, a.text.b as f32);
     let mut tiers: Vec<TextTier> = Vec::new();
 
     // T0: the two refusals a text query has, answered with the same status.
@@ -1343,7 +1391,8 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
         let got = eng
             .query_text(&a.collection, &a.field, &queries, a.limit as u64, k1, b)
             .await?;
-        let (max_rel, rank, nm) = text_tiers(&index, &queries, &truth.hits, &got, a.k1, a.b, &a);
+        let (max_rel, rank, nm) =
+            text_tiers(&index, &queries, &truth.hits, &got, a.text.k1, a.text.b, &a);
         if eng.label == "strawmann" {
             strawmann_max_rel = max_rel;
         }
@@ -1383,10 +1432,7 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
         .cloned()
         .collect();
     let doubled: Vec<String> = mq.iter().map(|q| format!("{q} {q}")).collect();
-    let even = qdrant_client::qdrant::Filter::must([qdrant_client::qdrant::Condition::matches(
-        engine::TEXT_PARITY_KEY,
-        "keyword_0".to_string(),
-    )]);
+    let even = parity_filter("keyword_0");
     let even_only = |p: usize| p.is_multiple_of(2);
     let oracle =
         |k: f64, bb: f64, allowed: Option<&dyn Fn(usize) -> bool>| -> Vec<Vec<(u32, f64)>> {
@@ -1394,10 +1440,10 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
                 .map(|q| index.search(q, k, bb, a.limit, allowed))
                 .collect()
         };
-    let unfiltered = oracle(a.k1, a.b, None);
-    let filtered = oracle(a.k1, a.b, Some(&even_only));
+    let unfiltered = oracle(a.text.k1, a.text.b, None);
+    let filtered = oracle(a.text.k1, a.text.b, Some(&even_only));
     let b0 = oracle(2.0, 0.0, None);
-    let k0 = oracle(0.0, a.b, None);
+    let k0 = oracle(0.0, a.text.b, None);
     for eng in &engines {
         let lim = a.limit as u64;
         let runs = [
@@ -1406,16 +1452,16 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
                 eng.query_text(&a.collection, &a.field, &doubled, lim, k1, b)
                     .await?,
                 &unfiltered,
-                a.k1,
-                a.b,
+                a.text.k1,
+                a.text.b,
             ),
             (
                 "M filter narrows, statistics stay",
                 eng.query_text_filtered(&a.collection, &a.field, &mq, lim, k1, b, Some(&even))
                     .await?,
                 &filtered,
-                a.k1,
-                a.b,
+                a.text.k1,
+                a.text.b,
             ),
             (
                 "M b = 0 ignores length",
@@ -1431,7 +1477,7 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
                     .await?,
                 &k0,
                 0.0,
-                a.b,
+                a.text.b,
             ),
         ];
         for (name, got, want, kk, bb) in runs {
@@ -1461,14 +1507,15 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
     let after = text::Bm25Index::build(params, &kept_docs);
     let after_truth: Vec<Vec<(u32, f64)>> = mq
         .iter()
-        .map(|q| after.search(q, a.k1, a.b, a.limit, None))
+        .map(|q| after.search(q, a.text.k1, a.text.b, a.limit, None))
         .collect();
     for eng in &engines {
         eng.delete_points(&a.collection, &gone).await?;
         let got = eng
             .query_text(&a.collection, &a.field, &mq, a.limit as u64, k1, b)
             .await?;
-        let (max_rel, rank, nm) = text_tiers(&after, &mq, &after_truth, &got, a.k1, a.b, &a);
+        let (max_rel, rank, nm) =
+            text_tiers(&after, &mq, &after_truth, &got, a.text.k1, a.text.b, &a);
         let pass = max_rel <= a.value_epsilon && rank == 0 && nm == 0;
         let reported = eng.label == "qdrant";
         tiers.push(TextTier {
@@ -1542,8 +1589,8 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
         let conf = text::TextConformanceRow {
             dataset: &a.dataset,
             params,
-            k1: a.k1,
-            b: a.b,
+            k1: a.text.k1,
+            b: a.text.b,
             limit: a.limit,
             value_epsilon: a.value_epsilon,
             tie_epsilon: a.tie_epsilon,
@@ -1583,7 +1630,7 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
             "lowercase": params.lowercase,
             "english_stopwords": params.english_stopwords,
             "english_stemmer": params.english_stemmer,
-            "k1": a.k1, "b": a.b, "limit": a.limit,
+            "k1": a.text.k1, "b": a.text.b, "limit": a.limit,
             "value_epsilon": a.value_epsilon, "tie_epsilon": a.tie_epsilon,
             "tiers": tiers,
             "same_order": same_order, "queries": queries.len(),
@@ -1601,63 +1648,21 @@ async fn run_text_differ(a: TextDifferRun) -> anyhow::Result<()> {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
-    check_bm25_params(a.k1, a.b)?;
-    let params = text::TextParams {
-        lowercase: a.lowercase,
-        english_stopwords: a.english_stopwords,
-        english_stemmer: a.english_stemmer,
-    };
-    let (docs, corpus_checksum) = text::read_corpus(&a.corpus)?;
-    let (queries, query_checksum) = text::read_queries(&a.queries)?;
-    let index = text::Bm25Index::build(params, &docs);
-    let truth = if let Some(path) = &a.truth {
-        load_bm25_truth(
-            path,
-            params,
-            a.k1,
-            a.b,
-            a.limit,
-            corpus_checksum,
-            query_checksum,
-        )?
-    } else {
-        let settings = text::Bm25Settings {
-            params,
-            k1: a.k1,
-            b: a.b,
-            limit: a.limit,
-        };
-        let parity = a.parity.clone();
-        let allowed = move |p: usize| parity.as_deref() == Some(text::parity_of(p));
-        let allowed: Option<&(dyn Fn(usize) -> bool + Sync)> =
-            a.parity.as_ref().map(|_| &allowed as _);
-        text::Bm25Truth::from_index(
-            &index,
-            settings,
-            corpus_checksum,
-            &queries,
-            query_checksum,
-            allowed,
-        )
-    };
-    let filter = a.parity.as_ref().map(|v| {
-        qdrant_client::qdrant::Filter::must([qdrant_client::qdrant::Condition::matches(
-            engine::TEXT_PARITY_KEY,
-            v.clone(),
-        )])
-    });
+    let parity = a.parity.clone();
+    let allowed = move |p: usize| parity.as_deref() == Some(text::parity_of(p));
+    let allowed: Option<&(dyn Fn(usize) -> bool + Sync)> = a.parity.as_ref().map(|_| &allowed as _);
+    let TextInputs {
+        docs,
+        corpus_checksum,
+        queries,
+        query_checksum,
+        index,
+        truth,
+    } = load_text_inputs(&a.text, a.truth.as_deref(), a.limit, allowed)?;
+    let filter = a.parity.as_deref().map(parity_filter);
     let eng = engine::Engine::connect_quiet(&a.label, &a.engine)?;
     if !a.skip_upload {
-        eprintln!(
-            "[{}] loading {} documents into {}",
-            a.label,
-            docs.len(),
-            a.collection
-        );
-        eng.recreate_text_collection(&a.collection, &a.field, params, docs.len() as u64)
-            .await?;
-        eng.upsert_text(&a.collection, &a.field, &docs).await?;
-        eng.wait_green(&a.collection, 600).await?;
+        load_text_collection(&eng, &a.collection, &a.field, a.text.params(), &docs, 600).await?;
     }
     #[allow(clippy::cast_possible_truncation)]
     let returned = eng
@@ -1666,8 +1671,8 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
             &a.field,
             &queries,
             a.limit as u64,
-            a.k1 as f32,
-            a.b as f32,
+            a.text.k1 as f32,
+            a.text.b as f32,
             filter.as_ref(),
         )
         .await?;
@@ -1680,7 +1685,7 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
             "{}: judges a query past the {} in {}",
             path.display(),
             queries.len(),
-            a.queries.display()
+            a.text.queries.display()
         );
         let oracle: Vec<relevance::Returned> = truth
             .hits
@@ -1728,8 +1733,8 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
         // only to the variant it ran.
         let mut row = serde_json::to_value(&agreement)?;
         row["collection"] = a.collection.clone().into();
-        row["k1"] = a.k1.into();
-        row["b"] = a.b.into();
+        row["k1"] = a.text.k1.into();
+        row["b"] = a.text.b.into();
         row["parity"] = a.parity.clone().into();
         row["corpus_checksum"] = format!("{corpus_checksum:016x}").into();
         row["query_checksum"] = format!("{query_checksum:016x}").into();
@@ -3645,6 +3650,48 @@ mod tests {
         assert!(check_bm25_params(-0.1, 0.75).is_err());
         assert!(check_bm25_params(f64::NAN, 0.75).is_err());
         assert!(check_bm25_params(1.2, 1.5).is_err());
+    }
+
+    #[test]
+    fn the_text_commands_share_their_flags_and_keep_their_own_limit() {
+        let text = [
+            "--corpus",
+            "c.jsonl",
+            "--queries",
+            "q.txt",
+            "--lowercase",
+            "false",
+            "--english-stemmer",
+            "--k1",
+            "0.9",
+            "--b",
+            "0.4",
+        ];
+        let parse = |cmd: &str, extra: &[&str]| {
+            Cli::try_parse_from(["conformance", cmd].iter().chain(&text).chain(extra))
+                .unwrap()
+                .command
+        };
+        let Command::Bm25Truth(t) = parse("bm25-truth", &["--out", "o"]) else {
+            panic!("parsed as another command")
+        };
+        assert_eq!(t.limit, 100);
+        let want = text::TextParams {
+            lowercase: false,
+            english_stopwords: false,
+            english_stemmer: true,
+        };
+        assert_eq!(t.text.params(), want);
+        let s = t.text.settings(t.limit);
+        assert_eq!((s.k1, s.b, s.limit), (0.9, 0.4, 100));
+        let Command::TextRelevance(r) = parse("text-relevance", &[]) else {
+            panic!("parsed as another command")
+        };
+        assert_eq!((r.limit, r.text.params()), (10, want));
+        let Command::TextDiffer(d) = parse("text-differ", &[]) else {
+            panic!("parsed as another command")
+        };
+        assert_eq!((d.limit, d.text.k1, d.text.b), (10, 0.9, 0.4));
     }
 
     #[test]
