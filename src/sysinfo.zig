@@ -105,9 +105,13 @@ fn readChunk(chunk: []const u64, iters: usize, sink: *u64) void {
     sink.* = s;
 }
 
-/// Monotonic nanoseconds. Same primitive `bench/micro/perfctr.zig` uses, so a
-/// startup figure and a `zig build bench` figure are timed the same way.
-fn nowNs() u64 {
+/// Monotonic nanoseconds: the one clock every timer in the tree reads
+/// (`server.zig`, `collection.zig`, `bench/micro/perfctr.zig`,
+/// `bench/graphdiff`), so a startup figure and a `zig build bench` figure are
+/// timed the same way. `std.time.nanoTimestamp` moved under the `Io`
+/// interface in Zig 0.16 and none of those callers has an `Io` to thread
+/// through.
+pub fn monotonicNs() u64 {
     var ts: linux.timespec = undefined;
     _ = linux.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
@@ -172,14 +176,14 @@ fn measure(gpa: std.mem.Allocator, buf: []u64, want_threads: usize, iters: usize
         }
         // Everyone warmed and waiting; the window is the copy alone.
         Barrier.spinUntil(&barrier.ready, @intCast(spawned));
-        const t0 = nowNs();
+        const t0 = monotonicNs();
         barrier.go.store(1, .release);
         for (inline_from..threads) |k| {
             const lo = k * chunk;
             readChunk(buf[lo .. lo + chunk], iters, &sinks[k]);
         }
         Barrier.spinUntil(&barrier.done, @intCast(spawned));
-        best_ns = @min(best_ns, nowNs() - t0);
+        best_ns = @min(best_ns, monotonicNs() - t0);
         for (handles[0..spawned]) |h| h.join();
     }
     std.mem.doNotOptimizeAway(sinks[0]);

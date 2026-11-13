@@ -357,12 +357,8 @@ pub inline fn rdtsc() u64 {
     return (@as(u64, hi) << 32) | @as(u64, lo);
 }
 
-/// Monotonic nanoseconds.
-pub fn nowNs() u64 {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-}
+/// Monotonic nanoseconds, the engine's own clock.
+pub const nowNs = @import("strawmann").sysinfo.monotonicNs;
 
 // -------------------------------------------------------------------------
 // Tests

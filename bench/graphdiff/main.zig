@@ -163,14 +163,9 @@ pub const Corpus = struct {
     };
 };
 
-/// `std.time.nanoTimestamp` moved under the `Io` interface in Zig 0.16 and the
-/// builder threads have no `Io` to thread through, so the raw monotonic clock,
-/// as `collection.monotonicNs` does.
-fn nowNs() u64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-}
+/// The engine's monotonic clock (`sysinfo.monotonicNs`): the builder threads
+/// have no `Io` to thread through.
+const nowNs = strawmann.sysinfo.monotonicNs;
 
 var path_buf: [4096]u8 = undefined;
 

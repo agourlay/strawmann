@@ -1405,11 +1405,7 @@ test "brute force finds the true nearest neighbours" {
             .score = dist.similarity(.euclid, &q, c.space.rowConst(@intCast(i))),
         };
     }
-    std.mem.sort(Candidate, &all, {}, struct {
-        fn lt(_: void, a: Candidate, b: Candidate) bool {
-            return a.better(b);
-        }
-    }.lt);
+    std.mem.sort(Candidate, &all, {}, Candidate.betterFirst);
 
     try testing.expectEqual(@as(usize, 10), got.len);
     for (0..10) |i| try testing.expectEqual(all[i].id, got[i].id);
@@ -1533,16 +1529,12 @@ test "§8.6 metamorphic: score(x,x) is maximal for every metric" {
 // §6.5, index construction and the Yellow -> Green flow
 // =========================================================================
 
-/// Monotonic nanoseconds.
+/// Monotonic nanoseconds (`sysinfo.monotonicNs`).
 ///
 /// `std.time.nanoTimestamp` moved under the `Io` interface in Zig 0.16 and the
 /// collection has no `Io` to thread through; the raw clock is what a build
 /// timer needs anyway (§7.2 wants build time as a first-class W2 measurement).
-pub fn monotonicNs() u64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-}
+pub const monotonicNs = @import("../sysinfo.zig").monotonicNs;
 
 /// Announce that rows are no longer write-once, before the first one is.
 ///

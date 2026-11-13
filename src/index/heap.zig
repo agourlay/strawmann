@@ -49,6 +49,11 @@ pub const Candidate = struct {
     pub fn worse(a: Candidate, b: Candidate) bool {
         return better(b, a);
     }
+
+    /// `better` as a `std.mem.sort` comparator: sorts best first.
+    pub fn betterFirst(_: void, a: Candidate, b: Candidate) bool {
+        return a.better(b);
+    }
 };
 
 /// A bounded max-`k` collection: keeps the `k` best candidates seen.

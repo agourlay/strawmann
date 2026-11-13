@@ -971,27 +971,17 @@ pub fn splitEntry(entry: []const u8) ?Entry {
     return .{ .key = key orelse return null, .value = value };
 }
 
-fn varintLen(v: u64) usize {
-    var n: usize = 1;
-    var x = v >> 7;
-    while (x != 0) : (x >>= 7) n += 1;
-    return n;
-}
-
+/// `v` as a protobuf varint at the front of `buf`, which the caller sized for
+/// it (`wire.varintSize`). Returns the bytes written.
 fn writeVarint(buf: []u8, v: u64) usize {
-    var x = v;
-    var i: usize = 0;
-    while (x >= 0x80) : (x >>= 7) {
-        buf[i] = @as(u8, @truncate(x & 0x7f)) | 0x80;
-        i += 1;
-    }
-    buf[i] = @truncate(x);
-    return i + 1;
+    var w = wire.Writer.init(buf);
+    w.varint(v) catch unreachable;
+    return w.pos;
 }
 
 /// Bytes the framed form of `entry` occupies.
 pub fn framedLen(entry: []const u8) usize {
-    return varintLen(entry.len) + entry.len;
+    return wire.varintSize(entry.len) + entry.len;
 }
 
 /// Append `entry` in framed form.

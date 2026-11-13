@@ -1085,11 +1085,7 @@ pub fn advertisedMaxFrame(read_buffer: usize) u32 {
     return @intCast(@max(16384, @min(@as(usize, h2.Settings.default_max_frame), usable_frame)));
 }
 
-fn nowNs() u64 {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-}
+const nowNs = @import("../sysinfo.zig").monotonicNs;
 
 /// Seconds since a `nowNs()` stamp, saturating at zero for a stamp that
 /// somehow post-dates now.
