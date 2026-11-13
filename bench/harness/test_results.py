@@ -1316,6 +1316,17 @@ class ResultsSinkTests(unittest.TestCase):
         (d / "conformance.json").write_text(json.dumps(conf))
         return d
 
+    #: A strawmANN arm on sift1m with an ISA build and a commit: what the
+    #: sink accepts, so a test can vary the rows alone.
+    SIFT_META: ClassVar[dict] = {"dataset": {"name": "sift1m"}, "isa_build": "avx512",
+                 "strawmann": {"commit": "abcdef123456", "dirty": True}}
+
+    def _sift_label(self, name: str, rows: list[dict]) -> Path:
+        """`_label` under `SIFT_META` and `CONF`, holding `rows`."""
+        d = self._label(name, self.SIFT_META, self.CONF)
+        (d / "rows.json").write_text(json.dumps(rows))
+        return d
+
     def test_a_filtered_row_is_ingested_against_the_sweep_of_its_own_grade(self):
         """The sink has its own recall lookup, separate from
         `compare.recall_at`, and it keyed on (collection, quantization params)
@@ -1333,12 +1344,9 @@ class ResultsSinkTests(unittest.TestCase):
         import io
         res = self.res
         root = Path(self.tmp.name)
-        meta = {"dataset": {"name": "sift1m"}, "isa_build": "avx512",
-                "strawmann": {"commit": "abcdef123456", "dirty": True}}
-        d = self._label("arm", meta, self.CONF)
-        (d / "rows.json").write_text(json.dumps([
+        d = self._sift_label("arm", [
             _row("W12-sel1", 2571.0, ef=128, collection="bench12"),
-            _row("W12-sel10", 296.0, ef=128, collection="bench12")]))
+            _row("W12-sel10", 296.0, ef=128, collection="bench12")])
         # One sweep per grade, as `recall.py` writes them, and nothing under
         # the unfiltered name.
         for grade, recall in (("sel1", 1.0), ("sel10", 0.99)):
@@ -1387,13 +1395,10 @@ class ResultsSinkTests(unittest.TestCase):
         import io
         res = self.res
         root = Path(self.tmp.name)
-        meta = {"dataset": {"name": "sift1m"}, "isa_build": "avx512",
-                "strawmann": {"commit": "abcdef123456", "dirty": True}}
-        d = self._label("arm", meta, self.CONF)
-        (d / "rows.json").write_text(json.dumps([
+        self._sift_label("arm", [
             _row("W11-steady", 3000.0, collection="bench2", recall_joinable=False),
             _row("W11", 1200.0, collection="bench2", recall_joinable=False),
-            _row("W12", 26.0, collection="bench12")]))
+            _row("W12", 26.0, collection="bench12")])
         db = res.connect(":memory:")
         err = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
@@ -1421,11 +1426,8 @@ class ResultsSinkTests(unittest.TestCase):
         import io
         res = self.res
         root = Path(self.tmp.name)
-        meta = {"dataset": {"name": "sift1m"}, "isa_build": "avx512",
-                "strawmann": {"commit": "abcdef123456", "dirty": True}}
-        d = self._label("arm", meta, self.CONF)
-        (d / "rows.json").write_text(json.dumps([
-            _row("W11", 1200.0, collection="bench2", recall_joinable=False)]))
+        self._sift_label("arm", [
+            _row("W11", 1200.0, collection="bench2", recall_joinable=False)])
         db = res.connect(":memory:")
         err = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
@@ -1438,8 +1440,7 @@ class ResultsSinkTests(unittest.TestCase):
         import io
         res = self.res
         root = Path(self.tmp.name)
-        meta = {"dataset": {"name": "sift1m"}, "isa_build": "avx512",
-                "strawmann": {"commit": "abcdef123456", "dirty": True}}
+        meta = self.SIFT_META
         self._label("arm", meta, self.CONF)
         db = res.connect(":memory:")
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -1508,21 +1509,17 @@ class ResultsSinkTests(unittest.TestCase):
             self.assertEqual(res.ingest_run(db, "qd", root), 0)
         self.assertEqual(db.execute("SELECT isa_build FROM perf").fetchall(), [("native",)])
         # The row's own stamp wins over the label's.
-        meta = {"dataset": {"name": "sift1m"}, "isa_build": "avx512",
-                "strawmann": {"commit": "abcdef123456", "dirty": True}}
-        d = self._label("stamped", meta, self.CONF)
-        (d / "rows.json").write_text(json.dumps([_row("W0", 100.0, ef=None, collection="bench0",
-                                                     isa_build="avx2")]))
+        self._sift_label("stamped", [_row("W0", 100.0, ef=None, collection="bench0",
+                                          isa_build="avx2")])
         db = res.connect(":memory:")
         err = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
             self.assertEqual(res.ingest_run(db, "stamped", root), 1)
         self.assertIn("ISA build 'avx2'", err.getvalue())
         # Rows from two builds in one file: refused whole, like STALE.
-        d = self._label("mixed", meta, self.CONF)
-        (d / "rows.json").write_text(json.dumps([
+        self._sift_label("mixed", [
             _row("W0", 100.0, ef=None, collection="bench0", engine_binary="1111", isa_build="avx512"),
-            _row("W3", 100.0, engine_binary="2222", isa_build="avx512")]))
+            _row("W3", 100.0, engine_binary="2222", isa_build="avx512")])
         db = res.connect(":memory:")
         err = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
@@ -1623,14 +1620,11 @@ class ResultsSinkTests(unittest.TestCase):
         import io
         res = self.res
         root = Path(self.tmp.name)
-        meta = {"dataset": {"name": "sift1m"}, "isa_build": "avx512",
-                "strawmann": {"commit": "abcdef123456", "dirty": True}}
-        d = self._label("w7", meta, self.CONF)
-        rows = [_row("W7", 500.0, ef=128, collection="bench7",
-                     quantization_oversampling=4.0, quantization_rescore=True),
-                _row("W6", 600.0, ef=128, collection="bench6",
-                     quantization_oversampling=1.0, quantization_rescore=True)]
-        (d / "rows.json").write_text(json.dumps(rows))
+        d = self._sift_label("w7", [
+            _row("W7", 500.0, ef=128, collection="bench7",
+                 quantization_oversampling=4.0, quantization_rescore=True),
+            _row("W6", 600.0, ef=128, collection="bench6",
+                 quantization_oversampling=1.0, quantization_rescore=True)])
         # bench7 sweep recorded at oversampling 1 → must NOT join W7 (recall NULL);
         # bench6 sweep at 1 → joins W6.
         for coll, ovs, rec in (("bench7", 1.0, 0.5), ("bench6", 1.0, 0.9)):

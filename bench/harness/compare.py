@@ -1101,6 +1101,16 @@ class Row:
         return " ".join(self.notes)
 
 
+def _table() -> list:
+    """§4's rows from `workloads.table`, imported here rather than at the top
+    with the rest, or [] where `workloads` cannot be imported at all."""
+    try:
+        from workloads import table
+    except ImportError:  # pragma: no cover - only if run from outside bench/harness
+        return []
+    return table()
+
+
 def recall_required_of() -> dict[str, bool]:
     """Which rows §7.4's rule applies to, from §4's table.
 
@@ -1109,12 +1119,8 @@ def recall_required_of() -> dict[str, bool]:
     plumbing floor, no relevance), exact rows (recall 1.0 by construction on
     both sides), scroll (no ranking). A row not in the table is not exempt.
     """
-    try:
-        from workloads import table
-    except ImportError:  # pragma: no cover
-        return {}
     out = {}
-    for w in table():
+    for w in _table():
         if w.upload_only:
             continue
         # W16 searches through bfb's config file, which spells no `--search`.
@@ -1439,22 +1445,17 @@ RETIRED_PURPOSES = {
 def purpose_of() -> dict[str, str]:
     """§4's own name for each row, read from the one definition of the table,
     plus the retired ids an archived result set may still contain."""
-    try:
-        from workloads import table
-    except ImportError:  # pragma: no cover - only if run from outside bench/harness
-        return dict(RETIRED_PURPOSES)
-    return {**RETIRED_PURPOSES, **{w.id: w.purpose for w in table()}}
+    return {**RETIRED_PURPOSES, **{w.id: w.purpose for w in _table()}}
 
 
 def collection_of() -> dict[str, str]:
     """Which collection each row searches, from §4's one definition."""
-    try:
-        from workloads import collection_of as _coll
-        from workloads import table
-    except ImportError:  # pragma: no cover
+    rows = _table()
+    if not rows:
         return {}
+    from workloads import collection_of as _coll
     out = {}
-    for w in table():
+    for w in rows:
         c = _coll(w)
         if c:
             out[w.id] = c
@@ -1462,11 +1463,7 @@ def collection_of() -> dict[str, str]:
 
 
 def recall_joinable_of() -> dict[str, bool]:
-    try:
-        from workloads import table
-    except ImportError:  # pragma: no cover
-        return {}
-    return {w.id: w.recall_joinable for w in table()}
+    return {w.id: w.recall_joinable for w in _table()}
 
 
 def payload_indexes(label: str, collection: str) -> list[str] | None:
@@ -1491,29 +1488,21 @@ def needs_payload_index_of() -> dict[str, bool]:
     """`Workload.needs_payload_index` per row, for rows measured before it was
     recorded — the same fallback `ratio_policy_of` exists for, and for the same
     reason: the check must cover the results already on disk."""
-    try:
-        from workloads import table
-    except ImportError:  # pragma: no cover
-        return {}
-    return {w.id: w.needs_payload_index for w in table() if w.needs_payload_index}
+    return {w.id: w.needs_payload_index for w in _table() if w.needs_payload_index}
 
 
 def payload_index_suppressed_of() -> dict[str, bool]:
     """`payload_index_suppressed` per row, the same fallback for rows on disk."""
-    try:
-        from workloads import payload_index_suppressed, table
-    except ImportError:  # pragma: no cover
+    rows = _table()
+    if not rows:
         return {}
-    return {w.id: True for w in table() if payload_index_suppressed(w)}
+    from workloads import payload_index_suppressed
+    return {w.id: True for w in rows if payload_index_suppressed(w)}
 
 
 def ratio_policy_of() -> dict[str, str]:
     """`Workload.ratio_policy` per row, for rows measured before it was recorded."""
-    try:
-        from workloads import table
-    except ImportError:  # pragma: no cover
-        return {}
-    return {w.id: w.ratio_policy for w in table() if w.ratio_policy}
+    return {w.id: w.ratio_policy for w in _table() if w.ratio_policy}
 
 
 #: How each engine is written in prose. The tables used the raw directory
