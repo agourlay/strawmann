@@ -353,72 +353,49 @@ pub fn randomOrder(alloc: std.mem.Allocator, slots: usize, rnd: std.Random) ![]u
 // Kernel specs
 // -------------------------------------------------------------------------
 
-pub fn dotF32Spec(dim: usize) Spec {
+/// A spec whose `kernel` scores a `[]const Q` query against a `[]const V`
+/// row, both `dim` long. Every instantiation has its own `score` thunk with
+/// `kernel` comptime-known, so the measured call stays direct.
+fn typedSpec(
+    comptime Q: type,
+    comptime V: type,
+    comptime kernel: anytype,
+    name: []const u8,
+    stride: usize,
+    elem: Elem,
+    dim: usize,
+) Spec {
     const S = struct {
         fn score(query: *const anyopaque, arena: [*]const u8, offset: usize, d: usize) f64 {
-            const q: [*]const f32 = @ptrCast(@alignCast(query));
-            const v: [*]const f32 = @ptrCast(@alignCast(arena + offset));
-            return dist.native.dot(q[0..d], v[0..d]);
+            const q: [*]const Q = @ptrCast(@alignCast(query));
+            const v: [*]const V = @ptrCast(@alignCast(arena + offset));
+            return kernel(q[0..d], v[0..d]);
         }
     };
     return .{
-        .name = "dot_f32",
-        .stride = Layout.typed(dim, .float32),
-        .payload = dim * 4,
-        .elem = .f32,
+        .name = name,
+        .stride = stride,
+        .payload = dim * @sizeOf(V),
+        .elem = elem,
         .score = S.score,
     };
+}
+
+pub fn dotF32Spec(dim: usize) Spec {
+    return typedSpec(f32, f32, dist.native.dot, "dot_f32", Layout.typed(dim, .float32), .f32, dim);
 }
 
 pub fn euclidF32Spec(dim: usize) Spec {
-    const S = struct {
-        fn score(query: *const anyopaque, arena: [*]const u8, offset: usize, d: usize) f64 {
-            const q: [*]const f32 = @ptrCast(@alignCast(query));
-            const v: [*]const f32 = @ptrCast(@alignCast(arena + offset));
-            return dist.native.euclid(q[0..d], v[0..d]);
-        }
-    };
-    return .{
-        .name = "l2_f32",
-        .stride = Layout.typed(dim, .float32),
-        .payload = dim * 4,
-        .elem = .f32,
-        .score = S.score,
-    };
+    return typedSpec(f32, f32, dist.native.euclid, "l2_f32", Layout.typed(dim, .float32), .f32, dim);
 }
 
 pub fn dotF16Spec(dim: usize) Spec {
-    const S = struct {
-        fn score(query: *const anyopaque, arena: [*]const u8, offset: usize, d: usize) f64 {
-            const q: [*]const f16 = @ptrCast(@alignCast(query));
-            const v: [*]const f16 = @ptrCast(@alignCast(arena + offset));
-            return dist.dot_f16.dot_native.call(q[0..d], v[0..d]);
-        }
-    };
-    return .{
-        .name = "dot_f16",
-        .stride = Layout.typed(dim, .float16),
-        .payload = dim * 2,
-        .elem = .f16,
-        .score = S.score,
-    };
+    return typedSpec(f16, f16, dist.dot_f16.dot_native.call, "dot_f16", Layout.typed(dim, .float16), .f16, dim);
 }
 
 /// SQ8 asymmetric: fp32 query against u8 codes.
 pub fn dotI8AsymSpec(dim: usize) Spec {
-    const S = struct {
-        fn score(query: *const anyopaque, arena: [*]const u8, offset: usize, d: usize) f64 {
-            const q: [*]const f32 = @ptrCast(@alignCast(query));
-            return dist.dot_i8.f32u8_native.call(q[0..d], (arena + offset)[0..d]);
-        }
-    };
-    return .{
-        .name = "dot_i8_asym",
-        .stride = Layout.sq8(dim),
-        .payload = dim,
-        .elem = .u8,
-        .score = S.score,
-    };
+    return typedSpec(f32, u8, dist.dot_i8.f32u8_native.call, "dot_i8_asym", Layout.sq8(dim), .u8, dim);
 }
 
 /// SQ8 asymmetric Euclid: the arm W6 actually runs on a Euclid dataset.
@@ -428,19 +405,11 @@ pub fn dotI8AsymSpec(dim: usize) Spec {
 /// reading does not. Measured at d=128 when it was replaced: 87.3 ns/call
 /// scalar against 6.2 ns/call vector.
 pub fn euclidI8AsymSpec(dim: usize) Spec {
-    const S = struct {
-        fn score(query: *const anyopaque, arena: [*]const u8, offset: usize, d: usize) f64 {
-            const q: [*]const f32 = @ptrCast(@alignCast(query));
-            return dist.dot_i8.euclid_f32u8_native.call(q[0..d], (arena + offset)[0..d], .{ .lo = -1.25, .alpha = 0.0098 });
-        }
-    };
-    return .{
-        .name = "euclid_i8_asym",
-        .stride = Layout.sq8(dim),
-        .payload = dim,
-        .elem = .u8,
-        .score = S.score,
-    };
+    return typedSpec(f32, u8, euclidI8Asym, "euclid_i8_asym", Layout.sq8(dim), .u8, dim);
+}
+
+inline fn euclidI8Asym(q: []const f32, c: []const u8) f32 {
+    return dist.dot_i8.euclid_f32u8_native.call(q, c, .{ .lo = -1.25, .alpha = 0.0098 });
 }
 
 /// uint8 storage: the whole-vector Euclid over two stored rows.

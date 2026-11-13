@@ -398,9 +398,7 @@ pub fn currentCpu() ?usize {
 /// the matrix is a per-core number and has to say which core.
 pub fn pinToCpu(cpu: usize) !void {
     if (cpu >= linux.CPU_SETSIZE * 8) return error.CpuOutOfRange;
-    var set: linux.cpu_set_t = @splat(0);
-    const bits = @bitSizeOf(usize);
-    set[cpu / bits] |= @as(usize, 1) << @intCast(cpu % bits);
+    const set = strawmann.net.server.cpuSet(&.{cpu});
     try linux.sched_setaffinity(0, &set);
 }
 

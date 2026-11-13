@@ -558,6 +558,16 @@ pub fn pinToCpu(cpu: usize) void {
 /// harness's row timeout and read as a hang.
 pub fn pinToCpus(cpus: []const usize) void {
     if (cpus.len == 0) return;
+    const set = cpuSet(cpus);
+    // Affinity may legitimately be denied in a container; a benchmark run
+    // that cannot pin is a §7.1 environment failure to report, not a crash.
+    // The report is the harness's: `provenance.affinity` reads every thread's
+    // mask back from `/proc`, so a refused pin shows on the row.
+    linux.sched_setaffinity(0, &set) catch {};
+}
+
+/// The affinity mask of `cpus`, those past the mask's end left out.
+pub fn cpuSet(cpus: []const usize) linux.cpu_set_t {
     var set: linux.cpu_set_t = std.mem.zeroes(linux.cpu_set_t);
     const bits_per_elem = @bitSizeOf(@TypeOf(set[0]));
     for (cpus) |cpu| {
@@ -566,11 +576,7 @@ pub fn pinToCpus(cpus: []const usize) void {
         if (idx >= set.len) continue;
         set[idx] |= @as(@TypeOf(set[0]), 1) << @intCast(bit);
     }
-    // Affinity may legitimately be denied in a container; a benchmark run
-    // that cannot pin is a §7.1 environment failure to report, not a crash.
-    // The report is the harness's: `provenance.affinity` reads every thread's
-    // mask back from `/proc`, so a refused pin shows on the row.
-    linux.sched_setaffinity(0, &set) catch {};
+    return set;
 }
 
 /// The nice value an index build runs at: Qdrant's, 9. Its

@@ -1457,16 +1457,7 @@ test "a permuted insertion order builds a graph that is just as good" {
         var queue = std.ArrayList(u32).empty;
         defer queue.deinit(testing.allocator);
         try descentSeeds(testing.allocator, &g, seen, &queue);
-        var head: usize = 0;
-        while (head < queue.items.len) : (head += 1) {
-            for (g.level0Slice(queue.items[head])) |nb| {
-                if (nb == empty_neighbour) break;
-                if (nb < n and !seen[nb]) {
-                    seen[nb] = true;
-                    try queue.append(testing.allocator, nb);
-                }
-            }
-        }
+        try flood(testing.allocator, &g, 0, seen, &queue);
         var unreachable_count: usize = 0;
         for (seen) |x| {
             if (!x) unreachable_count += 1;
@@ -1615,6 +1606,23 @@ test "parallel build with one thread still works" {
 // Diagnostic: who can the search actually reach?
 // =========================================================================
 
+/// Breadth-first over `level`'s out-edges from the nodes already in `queue`:
+/// every node reached and not yet `seen` is marked and appended, so `queue`
+/// ends as everything reachable from where it started.
+fn flood(alloc: std.mem.Allocator, g: *const Graph, level: u8, seen: []bool, queue: *std.ArrayList(u32)) !void {
+    const n = g.count;
+    var head: usize = 0;
+    while (head < queue.items.len) : (head += 1) {
+        for (g.neighbours(queue.items[head], level)) |nb| {
+            if (nb == empty_neighbour) break;
+            if (nb < n and !seen[nb]) {
+                seen[nb] = true;
+                try queue.append(alloc, nb);
+            }
+        }
+    }
+}
+
 /// Mark, in `seen`, every node the descent can hand level 0, and queue it.
 ///
 /// `descend` starts at the entry point and walks each upper level greedily
@@ -1649,16 +1657,7 @@ fn descentSeeds(alloc: std.mem.Allocator, g: *const Graph, seen: []bool, queue: 
                 try here.append(alloc, s);
             }
         }
-        var head: usize = 0;
-        while (head < here.items.len) : (head += 1) {
-            for (g.neighbours(here.items[head], level)) |nb| {
-                if (nb == empty_neighbour) break;
-                if (nb < n and !mark[nb]) {
-                    mark[nb] = true;
-                    try here.append(alloc, nb);
-                }
-            }
-        }
+        try flood(alloc, g, level, mark, &here);
         above.deinit(alloc);
         above = here;
         if (level == 1) break;
@@ -1716,16 +1715,7 @@ pub fn repairUnreachable(alloc: std.mem.Allocator, g: *Graph) !usize {
     defer queue.deinit(alloc);
 
     try descentSeeds(alloc, g, seen, &queue);
-    var head: usize = 0;
-    while (head < queue.items.len) : (head += 1) {
-        for (g.level0Slice(queue.items[head])) |nb| {
-            if (nb == empty_neighbour) break;
-            if (nb < n and !seen[nb]) {
-                seen[nb] = true;
-                try queue.append(alloc, nb);
-            }
-        }
-    }
+    try flood(alloc, g, 0, seen, &queue);
 
     // In-degree at level 0, maintained as edges move. The first version of
     // this pass overwrote the donor's last slot when its list was full, and
@@ -1823,18 +1813,7 @@ pub fn reachability(alloc: std.mem.Allocator, g: *const Graph) !struct {
     defer queue.deinit(alloc);
 
     try descentSeeds(alloc, g, seen, &queue);
-
-    var head: usize = 0;
-    while (head < queue.items.len) : (head += 1) {
-        const node = queue.items[head];
-        for (g.level0Slice(node)) |nb| {
-            if (nb == empty_neighbour) break;
-            if (nb < n and !seen[nb]) {
-                seen[nb] = true;
-                try queue.append(alloc, nb);
-            }
-        }
-    }
+    try flood(alloc, g, 0, seen, &queue);
 
     var reachable: usize = 0;
     for (seen) |s| reachable += @intFromBool(s);
@@ -2091,16 +2070,7 @@ fn reachableAtLevel(alloc: std.mem.Allocator, g: *const Graph, level: u8) !usize
     if (g.entry_point == empty_neighbour or g.node_levels[g.entry_point] < level) return 0;
     seen[g.entry_point] = true;
     try queue.append(alloc, g.entry_point);
-    var head: usize = 0;
-    while (head < queue.items.len) : (head += 1) {
-        for (g.neighbours(queue.items[head], level)) |nb| {
-            if (nb == empty_neighbour) break;
-            if (nb < n and !seen[nb]) {
-                seen[nb] = true;
-                try queue.append(alloc, nb);
-            }
-        }
-    }
+    try flood(alloc, g, level, seen, &queue);
     return queue.items.len;
 }
 
