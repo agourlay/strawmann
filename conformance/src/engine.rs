@@ -13,10 +13,12 @@
 
 use crate::oracle::Metric;
 use crate::relevance::Returned;
+use qdrant_client::qdrant::point_id::PointIdOptions;
 use qdrant_client::qdrant::{
     CreateCollectionBuilder, DeleteCollectionBuilder, Distance, Filter,
-    OptimizersConfigDiffBuilder, PointStruct, QueryBatchPointsBuilder, QueryPointsBuilder,
-    SearchParamsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
+    OptimizersConfigDiffBuilder, PointId, PointStruct, QueryBatchPointsBuilder, QueryPointsBuilder,
+    RetrievedPoint, ScoredPoint, ScrollPointsBuilder, SearchParamsBuilder, UpsertPointsBuilder,
+    VectorParamsBuilder,
 };
 use qdrant_client::{Qdrant, config::QdrantConfig};
 
@@ -260,33 +262,64 @@ fn client_config(url: &str, check: bool) -> QdrantConfig {
     }
 }
 
-impl Engine {
-    pub async fn recreate_collection(
-        &self,
-        name: &str,
-        dim: u64,
-        metric: Metric,
-        points: u64,
-    ) -> anyhow::Result<()> {
-        self.recreate_collection_hnsw(name, dim, metric, None, None, points)
-            .await
-    }
-
-    /// §6.5's `m` and `ef_construct`, sent explicitly.
+/// What a vector collection is created with.
+#[derive(Clone, Copy)]
+pub struct CollectionSpec {
+    pub dim: u64,
+    pub metric: Metric,
+    /// The point count the one-graph segment ceiling is sized from
+    /// (`one_graph_optimizers`). Stated by the caller rather than taken from
+    /// the rows loaded: the metamorphic permutation collections hold a slice
+    /// of the base and are sized for all of it.
+    pub points: u64,
+    /// §6.5's `m` and `ef_construct`, sent explicitly when set.
     ///
     /// Both engines default to `m=16, ef_construct=100`, so the defaults were
     /// already matched — but "matched by coincidence of defaults" is not the
     /// same as "controlled", and a sweep needs to set them.
-    pub async fn recreate_collection_hnsw(
-        &self,
-        name: &str,
-        dim: u64,
-        metric: Metric,
-        m: Option<u64>,
-        ef_construct: Option<u64>,
-        points: u64,
-    ) -> anyhow::Result<()> {
-        use qdrant_client::qdrant::HnswConfigDiffBuilder;
+    pub hnsw_m: Option<u64>,
+    pub hnsw_ef_construct: Option<u64>,
+    /// §8.5 T4 needs a *quantized* collection alongside the fp32 one, so the
+    /// same query can be scored both ways and the difference measured: SQ8 at
+    /// bfb's 0.99 quantile (§6.7), kept in RAM so the measurement is of the
+    /// encoding rather than of a disk read.
+    pub sq8: bool,
+}
+
+impl CollectionSpec {
+    /// An fp32 collection at the engines' default HNSW settings.
+    pub fn new(dim: u64, metric: Metric, points: u64) -> Self {
+        CollectionSpec {
+            dim,
+            metric,
+            points,
+            hnsw_m: None,
+            hnsw_ef_construct: None,
+            sq8: false,
+        }
+    }
+}
+
+/// How long `Engine::load` spent uploading and then waiting for green.
+pub struct LoadTimes {
+    pub upsert: std::time::Duration,
+    pub green: std::time::Duration,
+}
+
+/// The numeric id of a point, `None` for a UUID or a missing one.
+pub fn numeric_id(id: Option<&PointId>) -> Option<u64> {
+    match id.and_then(|i| i.point_id_options.as_ref()) {
+        Some(PointIdOptions::Num(n)) => Some(*n),
+        Some(PointIdOptions::Uuid(_)) | None => None,
+    }
+}
+
+impl Engine {
+    /// Drop `name` if it exists and create it as `spec` says.
+    pub async fn recreate(&self, name: &str, spec: CollectionSpec) -> anyhow::Result<()> {
+        use qdrant_client::qdrant::{
+            HnswConfigDiffBuilder, QuantizationType, ScalarQuantizationBuilder,
+        };
 
         let _ = self
             .client
@@ -294,20 +327,107 @@ impl Engine {
             .await;
 
         let mut b = CreateCollectionBuilder::new(name)
-            .vectors_config(VectorParamsBuilder::new(dim, to_distance(metric)))
-            .optimizers_config(one_graph_optimizers(points, dim));
-        if m.is_some() || ef_construct.is_some() {
+            .vectors_config(VectorParamsBuilder::new(spec.dim, to_distance(spec.metric)))
+            .optimizers_config(one_graph_optimizers(spec.points, spec.dim));
+        if spec.hnsw_m.is_some() || spec.hnsw_ef_construct.is_some() {
             let mut h = HnswConfigDiffBuilder::default();
-            if let Some(v) = m {
+            if let Some(v) = spec.hnsw_m {
                 h = h.m(v);
             }
-            if let Some(v) = ef_construct {
+            if let Some(v) = spec.hnsw_ef_construct {
                 h = h.ef_construct(v);
             }
             b = b.hnsw_config(h);
         }
+        if spec.sq8 {
+            b = b.quantization_config(
+                ScalarQuantizationBuilder::default()
+                    .r#type(QuantizationType::Int8 as i32)
+                    .quantile(0.99)
+                    .always_ram(true),
+            );
+        }
         self.client.create_collection(b).await?;
         Ok(())
+    }
+
+    /// Recreate `name` as `spec`, upsert `base` (every row in row order, or
+    /// the rows `order` names in that order) and wait for green.
+    pub async fn load(
+        &self,
+        name: &str,
+        base: &crate::datasets::Vectors,
+        spec: CollectionSpec,
+        order: Option<&[u32]>,
+        timeout_secs: u64,
+    ) -> anyhow::Result<LoadTimes> {
+        self.recreate(name, spec).await?;
+        let t = std::time::Instant::now();
+        match order {
+            Some(o) => self.upsert_in_order(name, &base.data, base.dim, o).await?,
+            None => self.upsert(name, &base.data, base.n, base.dim).await?,
+        }
+        let upsert = t.elapsed();
+        let t = std::time::Instant::now();
+        self.wait_green(name, timeout_secs).await?;
+        Ok(LoadTimes {
+            upsert,
+            green: t.elapsed(),
+        })
+    }
+
+    /// Page through `name`, `page` points per request, handing each page to
+    /// `f`; `shape` sets what each request asks for besides its page. `f`
+    /// returns whether to go on. Returns whether it stopped while pages
+    /// remained.
+    pub async fn scroll_each(
+        &self,
+        name: &str,
+        page: u32,
+        shape: impl Fn(ScrollPointsBuilder) -> ScrollPointsBuilder,
+        mut f: impl FnMut(&[RetrievedPoint]) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<bool> {
+        let mut cursor: Option<PointId> = None;
+        loop {
+            let mut b = shape(ScrollPointsBuilder::new(name).limit(page));
+            if let Some(c) = cursor.take() {
+                b = b.offset(c);
+            }
+            let resp = self.client.scroll(b).await?;
+            let go_on = f(&resp.result)?;
+            match resp.next_page_offset {
+                Some(next) if go_on => cursor = Some(next),
+                Some(_) => return Ok(true),
+                None => return Ok(false),
+            }
+        }
+    }
+
+    /// One query's scored points as ids and scores, best first. §4.3: ids are
+    /// row indices, so a point without a numeric id, or with one past `u32`,
+    /// is refused rather than guessed at.
+    fn to_returned(&self, points: Vec<ScoredPoint>) -> anyhow::Result<Returned> {
+        let mut ids = Vec::with_capacity(points.len());
+        let mut scores = Vec::with_capacity(points.len());
+        for p in points {
+            let Some(n) = numeric_id(p.id.as_ref()) else {
+                anyhow::bail!(
+                    "{}: a point without a numeric id; relevance runs require numeric ids (§4.3)",
+                    self.label
+                );
+            };
+            // Not `as u32`: that truncated an id past 2^32 to some other
+            // row's id, and the tiers then judged the wrong point rather than
+            // a wrong wire.
+            ids.push(u32::try_from(n).map_err(|_| {
+                anyhow::anyhow!(
+                    "{}: point id {n} does not fit u32; §4.3 ids are row indices",
+                    self.label
+                )
+            })?);
+            scores.push(f64::from(p.score));
+        }
+        Ok(Returned { ids, scores })
     }
 
     /// A collection for the `text` query: a 4-dimension placeholder vector the
@@ -324,8 +444,11 @@ impl Engine {
         use qdrant_client::qdrant::{
             CreateFieldIndexCollectionBuilder, FieldType, TextIndexParamsBuilder, TokenizerType,
         };
-        self.recreate_collection(name, TEXT_PLACEHOLDER_DIM as u64, Metric::Dot, points)
-            .await?;
+        self.recreate(
+            name,
+            CollectionSpec::new(TEXT_PLACEHOLDER_DIM as u64, Metric::Dot, points),
+        )
+        .await?;
         let mut index = TextIndexParamsBuilder::new(TokenizerType::Word)
             .lowercase(params.lowercase)
             .bm25_scoring();
@@ -431,20 +554,7 @@ impl Engine {
                 .query_batch(QueryBatchPointsBuilder::new(name, batch))
                 .await?;
             for r in resp.result {
-                let mut ids = Vec::with_capacity(r.result.len());
-                let mut scores = Vec::with_capacity(r.result.len());
-                for p in r.result {
-                    let Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(n)) =
-                        p.id.and_then(|i| i.point_id_options)
-                    else {
-                        anyhow::bail!("{}: a text hit without a numeric id (§4.3)", self.label);
-                    };
-                    ids.push(u32::try_from(n).map_err(|_| {
-                        anyhow::anyhow!("{}: point id {n} does not fit u32", self.label)
-                    })?);
-                    scores.push(f64::from(p.score));
-                }
-                out.push(Returned { ids, scores });
+                out.push(self.to_returned(r.result)?);
             }
         }
         Ok(out)
@@ -489,41 +599,6 @@ impl Engine {
             .client
             .delete_collection(DeleteCollectionBuilder::new(name))
             .await;
-    }
-
-    /// §8.5 T4 needs a *quantized* collection alongside the fp32 one, so the
-    /// same query can be scored both ways and the difference measured.
-    ///
-    /// SQ8 at bfb's 0.99 quantile (§6.7), kept in RAM so the measurement is of
-    /// the encoding rather than of a disk read.
-    pub async fn recreate_collection_quantized(
-        &self,
-        name: &str,
-        dim: u64,
-        metric: Metric,
-        points: u64,
-    ) -> anyhow::Result<()> {
-        use qdrant_client::qdrant::{QuantizationType, ScalarQuantizationBuilder};
-
-        let _ = self
-            .client
-            .delete_collection(DeleteCollectionBuilder::new(name))
-            .await;
-
-        self.client
-            .create_collection(
-                CreateCollectionBuilder::new(name)
-                    .vectors_config(VectorParamsBuilder::new(dim, to_distance(metric)))
-                    .optimizers_config(one_graph_optimizers(points, dim))
-                    .quantization_config(
-                        ScalarQuantizationBuilder::default()
-                            .r#type(QuantizationType::Int8 as i32)
-                            .quantile(0.99)
-                            .always_ram(true),
-                    ),
-            )
-            .await?;
-        Ok(())
     }
 
     pub async fn upsert(
@@ -825,36 +900,7 @@ impl Engine {
                 .await?;
 
             for br in resp.result {
-                let mut ids = Vec::with_capacity(br.result.len());
-                let mut scores = Vec::with_capacity(br.result.len());
-                for p in br.result {
-                    let id = match p.id.and_then(|i| i.point_id_options) {
-                        // Not `as u32`: that truncated an id past 2^32 to some
-                        // other row's id, and the tiers then judged the wrong
-                        // point rather than a wrong wire.
-                        Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(n)) => {
-                            u32::try_from(n).map_err(|_| {
-                                anyhow::anyhow!(
-                                    "{}: point id {n} does not fit u32; §4.3 ids are row indices",
-                                    self.label
-                                )
-                            })?
-                        }
-                        // §4.3 requires numeric ids equal to the row index for
-                        // relevance runs, so a UUID here means the run was
-                        // misconfigured rather than that we should guess.
-                        Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(u)) => {
-                            anyhow::bail!(
-                                "{}: got UUID id {u}; relevance runs require numeric ids (§4.3)",
-                                self.label
-                            )
-                        }
-                        None => anyhow::bail!("{}: ScoredPoint with no id", self.label),
-                    };
-                    ids.push(id);
-                    scores.push(f64::from(p.score));
-                }
-                out.push(Returned { ids, scores });
+                out.push(self.to_returned(br.result)?);
             }
             start = end;
         }
@@ -977,6 +1023,16 @@ pub fn grpc_status_code(e: &qdrant_client::QdrantError) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_numeric_id_is_a_row_index() {
+        let num = PointId::from(7u64);
+        assert_eq!(numeric_id(Some(&num)), Some(7));
+        let uuid = PointId::from("6f1c0a52-3a1e-4a6b-9a55-0b8f2d1c4e7a".to_string());
+        assert_eq!(numeric_id(Some(&uuid)), None);
+        assert_eq!(numeric_id(Some(&PointId::default())), None);
+        assert_eq!(numeric_id(None), None);
+    }
 
     #[test]
     fn only_the_differ_connection_checks_compatibility() {

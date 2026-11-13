@@ -1759,9 +1759,6 @@ async fn run_text_relevance(a: TextRelevanceRun) -> anyhow::Result<()> {
 /// truth over exactly those.
 #[tokio::main(flavor = "multi_thread")]
 async fn run_filtered_truth(a: FilteredTruthRun) -> anyhow::Result<()> {
-    use qdrant_client::qdrant::point_id::PointIdOptions;
-    use qdrant_client::qdrant::{PointId, ScrollPointsBuilder};
-
     anyhow::ensure!(!a.values.is_empty(), "--values needs at least one value");
     let m = parse_metric(&a.metric)?;
     let wanted: std::collections::HashSet<String> = a.values.iter().cloned().collect();
@@ -1772,36 +1769,28 @@ async fn run_filtered_truth(a: FilteredTruthRun) -> anyhow::Result<()> {
     });
 
     let eng = engine::Engine::connect_quiet("strawmann", &a.engine)?;
-    let mut cursor: Option<PointId> = None;
     let mut matching: Vec<u32> = Vec::new();
     let mut scanned: usize = 0;
     let t = std::time::Instant::now();
-    loop {
-        let mut b = ScrollPointsBuilder::new(&a.collection)
-            .limit(a.page)
-            .with_payload(true)
-            // The vectors are the corpus and are already on disk here; asking
-            // for 200k of them back would dominate the request for no use.
-            .with_vectors(false);
-        if let Some(c) = cursor.clone() {
-            b = b.offset(c);
-        }
-        let resp = eng.client.scroll(b).await?;
-        for pt in &resp.result {
-            let id = match pt.id.as_ref().and_then(|i| i.point_id_options.as_ref()) {
-                Some(PointIdOptions::Num(n)) => *n,
-                _ => anyhow::bail!("non-numeric point id"),
-            };
-            scanned += 1;
-            if payload_matches(&pt.payload, &a.field, &wanted) {
-                matching.push(u32::try_from(id)?);
+    eng.scroll_each(
+        &a.collection,
+        a.page,
+        // The vectors are the corpus and are already on disk here; asking
+        // for 200k of them back would dominate the request for no use.
+        |b| b.with_payload(true).with_vectors(false),
+        |points| {
+            for pt in points {
+                let id = engine::numeric_id(pt.id.as_ref())
+                    .ok_or_else(|| anyhow::anyhow!("non-numeric point id"))?;
+                scanned += 1;
+                if payload_matches(&pt.payload, &a.field, &wanted) {
+                    matching.push(u32::try_from(id)?);
+                }
             }
-        }
-        match resp.next_page_offset {
-            Some(next) => cursor = Some(next),
-            None => break,
-        }
-    }
+            Ok(true)
+        },
+    )
+    .await?;
     // Ascending, so the restricted scan reads the corpus in order and the
     // condition's id set is comparable between runs.
     matching.sort_unstable();
@@ -1960,47 +1949,39 @@ async fn run_scroll_check(
     page: u32,
     max_points: usize,
 ) -> anyhow::Result<()> {
-    use qdrant_client::qdrant::point_id::PointIdOptions;
-    use qdrant_client::qdrant::{PointId, ScrollPointsBuilder};
-
     let eng = engine::Engine::connect_quiet("strawmann", url)?;
-    let mut cursor: Option<PointId> = None;
     let mut seen: usize = 0;
     let mut pages: usize = 0;
     let mut last: Option<u64> = None;
     let t = std::time::Instant::now();
 
-    loop {
-        let mut b = ScrollPointsBuilder::new(collection).limit(page);
-        if let Some(c) = cursor.clone() {
-            b = b.offset(c);
-        }
-        // prost decodes the response here. A `time` double written at field 2
-        // instead of 3 lands inside the repeated `result` list and this call
-        // fails rather than returning a short page.
-        let resp = eng.client.scroll(b).await?;
-        pages += 1;
-        for p in &resp.result {
-            let id = match p.id.as_ref().and_then(|i| i.point_id_options.as_ref()) {
-                Some(PointIdOptions::Num(n)) => *n,
-                _ => anyhow::bail!("non-numeric point id"),
-            };
-            // Ids must come back strictly ascending, or pagination is repeating
-            // or skipping points.
-            if let Some(prev) = last {
-                anyhow::ensure!(id > prev, "scroll went backwards: {prev} then {id}");
-            }
-            last = Some(id);
-            seen += 1;
-        }
-        match resp.next_page_offset {
-            Some(next) => cursor = Some(next),
-            None => break,
-        }
-        if max_points > 0 && seen >= max_points {
-            println!("stopping early at {seen} points");
-            break;
-        }
+    // prost decodes each response inside `scroll_each`. A `time` double
+    // written at field 2 instead of 3 lands inside the repeated `result` list
+    // and the call fails rather than returning a short page.
+    let stopped = eng
+        .scroll_each(
+            collection,
+            page,
+            |b| b,
+            |points| {
+                pages += 1;
+                for p in points {
+                    let id = engine::numeric_id(p.id.as_ref())
+                        .ok_or_else(|| anyhow::anyhow!("non-numeric point id"))?;
+                    // Ids must come back strictly ascending, or pagination is
+                    // repeating or skipping points.
+                    if let Some(prev) = last {
+                        anyhow::ensure!(id > prev, "scroll went backwards: {prev} then {id}");
+                    }
+                    last = Some(id);
+                    seen += 1;
+                }
+                Ok(!(max_points > 0 && seen >= max_points))
+            },
+        )
+        .await?;
+    if stopped {
+        println!("stopping early at {seen} points");
     }
 
     let secs = t.elapsed().as_secs_f64();
@@ -2042,11 +2023,8 @@ async fn run_dump_scores(d: DumpRun) -> anyhow::Result<()> {
 
     let eng = engine::Engine::connect_quiet("dump", &d.engine)?;
     if !d.skip_upload {
-        eng.recreate_collection(&d.collection, base.dim as u64, m, base.n as u64)
-            .await?;
-        eng.upsert(&d.collection, &base.data, base.n, base.dim)
-            .await?;
-        eng.wait_green(&d.collection, 3600).await?;
+        let spec = engine::CollectionSpec::new(base.dim as u64, m, base.n as u64);
+        eng.load(&d.collection, &base, spec, None, 3600).await?;
     }
 
     // `exact: true` — see the doc on `DumpScores`.
@@ -2496,25 +2474,14 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
             "creating {} ({} x {}, {})",
             r.collection, b.n, b.dim, r.metric
         );
-        eng.recreate_collection_hnsw(
-            &r.collection,
-            b.dim as u64,
-            m,
-            r.hnsw_m,
-            r.hnsw_ef_construct,
-            b.n as u64,
-        )
-        .await?;
-        let t = std::time::Instant::now();
-        eng.upsert(&r.collection, &b.data, b.n, b.dim).await?;
-        eprintln!(
-            "uploaded {} points in {:.1}s",
-            b.n,
-            t.elapsed().as_secs_f64()
-        );
-        let t = std::time::Instant::now();
-        eng.wait_green(&r.collection, 3600).await?;
-        eprintln!("green in {:.1}s", t.elapsed().as_secs_f64());
+        let spec = engine::CollectionSpec {
+            hnsw_m: r.hnsw_m,
+            hnsw_ef_construct: r.hnsw_ef_construct,
+            ..engine::CollectionSpec::new(b.dim as u64, m, b.n as u64)
+        };
+        let t = eng.load(&r.collection, &b, spec, None, 3600).await?;
+        eprintln!("uploaded {} points in {:.1}s", b.n, t.upsert.as_secs_f64());
+        eprintln!("green in {:.1}s", t.green.as_secs_f64());
     }
 
     // §4.3's tie clause needs to know whether `--epsilon` is a ratio or
@@ -2875,11 +2842,9 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
     let collection = "conformance";
     for e in &engines {
         eprintln!("[{}] recreating collection", e.label);
-        e.recreate_collection(collection, base.dim as u64, m, base.n as u64)
-            .await?;
         eprintln!("[{}] upserting {} points", e.label, base.n);
-        e.upsert(collection, &base.data, base.n, base.dim).await?;
-        e.wait_green(collection, 600).await?;
+        let spec = engine::CollectionSpec::new(base.dim as u64, m, base.n as u64);
+        e.load(collection, &base, spec, None, 600).await?;
         // The pin, read back. T3 compares recall at a nominal `ef`, and an
         // engine searching several graphs at that `ef` reports a higher one
         // without being more accurate -- which is how the
@@ -3109,11 +3074,12 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
     // *only* difference between the two score sets is the encoding.
     if max_tier >= 4 {
         let qcoll = format!("{collection}_sq8");
+        let spec = engine::CollectionSpec {
+            sq8: true,
+            ..engine::CollectionSpec::new(base.dim as u64, m, base.n as u64)
+        };
         for e in &engines {
-            e.recreate_collection_quantized(&qcoll, base.dim as u64, m, base.n as u64)
-                .await?;
-            e.upsert(&qcoll, &base.data, base.n, base.dim).await?;
-            e.wait_green(&qcoll, 3600).await?;
+            e.load(&qcoll, &base, spec, None, 3600).await?;
         }
         for (i, e) in engines.iter().enumerate() {
             // Quantized scores, then the same queries forced onto the fp32 path
@@ -3462,16 +3428,11 @@ async fn run_metamorphic(
         ));
 
         // §8.6's permutation invariance proper.
-        e.recreate_collection(&perm_fwd, base.dim as u64, m, base.n as u64)
-            .await?;
-        e.upsert_in_order(&perm_fwd, &base.data, base.dim, &fwd)
-            .await?;
-        e.wait_green(&perm_fwd, 600).await?;
-        e.recreate_collection(&perm_rev, base.dim as u64, m, base.n as u64)
-            .await?;
-        e.upsert_in_order(&perm_rev, &base.data, base.dim, &rev)
-            .await?;
-        e.wait_green(&perm_rev, 600).await?;
+        // Sized for the whole base (`base.n`), though they hold `n_perm`
+        // rows: the segment ceiling this sets is the main collection's.
+        let spec = engine::CollectionSpec::new(base.dim as u64, m, base.n as u64);
+        e.load(&perm_fwd, base, spec, Some(&fwd), 600).await?;
+        e.load(&perm_rev, base, spec, Some(&rev), 600).await?;
         let from_fwd = e
             .query(
                 &perm_fwd,
