@@ -303,6 +303,20 @@ def dataset(name: str) -> Corpus:
                   ground_truth=d / "gt" / f"{name}.{metric(name)}.k100.gt.json")
 
 
+def missing_file_message(f: Path, name: str) -> str:
+    """What `fullrun.py` and `recall.py` print when one of `name`'s files is absent.
+
+    Names the conversion separately from the fetch: for every dataset but
+    SIFT1M the missing file is the converted corpus or the fp64 ground truth,
+    neither of which `fetch` produces. Sending the reader there costs a
+    re-download and still leaves the file missing.
+    """
+    return (f"missing {f}\n"
+            f"the archives come from: conformance/datasets/datasets.py fetch {name}\n"
+            f"the fbin and the ground truth are made by the dataset's own "
+            f"conversion (for dbpedia-openai-1m: bench/harness/headline.py)")
+
+
 class TextCorpus(NamedTuple):
     """A text corpus's files: `corpus.jsonl`, `queries.txt` and, when judged,
     `qrels.tsv` (the oracle's side), and the `bfb/` directory bfb uploads."""

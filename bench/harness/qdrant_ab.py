@@ -41,6 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paths
+from host_load import wait_quiet
 
 ROOT = Path(os.environ.get("STRAWMANN_ROOT", Path(__file__).resolve().parents[2]))
 STORAGE = paths.QDRANT_STORAGE
@@ -127,17 +128,6 @@ def start(image: str) -> str:
             time.sleep(2)
     stop_container()
     raise SystemExit(f"{image} did not answer on :{REST_PORT} within 120s ({last})")
-
-
-def wait_quiet(limit_pct: int = 10, cap_s: int = 300) -> int:
-    cores = os.cpu_count() or 1
-    waited = 0
-    while waited < cap_s:
-        if float(Path("/proc/loadavg").read_text().split()[0]) / cores * 100 <= limit_pct:
-            return waited
-        time.sleep(15)
-        waited += 15
-    return waited
 
 
 def run_rows(label: str, rows: list[str], out_dir: Path,

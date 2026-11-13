@@ -1623,7 +1623,7 @@ def settle(what: str) -> None:
     recent: list[float] = []
     announced = False
     while True:
-        load1 = float(Path("/proc/loadavg").read_text().split()[0])
+        load1 = workloads.read_load1()
         pct = int(load1 / cores * 100)
         if pct <= SETTLE_TARGET_PCT:
             # Low average is not quiet: the gate fails on any single foreign
@@ -2740,15 +2740,7 @@ def main(argv: list[str]) -> int:
     for f in (text_files(DATASET) if paths.is_text(DATASET)
               else [*paths.dataset(DATASET), *paths.tests_files(DATASET)]):
         if not f.exists():
-            # Named separately from the fetch: for every dataset but SIFT1M the
-            # missing file is the converted corpus or the fp64 ground truth,
-            # neither of which `fetch` produces. Sending the reader there costs
-            # a re-download and still leaves the file missing.
-            print(f"missing {f}\n"
-                  f"the archives come from: conformance/datasets/datasets.py fetch {DATASET}\n"
-                  f"the fbin and the ground truth are made by the dataset's own "
-                  f"conversion (for dbpedia-openai-1m: bench/harness/headline.py)",
-                  file=sys.stderr)
+            print(paths.missing_file_message(f, DATASET), file=sys.stderr)
             return 1
 
     # Before the gate and the build, not after: this costs a millisecond and

@@ -84,17 +84,8 @@ def engine_processes() -> list[tuple[int, str]]:
     measurement: they share the page cache and the memory bus. The caller
     reports that rather than picking one.
     """
-    found = []
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            comm = (entry / "comm").read_text().strip()
-        except OSError:
-            continue  # exited between listing and reading
-        if any(comm.startswith(p) for p in ENGINE_PREFIXES):
-            found.append((int(entry.name), comm))
-    return sorted(found)
+    return [(pid, comm) for pid, comm in processes()
+            if any(comm.startswith(p) for p in ENGINE_PREFIXES)]
 
 
 #: Compilers and linkers: a build started in another session mid-run is
@@ -822,12 +813,21 @@ def rss_split(pid: int) -> dict[str, int | None]:
     of gigabytes. A measurement that perturbs the engine to describe it is the
     wrong trade here; the THP question belongs to a diagnostic run.
     """
-    out: dict[str, int | None] = dict.fromkeys(RSS_FIELDS)
-    text = _read(f"/proc/{pid}/status")
+    return _kb_fields(_read(f"/proc/{pid}/status"), RSS_FIELDS,
+                      {"RssAnon:": "rss_anon_bytes", "RssFile:": "rss_file_bytes",
+                       "RssShmem:": "rss_shmem_bytes"})
+
+
+def _kb_fields(text: str | None, fields: tuple[str, ...],
+               keys: dict[str, str]) -> dict[str, int | None]:
+    """`/proc`'s "Key:  N kB" lines named in `keys`, as bytes under their field.
+
+    Every field in `fields` is present, None where `text` is None or the line
+    is missing or does not parse.
+    """
+    out: dict[str, int | None] = dict.fromkeys(fields)
     if text is None:
         return out
-    keys = {"RssAnon:": "rss_anon_bytes", "RssFile:": "rss_file_bytes",
-            "RssShmem:": "rss_shmem_bytes"}
     for line in text.splitlines():
         head = line.split(":")[0] + ":"
         if head in keys:
@@ -850,17 +850,9 @@ def huge_pages(pid: int | None) -> dict[str, int | None]:
     running, with W3 and W4 on the same collection flat, and whether that
     pass's arenas are mapped by smaller pages is one reading away.
     """
-    out: dict[str, int | None] = dict.fromkeys(HUGE_FIELDS)
-    text = _read(f"/proc/{pid}/smaps_rollup") if pid else None
-    if text is None:
-        return out
-    keys = {"AnonHugePages:": "anon_huge_bytes", "FilePmdMapped:": "file_pmd_bytes"}
-    for line in text.splitlines():
-        head = line.split(":")[0] + ":"
-        if head in keys:
-            with contextlib.suppress(IndexError, ValueError):
-                out[keys[head]] = int(line.split()[1]) * 1024
-    return out
+    return _kb_fields(_read(f"/proc/{pid}/smaps_rollup") if pid else None, HUGE_FIELDS,
+                      {"AnonHugePages:": "anon_huge_bytes",
+                       "FilePmdMapped:": "file_pmd_bytes"})
 
 
 #: `memory_state`'s fields: the host's free memory and swap, and the engine's
@@ -889,11 +881,8 @@ def memory_state(pid: int | None) -> dict[str, int | None]:
             out["mem_available_bytes"] = kib["MemAvailable"] * 1024
         if "SwapTotal" in kib and "SwapFree" in kib:
             out["swap_used_bytes"] = (kib["SwapTotal"] - kib["SwapFree"]) * 1024
-    status = _read(f"/proc/{pid}/status") if pid else None
-    for line in (status or "").splitlines():
-        if line.startswith("VmSwap:"):
-            with contextlib.suppress(IndexError, ValueError):
-                out["engine_swap_bytes"] = int(line.split()[1]) * 1024
+    out.update(_kb_fields(_read(f"/proc/{pid}/status") if pid else None,
+                          ("engine_swap_bytes",), {"VmSwap:": "engine_swap_bytes"}))
     return out
 
 

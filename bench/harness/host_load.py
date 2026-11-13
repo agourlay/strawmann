@@ -26,11 +26,40 @@ import setup
 # Host state, §7.1 covers configuration, none of which notices a busy machine
 # --------------------------------------------------------------------------
 
+def read_load1() -> float:
+    """The 1-minute load average, raw. Raises where `/proc/loadavg` cannot be read."""
+    return float(Path("/proc/loadavg").read_text().split()[0])
+
+
+def load_per_core_pct() -> float:
+    """The one-minute load average per core, as a percentage, the gate's reading:
+    100 is every core busy, and 0.0 where `/proc/loadavg` cannot be read."""
+    try:
+        load1 = read_load1()
+    except (OSError, ValueError, IndexError):
+        return 0.0
+    return load1 / (os.cpu_count() or 1) * 100
+
+
 def load_pct() -> int:
-    """The 1-minute load average per core, as a percentage: 100 is every core busy."""
-    with open("/proc/loadavg") as fh:
-        one = float(fh.read().split()[0])
-    return int(one / os.cpu_count() * 100)
+    """`load_per_core_pct` as the whole percent rows record (`load_start`, `load_end`)."""
+    return int(load_per_core_pct())
+
+
+def wait_quiet(limit_pct: int = 10, cap_s: int = 300) -> int:
+    """§7.1: do not start a timed row on a busy machine.
+
+    Polls every 15 s until the load per core is at most `limit_pct`, for at
+    most `cap_s`, and returns the seconds waited.
+    """
+    cores = os.cpu_count() or 1
+    waited = 0
+    while waited < cap_s:
+        if read_load1() / cores * 100 <= limit_pct:
+            return waited
+        time.sleep(15)
+        waited += 15
+    return waited
 
 
 #: Processes that are *supposed* to be running during a measurement, matched by

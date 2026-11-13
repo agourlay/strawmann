@@ -99,6 +99,8 @@ from host_load import (  # noqa: F401  re-exported
     foreign_from_ps,
     foreign_load,
     load_pct,
+    load_per_core_pct,
+    read_load1,
 )
 from row_schema import Gate, LoadMode, Result, Status
 
@@ -2402,23 +2404,12 @@ def ef_of(w: Workload) -> int | None:
     Rows that do not name one search at the engine's default, which is not the
     same claim, so they report None rather than 128.
     """
-    if "--search-hnsw-ef" not in w.args:
-        return None
-    i = w.args.index("--search-hnsw-ef")
-    try:
-        return int(w.args[i + 1])
-    except (IndexError, ValueError):
-        return None
+    return _flag_int(w.args, "--search-hnsw-ef")
 
 
 def n_of(w: Workload) -> int | None:
     """The `-n` a row was invoked with, or None if it names none."""
-    if "-n" not in w.args:
-        return None
-    try:
-        return int(w.args[w.args.index("-n") + 1])
-    except (IndexError, ValueError):
-        return None
+    return _flag_int(w.args, "-n")
 
 
 #: What `OversamplingPolicy.matched` asks for. Two, because findings 42 swept
@@ -2533,17 +2524,25 @@ BFB_DEFAULT_THREADS = 2
 BFB_DEFAULT_CONNECTIONS = 1
 
 
-def _flag_int(args: list[str], *names: str) -> int | None:
-    """The integer value of the first of `names` present in `args`, or None."""
+def _flag_value(args: list[str], *names: str) -> str | None:
+    """The value after the first of `names` present in `args` with one, or None."""
     for n in names:
         if n in args:
             i = args.index(n)
             if i + 1 < len(args):
-                try:
-                    return int(args[i + 1])
-                except ValueError:
-                    return None
+                return args[i + 1]
     return None
+
+
+def _flag_int(args: list[str], *names: str) -> int | None:
+    """`_flag_value` as an integer, or None where it is absent or not one."""
+    v = _flag_value(args, *names)
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        return None
 
 
 def client_concurrency(w: Workload) -> dict:
@@ -2616,21 +2615,13 @@ def load_mode_of(w: Workload) -> LoadMode:
 
 
 def collection_of(w: Workload) -> str | None:
-    if "--collection-name" in w.args:
-        i = w.args.index("--collection-name")
-        if i + 1 < len(w.args):
-            return w.args[i + 1]
-    return w.query_collection
+    v = _flag_value(w.args, "--collection-name")
+    return v if v is not None else w.query_collection
 
 
 def batch_size_of(w: Workload) -> int:
-    if "--search-batch-size" in w.args:
-        i = w.args.index("--search-batch-size")
-        try:
-            return int(w.args[i + 1])
-        except (IndexError, ValueError):
-            pass
-    return 1
+    v = _flag_int(w.args, "--search-batch-size")
+    return v if v is not None else 1
 
 
 def static_notes(w: Workload) -> list[str]:
@@ -2878,15 +2869,6 @@ def run_gate_with_retry() -> subprocess.CompletedProcess:
         else:
             settle_for_retry()
     return gate  # unreachable; the loop returns
-
-
-def load_per_core_pct() -> float:
-    """The one-minute load average per core, as a percentage, the gate's reading."""
-    try:
-        load1 = float(Path("/proc/loadavg").read_text().split()[0])
-    except (OSError, ValueError, IndexError):
-        return 0.0
-    return load1 / (os.cpu_count() or 1) * 100
 
 
 def settle_load_for_retry() -> None:

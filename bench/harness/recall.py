@@ -937,14 +937,7 @@ def main(argv: list[str]) -> int:
 
     for f in paths.dataset(DATASET):
         if not f.exists():
-            # The same distinction `fullrun.py` makes: past SIFT1M the missing
-            # file is the converted corpus or the fp64 ground truth, and
-            # `fetch` produces neither.
-            print(f"missing {f}\n"
-                  f"the archives come from: conformance/datasets/datasets.py fetch {DATASET}\n"
-                  f"the fbin and the ground truth are made by the dataset's own "
-                  f"conversion (for dbpedia-openai-1m: bench/harness/headline.py)",
-                  file=sys.stderr)
+            print(paths.missing_file_message(f, DATASET), file=sys.stderr)
             return 1
 
     rc = 0

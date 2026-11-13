@@ -56,6 +56,25 @@ def percentiles_us(times: list[float]) -> dict[str, float]:
     return out
 
 
+def _doc(results: Path, wid: str, suffix: str = ""):
+    """bfb's JSON for row `wid` (`<wid><suffix>.json`), or {} where it is
+    missing or unreadable: every reader below then finds nothing in it."""
+    p = results / f"{wid}{suffix}.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _phase(doc: dict) -> dict:
+    """The timed phase's block: bfb records a search row's figures under
+    `search` and a scroll row's under `scroll`."""
+    res = doc.get("results", {})
+    return res.get("search") or res.get("scroll") or {}
+
+
 
 def phases_of(results: Path, wid: str) -> dict:
     """bfb's own upload and index-wait times, in seconds, unrounded.
@@ -73,14 +92,7 @@ def phases_of(results: Path, wid: str) -> dict:
     marks a row sitting on that floor, where the number is an upper bound on
     the build and a measurement of the polling loop.
     """
-    p = results / f"{wid}.json"
-    if not p.exists():
-        return {}
-    try:
-        d = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
-    res = d.get("results", {})
+    res = _doc(results, wid).get("results", {})
     out: dict = {}
     if isinstance(res.get("upload"), dict):
         v = res["upload"].get("duration_secs")
@@ -106,15 +118,7 @@ def wall_qps_of(results: Path, wid: str, batch: int = 1) -> dict:
     request count comes from `full_timings` rather than `-n`, so an
     interrupted row reports what it did rather than what it was asked.
     """
-    p = results / f"{wid}.json"
-    if not p.exists():
-        return {}
-    try:
-        d = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
-    res = d.get("results", {})
-    phase = res.get("search") or res.get("scroll") or {}
+    phase = _phase(_doc(results, wid))
     dur = phase.get("duration_secs")
     reqs = phase.get("full_timings")
     if not isinstance(dur, (int, float)) or dur <= 0 or not isinstance(reqs, list) or not reqs:
@@ -134,13 +138,7 @@ def precision_of(results: Path, wid: str) -> dict:
     recall is the conformance sweep's (`recall.py`), as for every other row.
     The two far apart is worth a look; close is expected.
     """
-    p = results / f"{wid}.json"
-    if not p.exists():
-        return {}
-    try:
-        d = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
+    d = _doc(results, wid)
     prec = ((d.get("results") or {}).get("search") or {}).get("precision") or {}
     v = prec.get("avg") if isinstance(prec, dict) else None
     return {"bfb_precision": round(float(v), 4)} if isinstance(v, (int, float)) else {}
@@ -149,13 +147,7 @@ def precision_of(results: Path, wid: str) -> dict:
 
 def background_of(results: Path, wid: str) -> dict:
     """The upload phase of a row's concurrent bfb, from its own JSON."""
-    p = results / f"{wid}-write.json"
-    if not p.exists():
-        return {}
-    try:
-        d = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
+    d = _doc(results, wid, "-write")
     up = (d.get("results") or {}).get("upload") or {}
     out = {}
     if isinstance(up.get("points_per_sec"), (int, float)):
@@ -180,15 +172,7 @@ def latency_of(results: Path, wid: str) -> dict:
     stated reason, which reads as a measurement failure rather than as a lookup
     in the wrong key.
     """
-    p = results / f"{wid}.json"
-    if not p.exists():
-        return {}
-    try:
-        d = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
-    res = d.get("results", {})
-    search = res.get("search") or res.get("scroll") or {}
+    search = _phase(_doc(results, wid))
     out = {}
     for key, prefix in (("full_timings", "client"), ("server_timings", "server")):
         v = search.get(key)

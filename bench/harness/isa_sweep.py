@@ -53,6 +53,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paths
+from host_load import wait_quiet
 
 ROOT = Path(os.environ.get("STRAWMANN_ROOT", Path(__file__).resolve().parents[2]))
 ISA_DIR = ROOT / "zig-out/isa"
@@ -131,19 +132,6 @@ def cmd_list(args) -> int:
     print(f"\ndefault rows: {' '.join(DEFAULT_ROWS)}")
     print(f"controls (expect no ISA effect): {', '.join(sorted(CONTROL_ROWS))}")
     return 0
-
-
-def wait_quiet(limit_pct: int = 10, cap_s: int = 300) -> int:
-    """§7.1: do not start a timed row on a busy machine."""
-    cores = os.cpu_count() or 1
-    waited = 0
-    while waited < cap_s:
-        load1 = float(Path("/proc/loadavg").read_text().split()[0])
-        if load1 / cores * 100 <= limit_pct:
-            return waited
-        time.sleep(15)
-        waited += 15
-    return waited
 
 
 #: PIDs of the servers this sweep started and has not seen exit.
