@@ -431,6 +431,16 @@ impl GroundTruth {
         &self.scores[query * self.k..(query + 1) * self.k]
     }
 
+    /// How deep `query`'s truth really is: its scores up to the first `NaN`
+    /// pad. `k` for a full row; less where the corpus, or the query's own
+    /// condition, holds fewer than `k` points.
+    pub fn depth(&self, query: usize) -> usize {
+        self.scores_for(query)
+            .iter()
+            .take_while(|s| !s.is_nan())
+            .count()
+    }
+
     /// §4.3's boundary-tie rule, against the **top-`k` prefix** of the truth
     /// rather than the whole cached list.
     ///

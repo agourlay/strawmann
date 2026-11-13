@@ -192,7 +192,9 @@ fn recall_one(
     // against `k` it reads 0.6, and the §7.4 frontier shows a regression that
     // is the filter's doing rather than the engine's. `None` is §4.3's
     // unfiltered truth, whose matching set is the whole corpus.
-    let available = gt.n_matching.map_or(k, |m| k.min(m));
+    // And per query: a dataset's own test whose condition matches 3 points
+    // ships 3 neighbours (h-and-m: 676 of 10,000), padded to `k` with NaN.
+    let available = gt.n_matching.map_or(k, |m| k.min(m)).min(gt.depth(qi));
     if available == 0 {
         return f64::NAN;
     }
@@ -369,10 +371,14 @@ pub fn evaluate(
     // engine answering badly.
     let expected_len = limit.min(gt.n_matching.unwrap_or(gt.n_base));
     let mut returned_total = 0usize;
+    let mut asked_total = 0usize;
     let mut short_lists = 0usize;
 
     for (qi, r) in results.iter().enumerate().take(n) {
+        // A query whose own truth is shorter than the page asks no more.
+        let expected_len = expected_len.min(gt.depth(qi));
         returned_total += r.ids.len().min(limit);
+        asked_total += expected_len;
         if r.ids.len() < expected_len {
             short_lists += 1;
         }
@@ -432,7 +438,7 @@ pub fn evaluate(
         },
         short_lists,
         returned: returned_total,
-        asked: n * expected_len,
+        asked: asked_total,
         n_matching: gt.n_matching,
         impossible_scores: tally.impossible_scores,
         unknown_ids: tally.unknown_ids,

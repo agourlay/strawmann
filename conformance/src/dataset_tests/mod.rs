@@ -399,10 +399,13 @@ pub fn read_tests(path: &Path, limit: Option<usize>) -> anyhow::Result<Vec<TestR
 
 /// The shipped neighbours as a `GroundTruth` at depth `k`.
 ///
-/// `k` is the sweep's `--limit`. A record holding fewer than `k` ids cannot
-/// say what its k-th neighbour is, and the tie clause reads exactly that
-/// score, so it is refused rather than padded. An id past the corpus is
-/// refused too: §4.3 makes ids row indices.
+/// `k` is the sweep's `--limit`. A record with a condition may hold fewer
+/// than `k` ids: its condition matches fewer points (h-and-m: 676 of 10,000
+/// tests ship 1 to 9). Its row is padded with `NaN` scores and an id no base
+/// row has, and scoring reads it at its own depth (`GroundTruth::depth`).
+/// An unconditioned record shorter than `k` cannot say what its k-th
+/// neighbour is and is refused. An id past the corpus is refused too: §4.3
+/// makes ids row indices.
 pub fn truth_from_tests(
     records: &[TestRecord],
     k: usize,
@@ -418,7 +421,7 @@ pub fn truth_from_tests(
     let mut scores = Vec::with_capacity(records.len() * k);
     let mut queries = Vec::with_capacity(records.len() * dim);
     for (qi, r) in records.iter().enumerate() {
-        if r.closest_ids.len() < k {
+        if r.closest_ids.len() < k && r.conditions.is_none() {
             return Err(format!(
                 "query {qi} (line {}) ships {} closest_ids and --limit is {k}: \
                  the truth cannot be deeper than the dataset's",
@@ -426,14 +429,20 @@ pub fn truth_from_tests(
                 r.closest_ids.len()
             ));
         }
-        if let Some(&bad) = r.closest_ids[..k].iter().find(|&&id| id as usize >= n_base) {
+        let have = r.closest_ids.len().min(k);
+        if let Some(&bad) = r.closest_ids[..have]
+            .iter()
+            .find(|&&id| id as usize >= n_base)
+        {
             return Err(format!(
                 "query {qi} (line {}) names neighbour {bad}, past the corpus of {n_base} (§4.3)",
                 r.line
             ));
         }
-        ids.extend_from_slice(&r.closest_ids[..k]);
-        scores.extend_from_slice(&r.closest_scores[..k]);
+        ids.extend_from_slice(&r.closest_ids[..have]);
+        scores.extend_from_slice(&r.closest_scores[..have]);
+        ids.extend(std::iter::repeat_n(u32::MAX, k - have));
+        scores.extend(std::iter::repeat_n(f64::NAN, k - have));
         queries.extend_from_slice(&r.query);
     }
     Ok(GroundTruth {
@@ -448,8 +457,7 @@ pub fn truth_from_tests(
         query_checksum: oracle::checksum_f32(&queries),
         condition: Some(DATASET_CONDITION.to_string()),
         // Per query, and the file does not say: each condition matches its
-        // own set. Records shorter than `k` are refused above, so every
-        // query's truth is a full `k`.
+        // own set. A row shorter than `k` carries its depth in its NaN pad.
         n_matching: None,
     })
 }
@@ -855,6 +863,55 @@ mod tests {
         let e = read_tests(&p, None).unwrap_err().to_string();
         assert!(e.contains(":4 (query 2)") && e.contains("geo"), "{e}");
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_condition_matching_fewer_than_k_points_is_scored_at_its_own_depth() {
+        // h-and-m: 676 of 10,000 tests ship fewer than 10 neighbours because
+        // their condition matches fewer points. The sweep refused the file.
+        let cond = Some(Conditions {
+            must: vec![],
+            should: vec![],
+        });
+        let rec = |ids: Vec<u32>, conditions| TestRecord {
+            line: 1,
+            query: vec![1.0, 0.0],
+            conditions,
+            closest_scores: ids.iter().map(|&i| 0.9 - f64::from(i) * 0.01).collect(),
+            closest_ids: ids,
+        };
+        let recs = [
+            rec(vec![4, 5, 6], cond.clone()),
+            rec((0..10).collect(), None),
+        ];
+        let gt = truth_from_tests(&recs, 10, Metric::Cosine, 12, 0).unwrap();
+        assert_eq!((gt.depth(0), gt.depth(1)), (3, 10));
+        assert!(gt.scores_for(0)[3].is_nan());
+        // All three returned is recall 1.0 and not a short list; two is 2/3.
+        let all = Returned {
+            ids: vec![4, 5, 6],
+            scores: vec![0.86, 0.85, 0.84],
+        };
+        let two = Returned {
+            ids: vec![4, 5],
+            scores: vec![0.86, 0.85],
+        };
+        let full = Returned {
+            ids: (0..10).collect(),
+            scores: (0..10).map(|i| 0.9 - f64::from(i) * 0.01).collect(),
+        };
+        let e = eps();
+        let g = crate::relevance::evaluate(&gt, &[all, full.clone()], &e, 10, None);
+        assert_eq!(
+            (g.recall_at_10, g.short_lists, g.asked, g.returned),
+            (1.0, 0, 13, 13)
+        );
+        let g = crate::relevance::evaluate(&gt, &[two, full], &e, 10, None);
+        assert!((g.recall_at_10 - (2.0 / 3.0 + 1.0) / 2.0).abs() < 1e-12);
+        assert_eq!(g.short_lists, 1);
+        // Unconditioned and short is still a malformed record.
+        let e = truth_from_tests(&[rec(vec![1, 2], None)], 10, Metric::Cosine, 12, 0).unwrap_err();
+        assert!(e.contains("ships 2"), "{e}");
     }
 
     #[test]
