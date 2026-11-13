@@ -36,13 +36,13 @@
 //! The cast is lossy — f64's 53-bit mantissa to f32's 24 — but it is the same
 //! loss the engine takes at ingest, which is the point.
 
+use super::FbinWriter;
 use anyhow::Context;
 use arrow_array::{Array, cast::AsArray, types::Float64Type};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use std::fs::File;
-use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 /// What a conversion produced, for the run record.
@@ -131,63 +131,6 @@ upstream digest",
             Ok(r.metadata().file_metadata().num_rows() as usize)
         })
         .collect()
-}
-
-/// Streams an fbin file: header first, then rows, verifying the count at close.
-struct FbinWriter {
-    w: BufWriter<File>,
-    dim: usize,
-    declared: usize,
-    written: usize,
-    path: PathBuf,
-}
-
-impl FbinWriter {
-    fn create(path: &Path, n: usize, dim: usize) -> anyhow::Result<Self> {
-        if let Some(p) = path.parent() {
-            std::fs::create_dir_all(p)?;
-        }
-        let mut w = BufWriter::with_capacity(1 << 20, File::create(path)?);
-        w.write_all(&(n as u32).to_le_bytes())?;
-        w.write_all(&(dim as u32).to_le_bytes())?;
-        Ok(Self {
-            w,
-            dim,
-            declared: n,
-            written: 0,
-            path: path.to_path_buf(),
-        })
-    }
-
-    fn push(&mut self, row: &[f32]) -> anyhow::Result<()> {
-        debug_assert_eq!(row.len(), self.dim);
-        // `to_le_bytes` per component rather than a transmute of the slice:
-        // `read_fbin` is explicitly little-endian, and a big-endian host writing
-        // native bytes would produce a file that reads back as garbage on the
-        // machine that wrote it.
-        let mut buf = Vec::with_capacity(self.dim * 4);
-        for x in row {
-            buf.extend_from_slice(&x.to_le_bytes());
-        }
-        self.w.write_all(&buf)?;
-        self.written += 1;
-        Ok(())
-    }
-
-    fn finish(mut self) -> anyhow::Result<()> {
-        self.w.flush()?;
-        // The header was written from the footer-derived count. If the decoded
-        // rows disagree, the file claims a length it does not have and every
-        // downstream reader silently reads past the end of the real data.
-        anyhow::ensure!(
-            self.written == self.declared,
-            "{}: header declares {} rows but {} were written",
-            self.path.display(),
-            self.declared,
-            self.written
-        );
-        Ok(())
-    }
 }
 
 /// Convert a directory of parquet shards into `base.fbin` + `queries.fbin`.

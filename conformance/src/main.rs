@@ -1885,6 +1885,12 @@ async fn run_filtered_truth(a: FilteredTruthRun) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A `--collections` list: comma-separated, each name trimmed, empty ones
+/// skipped.
+fn collection_names(list: &str) -> impl Iterator<Item = &str> {
+    list.split(',').map(str::trim).filter(|s| !s.is_empty())
+}
+
 /// §8.9's argument, applied to the collection: a pin nobody reads back is not
 /// a pin.
 ///
@@ -1907,11 +1913,7 @@ async fn run_collection_info(
 ) -> anyhow::Result<()> {
     let eng = engine::Engine::connect_quiet(label, url)?;
     let mut got = Vec::new();
-    for name in collections
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    for name in collection_names(collections) {
         match eng.collection_config(name).await {
             Ok(v) => {
                 println!("  {name}: {v}");
@@ -1932,11 +1934,7 @@ async fn run_collection_info(
 #[tokio::main(flavor = "multi_thread")]
 async fn run_drop_collections(url: &str, collections: &str) -> anyhow::Result<()> {
     let eng = engine::Engine::connect_quiet("drop", url)?;
-    for name in collections
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    for name in collection_names(collections) {
         let before = eng.count(name).await.ok();
         eng.delete_collection(name).await;
         match before {
@@ -3683,9 +3681,9 @@ mod tests {
         assert!(parse_max_tier("").is_err());
     }
 
-    #[test]
-    fn relevance_acorn_needs_a_filter() {
-        // W12's join: the rows send ACORN, so the sweep has to be able to.
+    /// `relevance` on the file path (`--base`, `--queries`, `--ground-truth`)
+    /// with `extra` after it.
+    fn parse_relevance(extra: &[&str]) -> Result<Cli, clap::Error> {
         let base = [
             "conformance",
             "relevance",
@@ -3696,7 +3694,13 @@ mod tests {
             "--ground-truth",
             "g",
         ];
-        let parse = |extra: &[&str]| Cli::try_parse_from(base.iter().chain(extra));
+        Cli::try_parse_from(base.iter().chain(extra))
+    }
+
+    #[test]
+    fn relevance_acorn_needs_a_filter() {
+        // W12's join: the rows send ACORN, so the sweep has to be able to.
+        let parse = parse_relevance;
         let Command::Relevance(r) = parse(&["--filter-values", "1,2", "--acorn"])
             .unwrap()
             .command
@@ -3745,15 +3749,7 @@ mod tests {
     #[test]
     fn relevance_passes_quantization_params_through() {
         // W7's join: the sweep has to send what the row sent, and say so.
-        let cli = Cli::try_parse_from([
-            "conformance",
-            "relevance",
-            "--base",
-            "b",
-            "--queries",
-            "q",
-            "--ground-truth",
-            "g",
+        let cli = parse_relevance(&[
             "--quantization-oversampling",
             "4",
             "--quantization-rescore",
@@ -3768,17 +3764,7 @@ mod tests {
         assert_eq!(quantization_oversampling, Some(4.0));
         assert_eq!(quantization_rescore, Some(true));
         // Neither given: no quantization params are sent, and none recorded.
-        let cli = Cli::try_parse_from([
-            "conformance",
-            "relevance",
-            "--base",
-            "b",
-            "--queries",
-            "q",
-            "--ground-truth",
-            "g",
-        ])
-        .unwrap();
+        let cli = parse_relevance(&[]).unwrap();
         let Command::Relevance(r) = cli.command else {
             panic!("parsed as another command")
         };
@@ -3789,21 +3775,7 @@ mod tests {
         // Oversampling without rescore is refused rather than defaulted:
         // the request must state both, or the sweep's record names a search
         // the engine's default may or may not have run.
-        assert!(
-            Cli::try_parse_from([
-                "conformance",
-                "relevance",
-                "--base",
-                "b",
-                "--queries",
-                "q",
-                "--ground-truth",
-                "g",
-                "--quantization-oversampling",
-                "4",
-            ])
-            .is_err()
-        );
+        assert!(parse_relevance(&["--quantization-oversampling", "4"]).is_err());
     }
 
     #[test]

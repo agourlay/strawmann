@@ -324,6 +324,25 @@ pub struct TestRecord {
     pub closest_scores: Vec<f64>,
 }
 
+/// The array under `key` in one test record, each element through `elem`:
+/// refused, at `at()`, when the key holds no array or an element is not a
+/// `what` (`"non-number"`, `"non-id"`).
+fn array_of<T>(
+    v: &Value,
+    key: &str,
+    what: &str,
+    at: &dyn Fn() -> String,
+    elem: impl Fn(&Value) -> Option<T>,
+) -> anyhow::Result<Vec<T>> {
+    v.get(key)
+        .and_then(Value::as_array)
+        .with_context(|| format!("{}: no `{key}` array", at()))?
+        .iter()
+        .map(elem)
+        .collect::<Option<_>>()
+        .with_context(|| format!("{}: `{key}` holds a {what}", at()))
+}
+
 /// Read the first `limit` records (all when `None`).
 ///
 /// Every refusal names the line and the query index, so a dataset that grows
@@ -343,32 +362,16 @@ pub fn read_tests(path: &Path, limit: Option<usize>) -> anyhow::Result<Vec<TestR
         let at = || format!("{}:{} (query {})", path.display(), i + 1, out.len());
         let v: Value =
             serde_json::from_str(&line).with_context(|| format!("{}: not JSON", at()))?;
-        let query: Vec<f32> = v
-            .get("query")
-            .and_then(Value::as_array)
-            .with_context(|| format!("{}: no `query` array", at()))?
-            .iter()
-            .map(|x| x.as_f64().map(|f| f as f32))
-            .collect::<Option<_>>()
-            .with_context(|| format!("{}: `query` holds a non-number", at()))?;
+        let query: Vec<f32> = array_of(&v, "query", "non-number", &at, |x| {
+            x.as_f64().map(|f| f as f32)
+        })?;
         let conditions =
             parse_conditions(v.get("conditions")).map_err(|e| anyhow::anyhow!("{}: {e}", at()))?;
-        let closest_ids: Vec<u32> = v
-            .get("closest_ids")
-            .and_then(Value::as_array)
-            .with_context(|| format!("{}: no `closest_ids` array", at()))?
-            .iter()
-            .map(|x| x.as_u64().and_then(|n| u32::try_from(n).ok()))
-            .collect::<Option<_>>()
-            .with_context(|| format!("{}: `closest_ids` holds a non-id", at()))?;
-        let closest_scores: Vec<f64> = v
-            .get("closest_scores")
-            .and_then(Value::as_array)
-            .with_context(|| format!("{}: no `closest_scores` array", at()))?
-            .iter()
-            .map(Value::as_f64)
-            .collect::<Option<_>>()
-            .with_context(|| format!("{}: `closest_scores` holds a non-number", at()))?;
+        let closest_ids: Vec<u32> = array_of(&v, "closest_ids", "non-id", &at, |x| {
+            x.as_u64().and_then(|n| u32::try_from(n).ok())
+        })?;
+        let closest_scores: Vec<f64> =
+            array_of(&v, "closest_scores", "non-number", &at, Value::as_f64)?;
         anyhow::ensure!(
             closest_ids.len() == closest_scores.len(),
             "{}: {} closest_ids and {} closest_scores",

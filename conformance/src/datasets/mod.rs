@@ -156,15 +156,22 @@ pub fn read_fbin(path: &Path, limit: Option<usize>) -> anyhow::Result<Vectors> {
     Ok(Vectors { n, dim, data })
 }
 
-/// Read a `.fvecs` file: each row is `(u32 dim, dim × f32)`, no file header.
-pub fn read_fvecs(path: &Path, limit: Option<usize>) -> anyhow::Result<Vectors> {
+/// The `*vecs` framing `fvecs` and `ivecs` share: no file header, each row
+/// `(u32 dim, dim × 4-byte little-endian component)`. Returns the row count
+/// (capped at `limit`), the dimension and the components as raw `u32` words.
+fn read_vecs(
+    path: &Path,
+    format: &str,
+    limit: Option<usize>,
+) -> anyhow::Result<(usize, usize, Vec<u32>)> {
     let bytes = std::fs::read(path)?;
     if bytes.len() < 4 {
-        anyhow::bail!("{}: too short to be fvecs", path.display());
+        anyhow::bail!("{}: too short to be {format}", path.display());
     }
-    let dim = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let word = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+    let dim = word(0) as usize;
     if dim == 0 || dim > 65536 {
-        anyhow::bail!("{}: dim={dim} is implausible for fvecs", path.display());
+        anyhow::bail!("{}: dim={dim} is implausible for {format}", path.display());
     }
     let row_bytes = 4 + dim * 4;
     if bytes.len() % row_bytes != 0 {
@@ -177,12 +184,12 @@ pub fn read_fvecs(path: &Path, limit: Option<usize>) -> anyhow::Result<Vectors> 
     let n_file = bytes.len() / row_bytes;
     let n = limit.map(|l| l.min(n_file)).unwrap_or(n_file);
 
-    let mut data = vec![0f32; n * dim];
+    let mut data = vec![0u32; n * dim];
     for i in 0..n {
         let base = i * row_bytes;
         // Every row repeats the dimension; a mismatch means the file is not
         // what it claims.
-        let d = u32::from_le_bytes(bytes[base..base + 4].try_into().unwrap()) as usize;
+        let d = word(base) as usize;
         if d != dim {
             anyhow::bail!(
                 "{}: row {i} declares dim {d}, expected {dim}",
@@ -190,52 +197,95 @@ pub fn read_fvecs(path: &Path, limit: Option<usize>) -> anyhow::Result<Vectors> 
             );
         }
         for j in 0..dim {
-            let o = base + 4 + j * 4;
-            data[i * dim + j] = f32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+            data[i * dim + j] = word(base + 4 + j * 4);
         }
     }
-    Ok(Vectors { n, dim, data })
+    Ok((n, dim, data))
+}
+
+/// Read a `.fvecs` file: each row is `(u32 dim, dim × f32)`, no file header.
+pub fn read_fvecs(path: &Path, limit: Option<usize>) -> anyhow::Result<Vectors> {
+    let (n, dim, words) = read_vecs(path, "fvecs", limit)?;
+    Ok(Vectors {
+        n,
+        dim,
+        data: words.into_iter().map(f32::from_bits).collect(),
+    })
 }
 
 /// Read `.ivecs` ground truth: each row is `(u32 k, k × i32)`.
 pub fn read_ivecs(path: &Path) -> anyhow::Result<(usize, usize, Vec<u32>)> {
-    let bytes = std::fs::read(path)?;
-    if bytes.len() < 4 {
-        anyhow::bail!("{}: too short to be ivecs", path.display());
-    }
-    let k = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let row_bytes = 4 + k * 4;
-    if bytes.len() % row_bytes != 0 {
-        anyhow::bail!("{}: not a multiple of the row size", path.display());
-    }
-    let n = bytes.len() / row_bytes;
-    let mut out = vec![0u32; n * k];
-    for i in 0..n {
-        let base = i * row_bytes;
-        for j in 0..k {
-            let o = base + 4 + j * 4;
-            out[i * k + j] = u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
-        }
-    }
-    Ok((n, k, out))
+    read_vecs(path, "ivecs", None)
 }
 
 /// §4.3: "`fvecs`/`ivecs` inputs are converted once at ingest, not at benchmark
 /// time."
 pub fn write_fbin(path: &Path, v: &Vectors) -> anyhow::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(&(v.n as u32).to_le_bytes())?;
-    f.write_all(&(v.dim as u32).to_le_bytes())?;
-    let mut buf = Vec::with_capacity(v.dim * 4);
+    let mut w = FbinWriter::create(path, v.n, v.dim)?;
     for i in 0..v.n {
-        buf.clear();
-        for &x in v.row(i) {
+        w.push(v.row(i))?;
+    }
+    w.finish()
+}
+
+/// Streams an fbin file: header first, then rows, verifying the count at close.
+pub(crate) struct FbinWriter {
+    w: std::io::BufWriter<std::fs::File>,
+    dim: usize,
+    declared: usize,
+    written: usize,
+    path: std::path::PathBuf,
+}
+
+impl FbinWriter {
+    pub(crate) fn create(path: &Path, n: usize, dim: usize) -> anyhow::Result<Self> {
+        use std::io::Write;
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        let mut w = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
+        w.write_all(&(n as u32).to_le_bytes())?;
+        w.write_all(&(dim as u32).to_le_bytes())?;
+        Ok(Self {
+            w,
+            dim,
+            declared: n,
+            written: 0,
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub(crate) fn push(&mut self, row: &[f32]) -> anyhow::Result<()> {
+        use std::io::Write;
+        debug_assert_eq!(row.len(), self.dim);
+        // `to_le_bytes` per component rather than a transmute of the slice:
+        // `read_fbin` is explicitly little-endian, and a big-endian host writing
+        // native bytes would produce a file that reads back as garbage on the
+        // machine that wrote it.
+        let mut buf = Vec::with_capacity(self.dim * 4);
+        for x in row {
             buf.extend_from_slice(&x.to_le_bytes());
         }
-        f.write_all(&buf)?;
+        self.w.write_all(&buf)?;
+        self.written += 1;
+        Ok(())
     }
-    Ok(())
+
+    pub(crate) fn finish(mut self) -> anyhow::Result<()> {
+        use std::io::Write;
+        self.w.flush()?;
+        // The header was written from the footer-derived count. If the decoded
+        // rows disagree, the file claims a length it does not have and every
+        // downstream reader silently reads past the end of the real data.
+        anyhow::ensure!(
+            self.written == self.declared,
+            "{}: header declares {} rows but {} were written",
+            self.path.display(),
+            self.declared,
+            self.written
+        );
+        Ok(())
+    }
 }
 
 /// §4.2's dataset table, read from `conformance/datasets/datasets.json`.

@@ -59,6 +59,39 @@ fn nothing_to_check(name: &'static str) -> PropertyResult {
     fail(name, "nothing to check: no results were compared".into())
 }
 
+/// The skeleton every per-query property shares: nothing to check over zero
+/// queries, else the first query `check` refuses, with its detail, or `ok`.
+fn each_query(
+    name: &'static str,
+    n: usize,
+    mut check: impl FnMut(usize) -> Result<(), String>,
+) -> PropertyResult {
+    if n == 0 {
+        return nothing_to_check(name);
+    }
+    for qi in 0..n {
+        if let Err(detail) = check(qi) {
+            return fail(name, detail);
+        }
+    }
+    ok(name)
+}
+
+/// `a[qi]` and `b[qi]` hold the same ids up to ε-ties (T1's rule) for every
+/// query both answered; a query that does not reads "query {qi}: {what}: why".
+fn each_query_agrees(
+    name: &'static str,
+    a: &[Returned],
+    b: &[Returned],
+    eps: &Epsilon,
+    what: &str,
+) -> PropertyResult {
+    each_query(name, a.len().min(b.len()), |qi| {
+        crate::differ::ids_agree_up_to_ties(&a[qi], &b[qi], eps)
+            .map_err(|why| format!("query {qi}: {what}: {why}"))
+    })
+}
+
 /// §8.6: "`score(x, x)` is maximal, and exact top-1 for an indexed vector as
 /// query is that vector itself (under ANN this becomes a recall canary rather
 /// than an assertion)."
@@ -131,40 +164,26 @@ pub fn self_retrieval(
 /// legitimately swap. The points and their scores must not change; the order
 /// within a tie may.
 pub fn permutation_invariance(a: &[Returned], b: &[Returned], eps: &Epsilon) -> PropertyResult {
-    let n = a.len().min(b.len());
-    if n == 0 {
-        return nothing_to_check("permutation_invariance");
-    }
-    for qi in 0..n {
+    each_query("permutation_invariance", a.len().min(b.len()), |qi| {
         if a[qi].ids.len() != b[qi].ids.len() {
-            return fail(
-                "permutation_invariance",
-                format!(
-                    "query {qi}: insertion order changed the result count ({} vs {})",
-                    a[qi].ids.len(),
-                    b[qi].ids.len()
-                ),
-            );
+            return Err(format!(
+                "query {qi}: insertion order changed the result count ({} vs {})",
+                a[qi].ids.len(),
+                b[qi].ids.len()
+            ));
         }
-        if let Err(why) = crate::differ::ids_agree_up_to_ties(&a[qi], &b[qi], eps) {
-            return fail(
-                "permutation_invariance",
-                format!("query {qi}: insertion order changed the result list: {why}"),
-            );
-        }
+        crate::differ::ids_agree_up_to_ties(&a[qi], &b[qi], eps)
+            .map_err(|why| format!("query {qi}: insertion order changed the result list: {why}"))?;
         for i in 0..a[qi].ids.len() {
             let (x, y) = (a[qi].scores[i], b[qi].scores[i]);
             if !eps.holds((x - y).abs(), x) {
-                return fail(
-                    "permutation_invariance",
-                    format!(
-                        "query {qi} pos {i}: insertion order changed the score ({x:.9} vs {y:.9})"
-                    ),
-                );
+                return Err(format!(
+                    "query {qi} pos {i}: insertion order changed the score ({x:.9} vs {y:.9})"
+                ));
             }
         }
-    }
-    ok("permutation_invariance")
+        Ok(())
+    })
 }
 
 /// The order queries are *asked* in must not change exact-search results.
@@ -183,19 +202,13 @@ pub fn permutation_invariance(a: &[Returned], b: &[Returned], eps: &Epsilon) -> 
 /// deterministic between two requests, and an exact `ids ==` recorded that
 /// as a finding against a property it does not violate.
 pub fn query_order_invariance(a: &[Returned], b: &[Returned], eps: &Epsilon) -> PropertyResult {
-    let n = a.len().min(b.len());
-    if n == 0 {
-        return nothing_to_check("query_order_invariance");
-    }
-    for qi in 0..n {
-        if let Err(why) = crate::differ::ids_agree_up_to_ties(&a[qi], &b[qi], eps) {
-            return fail(
-                "query_order_invariance",
-                format!("query {qi}: batch order changed the result list: {why}"),
-            );
-        }
-    }
-    ok("query_order_invariance")
+    each_query_agrees(
+        "query_order_invariance",
+        a,
+        b,
+        eps,
+        "batch order changed the result list",
+    )
 }
 
 /// §8.6: "**Prefix property:** `top_k` is a prefix of `top_(k+1)`."
@@ -207,37 +220,26 @@ pub fn query_order_invariance(a: &[Returned], b: &[Returned], eps: &Epsilon) -> 
 /// ties differently from one request to the next, and the exact comparison
 /// recorded that as a Qdrant finding.
 pub fn prefix_property(small: &[Returned], large: &[Returned], eps: &Epsilon) -> PropertyResult {
-    let n = small.len().min(large.len());
-    if n == 0 {
-        return nothing_to_check("prefix_property");
-    }
-    for qi in 0..n {
+    each_query("prefix_property", small.len().min(large.len()), |qi| {
         let k = small[qi].ids.len();
         if k > large[qi].ids.len() {
-            return fail(
-                "prefix_property",
-                format!(
-                    "query {qi}: smaller limit returned more results ({k} > {})",
-                    large[qi].ids.len()
-                ),
-            );
+            return Err(format!(
+                "query {qi}: smaller limit returned more results ({k} > {})",
+                large[qi].ids.len()
+            ));
         }
         let head = Returned {
             ids: large[qi].ids[..k].to_vec(),
             scores: large[qi].scores[..k].to_vec(),
         };
-        if let Err(why) = crate::differ::ids_agree_up_to_ties(&small[qi], &head, eps) {
-            return fail(
-                "prefix_property",
-                format!(
-                    "query {qi}: top_{k} is not a prefix of the longer list ({:?} vs {:?}): {why}",
-                    small[qi].ids,
-                    &large[qi].ids[..k]
-                ),
-            );
-        }
-    }
-    ok("prefix_property")
+        crate::differ::ids_agree_up_to_ties(&small[qi], &head, eps).map_err(|why| {
+            format!(
+                "query {qi}: top_{k} is not a prefix of the longer list ({:?} vs {:?}): {why}",
+                small[qi].ids,
+                &large[qi].ids[..k]
+            )
+        })
+    })
 }
 
 /// §8.6: "**Offset consistency:** `query(limit=L, offset=O)` equals
@@ -263,47 +265,33 @@ pub fn offset_consistency(
     eps: &Epsilon,
 ) -> PropertyResult {
     let n = with_offset.len().min(without.len());
-    if n == 0 {
-        return nothing_to_check("offset_consistency");
-    }
-    for qi in 0..n {
+    each_query("offset_consistency", n, |qi| {
         let a = &with_offset[qi].ids;
         let full = &without[qi].ids;
         if offset >= full.len() {
             if !a.is_empty() {
-                return fail(
-                    "offset_consistency",
-                    format!(
-                        "query {qi}: offset {offset} past the end but {} results returned",
-                        a.len()
-                    ),
-                );
+                return Err(format!(
+                    "query {qi}: offset {offset} past the end but {} results returned",
+                    a.len()
+                ));
             }
-            continue;
+            return Ok(());
         }
         let expect = &full[offset..];
         if a.len() != expect.len() {
-            return fail(
-                "offset_consistency",
-                format!(
-                    "query {qi}: offset {offset} returned {} results where the unoffset tail has {}",
-                    a.len(),
-                    expect.len()
-                ),
-            );
+            return Err(format!(
+                "query {qi}: offset {offset} returned {} results where the unoffset tail has {}",
+                a.len(),
+                expect.len()
+            ));
         }
         let tail = Returned {
             ids: expect.to_vec(),
             scores: without[qi].scores[offset..].to_vec(),
         };
-        if let Err(why) = crate::differ::ids_agree_up_to_ties(&with_offset[qi], &tail, eps) {
-            return fail(
-                "offset_consistency",
-                format!("query {qi}: offset slice differs ({a:?} vs {expect:?}): {why}"),
-            );
-        }
-    }
-    ok("offset_consistency")
+        crate::differ::ids_agree_up_to_ties(&with_offset[qi], &tail, eps)
+            .map_err(|why| format!("query {qi}: offset slice differs ({a:?} vs {expect:?}): {why}"))
+    })
 }
 
 /// §8.6: "**Idempotent upsert:** re-upserting identical points changes nothing
@@ -325,19 +313,13 @@ pub fn idempotent_upsert(
             format!("points_count changed from {count_before} to {count_after}"),
         );
     }
-    let n = before.len().min(after.len());
-    if n == 0 {
-        return nothing_to_check("idempotent_upsert");
-    }
-    for qi in 0..n {
-        if let Err(why) = crate::differ::ids_agree_up_to_ties(&before[qi], &after[qi], eps) {
-            return fail(
-                "idempotent_upsert",
-                format!("query {qi}: results changed after re-upserting identical points: {why}"),
-            );
-        }
-    }
-    ok("idempotent_upsert")
+    each_query_agrees(
+        "idempotent_upsert",
+        before,
+        after,
+        eps,
+        "results changed after re-upserting identical points",
+    )
 }
 
 /// §8.6: "**Quantization dominance:** with `rescore = true` and oversampling

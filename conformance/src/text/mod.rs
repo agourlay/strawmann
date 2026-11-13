@@ -645,7 +645,7 @@ pub fn agreement(
         ..TextAgreement::default()
     };
     let mut abs = Vec::new();
-    let mut rel = Vec::new();
+    let mut oracles = Vec::new();
     let mut recall_sum = 0.0;
     let mut counted = 0usize;
     for (q, query) in queries.iter().enumerate() {
@@ -661,16 +661,13 @@ pub fn agreement(
         let floor = want.last().map(|h| h.1 * (1.0 - tie_epsilon));
         let in_truth: HashSet<u32> = want.iter().map(|h| h.0).collect();
         let mut hits = 0usize;
-        for (&id, &score) in got.ids.iter().zip(&got.scores) {
-            let point = id as usize;
-            if point >= index.tf.len() || !index.holds_any(point, &terms) {
+        for (id, score, oracle) in index.rescore(&terms, got, truth.k1, truth.b) {
+            let Some(oracle) = oracle else {
                 out.non_matching += 1;
                 continue;
-            }
-            let oracle = index.score(point, &terms, truth.k1, truth.b);
-            let d = (score - oracle).abs();
-            abs.push(d);
-            rel.push(if oracle > 0.0 { d / oracle } else { d });
+            };
+            abs.push((score - oracle).abs());
+            oracles.push(oracle);
             if in_truth.contains(&id) || floor.is_some_and(|f| want.len() == limit && oracle >= f) {
                 hits += 1;
             }
@@ -685,17 +682,14 @@ pub fn agreement(
     } else {
         1.0
     };
-    out.scored_points = abs.len();
-    let p99 = |v: &mut Vec<f64>| {
-        v.sort_by(f64::total_cmp);
-        v.get(((v.len() as f64 * 0.99).ceil() as usize).saturating_sub(1))
-            .copied()
-            .unwrap_or(0.0)
-    };
-    out.max_abs_delta = abs.iter().copied().fold(0.0, f64::max);
-    out.max_rel_delta = rel.iter().copied().fold(0.0, f64::max);
-    out.p99_abs_delta = p99(&mut abs);
-    out.p99_rel_delta = p99(&mut rel);
+    // Relative to the oracle's score, or absolute where that is not positive:
+    // the rule `check_ranking` applies to the same deltas.
+    let d = crate::differ::tolerance::Distribution::from_samples(abs, &oracles);
+    out.scored_points = d.count;
+    out.max_abs_delta = d.max;
+    out.max_rel_delta = d.max_relative;
+    out.p99_abs_delta = d.p99;
+    out.p99_rel_delta = d.p99_relative;
     out
 }
 
@@ -714,6 +708,23 @@ pub struct RankCheck {
 }
 
 impl Bm25Index {
+    /// Each point of `got` with the score the engine gave it and the oracle's
+    /// score of it for `terms` under `k1` and `b`: `None` for a point that
+    /// holds none of the terms, or is not a row of the corpus at all.
+    fn rescore<'a>(
+        &'a self,
+        terms: &'a [String],
+        got: &'a crate::relevance::Returned,
+        k1: f64,
+        b: f64,
+    ) -> impl Iterator<Item = (u32, f64, Option<f64>)> + 'a {
+        got.ids.iter().zip(&got.scores).map(move |(&id, &score)| {
+            let point = id as usize;
+            let held = point < self.tf.len() && self.holds_any(point, terms);
+            (id, score, held.then(|| self.score(point, terms, k1, b)))
+        })
+    }
+
     /// Check `got` against `want`, the oracle's top list for `query` under the
     /// same `k1`, `b` and candidate set. Equal scores may come back in any
     /// order and either of two tied points may take the last place: what must
@@ -733,14 +744,12 @@ impl Bm25Index {
         if got.ids.len() != want.len() {
             out.rank_mismatch = true;
         }
-        for (i, (&id, &score)) in got.ids.iter().zip(&got.scores).enumerate() {
-            let point = id as usize;
-            if point >= self.tf.len() || !self.holds_any(point, &terms) {
+        for (i, (_, score, oracle)) in self.rescore(&terms, got, k1, b).enumerate() {
+            let Some(oracle) = oracle else {
                 out.non_matching = true;
                 out.rank_mismatch = true;
                 continue;
-            }
-            let oracle = self.score(point, &terms, k1, b);
+            };
             let rel = if oracle > 0.0 {
                 (score - oracle).abs() / oracle
             } else {
@@ -1029,6 +1038,37 @@ mod tests {
         assert_eq!((a.exact_order, a.short_lists, a.non_matching), (1, 0, 0));
         assert!((a.recall - 1.0).abs() < 1e-12);
         assert!(a.max_rel_delta < 1e-6 && a.max_rel_delta > 0.0);
+        // The delta statistics: max and nearest-rank p99 of |Δ| and of
+        // |Δ| / oracle, over the scored points.
+        let off = Returned {
+            ids: want.iter().map(|h| h.0).collect(),
+            scores: want
+                .iter()
+                .enumerate()
+                .map(|(i, h)| h.1 + 0.01 * (i + 1) as f64)
+                .collect(),
+        };
+        let abs: Vec<f64> = off
+            .scores
+            .iter()
+            .zip(want)
+            .map(|(s, h)| (s - h.1).abs())
+            .collect();
+        let rel: Vec<f64> = abs.iter().zip(want).map(|(d, h)| d / h.1).collect();
+        let max = |v: &[f64]| v.iter().copied().fold(0.0, f64::max);
+        let a = agreement(&index, &truth, &qs, &[off], 2, 1e-6);
+        assert_eq!(a.scored_points, 2);
+        assert_eq!((a.max_abs_delta, a.p99_abs_delta), (max(&abs), max(&abs)));
+        assert_eq!((a.max_rel_delta, a.p99_rel_delta), (max(&rel), max(&rel)));
+        let empty = Returned {
+            ids: Vec::new(),
+            scores: Vec::new(),
+        };
+        let none = agreement(&index, &truth, &qs, &[empty], 2, 1e-6);
+        assert_eq!(
+            (none.scored_points, none.max_abs_delta, none.p99_rel_delta),
+            (0, 0.0, 0.0)
+        );
         // One wrong point, one that holds no query term, and a short list.
         let wrong = Returned {
             ids: vec![want[0].0, 4],
