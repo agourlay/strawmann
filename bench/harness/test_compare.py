@@ -2337,6 +2337,21 @@ class MatchedLineTests(unittest.TestCase):
         self.assertIn("falling to 1.48x at 0.9980", line)
         self.assertIn("3 anchors", line)
 
+    def test_an_anchor_whose_interval_holds_one_says_so(self):
+        """sm/qd-sift-perf-1112's README ended `falling to 1.28x at 0.9976`
+        for an anchor the report gives as 0.97 to 1.70x."""
+        cmp = self.m["compare"]
+        import report_data
+        band = report_data.Band
+        best = {"ratio": 2.46, "recall": 0.9624, "band": band(2.30, 2.63)}
+        top = {"ratio": 1.28, "recall": 0.9976, "band": band(0.968, 1.699)}
+        self.assertEqual(cmp.unsettled(best), "")
+        self.assertEqual(cmp.unsettled({"ratio": 1.0, "recall": 0.9}), "")
+        self.assertEqual(cmp.anchor_tail(best, top, top),
+                         ", falling to 1.28x at 0.9976 (0.97x to 1.70x, not a measured lead)")
+        for dash in (chr(0x2013), chr(0x2014)):
+            self.assertNotIn(dash, cmp.anchor_tail(best, top, top))
+
     def _fake_rd(self, anchors, refusal=""):
         fx = Fixture(Path(self.tmp.name))
         for lab in ("a", "b"):
@@ -2664,6 +2679,20 @@ class UnarchivedReportTests(unittest.TestCase):
             msg = compare.warn_unarchived("scifact", "sm-x", "qd-x")
         self.assertIn(page, msg)
         self.assertIn("docs/reports", err.getvalue())
+
+    def test_a_published_run_s_page_is_archived_and_its_panel_links_it(self):
+        """Every night's panels went out with no report link until the page
+        was copied by hand and `--write-readme` run again."""
+        compare = self.m["compare"]
+        (self.root / "bench/results").mkdir(parents=True, exist_ok=True)
+        for hhmm in ("0100", "0200"):
+            (self.root / "bench/results" /
+             f"report-scifact-sm-x-vs-qd-x-2026-10-14-{hhmm}.html").write_text(hhmm)
+        name = compare.archive_report("scifact", "sm-x", "qd-x")
+        self.assertEqual(name, "report-scifact-sm-x-vs-qd-x-2026-10-14-0200.html")
+        self.assertEqual((self.root / "docs/reports" / name).read_text(), "0200")
+        self.assertEqual(compare.published_report("scifact", "sm-x", "qd-x"), name)
+        self.assertIsNone(compare.archive_report("scifact", "sm-z", "qd-z"))
 
     def test_nothing_rendered_says_nothing(self):
         compare = self.m["compare"]

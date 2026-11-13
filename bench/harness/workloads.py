@@ -566,7 +566,11 @@ def collections_droppable_after_sweeps() -> list[str]:
     keep = {w.query_collection for w in table() if w.background and w.query_collection}
     # Not created until their own phase, after this drop.
     keep |= isolated_collections()
-    return [c for c in collections_read_after_rows() if c not in keep]
+    # Only what this corpus's table creates: `recall.COLLECTIONS` names every
+    # collection a sweep can read, and h-and-m, which runs no W16, read back
+    # and dropped a `bench16` it never had, 12 lines a night.
+    made = set(upload_collections())
+    return [c for c in collections_read_after_rows() if c not in keep and c in made]
 
 
 def upload_collections() -> list[str]:

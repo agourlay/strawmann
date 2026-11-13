@@ -390,7 +390,11 @@ def previous_pair(labels: list[str], now: dt.datetime | None = None) -> list[str
     # Strictly earlier than these labels, as the name says. "Newest other
     # than these" let a walk over pairs (the old W11 sizing) step from the
     # newest pair to the second and back to the newest, and stop there.
-    own = min(label_time(x, now) for x in labels)
+    # A label with no `run.json` is about to be measured, so it is now, not
+    # midnight UTC of its MMDD: laion 1112's night started at 21:00Z and
+    # passed over 1111, measured at 02:48Z that same day, for 1109.
+    now = now or dt.datetime.now(dt.UTC)
+    own = min(label_started(x) or now for x in labels)
     found = []
     for d in (ROOT / "bench/results").glob(f"{stem}-*"):
         m = re.fullmatch(re.escape(stem) + r"(-rel)?-(\d{4})", d.name)
@@ -2364,6 +2368,10 @@ def render(labels: list[str], lax: bool = False,
                   "asked for, not a fault in it: this run has not failed)",
                   flush=True)
     else:
+        import compare
+        if (page := compare.archive_report(DATASET, labels[0], labels[1])):
+            print(f"  report copied into docs/reports/{page}, for the panel's link "
+                  f"(commit it with the pages)", flush=True)
         code, out = sh([*cmp_argv, "--write-readme"], 300, cwd=ROOT)
         print(out.rstrip(), flush=True)
         rc |= code

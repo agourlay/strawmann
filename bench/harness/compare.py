@@ -40,6 +40,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -2005,6 +2006,26 @@ def published_report(dataset: str, a_label: str, b_label: str) -> str | None:
     return pages[-1].name if pages else None
 
 
+def archive_report(dataset: str, a_label: str, b_label: str) -> str | None:
+    """Copy this pair's newest rendered page into `docs/reports/`, and return
+    its name; `None` when nothing was rendered.
+
+    For a run whose numbers are about to be published (`fullrun.render`), so
+    its panel carries its link: every night's panels went out without one
+    until the page was copied by hand and `--write-readme` run again. The
+    copy is the operator's to commit, as the pages it links from are; a
+    superseded page of the same corpus stays until it is retired.
+    """
+    pages = sorted((ROOT / "bench/results").glob(
+        f"report-{dataset}-{a_label}-vs-{b_label}-*.html"))
+    if not pages:
+        return None
+    dest = ROOT / "docs/reports" / pages[-1].name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(pages[-1], dest)
+    return dest.name
+
+
 def warn_unarchived(dataset: str, a_label: str, b_label: str) -> str | None:
     """Say so when this pair has a rendered page that is not in `docs/reports/`.
 
@@ -2296,14 +2317,25 @@ def matched_anchors(a_label: str, b_label: str) -> tuple[dict, dict, dict, int] 
             min(rows, key=lambda r: r["ratio"]), len(rows))
 
 
+def unsettled(anchor: dict) -> str:
+    """The anchor's interval, when it holds 1.0: ` (0.97x to 1.70x, not a
+    measured lead)`; else nothing. sm/qd-sift-perf-1112's headline ended
+    `falling to 1.28x at 0.9976` for an anchor the report gives as 0.97 to
+    1.70x."""
+    band = anchor.get("band")
+    if band is None or not (band.low <= 1.0 <= band.high):
+        return ""
+    return f" ({band.low:,.2f}x to {band.high:,.2f}x, not a measured lead)"
+
+
 def anchor_tail(best: dict, top: dict, low: dict) -> str:
     """What follows the best anchor. "Falling to" the top of the curve is
     false when the best *is* the top: sm/qd-hnm-perf-1109 read `best at recall
     0.9989, falling to 2.22x at 0.9989` and never named its low, 1.70x."""
     if best is top:
         return (f", the top of the curve; lowest {low['ratio']:,.2f}x "
-                f"at {low['recall']:.4f}")
-    return f", falling to {top['ratio']:,.2f}x at {top['recall']:.4f}"
+                f"at {low['recall']:.4f}{unsettled(low)}")
+    return f", falling to {top['ratio']:,.2f}x at {top['recall']:.4f}{unsettled(top)}"
 
 
 def matched_line(a_label: str, b_label: str) -> str | None:
@@ -2340,7 +2372,7 @@ def matched_line(a_label: str, b_label: str) -> str | None:
     # anchor, so "1.48x to 2.12x" and "narrowing to 1.48x" said the same thing
     # twice and neither said that the frontier falls where recall is tightest.
     return (f"at equal recall (§7.4's comparison, not equal ef): "
-            f"{best['ratio']:,.2f}x at recall {best['recall']:.4f}"
+            f"{best['ratio']:,.2f}x at recall {best['recall']:.4f}{unsettled(best)}"
             f"{anchor_tail(best, top, low)}, over {n} anchors")
 
 

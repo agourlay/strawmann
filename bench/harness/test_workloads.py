@@ -4776,6 +4776,17 @@ class DatasetTestsTableTests(unittest.TestCase):
             self.assertFalse(required[i], i)
         self.assertTrue(required["W3"])
 
+    def test_a_corpus_without_w16_neither_reads_back_nor_drops_bench16(self):
+        """h-and-m runs no W16 until bfb sends keyword matches, and printed
+        `bench16: absent` twelve times a night, read back and dropped."""
+        self.w.use_dataset("h-and-m-2048-angular-filters")
+        if any(r.id.startswith("W16") for r in self.w.table()):
+            self.skipTest("h-and-m runs W16 here")
+        self.assertNotIn("bench16", self.w.collections_droppable_after_sweeps())
+        self.w.use_dataset("laion-small-clip")
+        # On laion it is still handled, by its own isolated phase.
+        self.assertIn("bench16", self.w.isolated_collections())
+
     def test_laion_gains_the_w16_rows_and_runs_them_on_their_own(self):
         ids = self.ids()
         w16 = ["W16-upload", "W16-ef32", "W16-ef64", "W16-ef128", "W16-ef256", "W16-ef512"]
@@ -5168,6 +5179,18 @@ class LabelYearTests(unittest.TestCase):
         self._label("sm-sift-perf-rel-0104", "2026-01-04T17:30:00Z")
         self.assertEqual(self.f.previous_pair(["sm-sift-perf-0105", "qd-sift-perf-0105"],
                                               now=now)[0], "sm-sift-perf-1220")
+
+    def test_a_pair_measured_after_midnight_utc_of_tonight_s_date_is_found(self):
+        """laion 1112's night started at 21:00Z with no `run.json` yet, read
+        as midnight UTC of 11-12, and passed over 1111, measured at 02:48Z
+        that day, for 1109."""
+        import datetime as dt
+        now = dt.datetime(2026, 11, 12, 21, 0, tzinfo=dt.UTC)
+        self._label("sm-laion-perf-1109", "2026-11-09T21:00:00Z")
+        self._label("sm-laion-perf-1111", "2026-11-12T02:48:49Z")
+        self.assertEqual(self.f.previous_pair(["sm-laion-perf-1112", "qd-laion-perf-1112"],
+                                              now=now),
+                         ["sm-laion-perf-1111", "qd-laion-perf-1111"])
 
     def test_a_label_from_another_day_is_refused_and_a_relaunch_is_not(self):
         import datetime as dt
