@@ -86,7 +86,6 @@ pub fn DotU8I8(comptime L: usize) type {
         const Wide = @Vector(L, i32);
 
         const nacc = 4;
-        const block = L * nacc;
 
         inline fn vpdpbusd(acc: Acc, a: Bytes, b: SBytes) Acc {
             return simd.vpdpbusd(L, acc, a, b);
@@ -97,35 +96,43 @@ pub fn DotU8I8(comptime L: usize) type {
             return callGeneric(a, b);
         }
 
+        /// One `vpdpbusd` per `L` bytes, into an `L / 4`-lane i32 chain.
+        const VnniOp = struct {
+            pub const Total = i32;
+
+            pub inline fn step(_: VnniOp, acc: Acc, a: *const [L]u8, b: *const [L]i8) Acc {
+                const av: Bytes = a.*;
+                const bv: SBytes = b.*;
+                return vpdpbusd(acc, av, bv);
+            }
+
+            pub inline fn tail(_: VnniOp, total: i32, x: *const u8, y: *const i8) i32 {
+                return total + @as(i32, x.*) * @as(i32, y.*);
+            }
+        };
+
         /// The `vpdpbusd` path. One instruction per L bytes.
         pub fn callVnni(a: []const u8, b: []const i8) i32 {
             comptime std.debug.assert(uses_vnni);
-            std.debug.assert(a.len == b.len);
-
-            var acc: [nacc]Acc = @splat(@as(Acc, @splat(0)));
-            var i: usize = 0;
-
-            while (i + block <= a.len) : (i += block) {
-                inline for (0..nacc) |k| {
-                    const off = i + k * L;
-                    const av: Bytes = a[off..][0..L].*;
-                    const bv: SBytes = b[off..][0..L].*;
-                    acc[k] = vpdpbusd(acc[k], av, bv);
-                }
-            }
-            while (i + L <= a.len) : (i += L) {
-                const av: Bytes = a[i..][0..L].*;
-                const bv: SBytes = b[i..][0..L].*;
-                acc[0] = vpdpbusd(acc[0], av, bv);
-            }
-
-            const folded = common.treeReduce(Acc, nacc, acc);
-            var total: i32 = @reduce(.Add, folded);
-            while (i < a.len) : (i += 1) {
-                total += @as(i32, a[i]) * @as(i32, b[i]);
-            }
-            return total;
+            return common.accumulate(L, nacc, Acc, a, b, VnniOp{});
         }
+
+        /// Each byte widened into its own i32 lane and multiplied.
+        const WideOp = struct {
+            pub const Total = i32;
+
+            pub inline fn step(_: WideOp, acc: Wide, a: *const [L]u8, b: *const [L]i8) Wide {
+                const av: Bytes = a.*;
+                const bv: SBytes = b.*;
+                const aw: Wide = av;
+                const bw: Wide = bv;
+                return acc + aw * bw;
+            }
+
+            pub inline fn tail(_: WideOp, total: i32, x: *const u8, y: *const i8) i32 {
+                return total + @as(i32, x.*) * @as(i32, y.*);
+            }
+        };
 
         /// The portable path: widen each byte into its own i32 lane and
         /// multiply. Correct on every target and the reference the VNNI path is
@@ -136,35 +143,7 @@ pub fn DotU8I8(comptime L: usize) type {
         /// the `vpmaddubsw` saturation hazard by construction: products reach
         /// 255×127 = 32385 and a pairwise i16 sum of two of them overflows.
         pub fn callGeneric(a: []const u8, b: []const i8) i32 {
-            std.debug.assert(a.len == b.len);
-
-            var acc: [nacc]Wide = @splat(@as(Wide, @splat(0)));
-            var i: usize = 0;
-
-            while (i + block <= a.len) : (i += block) {
-                inline for (0..nacc) |k| {
-                    const off = i + k * L;
-                    const av: Bytes = a[off..][0..L].*;
-                    const bv: SBytes = b[off..][0..L].*;
-                    const aw: Wide = av;
-                    const bw: Wide = bv;
-                    acc[k] += aw * bw;
-                }
-            }
-            while (i + L <= a.len) : (i += L) {
-                const av: Bytes = a[i..][0..L].*;
-                const bv: SBytes = b[i..][0..L].*;
-                const aw: Wide = av;
-                const bw: Wide = bv;
-                acc[0] += aw * bw;
-            }
-
-            const folded = common.treeReduce(Wide, nacc, acc);
-            var total: i32 = @reduce(.Add, folded);
-            while (i < a.len) : (i += 1) {
-                total += @as(i32, a[i]) * @as(i32, b[i]);
-            }
-            return total;
+            return common.accumulate(L, nacc, Wide, a, b, WideOp{});
         }
     };
 }
@@ -187,38 +166,24 @@ pub fn DotU8(comptime L: usize) type {
         const Bytes = @Vector(L, u8);
         const Wide = @Vector(L, u32);
 
-        pub fn call(a: []const u8, b: []const u8) u32 {
-            std.debug.assert(a.len == b.len);
+        const Op = struct {
+            pub const Total = u32;
 
-            const nacc = 4;
-            var acc: [nacc]Wide = @splat(@as(Wide, @splat(0)));
-            const block = L * nacc;
-            var i: usize = 0;
-
-            while (i + block <= a.len) : (i += block) {
-                inline for (0..nacc) |k| {
-                    const off = i + k * L;
-                    const av: Bytes = a[off..][0..L].*;
-                    const bv: Bytes = b[off..][0..L].*;
-                    const aw: Wide = av;
-                    const bw: Wide = bv;
-                    acc[k] += aw * bw;
-                }
-            }
-            while (i + L <= a.len) : (i += L) {
-                const av: Bytes = a[i..][0..L].*;
-                const bv: Bytes = b[i..][0..L].*;
+            pub inline fn step(_: Op, acc: Wide, a: *const [L]u8, b: *const [L]u8) Wide {
+                const av: Bytes = a.*;
+                const bv: Bytes = b.*;
                 const aw: Wide = av;
                 const bw: Wide = bv;
-                acc[0] += aw * bw;
+                return acc + aw * bw;
             }
 
-            const folded = common.treeReduce(Wide, nacc, acc);
-            var total: u32 = @reduce(.Add, folded);
-            while (i < a.len) : (i += 1) {
-                total += @as(u32, a[i]) * @as(u32, b[i]);
+            pub inline fn tail(_: Op, total: u32, x: *const u8, y: *const u8) u32 {
+                return total + @as(u32, x.*) * @as(u32, y.*);
             }
-            return total;
+        };
+
+        pub fn call(a: []const u8, b: []const u8) u32 {
+            return common.accumulate(L, 4, Wide, a, b, Op{});
         }
     };
 }
@@ -244,40 +209,27 @@ pub fn EuclidU8(comptime L: usize) type {
         const Bytes = @Vector(L, u8);
         const Wide = @Vector(L, i32);
 
-        pub fn call(a: []const u8, b: []const u8) i32 {
-            std.debug.assert(a.len == b.len);
+        const Op = struct {
+            pub const Total = i32;
 
-            const nacc = 4;
-            var acc: [nacc]Wide = @splat(@as(Wide, @splat(0)));
-            const block = L * nacc;
-            var i: usize = 0;
-
-            while (i + block <= a.len) : (i += block) {
-                inline for (0..nacc) |k| {
-                    const off = i + k * L;
-                    const av: Bytes = a[off..][0..L].*;
-                    const bv: Bytes = b[off..][0..L].*;
-                    // Widen *before* subtracting: u8 - u8 wraps, and the wrap
-                    // is invisible in the result because squaring makes it
-                    // positive again.
-                    const d: Wide = @as(Wide, av) - @as(Wide, bv);
-                    acc[k] += d * d;
-                }
-            }
-            while (i + L <= a.len) : (i += L) {
-                const av: Bytes = a[i..][0..L].*;
-                const bv: Bytes = b[i..][0..L].*;
+            pub inline fn step(_: Op, acc: Wide, a: *const [L]u8, b: *const [L]u8) Wide {
+                const av: Bytes = a.*;
+                const bv: Bytes = b.*;
+                // Widen *before* subtracting: u8 - u8 wraps, and the wrap
+                // is invisible in the result because squaring makes it
+                // positive again.
                 const d: Wide = @as(Wide, av) - @as(Wide, bv);
-                acc[0] += d * d;
+                return acc + d * d;
             }
 
-            const folded = common.treeReduce(Wide, nacc, acc);
-            var total: i32 = @reduce(.Add, folded);
-            while (i < a.len) : (i += 1) {
-                const d = @as(i32, a[i]) - @as(i32, b[i]);
-                total += d * d;
+            pub inline fn tail(_: Op, total: i32, x: *const u8, y: *const u8) i32 {
+                const d = @as(i32, x.*) - @as(i32, y.*);
+                return total + d * d;
             }
-            return -total;
+        };
+
+        pub fn call(a: []const u8, b: []const u8) i32 {
+            return -common.accumulate(L, 4, Wide, a, b, Op{});
         }
     };
 }
@@ -296,37 +248,25 @@ pub fn ManhattanU8(comptime L: usize) type {
         const Bytes = @Vector(L, u8);
         const Wide = @Vector(L, i32);
 
+        const Op = struct {
+            pub const Total = i32;
+
+            pub inline fn step(_: Op, acc: Wide, a: *const [L]u8, b: *const [L]u8) Wide {
+                const av: Bytes = a.*;
+                const bv: Bytes = b.*;
+                // `@abs` on a signed vector yields the unsigned vector of
+                // the same width; the difference of two u8 values fits in
+                // i32 with room to spare, so the cast back cannot wrap.
+                return acc + @as(Wide, @intCast(@abs(@as(Wide, av) - @as(Wide, bv))));
+            }
+
+            pub inline fn tail(_: Op, total: i32, x: *const u8, y: *const u8) i32 {
+                return total + @as(i32, @intCast(@abs(@as(i32, x.*) - @as(i32, y.*))));
+            }
+        };
+
         pub fn call(a: []const u8, b: []const u8) i32 {
-            std.debug.assert(a.len == b.len);
-
-            const nacc = 4;
-            var acc: [nacc]Wide = @splat(@as(Wide, @splat(0)));
-            const block = L * nacc;
-            var i: usize = 0;
-
-            while (i + block <= a.len) : (i += block) {
-                inline for (0..nacc) |k| {
-                    const off = i + k * L;
-                    const av: Bytes = a[off..][0..L].*;
-                    const bv: Bytes = b[off..][0..L].*;
-                    // `@abs` on a signed vector yields the unsigned vector of
-                    // the same width; the difference of two u8 values fits in
-                    // i32 with room to spare, so the cast back cannot wrap.
-                    acc[k] += @as(Wide, @intCast(@abs(@as(Wide, av) - @as(Wide, bv))));
-                }
-            }
-            while (i + L <= a.len) : (i += L) {
-                const av: Bytes = a[i..][0..L].*;
-                const bv: Bytes = b[i..][0..L].*;
-                acc[0] += @as(Wide, @intCast(@abs(@as(Wide, av) - @as(Wide, bv))));
-            }
-
-            const folded = common.treeReduce(Wide, nacc, acc);
-            var total: i32 = @reduce(.Add, folded);
-            while (i < a.len) : (i += 1) {
-                total += @intCast(@abs(@as(i32, a[i]) - @as(i32, b[i])));
-            }
-            return -total;
+            return -common.accumulate(L, 4, Wide, a, b, Op{});
         }
     };
 }
@@ -347,37 +287,28 @@ pub fn DotF32U8(comptime L: usize, comptime NACC: usize) type {
 
         const V = @Vector(L, f32);
         const Bytes = @Vector(L, u8);
-        const block = L * NACC;
+
+        const Op = struct {
+            pub const Total = f32;
+
+            pub inline fn step(_: Op, acc: V, q: *const [L]f32, c: *const [L]u8) V {
+                @setFloatMode(.optimized);
+                const qv: V = q.*;
+                const cb: Bytes = c.*;
+                // u8 -> f32 conversion; on AVX-512 this is a single
+                // vcvtudq2ps after a zero-extend, on AVX2 a shuffle chain.
+                const cv: V = @floatFromInt(cb);
+                return common.mulAdd(V, qv, cv, acc);
+            }
+
+            pub inline fn tail(_: Op, s: f32, q: *const f32, c: *const u8) f32 {
+                @setFloatMode(.optimized);
+                return s + q.* * @as(f32, @floatFromInt(c.*));
+            }
+        };
 
         pub fn call(q: []const f32, c: []const u8) f32 {
-            @setFloatMode(.optimized);
-            std.debug.assert(q.len == c.len);
-
-            var acc: [NACC]V = @splat(@as(V, @splat(0.0)));
-            var i: usize = 0;
-
-            while (i + block <= q.len) : (i += block) {
-                inline for (0..NACC) |k| {
-                    const off = i + k * L;
-                    const qv: V = q[off..][0..L].*;
-                    const cb: Bytes = c[off..][0..L].*;
-                    // u8 -> f32 conversion; on AVX-512 this is a single
-                    // vcvtudq2ps after a zero-extend, on AVX2 a shuffle chain.
-                    const cv: V = @floatFromInt(cb);
-                    acc[k] = common.mulAdd(V, qv, cv, acc[k]);
-                }
-            }
-            while (i + L <= q.len) : (i += L) {
-                const qv: V = q[i..][0..L].*;
-                const cb: Bytes = c[i..][0..L].*;
-                const cv: V = @floatFromInt(cb);
-                acc[0] = common.mulAdd(V, qv, cv, acc[0]);
-            }
-
-            const folded = common.treeReduce(V, NACC, acc);
-            var s: f32 = @reduce(.Add, folded);
-            while (i < q.len) : (i += 1) s += q[i] * @as(f32, @floatFromInt(c[i]));
-            return s;
+            return common.accumulate(L, NACC, V, q, c, Op{});
         }
     };
 }
@@ -419,42 +350,33 @@ pub fn EuclidF32U8(comptime L: usize, comptime NACC: usize) type {
 
         const V = @Vector(L, f32);
         const B = @Vector(L, u8);
-        const block = L * NACC;
+
+        const Op = struct {
+            pub const Total = f32;
+
+            a: Affine,
+            lov: V,
+            av: V,
+
+            pub inline fn step(op: Op, acc: V, q: *const [L]f32, c: *const [L]u8) V {
+                @setFloatMode(.optimized);
+                const qv: V = q.*;
+                const cb: B = c.*;
+                const cv: V = @floatFromInt(cb);
+                const d = qv - common.mulAdd(V, op.av, cv, op.lov);
+                return common.mulAdd(V, d, d, acc);
+            }
+
+            pub inline fn tail(op: Op, s: f32, q: *const f32, c: *const u8) f32 {
+                @setFloatMode(.optimized);
+                const d = q.* - (op.a.lo + op.a.alpha * @as(f32, @floatFromInt(c.*)));
+                return s + d * d;
+            }
+        };
 
         pub fn call(q: []const f32, c: []const u8, a: Affine) f32 {
-            @setFloatMode(.optimized);
-            std.debug.assert(q.len == c.len);
-
-            const lov: V = @splat(a.lo);
-            const av: V = @splat(a.alpha);
-            var acc: [NACC]V = @splat(@as(V, @splat(0.0)));
-            var i: usize = 0;
-
-            while (i + block <= q.len) : (i += block) {
-                inline for (0..NACC) |k| {
-                    const off = i + k * L;
-                    const qv: V = q[off..][0..L].*;
-                    const cb: B = c[off..][0..L].*;
-                    const cv: V = @floatFromInt(cb);
-                    const d = qv - common.mulAdd(V, av, cv, lov);
-                    acc[k] = common.mulAdd(V, d, d, acc[k]);
-                }
-            }
-            while (i + L <= q.len) : (i += L) {
-                const qv: V = q[i..][0..L].*;
-                const cb: B = c[i..][0..L].*;
-                const cv: V = @floatFromInt(cb);
-                const d = qv - common.mulAdd(V, av, cv, lov);
-                acc[0] = common.mulAdd(V, d, d, acc[0]);
-            }
-
-            const folded = common.treeReduce(V, NACC, acc);
-            var s: f32 = @reduce(.Add, folded);
-            while (i < q.len) : (i += 1) {
-                const d = q[i] - (a.lo + a.alpha * @as(f32, @floatFromInt(c[i])));
-                s += d * d;
-            }
-            return -s;
+            const op = Op{ .a = a, .lov = @splat(a.lo), .av = @splat(a.alpha) };
+            return -common.accumulate(L, NACC, V, q, c, op);
         }
     };
 }
@@ -470,39 +392,31 @@ pub fn ManhattanF32U8(comptime L: usize, comptime NACC: usize) type {
 
         const V = @Vector(L, f32);
         const B = @Vector(L, u8);
-        const block = L * NACC;
+
+        const Op = struct {
+            pub const Total = f32;
+
+            a: Affine,
+            lov: V,
+            av: V,
+
+            pub inline fn step(op: Op, acc: V, q: *const [L]f32, c: *const [L]u8) V {
+                @setFloatMode(.optimized);
+                const qv: V = q.*;
+                const cb: B = c.*;
+                const cv: V = @floatFromInt(cb);
+                return acc + @abs(qv - common.mulAdd(V, op.av, cv, op.lov));
+            }
+
+            pub inline fn tail(op: Op, s: f32, q: *const f32, c: *const u8) f32 {
+                @setFloatMode(.optimized);
+                return s + @abs(q.* - (op.a.lo + op.a.alpha * @as(f32, @floatFromInt(c.*))));
+            }
+        };
 
         pub fn call(q: []const f32, c: []const u8, a: Affine) f32 {
-            @setFloatMode(.optimized);
-            std.debug.assert(q.len == c.len);
-
-            const lov: V = @splat(a.lo);
-            const av: V = @splat(a.alpha);
-            var acc: [NACC]V = @splat(@as(V, @splat(0.0)));
-            var i: usize = 0;
-
-            while (i + block <= q.len) : (i += block) {
-                inline for (0..NACC) |k| {
-                    const off = i + k * L;
-                    const qv: V = q[off..][0..L].*;
-                    const cb: B = c[off..][0..L].*;
-                    const cv: V = @floatFromInt(cb);
-                    acc[k] += @abs(qv - common.mulAdd(V, av, cv, lov));
-                }
-            }
-            while (i + L <= q.len) : (i += L) {
-                const qv: V = q[i..][0..L].*;
-                const cb: B = c[i..][0..L].*;
-                const cv: V = @floatFromInt(cb);
-                acc[0] += @abs(qv - common.mulAdd(V, av, cv, lov));
-            }
-
-            const folded = common.treeReduce(V, NACC, acc);
-            var s: f32 = @reduce(.Add, folded);
-            while (i < q.len) : (i += 1) {
-                s += @abs(q[i] - (a.lo + a.alpha * @as(f32, @floatFromInt(c[i]))));
-            }
-            return -s;
+            const op = Op{ .a = a, .lov = @splat(a.lo), .av = @splat(a.alpha) };
+            return -common.accumulate(L, NACC, V, q, c, op);
         }
     };
 }
@@ -545,25 +459,55 @@ fn refU8(a: []const u8, b: []const u8) u32 {
     return t;
 }
 
-test "u8xi8 dot matches the reference across widths and dims" {
-    var prng = std.Random.DefaultPrng.init(0x18d07);
-    const rnd = prng.random();
-    const dims = [_]usize{ 1, 7, 16, 17, 32, 33, 63, 64, 65, 128, 384, 768, 1536 };
+fn refF32U8(q: []const f32, c: []const u8) f64 {
+    var t: f64 = 0;
+    for (q, c) |x, y| t += @as(f64, x) * @as(f64, @floatFromInt(y));
+    return t;
+}
 
-    inline for ([_]usize{ 16, 32, 64 }) |L| {
-        const K = DotU8I8(L);
-        for (dims) |d| {
-            const a = try std.testing.allocator.alloc(u8, d);
-            defer std.testing.allocator.free(a);
-            const b = try std.testing.allocator.alloc(i8, d);
-            defer std.testing.allocator.free(b);
-            for (a, b) |*x, *y| {
-                x.* = rnd.int(u8);
-                y.* = rnd.int(i8);
-            }
-            try std.testing.expectEqual(refU8I8(a, b), K.call(a, b));
-        }
+fn refEuclidU8(a: []const u8, b: []const u8) i32 {
+    var t: i32 = 0;
+    for (a, b) |x, y| {
+        const d = @as(i32, x) - @as(i32, y);
+        t += d * d;
     }
+    return -t;
+}
+
+fn refManhattanU8(a: []const u8, b: []const u8) i32 {
+    var t: i32 = 0;
+    for (a, b) |x, y| t += @intCast(@abs(@as(i32, x) - @as(i32, y)));
+    return -t;
+}
+
+fn refEuclidF32U8(q: []const f32, c: []const u8, aff: Affine) f32 {
+    var t: f32 = 0;
+    for (q, c) |x, y| {
+        const d = x - (aff.lo + aff.alpha * @as(f32, @floatFromInt(y)));
+        t += d * d;
+    }
+    return -t;
+}
+
+fn refManhattanF32U8(q: []const f32, c: []const u8, aff: Affine) f32 {
+    var t: f32 = 0;
+    for (q, c) |x, y| t += @abs(x - (aff.lo + aff.alpha * @as(f32, @floatFromInt(y))));
+    return -t;
+}
+
+const kernel_test = @import("kernel_test.zig");
+
+test "u8xi8 dot matches the reference across widths and dims" {
+    try kernel_test.expectMatches(
+        u8,
+        i8,
+        .{ DotU8I8(16), DotU8I8(32), DotU8I8(64) },
+        refU8I8,
+        .exact,
+        0x18d07,
+        &.{ 1, 7, 16, 17, 32, 33, 63, 64, 65, 128, 384, 768, 1536 },
+        .{},
+    );
 }
 
 test "u8xi8 dot is correct at the saturation extremes" {
@@ -592,24 +536,16 @@ test "u8xi8 dot is correct at the saturation extremes" {
 }
 
 test "u8xu8 dot matches the reference across widths and dims" {
-    var prng = std.Random.DefaultPrng.init(0x18d08);
-    const rnd = prng.random();
-    const dims = [_]usize{ 1, 15, 16, 31, 64, 100, 128, 768, 1536 };
-
-    inline for ([_]usize{ 16, 32, 64 }) |L| {
-        const K = DotU8(L);
-        for (dims) |d| {
-            const a = try std.testing.allocator.alloc(u8, d);
-            defer std.testing.allocator.free(a);
-            const b = try std.testing.allocator.alloc(u8, d);
-            defer std.testing.allocator.free(b);
-            for (a, b) |*x, *y| {
-                x.* = rnd.int(u8);
-                y.* = rnd.int(u8);
-            }
-            try std.testing.expectEqual(refU8(a, b), K.call(a, b));
-        }
-    }
+    try kernel_test.expectMatches(
+        u8,
+        u8,
+        .{ DotU8(16), DotU8(32), DotU8(64) },
+        refU8,
+        .exact,
+        0x18d08,
+        &.{ 1, 15, 16, 31, 64, 100, 128, 768, 1536 },
+        .{},
+    );
 }
 
 test "the vpdpbusd path agrees with the portable path bit for bit" {
@@ -659,26 +595,16 @@ test "u8xu8 dot is correct at the maximum" {
 }
 
 test "f32xu8 asymmetric dot matches the reference" {
-    var prng = std.Random.DefaultPrng.init(0x0a5e);
-    const rnd = prng.random();
-    const dims = [_]usize{ 1, 7, 8, 33, 128, 768, 1536 };
-
-    for (dims) |d| {
-        const q = try std.testing.allocator.alloc(f32, d);
-        defer std.testing.allocator.free(q);
-        const c = try std.testing.allocator.alloc(u8, d);
-        defer std.testing.allocator.free(c);
-        for (q, c) |*x, *y| {
-            x.* = rnd.floatNorm(f32);
-            y.* = rnd.int(u8);
-        }
-        var want: f64 = 0;
-        for (q, c) |x, y| want += @as(f64, x) * @as(f64, @floatFromInt(y));
-
-        const got = f32u8_native.call(q, c);
-        const scale = @max(1.0, @abs(want));
-        try std.testing.expect(@abs(@as(f64, got) - want) / scale < 1e-5);
-    }
+    try kernel_test.expectMatches(
+        f32,
+        u8,
+        .{f32u8_native},
+        refF32U8,
+        .{ .scaled = 1e-5 },
+        0x0a5e,
+        &.{ 1, 7, 8, 33, 128, 768, 1536 },
+        .{},
+    );
 }
 
 test "all three int kernels agree on non-negative signed input" {
@@ -706,28 +632,9 @@ test "u8 euclid and manhattan match a scalar reference exactly" {
     // Integer kernels, so "close" is not the bar: every intermediate is
     // exactly representable and any difference is a bug in the vector path,
     // not rounding.
-    var prng = std.Random.DefaultPrng.init(0xd7a);
-    const rnd = prng.random();
-    for ([_]usize{ 1, 7, 16, 31, 64, 128, 129, 768 }) |dim| {
-        const a = try std.testing.allocator.alloc(u8, dim);
-        defer std.testing.allocator.free(a);
-        const b = try std.testing.allocator.alloc(u8, dim);
-        defer std.testing.allocator.free(b);
-        for (a, b) |*x, *y| {
-            x.* = rnd.int(u8);
-            y.* = rnd.int(u8);
-        }
-
-        var sq: i32 = 0;
-        var abs: i32 = 0;
-        for (a, b) |x, y| {
-            const d = @as(i32, x) - @as(i32, y);
-            sq += d * d;
-            abs += @intCast(@abs(d));
-        }
-        try std.testing.expectEqual(-sq, euclid_u8_native.call(a, b));
-        try std.testing.expectEqual(-abs, manhattan_u8_native.call(a, b));
-    }
+    const dims = [_]usize{ 1, 7, 16, 31, 64, 128, 129, 768 };
+    try kernel_test.expectMatches(u8, u8, .{euclid_u8_native}, refEuclidU8, .exact, 0xd7a, &dims, .{});
+    try kernel_test.expectMatches(u8, u8, .{manhattan_u8_native}, refManhattanU8, .exact, 0xd7a, &dims, .{});
 }
 
 test "u8 euclid is zero against itself and never positive" {
@@ -742,30 +649,11 @@ test "the asymmetric SQ8 euclid and manhattan kernels match their scalar form" {
     // These replaced scalar loops, so the bar is that they compute the same
     // quantity. Not bit-identical: the vector path uses four accumulators and
     // a tree reduction, exactly as the `dot` arm beside it always has.
-    var prng = std.Random.DefaultPrng.init(0xc0de);
-    const rnd = prng.random();
     const aff = Affine{ .lo = -1.25, .alpha = 0.0098 };
-
-    for ([_]usize{ 1, 5, 16, 33, 128, 768 }) |dim| {
-        const q = try std.testing.allocator.alloc(f32, dim);
-        defer std.testing.allocator.free(q);
-        const c = try std.testing.allocator.alloc(u8, dim);
-        defer std.testing.allocator.free(c);
-        for (q, c) |*x, *y| {
-            x.* = rnd.floatNorm(f32);
-            y.* = rnd.int(u8);
-        }
-
-        var want_e: f32 = 0;
-        var want_m: f32 = 0;
-        for (q, c) |x, y| {
-            const d = x - (aff.lo + aff.alpha * @as(f32, @floatFromInt(y)));
-            want_e += d * d;
-            want_m += @abs(d);
-        }
-        try std.testing.expectApproxEqRel(-want_e, euclid_f32u8_native.call(q, c, aff), 1e-5);
-        try std.testing.expectApproxEqRel(-want_m, manhattan_f32u8_native.call(q, c, aff), 1e-5);
-    }
+    const dims = [_]usize{ 1, 5, 16, 33, 128, 768 };
+    const tol = kernel_test.Tolerance{ .rel = 1e-5 };
+    try kernel_test.expectMatches(f32, u8, .{euclid_f32u8_native}, refEuclidF32U8, tol, 0xc0de, &dims, .{aff});
+    try kernel_test.expectMatches(f32, u8, .{manhattan_f32u8_native}, refManhattanF32U8, tol, 0xc0de, &dims, .{aff});
 }
 
 test "an exact reconstruction scores zero distance" {

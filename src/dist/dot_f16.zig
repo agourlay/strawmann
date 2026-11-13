@@ -42,40 +42,28 @@ pub fn DotF16(comptime L: usize, comptime NACC: usize) type {
 
         const V = @Vector(L, f32);
         const H = @Vector(L, f16);
-        const block = L * NACC;
 
-        pub fn call(a: []const f16, b: []const f16) f32 {
-            @setFloatMode(.optimized);
-            std.debug.assert(a.len == b.len);
+        const Op = struct {
+            pub const Total = f32;
 
-            var acc: [NACC]V = @splat(@as(V, @splat(0.0)));
-            var i: usize = 0;
-
-            while (i + block <= a.len) : (i += block) {
-                inline for (0..NACC) |k| {
-                    const off = i + k * L;
-                    const ah: H = a[off..][0..L].*;
-                    const bh: H = b[off..][0..L].*;
-                    // `vcvtph2ps` on F16C, or a native widening on AVX512-FP16.
-                    const av: V = @floatCast(ah);
-                    const bv: V = @floatCast(bh);
-                    acc[k] = common.mulAdd(V, av, bv, acc[k]);
-                }
-            }
-            while (i + L <= a.len) : (i += L) {
-                const ah: H = a[i..][0..L].*;
-                const bh: H = b[i..][0..L].*;
+            pub inline fn step(_: Op, acc: V, a: *const [L]f16, b: *const [L]f16) V {
+                @setFloatMode(.optimized);
+                const ah: H = a.*;
+                const bh: H = b.*;
+                // `vcvtph2ps` on F16C, or a native widening on AVX512-FP16.
                 const av: V = @floatCast(ah);
                 const bv: V = @floatCast(bh);
-                acc[0] = common.mulAdd(V, av, bv, acc[0]);
+                return common.mulAdd(V, av, bv, acc);
             }
 
-            const folded = common.treeReduce(V, NACC, acc);
-            var s: f32 = @reduce(.Add, folded);
-            while (i < a.len) : (i += 1) {
-                s += @as(f32, @floatCast(a[i])) * @as(f32, @floatCast(b[i]));
+            pub inline fn tail(_: Op, s: f32, x: *const f16, y: *const f16) f32 {
+                @setFloatMode(.optimized);
+                return s + @as(f32, @floatCast(x.*)) * @as(f32, @floatCast(y.*));
             }
-            return s;
+        };
+
+        pub fn call(a: []const f16, b: []const f16) f32 {
+            return common.accumulate(L, NACC, V, a, b, Op{});
         }
     };
 }
@@ -91,45 +79,32 @@ pub fn EuclidF16(comptime L: usize, comptime NACC: usize) type {
 
         const V = @Vector(L, f32);
         const H = @Vector(L, f16);
-        const block = L * NACC;
 
-        pub fn call(a: []const f16, b: []const f16) f32 {
-            @setFloatMode(.optimized);
-            std.debug.assert(a.len == b.len);
+        const Op = struct {
+            pub const Total = f32;
 
-            var acc: [NACC]V = @splat(@as(V, @splat(0.0)));
-            var i: usize = 0;
-
-            while (i + block <= a.len) : (i += block) {
-                inline for (0..NACC) |k| {
-                    const off = i + k * L;
-                    const ah: H = a[off..][0..L].*;
-                    const bh: H = b[off..][0..L].*;
-                    const av: V = @floatCast(ah);
-                    const bv: V = @floatCast(bh);
-                    // Subtract *after* widening. Subtracting in f16 first would
-                    // round the difference to f16 precision, which for near
-                    // neighbours is where all the information is.
-                    const d = av - bv;
-                    acc[k] = common.mulAdd(V, d, d, acc[k]);
-                }
-            }
-            while (i + L <= a.len) : (i += L) {
-                const ah: H = a[i..][0..L].*;
-                const bh: H = b[i..][0..L].*;
+            pub inline fn step(_: Op, acc: V, a: *const [L]f16, b: *const [L]f16) V {
+                @setFloatMode(.optimized);
+                const ah: H = a.*;
+                const bh: H = b.*;
                 const av: V = @floatCast(ah);
                 const bv: V = @floatCast(bh);
+                // Subtract *after* widening. Subtracting in f16 first would
+                // round the difference to f16 precision, which for near
+                // neighbours is where all the information is.
                 const d = av - bv;
-                acc[0] = common.mulAdd(V, d, d, acc[0]);
+                return common.mulAdd(V, d, d, acc);
             }
 
-            const folded = common.treeReduce(V, NACC, acc);
-            var s: f32 = @reduce(.Add, folded);
-            while (i < a.len) : (i += 1) {
-                const d = @as(f32, @floatCast(a[i])) - @as(f32, @floatCast(b[i]));
-                s += d * d;
+            pub inline fn tail(_: Op, s: f32, x: *const f16, y: *const f16) f32 {
+                @setFloatMode(.optimized);
+                const d = @as(f32, @floatCast(x.*)) - @as(f32, @floatCast(y.*));
+                return s + d * d;
             }
-            return -s;
+        };
+
+        pub fn call(a: []const f16, b: []const f16) f32 {
+            return -common.accumulate(L, NACC, V, a, b, Op{});
         }
     };
 }
@@ -150,39 +125,27 @@ pub fn ManhattanF16(comptime L: usize, comptime NACC: usize) type {
 
         const V = @Vector(L, f32);
         const H = @Vector(L, f16);
-        const block = L * NACC;
 
-        pub fn call(a: []const f16, b: []const f16) f32 {
-            @setFloatMode(.optimized);
-            std.debug.assert(a.len == b.len);
+        const Op = struct {
+            pub const Total = f32;
 
-            var acc: [NACC]V = @splat(@as(V, @splat(0.0)));
-            var i: usize = 0;
-
-            while (i + block <= a.len) : (i += block) {
-                inline for (0..NACC) |k| {
-                    const off = i + k * L;
-                    const ah: H = a[off..][0..L].*;
-                    const bh: H = b[off..][0..L].*;
-                    const av: V = @floatCast(ah);
-                    const bv: V = @floatCast(bh);
-                    acc[k] += @abs(av - bv);
-                }
-            }
-            while (i + L <= a.len) : (i += L) {
-                const ah: H = a[i..][0..L].*;
-                const bh: H = b[i..][0..L].*;
+            pub inline fn step(_: Op, acc: V, a: *const [L]f16, b: *const [L]f16) V {
+                @setFloatMode(.optimized);
+                const ah: H = a.*;
+                const bh: H = b.*;
                 const av: V = @floatCast(ah);
                 const bv: V = @floatCast(bh);
-                acc[0] += @abs(av - bv);
+                return acc + @abs(av - bv);
             }
 
-            const folded = common.treeReduce(V, NACC, acc);
-            var s: f32 = @reduce(.Add, folded);
-            while (i < a.len) : (i += 1) {
-                s += @abs(@as(f32, @floatCast(a[i])) - @as(f32, @floatCast(b[i])));
+            pub inline fn tail(_: Op, s: f32, x: *const f16, y: *const f16) f32 {
+                @setFloatMode(.optimized);
+                return s + @abs(@as(f32, @floatCast(x.*)) - @as(f32, @floatCast(y.*)));
             }
-            return -s;
+        };
+
+        pub fn call(a: []const f16, b: []const f16) f32 {
+            return -common.accumulate(L, NACC, V, a, b, Op{});
         }
     };
 }
@@ -200,31 +163,25 @@ pub fn DotF16Native(comptime L: usize, comptime NACC: usize) type {
         pub const on_conformance_path = false;
 
         const H = @Vector(L, f16);
-        const block = L * NACC;
+
+        const Op = struct {
+            pub const Total = f16;
+
+            pub inline fn step(_: Op, acc: H, a: *const [L]f16, b: *const [L]f16) H {
+                @setFloatMode(.optimized);
+                const av: H = a.*;
+                const bv: H = b.*;
+                return common.mulAdd(H, av, bv, acc);
+            }
+
+            pub inline fn tail(_: Op, s: f16, x: *const f16, y: *const f16) f16 {
+                @setFloatMode(.optimized);
+                return s + x.* * y.*;
+            }
+        };
 
         pub fn call(a: []const f16, b: []const f16) f32 {
-            @setFloatMode(.optimized);
-            std.debug.assert(a.len == b.len);
-
-            var acc: [NACC]H = @splat(@as(H, @splat(0.0)));
-            var i: usize = 0;
-            while (i + block <= a.len) : (i += block) {
-                inline for (0..NACC) |k| {
-                    const off = i + k * L;
-                    const av: H = a[off..][0..L].*;
-                    const bv: H = b[off..][0..L].*;
-                    acc[k] = common.mulAdd(H, av, bv, acc[k]);
-                }
-            }
-            while (i + L <= a.len) : (i += L) {
-                const av: H = a[i..][0..L].*;
-                const bv: H = b[i..][0..L].*;
-                acc[0] = common.mulAdd(H, av, bv, acc[0]);
-            }
-            const folded = common.treeReduce(H, NACC, acc);
-            var s: f16 = @reduce(.Add, folded);
-            while (i < a.len) : (i += 1) s += a[i] * b[i];
-            return @floatCast(s);
+            return @floatCast(common.accumulate(L, NACC, H, a, b, Op{}));
         }
     };
 }
@@ -254,47 +211,40 @@ fn refDotF16(a: []const f16, b: []const f16) f64 {
     return acc;
 }
 
-test "f16 dot matches the widened reference across widths and dims" {
-    var prng = std.Random.DefaultPrng.init(0xf16d);
-    const rnd = prng.random();
-    const dims = [_]usize{ 1, 7, 8, 16, 33, 128, 384, 768, 1536 };
+const kernel_test = @import("kernel_test.zig");
 
-    inline for ([_]usize{ 4, 8, 16 }) |L| {
-        const K = DotF16(L, 8);
-        for (dims) |d| {
-            const a = try std.testing.allocator.alloc(f16, d);
-            defer std.testing.allocator.free(a);
-            const b = try std.testing.allocator.alloc(f16, d);
-            defer std.testing.allocator.free(b);
-            for (a, b) |*x, *y| {
-                x.* = @floatCast(rnd.floatNorm(f32));
-                y.* = @floatCast(rnd.floatNorm(f32));
-            }
-            const got = K.call(a, b);
-            const want = refDotF16(a, b);
-            const scale = @max(1.0, @abs(want));
-            try std.testing.expect(@abs(@as(f64, got) - want) / scale < 1e-5);
-        }
+/// `-Σ(a−b)²` widened to f64.
+fn refEuclidF16(a: []const f16, b: []const f16) f64 {
+    var acc: f64 = 0;
+    for (a, b) |x, y| {
+        const df = @as(f64, @floatCast(x)) - @as(f64, @floatCast(y));
+        acc += df * df;
     }
+    return -acc;
+}
+
+/// `-Σ|a−b|` widened to f32, scalar order.
+fn refManhattanF16(a: []const f16, b: []const f16) f32 {
+    var acc: f32 = 0;
+    for (a, b) |x, y| acc += @abs(@as(f32, @floatCast(x)) - @as(f32, @floatCast(y)));
+    return -acc;
+}
+
+test "f16 dot matches the widened reference across widths and dims" {
+    try kernel_test.expectMatches(
+        f16,
+        f16,
+        .{ DotF16(4, 8), DotF16(8, 8), DotF16(16, 8) },
+        refDotF16,
+        .{ .scaled = 1e-5 },
+        0xf16d,
+        &.{ 1, 7, 8, 16, 33, 128, 384, 768, 1536 },
+        .{},
+    );
 }
 
 test "f16 euclid matches the widened reference" {
-    var prng = std.Random.DefaultPrng.init(0xf16e);
-    const rnd = prng.random();
-    const d = 768;
-    var a: [d]f16 = undefined;
-    var b: [d]f16 = undefined;
-    for (&a, &b) |*x, *y| {
-        x.* = @floatCast(rnd.floatNorm(f32));
-        y.* = @floatCast(rnd.floatNorm(f32));
-    }
-    var want: f64 = 0;
-    for (a, b) |x, y| {
-        const df = @as(f64, @floatCast(x)) - @as(f64, @floatCast(y));
-        want += df * df;
-    }
-    const got = euclid_native.call(&a, &b);
-    try std.testing.expect(@abs(@as(f64, got) + want) / @max(1.0, want) < 1e-5);
+    try kernel_test.expectMatches(f16, f16, .{euclid_native}, refEuclidF16, .{ .scaled = 1e-5 }, 0xf16e, &.{768}, .{});
 }
 
 test "f16 self-distance is exactly zero" {
@@ -352,22 +302,16 @@ test "fromF32/toF32 round-trip within f16 resolution" {
 }
 
 test "f16 manhattan matches a widened scalar reference" {
-    var prng = std.Random.DefaultPrng.init(0x5a1);
-    const rnd = prng.random();
-    for ([_]usize{ 1, 8, 33, 128, 768 }) |dim| {
-        const a = try std.testing.allocator.alloc(f16, dim);
-        defer std.testing.allocator.free(a);
-        const b = try std.testing.allocator.alloc(f16, dim);
-        defer std.testing.allocator.free(b);
-        for (a, b) |*x, *y| {
-            x.* = @floatCast(rnd.floatNorm(f32));
-            y.* = @floatCast(rnd.floatNorm(f32));
-        }
-
-        var want: f32 = 0;
-        for (a, b) |x, y| want += @abs(@as(f32, @floatCast(x)) - @as(f32, @floatCast(y)));
-        // Summation order differs between the tree reduction and the scalar
-        // loop, so this is an fp32 accumulation tolerance, not a semantic one.
-        try std.testing.expectApproxEqRel(-want, manhattan_native.call(a, b), 1e-5);
-    }
+    // Summation order differs between the tree reduction and the scalar
+    // loop, so this is an fp32 accumulation tolerance, not a semantic one.
+    try kernel_test.expectMatches(
+        f16,
+        f16,
+        .{manhattan_native},
+        refManhattanF16,
+        .{ .rel = 1e-5 },
+        0x5a1,
+        &.{ 1, 8, 33, 128, 768 },
+        .{},
+    );
 }

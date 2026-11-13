@@ -28,13 +28,36 @@ pub fn Dot(comptime L: usize, comptime NACC: usize) type {
         pub const accumulators = NACC;
 
         const V = @Vector(L, f32);
-        const block = L * NACC;
+
+        const Op = struct {
+            pub const Total = f32;
+
+            pub inline fn step(_: Op, acc: V, a: *const [L]f32, b: *const [L]f32) V {
+                @setFloatMode(.optimized);
+                const av: V = a.*;
+                const bv: V = b.*;
+                // common.mulAdd is an explicit FMA on FMA hardware rather than
+                // a hope that the optimiser contracts `av * bv + acc`. §11
+                // lists "fails to contract FMA" as a real,
+                // invisible-without-checking risk; being explicit removes it
+                // from the list. On the no-FMA baseline arm it is a plain
+                // mul+add instead of a per-lane libcall (see the helper's
+                // doc).
+                return common.mulAdd(V, av, bv, acc);
+            }
+
+            pub inline fn tail(_: Op, s: f32, x: *const f32, y: *const f32) f32 {
+                @setFloatMode(.optimized);
+                return s + x.* * y.*;
+            }
+        };
 
         /// `Σ aᵢbᵢ`.
         ///
-        /// `@setFloatMode(.optimized)` is scoped to this function only, per
-        /// §6.6.3: "so FMA contraction and reassociation are permitted where
-        /// they're safe and nowhere else." The reduction is written as a
+        /// `@setFloatMode(.optimized)` is scoped to this kernel's loop
+        /// (`common.accumulate` and the `Op` steps) only, per §6.6.3: "so FMA
+        /// contraction and reassociation are permitted where they're safe and
+        /// nowhere else." The reduction is written as a
         /// fixed tree (`treeReduce`), but under this float mode reassociation
         /// is licensed, so LLVM may re-tree it; what §8.7 guarantees is that
         /// the result is deterministic *per build* (same binary, same input,
@@ -53,48 +76,7 @@ pub fn Dot(comptime L: usize, comptime NACC: usize) type {
         /// keeps an aligned copy in the test binary whatever the server does;
         /// `scripts/check.py`'s kernel-align step reads the release binary.
         pub noinline fn call(a: []const f32, b: []const f32) align(64) f32 {
-            @setFloatMode(.optimized);
-            std.debug.assert(a.len == b.len);
-
-            var acc: [NACC]V = @splat(@as(V, @splat(0.0)));
-            var i: usize = 0;
-
-            // Main body: NACC independent FMA chains, no cross-chain dependency.
-            while (i + block <= a.len) : (i += block) {
-                inline for (0..NACC) |k| {
-                    const off = i + k * L;
-                    const av: V = a[off..][0..L].*;
-                    const bv: V = b[off..][0..L].*;
-                    // common.mulAdd is an explicit FMA on FMA hardware rather
-                    // than a hope that the optimiser contracts
-                    // `av * bv + acc[k]`. §11 lists "fails to contract FMA" as
-                    // a real, invisible-without-checking risk; being explicit
-                    // removes it from the list. On the no-FMA baseline arm it
-                    // is a plain mul+add instead of a per-lane libcall (see
-                    // the helper's doc).
-                    acc[k] = common.mulAdd(V, av, bv, acc[k]);
-                }
-            }
-
-            // Vector tail: whole registers that did not fill a full block.
-            // Folded into chain 0, a fixed choice, so the shape stays
-            // deterministic for every length.
-            while (i + L <= a.len) : (i += L) {
-                const av: V = a[i..][0..L].*;
-                const bv: V = b[i..][0..L].*;
-                acc[0] = common.mulAdd(V, av, bv, acc[0]);
-            }
-
-            const folded = common.treeReduce(V, NACC, acc);
-            var s: f32 = @reduce(.Add, folded);
-
-            // Scalar epilogue for dims that are not a multiple of the lane
-            // count. §6.6.2 notes AVX-512 could predicate this away with mask
-            // registers at zero cost; for the dims we care about (128/384/768/
-            // 1536) this loop never executes, so it is correctness scaffolding
-            // rather than a hot path.
-            while (i < a.len) : (i += 1) s += a[i] * b[i];
-            return s;
+            return common.accumulate(L, NACC, V, a, b, Op{});
         }
     };
 }
@@ -107,37 +89,23 @@ pub const native = Dot(common.nativeLanes(f32), common.default_accumulators);
 // -------------------------------------------------------------------------
 
 const reference = @import("reference.zig");
+const kernel_test = @import("kernel_test.zig");
 
 test "dot matches the strict reference across widths, dims, and tails" {
-    var prng = std.Random.DefaultPrng.init(0xd07f32);
-    const rnd = prng.random();
-
     // Dims deliberately include the matrix dims (128/384/768/1536), values that
-    // exercise every tail path, and small awkward ones.
-    const dims = [_]usize{ 1, 3, 4, 7, 8, 15, 16, 31, 33, 64, 100, 128, 384, 768, 960, 1536 };
-
-    inline for ([_]usize{ 4, 8, 16 }) |L| {
-        const K = Dot(L, 8);
-        for (dims) |d| {
-            const a = try std.testing.allocator.alloc(f32, d);
-            defer std.testing.allocator.free(a);
-            const b = try std.testing.allocator.alloc(f32, d);
-            defer std.testing.allocator.free(b);
-            for (a, b) |*x, *y| {
-                x.* = rnd.floatNorm(f32);
-                y.* = rnd.floatNorm(f32);
-            }
-
-            const got = K.call(a, b);
-            const want = reference.dotWide(a, b);
-            // Blocked summation is *more* accurate than the strict left-to-right
-            // reference, so compare against the fp64 accumulation. Tolerance is
-            // relative to the magnitude, which grows as √d.
-            const scale = @max(1.0, @abs(want));
-            const rel = @abs(@as(f64, got) - want) / scale;
-            try std.testing.expect(rel < 1e-5);
-        }
-    }
+    // exercise every tail path, and small awkward ones. Blocked summation is
+    // *more* accurate than the strict left-to-right reference, so compare
+    // against the fp64 accumulation.
+    try kernel_test.expectMatches(
+        f32,
+        f32,
+        .{ Dot(4, 8), Dot(8, 8), Dot(16, 8) },
+        reference.dotWide,
+        .{ .scaled = 1e-5 },
+        0xd07f32,
+        &.{ 1, 3, 4, 7, 8, 15, 16, 31, 33, 64, 100, 128, 384, 768, 960, 1536 },
+        .{},
+    );
 }
 
 test "dot is exact on integer-valued inputs" {

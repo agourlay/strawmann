@@ -31,43 +31,32 @@ pub fn Euclid(comptime L: usize, comptime NACC: usize) type {
         pub const accumulators = NACC;
 
         const V = @Vector(L, f32);
-        const block = L * NACC;
+
+        const Op = struct {
+            pub const Total = f32;
+
+            pub inline fn step(_: Op, acc: V, a: *const [L]f32, b: *const [L]f32) V {
+                @setFloatMode(.optimized);
+                const av: V = a.*;
+                const bv: V = b.*;
+                const d = av - bv;
+                // sub then FMA: two instructions, no cancellation risk.
+                return common.mulAdd(V, d, d, acc);
+            }
+
+            pub inline fn tail(_: Op, s: f32, x: *const f32, y: *const f32) f32 {
+                @setFloatMode(.optimized);
+                const d = x.* - y.*;
+                return s + d * d;
+            }
+        };
 
         /// Aligned and kept out of line for the reasons `dot_f32.Dot.call` is.
         pub noinline fn call(a: []const f32, b: []const f32) align(64) f32 {
-            @setFloatMode(.optimized);
-            std.debug.assert(a.len == b.len);
-
-            var acc: [NACC]V = @splat(@as(V, @splat(0.0)));
-            var i: usize = 0;
-
-            while (i + block <= a.len) : (i += block) {
-                inline for (0..NACC) |k| {
-                    const off = i + k * L;
-                    const av: V = a[off..][0..L].*;
-                    const bv: V = b[off..][0..L].*;
-                    const d = av - bv;
-                    // sub then FMA: two instructions, no cancellation risk.
-                    acc[k] = common.mulAdd(V, d, d, acc[k]);
-                }
-            }
-            while (i + L <= a.len) : (i += L) {
-                const av: V = a[i..][0..L].*;
-                const bv: V = b[i..][0..L].*;
-                const d = av - bv;
-                acc[0] = common.mulAdd(V, d, d, acc[0]);
-            }
-
-            const folded = common.treeReduce(V, NACC, acc);
-            var s: f32 = @reduce(.Add, folded);
-            while (i < a.len) : (i += 1) {
-                const d = a[i] - b[i];
-                s += d * d;
-            }
             // §8.3: internal similarity is the *negated* squared distance, so
             // that "higher is better" holds uniformly across every metric and
             // the top-k heap never needs to know which metric it is serving.
-            return -s;
+            return -common.accumulate(L, NACC, V, a, b, Op{});
         }
     };
 }
@@ -82,35 +71,27 @@ pub fn Manhattan(comptime L: usize, comptime NACC: usize) type {
         pub const accumulators = NACC;
 
         const V = @Vector(L, f32);
-        const block = L * NACC;
+
+        const Op = struct {
+            pub const Total = f32;
+
+            pub inline fn step(_: Op, acc: V, a: *const [L]f32, b: *const [L]f32) V {
+                @setFloatMode(.optimized);
+                const av: V = a.*;
+                const bv: V = b.*;
+                // @abs on a float vector lowers to an andps/andpd with the
+                // sign-bit mask, one instruction, no branch.
+                return acc + @abs(av - bv);
+            }
+
+            pub inline fn tail(_: Op, s: f32, x: *const f32, y: *const f32) f32 {
+                @setFloatMode(.optimized);
+                return s + @abs(x.* - y.*);
+            }
+        };
 
         pub fn call(a: []const f32, b: []const f32) f32 {
-            @setFloatMode(.optimized);
-            std.debug.assert(a.len == b.len);
-
-            var acc: [NACC]V = @splat(@as(V, @splat(0.0)));
-            var i: usize = 0;
-
-            while (i + block <= a.len) : (i += block) {
-                inline for (0..NACC) |k| {
-                    const off = i + k * L;
-                    const av: V = a[off..][0..L].*;
-                    const bv: V = b[off..][0..L].*;
-                    // @abs on a float vector lowers to an andps/andpd with the
-                    // sign-bit mask, one instruction, no branch.
-                    acc[k] += @abs(av - bv);
-                }
-            }
-            while (i + L <= a.len) : (i += L) {
-                const av: V = a[i..][0..L].*;
-                const bv: V = b[i..][0..L].*;
-                acc[0] += @abs(av - bv);
-            }
-
-            const folded = common.treeReduce(V, NACC, acc);
-            var s: f32 = @reduce(.Add, folded);
-            while (i < a.len) : (i += 1) s += @abs(a[i] - b[i]);
-            return -s;
+            return -common.accumulate(L, NACC, V, a, b, Op{});
         }
     };
 }
@@ -154,54 +135,33 @@ pub const manhattan_native = Manhattan(common.nativeLanes(f32), common.default_a
 // -------------------------------------------------------------------------
 
 const reference = @import("reference.zig");
+const kernel_test = @import("kernel_test.zig");
 const Metric = @import("metric.zig").Metric;
 
 test "euclid matches the strict reference across widths, dims, and tails" {
-    var prng = std.Random.DefaultPrng.init(0xe0c11d);
-    const rnd = prng.random();
-    const dims = [_]usize{ 1, 3, 4, 7, 8, 15, 16, 31, 33, 100, 128, 384, 768, 960, 1536 };
-
-    inline for ([_]usize{ 4, 8, 16 }) |L| {
-        const K = Euclid(L, 8);
-        for (dims) |d| {
-            const a = try std.testing.allocator.alloc(f32, d);
-            defer std.testing.allocator.free(a);
-            const b = try std.testing.allocator.alloc(f32, d);
-            defer std.testing.allocator.free(b);
-            for (a, b) |*x, *y| {
-                x.* = rnd.floatNorm(f32);
-                y.* = rnd.floatNorm(f32);
-            }
-            const got = K.call(a, b);
-            const want = reference.euclidWide(a, b);
-            const scale = @max(1.0, @abs(want));
-            try std.testing.expect(@abs(@as(f64, got) - want) / scale < 1e-5);
-        }
-    }
+    try kernel_test.expectMatches(
+        f32,
+        f32,
+        .{ Euclid(4, 8), Euclid(8, 8), Euclid(16, 8) },
+        reference.euclidWide,
+        .{ .scaled = 1e-5 },
+        0xe0c11d,
+        &.{ 1, 3, 4, 7, 8, 15, 16, 31, 33, 100, 128, 384, 768, 960, 1536 },
+        .{},
+    );
 }
 
 test "manhattan matches the strict reference across widths, dims, and tails" {
-    var prng = std.Random.DefaultPrng.init(0x11a11a);
-    const rnd = prng.random();
-    const dims = [_]usize{ 1, 3, 7, 8, 15, 16, 33, 128, 384, 768, 1536 };
-
-    inline for ([_]usize{ 4, 8, 16 }) |L| {
-        const K = Manhattan(L, 8);
-        for (dims) |d| {
-            const a = try std.testing.allocator.alloc(f32, d);
-            defer std.testing.allocator.free(a);
-            const b = try std.testing.allocator.alloc(f32, d);
-            defer std.testing.allocator.free(b);
-            for (a, b) |*x, *y| {
-                x.* = rnd.floatNorm(f32);
-                y.* = rnd.floatNorm(f32);
-            }
-            const got = K.call(a, b);
-            const want = reference.manhattanWide(a, b);
-            const scale = @max(1.0, @abs(want));
-            try std.testing.expect(@abs(@as(f64, got) - want) / scale < 1e-5);
-        }
-    }
+    try kernel_test.expectMatches(
+        f32,
+        f32,
+        .{ Manhattan(4, 8), Manhattan(8, 8), Manhattan(16, 8) },
+        reference.manhattanWide,
+        .{ .scaled = 1e-5 },
+        0x11a11a,
+        &.{ 1, 3, 7, 8, 15, 16, 33, 128, 384, 768, 1536 },
+        .{},
+    );
 }
 
 test "euclid is exact on integer-valued inputs" {

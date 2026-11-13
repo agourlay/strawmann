@@ -41,6 +41,20 @@ pub fn Hamming(comptime L: usize) type {
 
         const V = @Vector(L, u64);
 
+        const Op = struct {
+            pub const Total = u64;
+
+            pub inline fn step(_: Op, acc: V, a: *const [L]u64, b: *const [L]u64) V {
+                const av: V = a.*;
+                const bv: V = b.*;
+                return acc + @popCount(av ^ bv);
+            }
+
+            pub inline fn tail(_: Op, total: u64, x: *const u64, y: *const u64) u64 {
+                return total + @popCount(x.* ^ y.*);
+            }
+        };
+
         /// Population count of `a XOR b`, the number of differing bits.
         ///
         /// Both slices are packed bit vectors of equal word length. The caller
@@ -48,35 +62,11 @@ pub fn Hamming(comptime L: usize) type {
         /// `wordsFor` and the note on `paddingIsZero`. Padding that is not
         /// zeroed in *both* operands contributes spurious differences.
         pub fn call(a: []const u64, b: []const u64) u32 {
-            std.debug.assert(a.len == b.len);
-
             // Four independent accumulator chains. popcount latency is ~3
             // cycles on the parts we target, so fewer chains than the f32 path
             // needs, and u64 accumulators cannot overflow for any realistic
             // vector length.
-            const nacc = 4;
-            var acc: [nacc]V = @splat(@as(V, @splat(0)));
-            const block = L * nacc;
-            var i: usize = 0;
-
-            while (i + block <= a.len) : (i += block) {
-                inline for (0..nacc) |k| {
-                    const off = i + k * L;
-                    const av: V = a[off..][0..L].*;
-                    const bv: V = b[off..][0..L].*;
-                    acc[k] += @popCount(av ^ bv);
-                }
-            }
-            while (i + L <= a.len) : (i += L) {
-                const av: V = a[i..][0..L].*;
-                const bv: V = b[i..][0..L].*;
-                acc[0] += @popCount(av ^ bv);
-            }
-
-            const folded = common.treeReduce(V, nacc, acc);
-            var total: u64 = @reduce(.Add, folded);
-            while (i < a.len) : (i += 1) total += @popCount(a[i] ^ b[i]);
-            return @intCast(total);
+            return @intCast(common.accumulate(L, 4, V, a, b, Op{}));
         }
 
         /// Internal similarity for binary quantization: `−hamming`.
@@ -137,27 +127,21 @@ fn hammingReference(a: []const u64, b: []const u64) u32 {
     return t;
 }
 
+const kernel_test = @import("kernel_test.zig");
+
 test "hamming matches the scalar reference across widths and word counts" {
-    var prng = std.Random.DefaultPrng.init(0xba1a1);
-    const rnd = prng.random();
     // Word counts chosen to exercise the full block, the vector tail and the
     // scalar epilogue for every lane count.
-    const counts = [_]usize{ 1, 2, 3, 5, 8, 11, 12, 16, 24, 33, 64 };
-
-    inline for ([_]usize{ 2, 4, 8 }) |L| {
-        const K = Hamming(L);
-        for (counts) |n| {
-            const a = try std.testing.allocator.alloc(u64, n);
-            defer std.testing.allocator.free(a);
-            const b = try std.testing.allocator.alloc(u64, n);
-            defer std.testing.allocator.free(b);
-            for (a, b) |*x, *y| {
-                x.* = rnd.int(u64);
-                y.* = rnd.int(u64);
-            }
-            try std.testing.expectEqual(hammingReference(a, b), K.call(a, b));
-        }
-    }
+    try kernel_test.expectMatches(
+        u64,
+        u64,
+        .{ Hamming(2), Hamming(4), Hamming(8) },
+        hammingReference,
+        .exact,
+        0xba1a1,
+        &.{ 1, 2, 3, 5, 8, 11, 12, 16, 24, 33, 64 },
+        .{},
+    );
 }
 
 test "hamming of a vector with itself is zero" {

@@ -55,6 +55,69 @@ pub fn treeReduce(comptime V: type, comptime N: usize, acc: [N]V) V {
     return a[0];
 }
 
+/// The loop every elementwise kernel in `dist/` is: `NACC` independent
+/// accumulator chains over blocks of `NACC` registers, a vector tail of whole
+/// registers folded into chain 0, the fixed `treeReduce`, a horizontal sum and
+/// a scalar epilogue for what is left. Fourteen kernels wrote it out by hand
+/// and differed only in what `op` supplies:
+///
+/// - `op.step(acc, a, b) Acc`: one register's worth, `a` and `b` pointing at
+///   `L` elements each; it loads, widens and combines into `acc`.
+/// - `op.tail(total, x, y) Total`: one leftover element into the scalar total,
+///   `x` and `y` pointing at it. Pointers so that each step loads where the
+///   expression reads, which keeps the epilogue's instruction order the
+///   hand-written one's.
+/// - `@TypeOf(op).Total`: the scalar the horizontal sum lands in.
+///
+/// The final sign, and any conversion of the total, stay with the caller.
+///
+/// `inline`, so it is each kernel's own loop and not a call: an `align(64)`
+/// kernel stays aligned, and the code is what the hand-written loop compiled
+/// to. Under `@setFloatMode(.optimized)`, which every float kernel set, and
+/// the steps of float kernels set it again in their own scope: the mode is per
+/// scope, and the horizontal `@reduce` and the epilogue's contraction depend
+/// on it. Integer kernels are unaffected by it.
+pub inline fn accumulate(
+    comptime L: usize,
+    comptime NACC: usize,
+    comptime Acc: type,
+    a: anytype,
+    b: anytype,
+    op: anytype,
+) @TypeOf(op).Total {
+    @setFloatMode(.optimized);
+    std.debug.assert(a.len == b.len);
+    const block = L * NACC;
+
+    var acc: [NACC]Acc = @splat(@as(Acc, @splat(0)));
+    var i: usize = 0;
+
+    // Main body: NACC independent chains, no cross-chain dependency.
+    while (i + block <= a.len) : (i += block) {
+        inline for (0..NACC) |k| {
+            const off = i + k * L;
+            acc[k] = op.step(acc[k], a[off..][0..L], b[off..][0..L]);
+        }
+    }
+
+    // Vector tail: whole registers that did not fill a full block. Folded
+    // into chain 0, a fixed choice, so the shape stays deterministic for every
+    // length.
+    while (i + L <= a.len) : (i += L) {
+        acc[0] = op.step(acc[0], a[i..][0..L], b[i..][0..L]);
+    }
+
+    const folded = treeReduce(Acc, NACC, acc);
+    var total: @TypeOf(op).Total = @reduce(.Add, folded);
+
+    // Scalar epilogue for dims that are not a multiple of the lane count.
+    // §6.6.2 notes AVX-512 could predicate this away with mask registers at
+    // zero cost; for the dims we care about (128/384/768/1536) this loop never
+    // executes, so it is correctness scaffolding rather than a hot path.
+    while (i < a.len) : (i += 1) total = op.tail(total, &a[i], &b[i]);
+    return total;
+}
+
 /// Whether the compiled target has a hardware fused multiply-add for floats.
 ///
 /// On x86 that is the FMA feature (Haswell / Piledriver and later, part of
