@@ -31,8 +31,6 @@ Development-grade: same hour, no strawmANN, no publication gate. Usage:
 from __future__ import annotations
 
 import argparse
-import contextlib
-import dataclasses
 import json
 import os
 import re
@@ -42,9 +40,9 @@ import threading
 import time
 from pathlib import Path
 
+import ab_common
 import fullrun
-import perfstat
-import w9_ab
+from ab_common import COMMON
 
 import procstat
 import workloads
@@ -170,24 +168,15 @@ def wait_loaded(n: int, timeout_s: int = 900) -> bool:
     return False
 
 
-COMMON = ["--retry", "0", "--timeout", str(workloads.BFB_TIMEOUT_S), "--p9", "3"]
-
-
 def measure(out: Path, arm: str, rep: int) -> dict:
-    w4 = {w.id: w for w in workloads.table()}["W4"]
+    w4 = workloads.by_id()["W4"]
     d = out / f"{arm}-r{rep}"
-    d.mkdir(parents=True, exist_ok=True)
-    w9_ab.warn_other_engines()
     pid = qdrant_pid()
     smp = Sampler(pid) if pid else None
-    with smp or contextlib.nullcontext():
-        res = workloads.run_one(w4, f"http://localhost:{fullrun.QDRANT_GRPC}", d, COMMON,
-                                perf="default")
-    row = dataclasses.asdict(res)
-    row.update(perfstat.derive(row))
+    row = ab_common.run_row(w4, f"http://localhost:{fullrun.QDRANT_GRPC}", d, during=smp)
     row.update({"arm": arm, "rep": rep,
                 "states": summarise_states(smp.samples) if smp else {}})
-    (d / "row.json").write_text(json.dumps(row, indent=2, default=str) + "\n")
+    ab_common.write_json(d / "row.json", row)
     cores = (row["perf_task_clock_s"] / row["duration_s"]
              if row.get("perf_task_clock_s") and row.get("duration_s") else None)
     print(f"  {arm} rep {rep}: {row.get('qps')} q/s, {cores and round(cores, 2)} cores, "
@@ -211,10 +200,10 @@ def profile(out: Path) -> None:
                             "-p", str(pid), "--call-graph", "dwarf,4096",
                             "-o", str(data), "--quiet"])
     try:
-        w4 = {w.id: w for w in workloads.table()}["W4"]
+        w4 = workloads.by_id()["W4"]
         workloads.run_one(w4, f"http://localhost:{fullrun.QDRANT_GRPC}", d, COMMON)
     finally:
-        w9_ab.stop_perf(rec, 300)
+        ab_common.stop_perf(rec, 300)
     rep = subprocess.run(["perf", "report", "-i", str(data), "--stdio", "--no-children",
                           "--sort", "comm,sym", "--percent-limit", "1"],
                          capture_output=True, text=True)
@@ -231,11 +220,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--tag", default=f"qdw4-{time.strftime('%m%d')}")
     args = ap.parse_args(argv[1:])
 
-    workloads.use_dataset(args.dataset)
+    ab_common.prepare(args.dataset, None)
     fullrun.QDRANT_BINARY = Path(args.qdrant_binary)
-    if busy := procstat.builders_alive():
-        print(f"!! build processes alive ({', '.join(busy)}): foreign load every row "
-              f"will record", flush=True)
+    ab_common.warn_foreign(claude=False)
     out = fullrun.RESULTS / args.tag
     out.mkdir(parents=True, exist_ok=True)
 
@@ -252,12 +239,9 @@ def main(argv: list[str]) -> int:
 def run_arms(args, out: Path, rows: list[dict]) -> int:
     if not start(None, args.server_cpus, wipe=True, out=out):
         return 1
-    w2 = {w.id: w for w in workloads.table()}["W2"]
     (out / "upload").mkdir(parents=True, exist_ok=True)
-    up = workloads.run_one(w2, f"http://localhost:{fullrun.QDRANT_GRPC}",
-                           out / "upload", COMMON)
-    if up.status != workloads.Status.ok:
-        print(f"upload failed: {up.status}", file=sys.stderr)
+    if not ab_common.upload_ok(workloads.by_id()["W2"],
+                               f"http://localhost:{fullrun.QDRANT_GRPC}", out / "upload"):
         return 1
     current = "default"
     for arm, rep in plan(args.reps):
@@ -292,7 +276,6 @@ def write_summary(out: Path, rows: list[dict]) -> None:
                                          and r.get("n_queries")],
             "states": [r["states"] for r in got],
         }
-    (out / "summary.json").write_text(json.dumps(summary, indent=2, default=str) + "\n")
     lines = []
     for arm, s in summary["arms"].items():
         lines.append(f"{arm:<8} q/s {s['qps']}  cores {s['cores']}  "
@@ -300,8 +283,7 @@ def write_summary(out: Path, rows: list[dict]) -> None:
         if s["states"]:
             for pool, st in s["states"][0].items():
                 lines.append(f"    {pool:<28} " + "  ".join(f"{k} {v:.1f}" for k, v in st.items()))
-    (out / "summary.txt").write_text("\n".join(lines) + "\n")
-    print("\n" + "\n".join(lines), flush=True)
+    ab_common.write_summary(out, summary, "\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":

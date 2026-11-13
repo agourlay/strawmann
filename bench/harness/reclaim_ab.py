@@ -20,14 +20,13 @@ no publication. Needs a quiet machine. Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
 
+import ab_common
 import commit_ab
 import fullrun
-import w9_ab
 
 import procstat
 import workloads
@@ -92,24 +91,20 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--tag", default=f"reclaim-ab-{time.strftime('%m%d')}")
     args = ap.parse_args(argv[1:])
 
-    workloads.use_dataset(args.dataset)
-    os.sched_setaffinity(0, w9_ab.cpu_set(args.client_cpus))
-    table = {w.id: w for w in workloads.table()}
+    ab_common.prepare(args.dataset, args.client_cpus)
+    table = workloads.by_id()
     out = fullrun.RESULTS / args.tag
     out.mkdir(parents=True, exist_ok=True)
     log = out / "server.log"
     workers = max(1, fullrun.cpu_count(args.server_cpus) - 1)
     uri = f"http://localhost:{PORT}"
     rows: list[dict] = []
-    engine = fullrun.start_strawmann(args.server_cpus, PORT, log, workers,
-                                     workloads.required_capacity(), binary=args.binary)
-    if engine is None:
-        return 1
-    try:
-        up = workloads.run_one(table["W2"], uri, out, w9_ab.COMMON)
-        if up.status != workloads.Status.ok:
-            print(f"upload failed: {up.status}", file=sys.stderr)
-            return 1
+
+    def start():
+        return fullrun.start_strawmann(args.server_cpus, PORT, log, workers,
+                                       workloads.required_capacity(), binary=args.binary)
+
+    def body():
         if (cg := engine_cgroup()) is None:
             print("the engine has no cgroup of its own to reclaim; nothing measured",
                   file=sys.stderr)
@@ -123,10 +118,13 @@ def main(argv: list[str]) -> int:
                 row = commit_ab.measure(table[wid], uri, out, arm, rnd)
                 if arm != "warm":
                     rows.append(row)
-    finally:
+        return 0
+
+    def stop(engine):
         fullrun.stop_strawmann(engine)
         commit_ab.write_summary(out, rows, ["resident", "reread"])
-    return 0
+
+    return ab_common.session(start, stop, table["W2"], uri, out, body)
 
 
 if __name__ == "__main__":

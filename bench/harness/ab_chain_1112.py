@@ -39,15 +39,13 @@ session:
 
 from __future__ import annotations
 
-import argparse
 import subprocess
 import sys
 import time
 
 import commit_ab
-import nightrun
 import phase1_chain
-from phase1_chain import BFB, CPUS, RESULTS, Step
+from phase1_chain import CPUS, Step
 
 DBPEDIA = "dbpedia-openai-100K-1536-angular"
 QUERY_UNION_PARENT = "154628e"  # before the quantized Query union
@@ -94,24 +92,17 @@ def steps(tag: str, commit: str) -> list[Step]:
 
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--tag", default=f"ab-{time.strftime('%m%d')}")
-    ap.add_argument("--commit", help="the build every arm runs (default: HEAD)")
-    ap.add_argument("--only", nargs="+", help="run these steps by name")
-    args = ap.parse_args(argv[1:])
-    if not BFB.is_file():
-        print(f"no bfb at {BFB}", file=sys.stderr)
-        return 2
-    commit = args.commit or subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
-        check=True).stdout.strip()
-    chain = [s for s in steps(args.tag, commit) if not args.only or s.name in args.only]
-    out = RESULTS / args.tag
-    out.mkdir(parents=True, exist_ok=True)
-    env = {**nightrun.child_env(), "BFB": str(BFB)}
-    done = phase1_chain.run(chain, out, env)
-    return 0 if all(d["rc"] == 0 for d in done) else 1
+    def add_args(ap):
+        ap.add_argument("--commit", help="the build every arm runs (default: HEAD)")
+
+    def chain(args):
+        commit = args.commit or subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+            check=True).stdout.strip()
+        return steps(args.tag, commit)
+
+    return phase1_chain.main_for(argv, __doc__, f"ab-{time.strftime('%m%d')}", chain,
+                                 phase1_chain.no_bfb, add_args)
 
 
 if __name__ == "__main__":

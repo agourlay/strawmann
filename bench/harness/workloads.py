@@ -1927,6 +1927,16 @@ def tests_table() -> list[Workload]:
     return rows
 
 
+def by_id() -> dict[str, Workload]:
+    """`table()` keyed by row id."""
+    return {w.id: w for w in table()}
+
+
+def bfb_common() -> list[str]:
+    """bfb's flags every row passes: no retries, the row timeout, p99.9."""
+    return ["--retry", "0", "--timeout", str(BFB_TIMEOUT_S), "--p9", "3"]
+
+
 def table() -> list[Workload]:
     """§4's table. `docs/workloads.md` carries the per-flag reasoning."""
     if paths.is_text(DATASET):
@@ -3424,11 +3434,11 @@ def backfill(label: str) -> int:
         print(f"no rows.json in {results}", file=sys.stderr)
         return 1
     rows = json.loads(path.read_text())
-    by_id = {w.id: w for w in table()}
+    rows_by_id = by_id()
 
     changed = 0
     for r in rows:
-        w = by_id.get(r["id"])
+        w = rows_by_id.get(r["id"])
         lat = latency_of(results, r["id"])
         if lat and not r.get("latency"):
             r["latency"] = lat
@@ -3834,7 +3844,7 @@ def main(argv: list[str]) -> int:
         f" (proc = syscalls + block bytes, cgroup = block ops + bytes)\n"
         f"storage path   {(probe.storage_path if probe else None) or 'unknown'}\n")
 
-    common = ["--retry", "0", "--timeout", str(BFB_TIMEOUT_S), "--p9", "3"]
+    common = bfb_common()
 
     rows = [w for w in table() if not wanted or w.id in wanted]
     # `--min-duration`'s verdict from this arm's first pass, if there was one.

@@ -26,6 +26,7 @@ import json
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import nightrun
@@ -81,21 +82,38 @@ def run(chain: list[Step], out: Path, env: dict[str, str], runner=subprocess.run
     return done
 
 
-def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
+def main_for(argv: list[str], doc: str, default_tag: str,
+             steps: Callable[[argparse.Namespace], list[Step]],
+             missing: Callable[[], list[str]],
+             add_args: Callable[[argparse.ArgumentParser], None] | None = None) -> int:
+    """A dated chain's `main`: its `--tag`, `--only`, what it checks before the
+    first step, and its own step list, built from the parsed arguments."""
+    ap = argparse.ArgumentParser(description=doc,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--tag", default=f"phase1-{time.strftime('%m%d')}")
+    ap.add_argument("--tag", default=default_tag)
+    if add_args is not None:
+        add_args(ap)
     ap.add_argument("--only", nargs="+", help="run these steps by name")
     args = ap.parse_args(argv[1:])
     if gone := missing():
         print("\n".join(gone), file=sys.stderr)
         return 2
-    chain = [s for s in steps(args.tag) if not args.only or s.name in args.only]
+    chain = [s for s in steps(args) if not args.only or s.name in args.only]
     out = RESULTS / args.tag
     out.mkdir(parents=True, exist_ok=True)
     env = {**nightrun.child_env(), "BFB": str(BFB)}
     done = run(chain, out, env)
     return 0 if all(d["rc"] == 0 for d in done) else 1
+
+
+def no_bfb() -> list[str]:
+    """The check the later chains make: they need no Zig 0.16 engine."""
+    return [] if BFB.is_file() else [f"no bfb at {BFB}"]
+
+
+def main(argv: list[str]) -> int:
+    return main_for(argv, __doc__, f"phase1-{time.strftime('%m%d')}",
+                    lambda args: steps(args.tag), missing)
 
 
 if __name__ == "__main__":

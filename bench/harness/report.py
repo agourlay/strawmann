@@ -1206,7 +1206,7 @@ def _read_before_drop(runs: list[Run]) -> set[str]:
     and its read-back is an end state. 0925's Qdrant bench1 read 988,196
     points and 5 segments seconds before the drop reported 990,000.
     """
-    by_id = {w.id: w for w in workloads.table()}
+    by_id = workloads.by_id()
     out: set[str] = set()
     for r in runs:
         settle = ((r.meta or {}).get("harness") or {}).get("engine_settle") or {}

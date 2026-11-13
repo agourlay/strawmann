@@ -21,14 +21,12 @@ Qdrant, no publication. Scheduled, not run from a session:
 
 from __future__ import annotations
 
-import argparse
 import sys
 import time
 
-import nightrun
 import phase1_chain
 import planner_ab
-from phase1_chain import BFB, CPUS, RESULTS, Step
+from phase1_chain import CPUS, Step
 
 REPORT_FIX = "14bec9e"   # the parent of the late filter
 LATE_FILTER = "f33ee1f"  # text: filter a BM25 search late
@@ -62,20 +60,8 @@ def steps(tag: str) -> list[Step]:
 
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--tag", default=f"ab-{time.strftime('%m%d')}")
-    ap.add_argument("--only", nargs="+", help="run these steps by name")
-    args = ap.parse_args(argv[1:])
-    if not BFB.is_file():
-        print(f"no bfb at {BFB}", file=sys.stderr)
-        return 2
-    chain = [s for s in steps(args.tag) if not args.only or s.name in args.only]
-    out = RESULTS / args.tag
-    out.mkdir(parents=True, exist_ok=True)
-    env = {**nightrun.child_env(), "BFB": str(BFB)}
-    done = phase1_chain.run(chain, out, env)
-    return 0 if all(d["rc"] == 0 for d in done) else 1
+    return phase1_chain.main_for(argv, __doc__, f"ab-{time.strftime('%m%d')}",
+                                 lambda args: steps(args.tag), phase1_chain.no_bfb)
 
 
 if __name__ == "__main__":

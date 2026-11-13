@@ -29,20 +29,16 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import json
-import os
-import signal
-import statistics
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+import ab_common
 import fullrun
-import perfstat
+from ab_common import COMMON, cpu_set, stop_perf, warn_other_engines  # noqa: F401  re-exported
 
 import procstat
-import provenance
 import workloads
 
 #: name, query workers, queries per request.
@@ -53,13 +49,6 @@ ARMS: tuple[tuple[str, int, int], ...] = (
 )
 
 PORT = 6334
-
-#: bfb's flags every row passes, as `workloads.main` builds them.
-COMMON = ["--retry", "0", "--timeout", str(workloads.BFB_TIMEOUT_S), "--p9", "3"]
-
-
-#: `0-3,8` as `{0, 1, 2, 3, 8}`.
-cpu_set = provenance.cpus_in
 
 
 def plan(reps: int) -> list[tuple[int, list[tuple[str, int]]]]:
@@ -84,7 +73,7 @@ def set_n(args: list[str], n: int) -> list[str]:
 
 def w9_row(arm: str, batch: int, queries: int) -> workloads.Workload:
     """The table's W9, with its query count and batch size as given."""
-    w9 = {w.id: w for w in workloads.table()}["W9"]
+    w9 = workloads.by_id()["W9"]
     args = set_n(list(w9.args), queries)
     if batch > 1:
         args += ["--search-batch-size", str(batch)]
@@ -96,26 +85,6 @@ def strawmann_pid() -> int | None:
     that scopes it, whose pid is not the one to profile."""
     found = [pid for pid, comm in procstat.engine_processes() if comm.startswith("strawmann")]
     return found[0] if len(found) == 1 else None
-
-
-def warn_other_engines() -> None:
-    """`run_one` attaches its counters to the lowest-pid engine process, so
-    a second one alive at measurement time would be the row's engine."""
-    procs = procstat.engine_processes()
-    if len(procs) > 1:
-        print(f"  !! {len(procs)} engine processes alive "
-              f"({', '.join(f'{c}:{p}' for p, c in procs)}); the row's counters "
-              f"describe the lowest pid", flush=True)
-
-
-def stop_perf(rec: subprocess.Popen, timeout_s: int) -> None:
-    """SIGINT so perf writes its file, and a kill if it will not stop."""
-    rec.send_signal(signal.SIGINT)
-    try:
-        rec.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        rec.kill()
-        rec.wait(timeout=30)
 
 
 def perf_record_argv(pid: int, out: Path) -> list[str]:
@@ -133,6 +102,7 @@ def summarise(rows: list[dict], corpus_bytes: int) -> list[dict]:
     by_arm: dict[str, list[dict]] = {}
     for r in rows:
         by_arm.setdefault(r["arm"], []).append(r)
+    _median, _ratio = ab_common.median_of, ab_common.ratio
     out = []
     for arm, _, batch in ARMS:
         got = [r for r in by_arm.get(arm, []) if r.get("qps")]
@@ -153,15 +123,6 @@ def summarise(rows: list[dict], corpus_bytes: int) -> list[dict]:
     return out
 
 
-def _ratio(r: dict, num: str, den: str) -> float | None:
-    return r[num] / r[den] if r.get(num) and r.get(den) else None
-
-
-def _median(rows: list[dict], f) -> float | None:
-    vals = [v for r in rows if (v := f(r)) is not None]
-    return statistics.median(vals) if vals else None
-
-
 def table_text(summary: list[dict], bus: str) -> str:
     lines = [f"bus (strawmann --probe): {bus}",
              (f"{'arm':<8} {'reps':>4} {'q/s':>8} {'spread':>7} {'cores':>6} "
@@ -179,15 +140,11 @@ def table_text(summary: list[dict], bus: str) -> str:
 
 def measure(w: workloads.Workload, uri: str, label: str, arm: str, rep: int) -> dict:
     results = fullrun.RESULTS / label
-    results.mkdir(parents=True, exist_ok=True)
-    warn_other_engines()
     # No warm-up: at 1,000 queries it is as long as the row itself, and a
     # full-arena scan has nothing to warm that the row's own start does not.
-    res = workloads.run_one(w, uri, results, COMMON, perf="default", warmup=False)
-    row = dataclasses.asdict(res)
-    row.update(perfstat.derive(row))
+    row = ab_common.run_row(w, uri, results, warmup=False)
     row.update({"arm": arm, "rep": rep})
-    (results / "row.json").write_text(json.dumps(row, indent=2, default=str) + "\n")
+    ab_common.write_json(results / "row.json", row)
     print(f"  {arm} rep {rep}: {row.get('qps')} q/s, status {row.get('status')}, "
           f"foreign {row.get('foreign') or '-'}", flush=True)
     return row
@@ -227,21 +184,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--tag", default=f"w9ab-{time.strftime('%m%d')}")
     args = ap.parse_args(argv[1:])
 
-    workloads.use_dataset(args.dataset)
-    # The load generator, its warm-ups and the perf sidecars are this process's
-    # children, so its affinity is theirs; the engine pins itself with
-    # `--pin --cpus`.
-    os.sched_setaffinity(0, cpu_set(args.client_cpus))
-    # Warned, not refused: the rows record their own foreign load, and the
-    # sessions are the user's.
-    if busy := procstat.builders_alive():
-        print(f"!! build processes alive ({', '.join(busy)}): foreign load every row "
-              f"will record, and memory pressure the engine can be oom-killed under",
-              flush=True)
-    claude = [c for _, c in procstat.processes() if c == "claude"]
-    if claude:
-        print(f"!! {len(claude)} claude process(es) alive; their idle CPU is foreign load",
-              flush=True)
+    ab_common.prepare(args.dataset, args.client_cpus)
+    ab_common.warn_foreign(oom=True)
     if fullrun.cpu_count(args.server_cpus) < 1 + max(w for _, w, _ in ARMS):
         print("--server-cpus must hold one I/O thread plus the widest arm's workers",
               file=sys.stderr)
@@ -268,12 +212,8 @@ def main(argv: list[str]) -> int:
 def write_summary(out: Path, rows: list[dict], bus: str, corpus_bytes: int,
                   queries: int) -> None:
     summary = summarise(rows, corpus_bytes)
-    (out / "summary.json").write_text(json.dumps(
-        {"bus": bus, "corpus_bytes": corpus_bytes, "queries": queries,
-         "arms": summary, "rows": rows}, indent=2, default=str) + "\n")
-    text = table_text(summary, bus)
-    (out / "summary.txt").write_text(text)
-    print("\n" + text, flush=True)
+    ab_common.write_summary(out, {"bus": bus, "corpus_bytes": corpus_bytes, "queries": queries,
+                                  "arms": summary, "rows": rows}, table_text(summary, bus))
 
 
 def run_sessions(args, out: Path, rows: list[dict]) -> int:
@@ -283,18 +223,14 @@ def run_sessions(args, out: Path, rows: list[dict]) -> int:
         print(f"\n=== {workers} workers: {', '.join(f'{a} rep {r}' for a, r in runs)}", flush=True)
         fullrun.wipe_strawmann_storage()
         log = out / f"server-{workers}w.log"
-        engine = fullrun.start_strawmann(args.server_cpus, PORT, log, workers,
-                                         workloads.required_capacity())
-        if engine is None:
-            return 1
-        try:
-            w2 = {w.id: w for w in workloads.table()}["W2"]
-            upload_dir = out / f"upload-{workers}w"
-            upload_dir.mkdir(parents=True, exist_ok=True)
-            up = workloads.run_one(w2, uri, upload_dir, COMMON)
-            if up.status != workloads.Status.ok:
-                print(f"upload failed: {up.status}", file=sys.stderr)
-                return 1
+        upload_dir = out / f"upload-{workers}w"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        def start(workers=workers, log=log):
+            return fullrun.start_strawmann(args.server_cpus, PORT, log, workers,
+                                           workloads.required_capacity())
+
+        def body(workers=workers, runs=runs):
             for arm, rep in runs:
                 fullrun.settle(f"{arm} rep {rep}")
                 rows.append(measure(w9_row(arm, batch_of[arm], args.queries), uri,
@@ -302,8 +238,10 @@ def run_sessions(args, out: Path, rows: list[dict]) -> int:
             if workers == 7:
                 fullrun.settle("the profile")
                 profile(w9_row("profile", 1, args.queries), uri, f"{args.tag}-stream7-profile")
-        finally:
-            fullrun.stop_strawmann(engine)
+
+        if ab_common.session(start, fullrun.stop_strawmann, workloads.by_id()["W2"], uri,
+                             upload_dir, body):
+            return 1
     return 0
 
 

@@ -25,9 +25,9 @@ import sys
 import time
 from pathlib import Path
 
+import ab_common
 import commit_ab
 import fullrun
-import w9_ab
 
 import procstat
 import workloads
@@ -57,26 +57,27 @@ def unrecognised_engines(arms: dict[str, Path]) -> list[str]:
 
 
 def run_sessions(args, out: Path, arms: dict[str, Path], rows: list[dict]) -> int:
-    table = {w.id: w for w in workloads.table()}
+    table = workloads.by_id()
     uri = f"http://localhost:{fullrun.QDRANT_GRPC}"
     for rep, arm in commit_ab.plan(list(arms), args.reps):
         fullrun.say(f"{arm} rep {rep}")
         fullrun.QDRANT_BINARY = arms[arm]
-        if fullrun.start_qdrant_binary(args.server_cpus, fullrun.QDRANT_GRPC,
-                                       fullrun.QDRANT_REST) is None:
-            return 1
         results = out / f"{arm}-r{rep}"
-        results.mkdir(parents=True, exist_ok=True)
-        try:
-            up = workloads.run_one(table["W2"], uri, results, w9_ab.COMMON)
-            if up.status != workloads.Status.ok:
-                print(f"upload failed: {up.status}", file=sys.stderr)
-                return 1
+
+        def start(results=results):
+            engine = fullrun.start_qdrant_binary(args.server_cpus, fullrun.QDRANT_GRPC,
+                                                 fullrun.QDRANT_REST)
+            results.mkdir(parents=True, exist_ok=True)
+            return engine
+
+        def body(arm=arm, rep=rep):
             for wid in args.rows:
                 fullrun.settle(f"{arm} rep {rep} {wid}")
                 rows.append(commit_ab.measure(table[wid], uri, out, arm, rep))
-        finally:
-            fullrun.stop_qdrant()
+
+        if ab_common.session(start, lambda _e: fullrun.stop_qdrant(), table["W2"], uri,
+                             results, body):
+            return 1
     return 0
 
 
@@ -105,15 +106,8 @@ def main(argv: list[str]) -> int:
     if missing := [str(p) for p in arms.values() if not os.access(p, os.X_OK)]:
         print(f"no executable at {', '.join(missing)}", file=sys.stderr)
         return 2
-    workloads.use_dataset(args.dataset)
-    os.sched_setaffinity(0, w9_ab.cpu_set(args.client_cpus))
-    if busy := procstat.builders_alive():
-        print(f"!! build processes alive ({', '.join(busy)}): foreign load every row "
-              f"will record", flush=True)
-    claude = [c for _, c in procstat.processes() if c == "claude"]
-    if claude:
-        print(f"!! {len(claude)} claude process(es) alive; their idle CPU is foreign load",
-              flush=True)
+    ab_common.prepare(args.dataset, args.client_cpus)
+    ab_common.warn_foreign()
     out = fullrun.RESULTS / f"{args.tag}-{args.dataset}"
     out.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []

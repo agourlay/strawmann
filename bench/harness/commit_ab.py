@@ -25,20 +25,16 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import json
-import os
+import functools
 import re
 import shlex
-import statistics
 import sys
 import time
 from pathlib import Path
 
+import ab_common
 import fullrun
-import perfstat
-import w9_ab
 
-import procstat
 import workloads
 
 #: findings 69's range, oldest first: the 0930 build, the drainer-on-upsert
@@ -160,26 +156,21 @@ def summarise(rows: list[dict]) -> list[dict]:
     for r in rows:
         if r.get("qps"):
             by.setdefault((r["id"], r["commit"]), []).append(r)
+    per_q = ab_common.per_q
     out = []
     for (wid, commit), got in by.items():
-        def med(f, got=got):
-            vals = [v for r in got if (v := f(r)) is not None]
-            return statistics.median(vals) if vals else None
+        med = functools.partial(ab_common.median_of, got)
         out.append({
             "row": wid, "commit": commit, "reps": len(got),
             "qps": med(lambda r: r["qps"]),
             "qps_all": [r["qps"] for r in got],
-            "cycles_per_q": med(lambda r: _per_q(r, "perf_cycles")),
-            "instructions_per_q": med(lambda r: _per_q(r, "perf_instructions")),
-            "dram_kib_per_q": med(lambda r: (v / 1024 if (v := _per_q(r, "dram_bytes"))
+            "cycles_per_q": med(lambda r: per_q(r, "perf_cycles")),
+            "instructions_per_q": med(lambda r: per_q(r, "perf_instructions")),
+            "dram_kib_per_q": med(lambda r: (v / 1024 if (v := per_q(r, "dram_bytes"))
                                              is not None else None)),
             "foreign": sorted({r["foreign"] for r in got if r.get("foreign")}),
         })
     return out
-
-
-def _per_q(r: dict, key: str) -> float | None:
-    return r[key] / r["n_queries"] if r.get(key) and r.get("n_queries") else None
 
 
 def table_text(summary: list[dict], commits: list[str]) -> str:
@@ -201,13 +192,9 @@ def table_text(summary: list[dict], commits: list[str]) -> str:
 
 def measure(w: workloads.Workload, uri: str, out: Path, commit: str, rep: int) -> dict:
     results = out / f"{worktree_dir(commit).name}-r{rep}"
-    results.mkdir(parents=True, exist_ok=True)
-    w9_ab.warn_other_engines()
-    res = workloads.run_one(w, uri, results, w9_ab.COMMON, perf="default")
-    row = dataclasses.asdict(res)
-    row.update(perfstat.derive(row))
+    row = ab_common.run_row(w, uri, results)
     row.update({"commit": commit, "rep": rep})
-    (results / f"{w.id}.row.json").write_text(json.dumps(row, indent=2, default=str) + "\n")
+    ab_common.write_json(results / f"{w.id}.row.json", row)
     print(f"  {commit} rep {rep} {w.id}: {row.get('qps')} q/s, status "
           f"{row.get('status')}, foreign {row.get('foreign') or '-'}", flush=True)
     return row
@@ -233,30 +220,29 @@ def binaries_for(arms: list[Arm]) -> dict[str, Path] | None:
 
 
 def run_sessions(args, out: Path, binaries: dict[str, Path], rows: list[dict]) -> int:
-    table = {w.id: w for w in workloads.table()}
+    table = workloads.by_id()
     flags = {a.name: list(a.flags) for a in args.arms}
     uri = f"http://localhost:{PORT}"
     workers = max(1, fullrun.cpu_count(args.server_cpus) - 1)
     for rep, commit in plan([a.name for a in args.arms], args.reps):
         fullrun.say(f"{commit} rep {rep}")
         log = out / f"{worktree_dir(commit).name}-r{rep}" / "server.log"
-        engine = fullrun.start_strawmann(args.server_cpus, PORT, log, workers,
-                                         workloads.required_capacity(),
-                                         binary=binaries[commit], extra=flags[commit])
-        if engine is None:
-            return 1
-        try:
-            up = workloads.run_one(table[args.upload], uri, log.parent, w9_ab.COMMON)
-            if up.status != workloads.Status.ok:
-                print(f"upload failed: {up.status}", file=sys.stderr)
-                return 1
+
+        def start(commit=commit, log=log):
+            return fullrun.start_strawmann(args.server_cpus, PORT, log, workers,
+                                           workloads.required_capacity(),
+                                           binary=binaries[commit], extra=flags[commit])
+
+        def body(commit=commit, rep=rep, log=log):
             for wid in args.rows:
                 fullrun.settle(f"{commit} rep {rep} {wid}")
                 row = measure(table[wid], uri, out, commit, rep)
                 row["drain"] = drain_lines(log)[-3:]
                 rows.append(row)
-        finally:
-            fullrun.stop_strawmann(engine)
+
+        if ab_common.session(start, fullrun.stop_strawmann, table[args.upload], uri,
+                             log.parent, body):
+            return 1
     return 0
 
 
@@ -268,10 +254,7 @@ def write_summary(out: Path, rows: list[dict], commits: list[str],
         # Each arm's engine, whose worktree is named by the hash its ref
         # resolved to: `scan=HEAD` says nothing once HEAD has moved.
         doc["builds"] = builds
-    (out / "summary.json").write_text(json.dumps(doc, indent=2, default=str) + "\n")
-    text = table_text(summary, commits)
-    (out / "summary.txt").write_text(text)
-    print("\n" + text, flush=True)
+    ab_common.write_summary(out, doc, table_text(summary, commits))
 
 
 def main(argv: list[str]) -> int:
@@ -291,15 +274,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--tag", default=f"commit-ab-{time.strftime('%m%d')}")
     args = ap.parse_args(argv[1:])
 
-    workloads.use_dataset(args.dataset)
-    os.sched_setaffinity(0, w9_ab.cpu_set(args.client_cpus))
-    if busy := procstat.builders_alive():
-        print(f"!! build processes alive ({', '.join(busy)}): foreign load every row "
-              f"will record", flush=True)
-    claude = [c for _, c in procstat.processes() if c == "claude"]
-    if claude:
-        print(f"!! {len(claude)} claude process(es) alive; their idle CPU is foreign load",
-              flush=True)
+    ab_common.prepare(args.dataset, args.client_cpus)
+    ab_common.warn_foreign()
     try:
         args.arms = parse_arms(args.commits, args.flags)
     except ValueError as exc:

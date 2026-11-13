@@ -1855,7 +1855,7 @@ def split_after_dead_writers(stable: list[str]) -> tuple[list[str], list[str], l
     if not writers:
         return list(stable), [], []
     cut = max(stable.index(r) for r in writers) + 1
-    by_id = {w.id: w for w in workloads.table()}
+    by_id = workloads.by_id()
     early = [c for r in writers if (c := workloads.collection_of(by_id[r]))]
     return stable[:cut], stable[cut:], early
 

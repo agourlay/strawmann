@@ -80,7 +80,7 @@ def upload(uri: str, label: str, threads: int, parallel: int, client_cpus: str,
     argv = [
         "taskset", "-c", client_cpus,
         str(workloads.BFB),
-        "--retry", "0", "--timeout", str(workloads.BFB_TIMEOUT_S), "--p9", "3",
+        *workloads.bfb_common(),
         "--uri", uri,
         "--json", str(results / f"upload-{collection}.json"),
         *workloads.CREATE,

@@ -24,9 +24,9 @@ import sys
 import time
 from pathlib import Path
 
+import ab_common
 import commit_ab
 import fullrun
-import w9_ab
 
 import workloads
 
@@ -50,31 +50,30 @@ def main(argv: list[str]) -> int:
         print(f"no qdrant binary at {args.qdrant_binary}", file=sys.stderr)
         return 2
 
-    workloads.use_dataset(args.dataset)
-    os.sched_setaffinity(0, w9_ab.cpu_set(args.client_cpus))
+    ab_common.prepare(args.dataset, args.client_cpus)
     fullrun.QDRANT_BINARY = args.qdrant_binary
-    table = {w.id: w for w in workloads.table()}
+    table = workloads.by_id()
     out = fullrun.RESULTS / args.tag
     out.mkdir(parents=True, exist_ok=True)
     uri = f"http://localhost:{fullrun.QDRANT_GRPC}"
     rows: list[dict] = []
-    if fullrun.start_qdrant_binary(args.server_cpus, fullrun.QDRANT_GRPC,
-                                   fullrun.QDRANT_REST) is None:
-        return 1
-    try:
-        up = workloads.run_one(table["W2"], uri, out, w9_ab.COMMON)
-        if up.status != workloads.Status.ok:
-            print(f"upload failed: {up.status}", file=sys.stderr)
-            return 1
+
+    def start():
+        return fullrun.start_qdrant_binary(args.server_cpus, fullrun.QDRANT_GRPC,
+                                           fullrun.QDRANT_REST)
+
+    def body():
         for rnd in range(1, args.rounds + 1):
             for wid in args.rows:
                 fullrun.settle(f"qdrant round {rnd} {wid}")
                 rows.append(commit_ab.measure(table[wid], uri, out, "qdrant", rnd))
-    finally:
+
+    def stop(_engine):
         fullrun.stop_qdrant()
         fullrun.wipe_qdrant_storage()
         commit_ab.write_summary(out, rows, ["qdrant"])
-    return 0
+
+    return ab_common.session(start, stop, table["W2"], uri, out, body)
 
 
 if __name__ == "__main__":
