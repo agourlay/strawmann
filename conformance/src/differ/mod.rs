@@ -898,8 +898,7 @@ pub fn compare_ranks(ours: &[Returned], theirs: &[Returned], eps: &Epsilon) -> T
 fn class_cuts(r: &Returned, eps: &Epsilon) -> std::collections::HashSet<usize> {
     let mut cuts = std::collections::HashSet::new();
     let mut anchor: Option<f64> = None;
-    for i in 0..r.ids.len() {
-        let s = r.scores[i];
+    for (i, &s) in r.scores.iter().enumerate().take(r.ids.len()) {
         match anchor {
             Some(a) if eps.holds((s - a).abs(), a) => {}
             _ => {
