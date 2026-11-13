@@ -329,6 +329,21 @@ IO_FIELDS = ("syscall_reads", "syscall_writes",
              "disk_read_ops", "disk_write_ops",
              "disk_read_bytes", "disk_write_bytes")
 
+def io_total(rows: list[dict], key: str) -> int | None:
+    """`key` summed over `rows`, or None when the sum would be a part of the run.
+
+    A row that measured I/O at all and lacks `key` while another row has it
+    makes the total unknown. An upgrade re-executed systemd during h-and-m
+    1112 and took the cgroup counts away from pass 3 on: 8 of 55 rows kept
+    `disk_write_ops`, and their 950 was published as the run's total against
+    69,745 three nights before. A field no row has stays None, as before.
+    """
+    measured = [r for r in rows
+                if r.get("io_source") or any(r.get(f) is not None for f in IO_FIELDS)]
+    have = [r[key] for r in measured if r.get(key) is not None]
+    return sum(have) if have and len(have) == len(measured) else None
+
+
 #: Fields a row carries only when a concurrent writer ran during it (W11,
 #: W11-steady). Their presence is what marks a row as mutating, which no single
 #: field does reliably: `background_pps` is absent when bfb's upload stats are.

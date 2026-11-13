@@ -1909,6 +1909,30 @@ class StorageLevelTests(unittest.TestCase):
         line = next(ln for ln in out if ln.startswith("| disk write ops"))
         self.assertIn("12", line)
 
+    def test_a_total_over_some_of_the_rows_is_unknown(self):
+        """h-and-m 1112 lost its cgroup counts in pass 3, so 8 of 55 folded
+        rows kept `disk_write_ops`; the page printed their 950 as the run's
+        total, against 69,745 three nights before."""
+        cmp = self.m["compare"]
+        whole = {r["id"]: r for r in [
+            _row("W3", 2000.0, io_source="proc+cgroup", disk_write_ops=5, disk_write_bytes=10),
+            _row("W4", 200.0, io_source="proc+cgroup", disk_write_ops=7, disk_write_bytes=20)]}
+        part = {r["id"]: r for r in [
+            _row("W3", 2000.0, io_source="proc+cgroup", disk_write_ops=950, disk_write_bytes=10),
+            _row("W4", 200.0, io_source="proc+cgroup", disk_write_ops=None,
+                 disk_write_bytes=20)]}
+        out = cmp.storage_and_io("a", "b", whole, part, markdown=True)
+        ops = next(ln for ln in out if ln.startswith("| disk write ops"))
+        self.assertEqual([c.strip() for c in ops.split("|")[2:4]], ["12", "unknown"])
+        # The field every row kept still sums.
+        written = next(ln for ln in out if ln.startswith("| disk write bytes"))
+        self.assertNotIn("unknown", written)
+        procstat = self.m["procstat"]
+        self.assertEqual(procstat.io_total(list(part.values()), "disk_write_bytes"), 30)
+        self.assertIsNone(procstat.io_total(list(part.values()), "disk_write_ops"))
+        self.assertIsNone(procstat.io_total(list(part.values()), "disk_read_ops"))
+        self.assertIsNone(procstat.io_total([], "disk_write_ops"))
+
 
 class EnvironmentFloorTests(unittest.TestCase):
     """A floor measured in another environment bands nothing (findings 46).

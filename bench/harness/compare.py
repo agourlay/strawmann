@@ -1697,16 +1697,14 @@ def storage_and_io(a_label: str, b_label: str,
         settled = {id(r) for r in procstat.settled_rows(list(rows.values()))}
         out["storage_excludes"] = [r["id"] for r in rows.values()
                                    if procstat.is_mutating(r)]
+        # Summed over rows: a field no row could measure stays None, so
+        # "nothing happened" and "we could not look" are different cells
+        # rather than the same zero. So does one only some rows measured.
+        for k in procstat.IO_FIELDS:
+            out[k] = procstat.io_total(list(rows.values()), k)
         for r in rows.values():
             if r.get("io_source"):
                 out["source"] = r["io_source"]
-            for k in procstat.IO_FIELDS:
-                v = r.get(k)
-                if v is not None:
-                    # Summed over rows: a field no row could measure stays
-                    # None, so "nothing happened" and "we could not look" are
-                    # different cells rather than the same zero.
-                    out[k] = (out[k] or 0) + v
             # Levels, not sums: the last row that saw one is the end state.
             if r.get("storage_bytes") is not None and id(r) in settled:
                 out["storage"] = r["storage_bytes"]

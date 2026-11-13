@@ -2840,6 +2840,8 @@ def storage_table(runs: list[Run], compact: bool = False) -> str:
         src = run.rows if (kind != "level" or (rss and not compact)) \
             else procstat.settled_rows(run.rows)
         vals = [r.get(key) for r in src if r.get(key) is not None]
+        if kind != "level" and procstat.io_total(src, key) is None:
+            vals = []  # a sum over some of the rows is not the run's total
         if not vals:
             # Runs measured before `procstat.store_bytes_for` recorded this can
             # still be answered from provenance they did keep: an engine whose
