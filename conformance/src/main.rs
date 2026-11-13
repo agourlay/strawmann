@@ -27,6 +27,7 @@ mod relevance;
 mod text;
 
 use clap::{Parser, Subcommand};
+use engine::{Filters, SearchOpts};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -2045,7 +2046,14 @@ async fn run_dump_scores(d: DumpRun) -> anyhow::Result<()> {
 
     // `exact: true` — see the doc on `DumpScores`.
     let res = eng
-        .query(&d.collection, &q.data, q.n, q.dim, d.limit, true, None)
+        .query(
+            &d.collection,
+            &q.data,
+            q.n,
+            q.dim,
+            d.limit,
+            SearchOpts::exact(),
+        )
         .await?;
 
     let scores: Vec<f64> = res.iter().flat_map(|r| r.scores.iter().copied()).collect();
@@ -2555,62 +2563,26 @@ corpus is meaningless, not approximate. Rebuild the ground truth for this size w
     for &e in &r.ef {
         let hnsw_ef = if e == 0 { None } else { Some(e) };
         let t = std::time::Instant::now();
-        let res = match r.quant() {
-            None if per_query.is_some() => {
-                eng.query_filtered_each(
-                    &r.collection,
-                    &q.data,
-                    n_q,
-                    q.dim,
-                    r.limit,
-                    r.exact,
-                    hnsw_ef,
-                    per_query.as_deref().expect("this arm is guarded on it"),
-                    r.acorn,
-                )
-                .await?
-            }
-            None if filter.is_some() => {
-                eng.query_filtered(
-                    &r.collection,
-                    &q.data,
-                    n_q,
-                    q.dim,
-                    r.limit,
-                    r.exact,
-                    hnsw_ef,
-                    filter.as_ref().expect("this arm is guarded on it"),
-                    r.acorn,
-                )
-                .await?
-            }
-            None => {
-                eng.query(
-                    &r.collection,
-                    &q.data,
-                    n_q,
-                    q.dim,
-                    r.limit,
-                    r.exact,
-                    hnsw_ef,
-                )
-                .await?
-            }
-            Some(quant) => {
-                eng.query_quant_oversampled(
-                    &r.collection,
-                    &q.data,
-                    n_q,
-                    q.dim,
-                    r.limit,
-                    r.exact,
-                    hnsw_ef,
-                    Some(quant),
-                    r.quantization_oversampling,
-                )
-                .await?
-            }
+        // A quantized sweep carries no filter; a per-query list wins over one
+        // shared filter.
+        let quant = r.quant();
+        let filters = match (quant, per_query.as_deref(), filter.as_ref()) {
+            (Some(_), _, _) => None,
+            (None, Some(each), _) => Some(Filters::Each(each)),
+            (None, None, one) => one.map(Filters::One),
         };
+        let opts = SearchOpts {
+            exact: r.exact,
+            hnsw_ef,
+            quant,
+            oversampling: quant.and(r.quantization_oversampling),
+            filter: filters,
+            acorn: r.acorn,
+            ..Default::default()
+        };
+        let res = eng
+            .query(&r.collection, &q.data, n_q, q.dim, r.limit, opts)
+            .await?;
         let elapsed = t.elapsed().as_secs_f64();
         let g = relevance::evaluate(&gt, &res, &eps, r.limit as usize, Some(&rescorer));
         if let Some(path) = &r.per_query {
@@ -2973,8 +2945,7 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
                     queries.n,
                     queries.dim,
                     limit as u64,
-                    true,
-                    None,
+                    SearchOpts::exact(),
                 )
                 .await?,
             engines[1]
@@ -2984,8 +2955,7 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
                     queries.n,
                     queries.dim,
                     limit as u64,
-                    true,
-                    None,
+                    SearchOpts::exact(),
                 )
                 .await?,
         )
@@ -3051,8 +3021,7 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
                 queries.n,
                 queries.dim,
                 limit as u64,
-                false,
-                Some(128),
+                SearchOpts::ann(128),
             )
             .await?;
         let theirs_ann = engines[1]
@@ -3062,8 +3031,7 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
                 queries.n,
                 queries.dim,
                 limit as u64,
-                false,
-                Some(128),
+                SearchOpts::ann(128),
             )
             .await?;
         // Matched recall, not equal ef (§8.5): start at the shared 128, then
@@ -3093,8 +3061,7 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
                         queries.n,
                         queries.dim,
                         limit as u64,
-                        false,
-                        Some(ef),
+                        SearchOpts::ann(ef),
                     )
                     .await?;
                 if i == 0 {
@@ -3158,27 +3125,29 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
             // via `ignore`. Rescore stays off: with it on we would measure the
             // rescorer, not the encoding.
             let q = e
-                .query_quant(
+                .query(
                     &qcoll,
                     &queries.data,
                     queries.n,
                     queries.dim,
                     limit as u64,
-                    false,
-                    Some(128),
-                    Some((false, false)),
+                    SearchOpts {
+                        quant: Some((false, false)),
+                        ..SearchOpts::ann(128)
+                    },
                 )
                 .await?;
             let f = e
-                .query_quant(
+                .query(
                     &qcoll,
                     &queries.data,
                     queries.n,
                     queries.dim,
                     limit as u64,
-                    false,
-                    Some(128),
-                    Some((true, false)),
+                    SearchOpts {
+                        quant: Some((true, false)),
+                        ..SearchOpts::ann(128)
+                    },
                 )
                 .await?;
             let label = if i == 0 { "strawmann" } else { "qdrant" };
@@ -3195,16 +3164,17 @@ async fn run_differ(a: DifferRun) -> anyhow::Result<()> {
             let mut curve: Vec<(f64, f64)> = Vec::new();
             for ov in [1.0f64, 2.0, 4.0, 8.0] {
                 let r = e
-                    .query_quant_oversampled(
+                    .query(
                         &qcoll,
                         &queries.data,
                         queries.n,
                         queries.dim,
                         limit as u64,
-                        false,
-                        Some(128),
-                        Some((false, true)),
-                        Some(ov),
+                        SearchOpts {
+                            quant: Some((false, true)),
+                            oversampling: Some(ov),
+                            ..SearchOpts::ann(128)
+                        },
                     )
                     .await?;
                 curve.push((
@@ -3436,8 +3406,7 @@ async fn run_metamorphic(
                 nq,
                 queries.dim,
                 limit as u64,
-                true,
-                None,
+                SearchOpts::exact(),
             )
             .await?;
         // limit + 5 at offset 0, and 5 at offset `limit`: §8.6's
@@ -3449,8 +3418,7 @@ async fn run_metamorphic(
                 nq,
                 queries.dim,
                 (limit + 5) as u64,
-                true,
-                None,
+                SearchOpts::exact(),
             )
             .await?;
         // §8.6: "Prefix property: top_k is a prefix of top_(k+1)."
@@ -3461,14 +3429,16 @@ async fn run_metamorphic(
         // `offset_consistency(&small, &large, 0)`: two offset-free lists at
         // offset zero, i.e. `x == x`.
         let offset = e
-            .query_offset(
+            .query(
                 collection,
                 &queries.data,
                 nq,
                 queries.dim,
                 5,
-                limit as u64,
-                true,
+                SearchOpts {
+                    offset: limit as u64,
+                    ..SearchOpts::exact()
+                },
             )
             .await?;
         props.push(metamorphic::offset_consistency(&offset, &large, limit, eps));
@@ -3479,7 +3449,7 @@ async fn run_metamorphic(
         // is known without consulting either engine.
         let nb = base.n.min(64);
         let self_q = e
-            .query(collection, &base.data, nb, base.dim, 1, true, None)
+            .query(collection, &base.data, nb, base.dim, 1, SearchOpts::exact())
             .await?;
         let expected: Vec<u32> = (0..nb as u32).collect();
         // A duplicate row is at distance zero from the query too, and §8.7's
@@ -3514,8 +3484,7 @@ async fn run_metamorphic(
                 nq,
                 queries.dim,
                 limit as u64,
-                true,
-                None,
+                SearchOpts::exact(),
             )
             .await?;
         let from_rev = e
@@ -3525,8 +3494,7 @@ async fn run_metamorphic(
                 nq,
                 queries.dim,
                 limit as u64,
-                true,
-                None,
+                SearchOpts::exact(),
             )
             .await?;
         props.push(metamorphic::permutation_invariance(
@@ -3551,8 +3519,7 @@ async fn run_metamorphic(
                 nq,
                 queries.dim,
                 limit as u64,
-                true,
-                None,
+                SearchOpts::exact(),
             )
             .await?;
         rev_res.reverse();
@@ -3573,8 +3540,7 @@ async fn run_metamorphic(
                 nq,
                 queries.dim,
                 limit as u64,
-                true,
-                None,
+                SearchOpts::exact(),
             )
             .await?;
         props.push(metamorphic::idempotent_upsert(

@@ -134,9 +134,10 @@ pub fn populated_segments(doc: &serde_json::Value, collection: &str) -> Option<u
     )
 }
 
-/// The filter each query of a batch carries: one for all, or one each.
+/// The filter each query of a batch carries: one for all, or one each
+/// (`None` for a query that carries none).
 #[derive(Clone, Copy)]
-enum Filters<'a> {
+pub enum Filters<'a> {
     One(&'a Filter),
     Each(&'a [Option<Filter>]),
 }
@@ -146,6 +147,54 @@ impl<'a> Filters<'a> {
         match self {
             Filters::One(f) => Some(f),
             Filters::Each(fs) => fs.get(qi).and_then(Option::as_ref),
+        }
+    }
+}
+
+/// The knobs of one `Engine::query` batch. `Default` is an HNSW search at
+/// the server's default ef, no offset, no quantization params, no filter.
+#[derive(Clone, Copy, Default)]
+pub struct SearchOpts<'a> {
+    /// `params.exact`, which §6.5 makes the recall ground truth and W9's
+    /// benchmark: it must never be silently served by an index.
+    pub exact: bool,
+    pub hnsw_ef: Option<u64>,
+    /// For §8.6's offset-consistency property, which is
+    /// `query(limit=L, offset=O) == query(limit=L+O)[O..]` and needs a
+    /// request that actually carries an offset. Zero sends none.
+    pub offset: u64,
+    /// §8.5 T4: `Some((ignore, rescore))`. `ignore: true` forces the fp32
+    /// path on a quantized collection, which is what makes a quantized and an
+    /// fp32 run differ *only* in the encoding rather than in the collection.
+    pub quant: Option<(bool, bool)>,
+    /// `quantization.oversampling`, sent only with `quant`: §8.6's
+    /// quantization-dominance property is a statement about how recall moves
+    /// with oversampling.
+    pub oversampling: Option<f64>,
+    /// W12's recall is only a recall if the sweep searches the way the row
+    /// does *and* is scored against a truth restricted to the same condition
+    /// (docs/workloads.md W12 point 3). This is the search half; the truth
+    /// half is `oracle::compute_filtered`. A vector-db-benchmark `tests.jsonl`
+    /// gives each query its own condition (findings 55): `Filters::Each`.
+    pub filter: Option<Filters<'a>>,
+    /// ACORN, sent only on the queries that carry a filter.
+    pub acorn: bool,
+}
+
+impl SearchOpts<'_> {
+    /// An exact search.
+    pub fn exact() -> Self {
+        SearchOpts {
+            exact: true,
+            ..Default::default()
+        }
+    }
+
+    /// An HNSW search at `ef`.
+    pub fn ann(ef: u64) -> Self {
+        SearchOpts {
+            hnsw_ef: Some(ef),
+            ..Default::default()
         }
     }
 }
@@ -696,9 +745,8 @@ impl Engine {
 
     /// Run a batch of queries and return the results in wire order.
     ///
-    /// `exact` maps to `params.exact`, which §6.5 makes the recall ground truth
-    /// and W9's benchmark — it must never be silently served by an index.
-    #[allow(clippy::too_many_arguments)]
+    /// Every query knob is in `opts`; see `SearchOpts` for what each is for.
+    /// A per-query filter list must cover every query.
     pub async fn query(
         &self,
         name: &str,
@@ -706,185 +754,24 @@ impl Engine {
         n_queries: usize,
         dim: usize,
         limit: u64,
-        exact: bool,
-        hnsw_ef: Option<u64>,
+        opts: SearchOpts<'_>,
     ) -> anyhow::Result<Vec<Returned>> {
-        self.query_quant(name, queries, n_queries, dim, limit, exact, hnsw_ef, None)
-            .await
-    }
-
-    /// `query` with `offset`, for §8.6's offset-consistency property.
-    ///
-    /// The property is `query(limit=L, offset=O) == query(limit=L+O)[O..]`,
-    /// and it needs a request that actually carries an offset. It was being
-    /// "checked" by slicing one offset-free list against another at `O=0`,
-    /// which is `x == x`.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn query_offset(
-        &self,
-        name: &str,
-        queries: &[f32],
-        n_queries: usize,
-        dim: usize,
-        limit: u64,
-        offset: u64,
-        exact: bool,
-    ) -> anyhow::Result<Vec<Returned>> {
-        self.query_full(
-            name, queries, n_queries, dim, limit, offset, exact, None, None, None, None,
-        )
-        .await
-    }
-
-    /// §8.5 T4: the same query scored through the quantized path and through
-    /// fp32, so `|quantized_score - fp32_score|` is measurable.
-    ///
-    /// `quant` is `Some((ignore, rescore))`. `ignore: true` forces the fp32
-    /// path on a quantized collection, which is what makes the two runs
-    /// differ *only* in the encoding rather than in the collection.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn query_quant(
-        &self,
-        name: &str,
-        queries: &[f32],
-        n_queries: usize,
-        dim: usize,
-        limit: u64,
-        exact: bool,
-        hnsw_ef: Option<u64>,
-        quant: Option<(bool, bool)>,
-    ) -> anyhow::Result<Vec<Returned>> {
-        self.query_quant_oversampled(
-            name, queries, n_queries, dim, limit, exact, hnsw_ef, quant, None,
-        )
-        .await
-    }
-
-    /// The same, with `quantization.oversampling` set.
-    ///
-    /// §8.6's quantization-dominance property is a statement about how recall
-    /// moves with oversampling, so measuring it needs the knob the property is
-    /// about.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn query_quant_oversampled(
-        &self,
-        name: &str,
-        queries: &[f32],
-        n_queries: usize,
-        dim: usize,
-        limit: u64,
-        exact: bool,
-        hnsw_ef: Option<u64>,
-        quant: Option<(bool, bool)>,
-        oversampling: Option<f64>,
-    ) -> anyhow::Result<Vec<Returned>> {
-        self.query_full(
-            name,
-            queries,
-            n_queries,
-            dim,
-            limit,
-            0,
+        if let Some(Filters::Each(filters)) = opts.filter {
+            anyhow::ensure!(
+                filters.len() >= n_queries,
+                "{} filters for {n_queries} queries",
+                filters.len()
+            );
+        }
+        let SearchOpts {
             exact,
             hnsw_ef,
+            offset,
             quant,
             oversampling,
-            None,
-        )
-        .await
-    }
-
-    /// `query`, carrying a payload filter.
-    ///
-    /// W12's recall is only a recall if the sweep searches the way the row
-    /// does *and* is scored against a truth restricted to the same condition
-    /// (docs/workloads.md W12 point 3). This is the search half; the truth half
-    /// is `oracle::compute_filtered`, and `relevance` refuses to pair one with
-    /// the other's absence.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn query_filtered(
-        &self,
-        name: &str,
-        queries: &[f32],
-        n_queries: usize,
-        dim: usize,
-        limit: u64,
-        exact: bool,
-        hnsw_ef: Option<u64>,
-        filter: &Filter,
-        acorn: bool,
-    ) -> anyhow::Result<Vec<Returned>> {
-        self.query_full(
-            name,
-            queries,
-            n_queries,
-            dim,
-            limit,
-            0,
-            exact,
-            hnsw_ef,
-            None,
-            None,
-            Some((Filters::One(filter), acorn)),
-        )
-        .await
-    }
-
-    /// `query_filtered` with a filter per query, `None` for a query that
-    /// carries none: a vector-db-benchmark `tests.jsonl` gives each query its
-    /// own condition (findings 55). ACORN goes only on the queries that carry
-    /// a filter, as on the single-filter path.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn query_filtered_each(
-        &self,
-        name: &str,
-        queries: &[f32],
-        n_queries: usize,
-        dim: usize,
-        limit: u64,
-        exact: bool,
-        hnsw_ef: Option<u64>,
-        filters: &[Option<Filter>],
-        acorn: bool,
-    ) -> anyhow::Result<Vec<Returned>> {
-        anyhow::ensure!(
-            filters.len() >= n_queries,
-            "{} filters for {n_queries} queries",
-            filters.len()
-        );
-        self.query_full(
-            name,
-            queries,
-            n_queries,
-            dim,
-            limit,
-            0,
-            exact,
-            hnsw_ef,
-            None,
-            None,
-            Some((Filters::Each(filters), acorn)),
-        )
-        .await
-    }
-
-    /// Every query knob in one place; the named entry points above are the
-    /// combinations the tiers use.
-    #[allow(clippy::too_many_arguments)]
-    async fn query_full(
-        &self,
-        name: &str,
-        queries: &[f32],
-        n_queries: usize,
-        dim: usize,
-        limit: u64,
-        offset: u64,
-        exact: bool,
-        hnsw_ef: Option<u64>,
-        quant: Option<(bool, bool)>,
-        oversampling: Option<f64>,
-        filter: Option<(Filters<'_>, bool)>,
-    ) -> anyhow::Result<Vec<Returned>> {
+            filter,
+            acorn,
+        } = opts;
         let mut out = Vec::with_capacity(n_queries);
 
         // Batched, because §2 notes bfb searches via QueryBatch rather than
@@ -909,10 +796,10 @@ impl Engine {
                     }
                     params = params.quantization(qp);
                 }
-                let this_filter = filter.and_then(|(f, _)| f.for_query(qi));
+                let this_filter = filter.and_then(|f| f.for_query(qi));
                 // ACORN as bfb's `--acorn` asks for it: enabled, at Qdrant's
                 // default `max_selectivity`. Only a filtered search carries it.
-                if this_filter.is_some() && filter.is_some_and(|(_, acorn)| acorn) {
+                if this_filter.is_some() && acorn {
                     params = params
                         .acorn(qdrant_client::qdrant::AcornSearchParamsBuilder::new(true).build());
                 }
