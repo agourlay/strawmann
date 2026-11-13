@@ -52,6 +52,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import results_io
+
 import paths
 from host_load import wait_quiet
 
@@ -212,16 +214,11 @@ def server_argv(arm: Arm, port: int, server_cpus: str | None = None) -> list[str
     if server_cpus:
         import fullrun
 
-        import paths
-        import workloads
-        workers = max(1, fullrun.cpu_count(server_cpus) - 1)
-        argv += ["--workers", str(workers), "--io-threads", "1", "--pin", "--cpus", server_cpus]
-        # The published engine's residency too: without these the arm serves
+        # The published engine's residency too: without it the arm serves
         # from the pinned huge-page arena, and W3's cycles per query are
         # compared with figures measured on the cached 4 KiB mapping.
-        if workloads.Placement.pinned != fullrun.PLACEMENT:
-            argv += ["--data-dir", str(paths.STRAWMANN_STORAGE),
-                     "--default-placement", str(fullrun.PLACEMENT)]
+        argv += fullrun.strawmann_pin_args(server_cpus,
+                                           max(1, fullrun.cpu_count(server_cpus) - 1))
     return argv
 
 
@@ -269,19 +266,11 @@ def run_arm(arm: Arm, rows: list[str], rep: int, port: int,
         setup = ["W0-upload", "W2"]
         if any(r in rows for r in ("W6", "W7", "W8")):
             setup += [f"W{n}-upload" for n in (6, 7, 8) if f"W{n}" in rows]
-        env = dict(os.environ, RESULTS_DIR=str(out), STRAWMANN_ROOT=str(ROOT))
-        r = subprocess.run(client_argv(port, arm.name, [*setup, *rows], client_cpus, perf),
-                           env=env, stdout=(out / "run.log").open("w"),
-                           stderr=subprocess.STDOUT, timeout=7200)
         # A failed arm used to leave an empty result directory while the sweep
-        # printed "sweep complete", so the only symptom was an empty table two
-        # steps later. Fail where the failure happens.
-        if r.returncode != 0:
-            tail = (out / "run.log").read_text().strip().splitlines()[-6:]
-            raise SystemExit(f"arm {arm.name} failed (exit {r.returncode}):\n  "
-                             + "\n  ".join(tail))
-        if not (out / "rows.json").exists():
-            raise SystemExit(f"arm {arm.name} wrote no rows.json to {out}")
+        # printed "sweep complete": `run_into` fails where the failure happens.
+        results_io.run_into(client_argv(port, arm.name, [*setup, *rows], client_cpus, perf),
+                            out, ROOT, f"arm {arm.name}", 7200,
+                            f"arm {arm.name} wrote no rows.json to {out}")
     finally:
         srv.terminate()
         try:

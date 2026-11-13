@@ -45,6 +45,8 @@ from pathlib import Path
 
 import results_io
 
+import provenance
+
 HERE =Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 
@@ -121,9 +123,8 @@ def qdrant_provenance(binary: Path) -> str:
     older than the commit. The verdict is `provenance`'s, the one `fullrun.py`
     records.
     """
-    import provenance
     side = provenance.binary_sidecar(binary)
-    commit = (git(["rev-parse", "--short", "HEAD"], binary.parent)
+    commit = (provenance.git_head(binary.parent, short=True)
               or (f"{side['commit']} ({side['commit_source']})" if side.get("commit") else None)
               or "not in a git tree; fullrun reads it from the server banner into run.json")
     predates = (" (BINARY PREDATES THIS COMMIT; sha256 is the identity that holds)"
@@ -340,7 +341,7 @@ def main(argv: list[str], root: Path = ROOT) -> int:
     oversampling = os.environ.get("OVERSAMPLING_POLICY", "defaults")
     log(f"night run starting: {args.dataset}, labels {sm} / {qd}, reps {reps}, "
         f"oversampling {oversampling}")
-    log(f"strawmann {git(['rev-parse', '--short', 'HEAD'], root)} "
+    log(f"strawmann {provenance.git_head(root, short=True)} "
         f"{dirty_summary(git(['status', '--short', '--untracked-files=all'], root) or '')}")
     binary = Path(os.environ.get("QDRANT_BINARY",
                                  Path.home() / "Workspace/qdrant/target/release/qdrant"))

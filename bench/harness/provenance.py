@@ -37,6 +37,7 @@ import platform
 import re
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from enum import StrEnum
 from pathlib import Path
@@ -44,12 +45,65 @@ from pathlib import Path
 ROOT = Path(os.environ.get("STRAWMANN_ROOT", Path(__file__).resolve().parents[2]))
 
 
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 10) -> str | None:
+def run_out(cmd: list[str], cwd: Path | None = None, timeout: int = 10) -> str | None:
+    """`cmd`'s stdout, stripped, or None where it failed, timed out or could not start."""
     try:
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
     return p.stdout.strip() if p.returncode == 0 else None
+
+
+#: The name this module's own callers use, and the one tests patch.
+_run = run_out
+
+
+def git_head(repo: Path | None, short: bool | int = False, timeout: int = 10) -> str | None:
+    """HEAD's commit in `repo` (None: the current directory), or None.
+
+    `short` is the length, and callers keep the one they have always used:
+    False is the full hash, True git's own `--short`, and a number
+    `--short=N`, as §8 matches the 12-character commit.
+    """
+    flag = ([] if short is False else ["--short"] if short is True
+            else [f"--short={short}"])
+    # Through `_run` by name, so a test patching it reaches this too.
+    return _run(["git", "rev-parse", *flag, "HEAD"], cwd=repo, timeout=timeout)
+
+
+def sh(argv: list[str], timeout: int = 600, **kw) -> tuple[int, str]:
+    """`argv`'s exit code and its stdout and stderr together; 127 and the error
+    where it could not start or timed out."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, **kw)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, str(e)
+
+
+def qdrant_rest_root(port: int | str, timeout: float = 5) -> dict:
+    """`GET /` on a Qdrant REST port, parsed: the server's own name and
+    version. Raises whatever `urlopen` or the JSON parse raises; each caller
+    decides what a silent server means."""
+    with urllib.request.urlopen(f"http://localhost:{port}/", timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def wait_qdrant_version(port: int, within_s: float) -> tuple[str | None, str]:
+    """Poll `qdrant_rest_root` every 2 s until it answers, for at most `within_s`.
+
+    Returns the version the server reports (the tag and the path are claims,
+    this is the answer), or None and the last error once the time is up.
+    """
+    deadline = time.time() + within_s
+    last = ""
+    while time.time() < deadline:
+        try:
+            return str(qdrant_rest_root(port).get("version", "unknown")), ""
+        except (urllib.error.URLError, OSError, ValueError, TimeoutError) as e:
+            last = str(e)
+            time.sleep(2)
+    return None, last
 
 
 def now_iso() -> str:
@@ -235,7 +289,7 @@ def strawmann_build(pid: int | None = None) -> dict:
     With a `pid`, the binary is `/proc/<pid>/exe`, i.e. whatever is actually
     serving; without one it is the default build output and says so.
     """
-    commit = _run(["git", "rev-parse", "--short=12", "HEAD"], cwd=ROOT)
+    commit = git_head(ROOT, short=12)
     # Over the sources the binary is built from, not the whole tree.
     #
     # `dirty` exists to say "this binary may not be what `commit` describes".
@@ -531,7 +585,7 @@ def qdrant_native_build(pid: int | None) -> dict:
     repo = target.parent
     for _ in range(4):
         if (repo / ".git").exists():
-            out["commit"] = _run(["git", "rev-parse", "--short=12", "HEAD"], cwd=repo)
+            out["commit"] = git_head(repo, short=12)
             out.pop("commit_source", None)  # a checkout outranks a sidecar
             out["dirty"] = bool(_run(["git", "status", "--porcelain"], cwd=repo))
             out["source"] = str(repo)
@@ -564,9 +618,7 @@ def qdrant_native_build(pid: int | None) -> dict:
             out.update(commit=banner, commit_source="server banner")
     for port in (6333,):
         try:
-            import urllib.request
-            with urllib.request.urlopen(f"http://localhost:{port}/", timeout=5) as r:
-                got = json.loads(r.read())
+            got = qdrant_rest_root(port)
             out.update(version=str(got.get("version")) or None,
                        version_source=f"server REST :{port}")
             break
@@ -609,8 +661,7 @@ def _qdrant_version(cid: str, image: str, ports: str, netmode: str = "") -> dict
 
     if host_port:
         try:
-            with urllib.request.urlopen(f"http://localhost:{host_port}/", timeout=5) as r:
-                v = json.loads(r.read().decode()).get("version")
+            v = qdrant_rest_root(host_port).get("version")
             if v:
                 where = ("REST / on the host's own port (--network host)"
                          if netmode == "host" else "REST / on the published port")

@@ -95,12 +95,8 @@ QDRANT_REST = 6333
 STRAWMANN_CONF_PORT = 6344
 
 
-def sh(argv: list[str], timeout: int = 600, **kw) -> tuple[int, str]:
-    try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, **kw)
-        return r.returncode, (r.stdout or "") + (r.stderr or "")
-    except (OSError, subprocess.SubprocessError) as e:
-        return 127, str(e)
+#: `provenance.sh`, under the name every caller here (and `commit_ab`) uses.
+sh = provenance.sh
 
 
 #: `(phase, monotonic start)` for every `say`. On dbpedia-openai-1m 0930 the
@@ -682,6 +678,21 @@ def wipe_strawmann_storage() -> None:
         print(f"  wiped {freed / 1e9:.2f} GB of previous arenas from {d}", flush=True)
 
 
+def strawmann_pin_args(server_cpus: str, workers: int) -> list[str]:
+    """The published engine's pinning and residency flags.
+
+    One I/O thread plus `workers` on `server_cpus`, and §7.4's one-residency
+    rule: `cached` and `cold` are mappings and need a file; `pinned` is
+    anonymous RAM and must not be given one, or the engine is measured mapping
+    a store it would not have had. `isa_sweep.server_argv` pins its arms with
+    the same flags.
+    """
+    return ["--workers", str(workers), "--io-threads", "1", "--pin", "--cpus", server_cpus,
+            *(["--data-dir", str(paths.STRAWMANN_STORAGE),
+               "--default-placement", str(PLACEMENT)]
+              if workloads.Placement.pinned != PLACEMENT else [])]
+
+
 def start_strawmann(server_cpus: str, port: int, log: Path,
                     workers: int, capacity: int,
                     binary: Path | None = None,
@@ -703,15 +714,7 @@ def start_strawmann(server_cpus: str, port: int, log: Path,
         # the excess before the HTTP/2 preface and W4 reports a bare transport
         # error with no status.
         "--connections", "64",
-        "--workers", str(workers),
-        "--io-threads", "1",
-        "--pin", "--cpus", server_cpus,
-        # §7.4's one-residency rule. `cached` and `cold` are mappings and need
-        # a file; `pinned` is anonymous RAM and must not be given one, or the
-        # engine is measured mapping a store it would not have had.
-        *(["--data-dir", str(paths.STRAWMANN_STORAGE),
-           "--default-placement", str(PLACEMENT)]
-          if workloads.Placement.pinned != PLACEMENT else []),
+        *strawmann_pin_args(server_cpus, workers),
         # No `--no-bandwidth-probe`: the startup banner is the harness's
         # preferred record of the machine's bandwidth (`provenance.memory_
         # bandwidth` reads it from server.log and only falls back to running
@@ -1108,21 +1111,10 @@ def await_qdrant(server_cpus: str, grpc: int, rest: int, what: str) -> str | Non
     server rather than from the tag or the path, because both of those are
     claims and this is the answer.
     """
-    import urllib.error
-    import urllib.request
-    deadline = time.time() + 180
-    last = ""
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(f"http://localhost:{rest}/", timeout=5) as r:
-                got = json.loads(r.read())
-                v = str(got.get("version", "unknown"))
-                print(f"  qdrant {v} on cpus {server_cpus}, grpc {grpc} ({what})",
-                      flush=True)
-                return v
-        except (urllib.error.URLError, OSError, ValueError, TimeoutError) as e:
-            last = str(e)
-            time.sleep(2)
+    v, last = provenance.wait_qdrant_version(rest, 180)
+    if v is not None:
+        print(f"  qdrant {v} on cpus {server_cpus}, grpc {grpc} ({what})", flush=True)
+        return v
     stop_qdrant()
     print(f"{what} did not answer within 180s ({last})", file=sys.stderr)
     return None
@@ -1509,7 +1501,7 @@ def build_identity(qdrant_version: str | None) -> dict:
     them — which is the first half of §8's sentence.
     """
     env = dict(os.environ)
-    commit = _run_out(["git", "rev-parse", "--short=12", "HEAD"]) or "unknown"
+    commit = provenance.git_head(None, short=12, timeout=30) or "unknown"
     if provenance.tree_dirty():
         # A dirty tree is a different build and must hash differently, or two
         # runs from one commit with different working trees collide.
@@ -1532,11 +1524,6 @@ def conformance_qdrant(version: str | None) -> str | None:
     sha = provenance.file_digest(QDRANT_BINARY) if QDRANT_BINARY else None
     return results.qdrant_identity({"version": version,
                                     "binary_sha256": sha[:16] if sha else None})
-
-
-def _run_out(argv: list[str]) -> str | None:
-    code, out = sh(argv, 30)
-    return out.strip() if code == 0 else None
 
 
 #: Rows that mutate a collection the recall sweeps read, so the sweeps run

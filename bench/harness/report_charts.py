@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import html
 import os
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -28,6 +27,7 @@ import plotly.io as pio
 
 import compare
 import procstat
+import provenance
 import recall as recall_mod
 from report_data import (
     BUILD_ROWS,
@@ -1330,10 +1330,9 @@ def bfb_commit(runs: list[Run] | None = None) -> str:
     candidates += [ROOT.parent / "bfb", Path.home() / "Workspace/bfb"]
     for p in candidates:
         if (p / ".git").exists():
-            r = subprocess.run(["git", "-C", str(p), "rev-parse", "--short", "HEAD"],
-                               capture_output=True, text=True)
-            if r.returncode == 0:
-                return f"dev @ {r.stdout.strip()} (checkout now; this run recorded none)"
+            head = provenance.git_head(p, short=True)
+            if head is not None:
+                return f"dev @ {head} (checkout now; this run recorded none)"
     return "dev (commit unknown)"
 
 

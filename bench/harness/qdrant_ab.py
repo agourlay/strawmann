@@ -29,18 +29,17 @@ most useful when someone already knows what changed.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import subprocess
 import sys
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import results_io
+
 import paths
+import provenance
 from host_load import wait_quiet
 
 ROOT = Path(os.environ.get("STRAWMANN_ROOT", Path(__file__).resolve().parents[2]))
@@ -55,11 +54,8 @@ SETUP_ROWS = ["W0-upload", "W2", "W6-upload"]
 
 
 def sh(argv: list[str], timeout: int = 300) -> tuple[int, str]:
-    try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        return r.returncode, (r.stdout or "") + (r.stderr or "")
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return 127, str(e)
+    """`provenance.sh`, with this driver's shorter default timeout."""
+    return provenance.sh(argv, timeout)
 
 
 def stop_container() -> None:
@@ -113,19 +109,12 @@ def start(image: str) -> str:
     if code != 0:
         raise SystemExit(f"could not start {image}:\n{out.strip()}")
 
-    deadline = time.time() + 120
-    last = ""
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(f"http://localhost:{REST_PORT}/", timeout=5) as r:
-                got = json.loads(r.read())
-                # Record what the server says it is, not what the tag claims. A
-                # tag is mutable; the reported version is what actually ran, and
-                # it is what belongs beside the numbers.
-                return str(got.get("version", "unknown"))
-        except (urllib.error.URLError, OSError, ValueError, TimeoutError) as e:
-            last = str(e)
-            time.sleep(2)
+    # Record what the server says it is, not what the tag claims. A tag is
+    # mutable; the reported version is what actually ran, and it is what
+    # belongs beside the numbers.
+    version, last = provenance.wait_qdrant_version(REST_PORT, 120)
+    if version is not None:
+        return version
     stop_container()
     raise SystemExit(f"{image} did not answer on :{REST_PORT} within 120s ({last})")
 
@@ -133,18 +122,10 @@ def start(image: str) -> str:
 def run_rows(label: str, rows: list[str], out_dir: Path,
              extra_env: dict[str, str] | None = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, RESULTS_DIR=str(out_dir), STRAWMANN_ROOT=str(ROOT),
-               **(extra_env or {}))
-    r = subprocess.run(
+    results_io.run_into(
         [sys.executable, "-u", str(ROOT / "bench/harness/workloads.py"),
          "run", f"http://localhost:{GRPC_PORT}", label, *SETUP_ROWS, *rows],
-        env=env, stdout=(out_dir / "run.log").open("w"),
-        stderr=subprocess.STDOUT, timeout=10800)
-    if r.returncode != 0:
-        tail = (out_dir / "run.log").read_text().strip().splitlines()[-6:]
-        raise SystemExit(f"{label} failed (exit {r.returncode}):\n  " + "\n  ".join(tail))
-    if not (out_dir / "rows.json").exists():
-        raise SystemExit(f"{label} wrote no rows.json")
+        out_dir, ROOT, label, 10800, f"{label} wrote no rows.json", extra_env)
 
 
 def main(argv: list[str]) -> int:

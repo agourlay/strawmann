@@ -887,11 +887,9 @@ def check_bfb_pin() -> str | None:
     repo = BFB.parent.parent.parent if BFB.parent.name == "release" else BFB.parent
     if not (repo / ".git").exists():
         return None
-    r = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
+    head = provenance.git_head(repo)
+    if head is None:
         return None
-    head = r.stdout.strip()
     if head.startswith(BFB_COMMIT):
         return stale_bfb_binary(repo)
     why = (f"bfb at {repo} is {head[:8]}, and this harness is pinned to "
@@ -981,16 +979,11 @@ def harness_stamp() -> dict:
     and treats a missing stamp as a disagreement.
     """
     def git(*args: str) -> str | None:
-        try:
-            r = subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
-                               text=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return r.stdout.strip() or None if r.returncode == 0 else None
+        return provenance.run_out(["git", *args], cwd=ROOT) or None
 
     return {
         "commit": git("log", "-1", "--format=%H", "--", "bench/harness/workloads.py"),
-        "head": git("rev-parse", "HEAD"),
+        "head": provenance.git_head(ROOT) or None,
         "dirty": bool(git("status", "--porcelain", "--", "bench/harness")),
         "dataset": DATASET,
         "metric": METRIC,
