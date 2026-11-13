@@ -349,6 +349,348 @@ pub const Scorer = struct {
     }
 };
 
+/// The graph walk itself, shared by the query path (`Index`) and the build
+/// (`build.Builder`): the greedy descent through the upper levels and the
+/// `ef`-bounded best-first search of one layer.
+///
+/// They were two copies, and the build's lagged behind: it got the query
+/// path's prefetch only on 2026-11-12, a year of construction without it,
+/// because nobody changing one remembered the other. Everything they differ in
+/// is a comptime property of `S`, the scorer adapter, so each instantiation
+/// compiles to what its hand-written copy did:
+///
+/// - `fn score(s: S, node: u32) f32`: the query path scores against its
+///   prepared query (`Scorer.call`), the build against the stored point it is
+///   inserting (`build.Scorer.between`).
+/// - fields `ctx` and `prefetch: ?PrefetchFn`: the row prefetch, which may be
+///   absent.
+/// - `S.filtered`: whether a `Filter`, and with it the two-hop walk, exists.
+///   The build walks unfiltered and the branches fold away.
+/// - `S.bounded`: whether ids at or past `s.bound` are skipped (`Index.bound`).
+///   The build walks the graph it is itself extending, with no snapshot.
+/// - `S.gate_next_row`: whether the next candidate's neighbour list is
+///   prefetched only when `prefetch` is set (the build, whose prefetch is a
+///   flag, `--build-prefetch`) or always (the query path).
+pub fn Walk(comptime S: type, comptime Visited: type) type {
+    return struct {
+        const Self = @This();
+
+        /// What `searchLayer` takes for a filter: nothing at all for an
+        /// unfiltered walk.
+        pub const FilterArg = if (S.filtered) ?Index.Filter else void;
+
+        graph: *const Graph,
+        vis: *Visited,
+        s: S,
+
+        inline fn outOfBound(w: Self, n: u32) bool {
+            return if (comptime S.bounded) n >= w.s.bound else false;
+        }
+
+        inline fn admits(filter: FilterArg, n: u32) bool {
+            if (comptime !S.filtered) return true;
+            return filter == null or filter.?.admits(n);
+        }
+
+        /// Greedy descent through one upper level: from `entry`, repeatedly
+        /// move to the best neighbour until no neighbour improves. Ties go to
+        /// the lower id, §8.7's total order (`Candidate.better`), not to
+        /// whichever came first in the neighbour list.
+        pub fn descend(w: Self, entry: u32, entry_score: f32, level: u8) Candidate {
+            var best = Candidate{ .id = entry, .score = entry_score };
+            var improved = true;
+            while (improved) {
+                improved = false;
+                // §6.5's prefetch discipline is the scorer's: the arena is
+                // behind the `score` callback, so the index cannot issue
+                // vector prefetches itself (`Scorer.prefetch`); a named no-op
+                // stood here for it.
+                const ns = w.graph.neighbours(best.id, level);
+                for (ns) |n| {
+                    if (n == empty_neighbour) break;
+                    if (w.outOfBound(n)) continue;
+                    const s = w.s.score(n);
+                    const c = Candidate{ .id = n, .score = s };
+                    if (c.better(best)) {
+                        best = c;
+                        improved = true;
+                    }
+                }
+            }
+            return best;
+        }
+
+        /// The core layer search: best-first traversal bounded by `out.k`.
+        ///
+        /// Leaves the `out.k` best candidates found in `out`, which the
+        /// caller has emptied. `frontier_buf` is the frontier's storage.
+        ///
+        /// `filter` gates *admission to the result heap*, never expansion: a
+        /// node it rejects is still scored, still pushed on the frontier and
+        /// still expanded, so tombstones keep bridging the graph (§3 keeps
+        /// them in it, uncompacted). What changes is that the heap fills with
+        /// `ef` candidates the caller will keep, rather than `ef` candidates
+        /// of which the caller then drops some. Filtering after the fact left
+        /// the caller short: with `ef == limit` and `d` tombstones among the
+        /// nearest, the client got `limit - d` results while live points
+        /// existed. The two-hop walk is the exception (`expandTwoHop`).
+        pub fn searchLayer(
+            w: Self,
+            frontier_buf: []Candidate,
+            entries: []const Candidate,
+            level: u8,
+            out: *heap.TopK,
+            filter: FilterArg,
+        ) void {
+            // `isFull` at k == 0 is true at length 0, and `peekWorst` would
+            // then read an unwritten slot.
+            std.debug.assert(out.k >= 1);
+            var frontier = heap.Frontier.init(frontier_buf);
+            const hop = if (comptime S.filtered) filter != null and filter.?.two_hop else false;
+
+            for (entries) |e| {
+                if (!w.vis.testAndSet(e.id)) continue;
+                frontier.push(e);
+                if (admits(filter, e.id)) out.push(e);
+            }
+
+            while (frontier.pop()) |current| {
+                // §6.5: "Early termination on the standard 'worst candidate
+                // is worse than current k-th best' condition."
+                if (out.isFull() and current.worse(out.peekWorst())) break;
+
+                const ns = w.graph.neighbours(current.id, level);
+                if (comptime S.gate_next_row) {
+                    if (w.s.prefetch) |pf| {
+                        w.prefetchNextRow(&frontier, level);
+                        w.prefetchRows(ns, pf);
+                    }
+                } else {
+                    w.prefetchNextRow(&frontier, level);
+                    if (w.s.prefetch) |pf| w.prefetchRows(ns, pf);
+                }
+                if (comptime S.filtered) {
+                    if (hop) {
+                        if (w.noneAdmitted(ns, filter.?)) {
+                            w.bridge(ns, &frontier, out, filter.?);
+                        } else {
+                            w.expandTwoHop(ns, level, &frontier, out, filter.?);
+                        }
+                        continue;
+                    }
+                }
+                for (ns) |n| {
+                    if (n == empty_neighbour) break;
+                    if (w.outOfBound(n)) continue;
+                    if (!w.vis.testAndSet(n)) continue;
+                    const s = w.s.score(n);
+                    const c = Candidate{ .id = n, .score = s };
+                    if (!out.isFull() or c.better(out.peekWorst())) {
+                        frontier.push(c);
+                        if (admits(filter, n)) out.push(c);
+                    }
+                }
+            }
+        }
+
+        /// The *next* candidate's list, while this one's rows are being
+        /// fetched. The two-pass prefetch (`prefetchRows`) covers the
+        /// neighbours of the node in hand; what it cannot cover is the load
+        /// that starts the next iteration, `neighbours(peek().id)`, which is
+        /// a random row of a 128 MB array and is the one link of the chain
+        /// nothing hides. At `-p 1` there is no other query on the core to
+        /// overlap it with, which is where W3 spends 972k cycles per query
+        /// against W4's 650k for the same work (profiled: `Probe.prefetch` is
+        /// 17.1% of samples at `-p 1` against 9.9% saturated).
+        inline fn prefetchNextRow(w: Self, frontier: *const heap.Frontier, level: u8) void {
+            if (frontier.peek()) |next| {
+                const row = w.graph.neighbours(next.id, level);
+                if (row.len > 0) {
+                    @prefetch(&row[0], .{ .rw = .read, .locality = 3, .cache = .data });
+                }
+            }
+        }
+
+        /// Two passes over the list, as hnswlib does: first ask for every
+        /// neighbour's visited stamp and the first line of its row, then
+        /// score. Each neighbour is a random node of the collection, so both
+        /// are cache misses, and issued one at a time from the scoring loop
+        /// they serialise: at d=4 on 1M points, where a distance is four
+        /// multiplies, `searchLayer` was 35% of the server's CPU and the heaps
+        /// another 20% (W0, perf). The stamp is prefetched for write, since
+        /// `testAndSet` writes it.
+        ///
+        /// The build had its own copy of this search and never got it until
+        /// 2026-11-12. At d=1536 its layer search is 68% of a drained point's
+        /// cost (1,065 of 1,564 us, in-process, 2026-11-11). Measured
+        /// in-process (micro numbers, not a server run; random unit vectors at
+        /// d=1536, 30,000 built on four threads, 2,000 drained by `drainLive`
+        /// on one thread, m=16, ef_construct=100, 2026-11-12, interleaved):
+        /// 1,517, 1,532 and 1,557 us an insertion without it, 1,399, 1,417 and
+        /// 1,418 with, about -8%, and the same drained-graph checksum in all
+        /// six. Order and scores are untouched, so the graph is too.
+        inline fn prefetchRows(w: Self, ns: []const u32, pf: PrefetchFn) void {
+            for (ns) |n| {
+                if (n == empty_neighbour) break;
+                w.vis.prefetch(n);
+                pf(w.s.ctx, n);
+            }
+        }
+
+        /// One expansion under a selective filter, ACORN-1 (Patel et al.,
+        /// SIGMOD 2024): an admitted neighbour is scored as usual; a rejected
+        /// one is never scored, and its own neighbours stand in for it,
+        /// admitted ones only. So the frontier holds only points the caller
+        /// can keep and no distance is spent on one it cannot, except at a
+        /// node with no admitted neighbour at all, which `bridge` takes.
+        ///
+        /// The plain rule scores every neighbour and expands rejected ones
+        /// too, which at 10% selectivity is nine distances in ten on points
+        /// that can never be returned: W12-sel10's walk at `ef` 32 ran at 284
+        /// qps on dbpedia-openai-1m, and Qdrant, which does not score what its
+        /// filter rejects, at 2,226.
+        ///
+        /// Each expansion scores at most the list's width (`m0` at level 0),
+        /// as ACORN-1 truncates its compressed neighbourhood to `M`: the
+        /// two-hop fan-out is `m0²`, and uncapped at a loose filter it would
+        /// score far more per step than the plain walk does. A rejected
+        /// neighbour is marked visited only once its hop is taken, so one
+        /// skipped for the cap can still be hopped through from another node.
+        fn expandTwoHop(
+            w: Self,
+            ns: []const u32,
+            level: u8,
+            frontier: *heap.Frontier,
+            out: *heap.TopK,
+            filter: Index.Filter,
+        ) void {
+            // First pass: the row of each admitted neighbour, and the
+            // neighbour list of each rejected one, which is what the second
+            // pass reads.
+            if (w.s.prefetch) |pf| {
+                for (ns) |n| {
+                    if (n == empty_neighbour) break;
+                    if (filter.admits(n)) {
+                        w.vis.prefetch(n);
+                        pf(w.s.ctx, n);
+                    } else {
+                        const row = w.graph.neighbours(n, level);
+                        if (row.len > 0) @prefetch(&row[0], .{ .rw = .read, .locality = 3, .cache = .data });
+                    }
+                }
+            }
+            const budget = ns.len;
+            var scored: usize = 0;
+            for (ns) |n| {
+                if (n == empty_neighbour) break;
+                if (w.outOfBound(n)) continue;
+                if (filter.admits(n)) {
+                    if (!w.vis.testAndSet(n)) continue;
+                    scored += 1;
+                    w.consider(n, frontier, out);
+                    continue;
+                }
+                if (scored >= budget) continue;
+                if (!w.vis.testAndSet(n)) continue;
+                for (w.graph.neighbours(n, level)) |n2| {
+                    if (n2 == empty_neighbour) break;
+                    if (scored >= budget) break;
+                    if (w.outOfBound(n2)) continue;
+                    // Tested before the visited stamp: a rejected two-hop node
+                    // is not taken here, and stamping it would stop a later
+                    // hop through it.
+                    if (!filter.admits(n2)) continue;
+                    if (!w.vis.testAndSet(n2)) continue;
+                    scored += 1;
+                    w.consider(n2, frontier, out);
+                }
+            }
+        }
+
+        /// Whether none of a node's neighbours is admitted.
+        fn noneAdmitted(w: Self, ns: []const u32, filter: Index.Filter) bool {
+            for (ns) |n| {
+                if (n == empty_neighbour) break;
+                if (!w.outOfBound(n) and filter.admits(n)) return false;
+            }
+            return true;
+        }
+
+        /// One expansion of a two-hop walk at a node with no admitted
+        /// neighbour: its first `Index.bridge_width` unvisited neighbours are
+        /// scored and queued, rejected though they are, so the walk can go on
+        /// through them.
+        ///
+        /// `expandTwoHop` queues admitted points only, so an admitted point
+        /// more than two rejected hops from every other one is out of its
+        /// reach. When the filter follows the vector the admitted points near
+        /// a query are exactly those: laion-small-clip's `similarity > x`
+        /// ranges admitting 3% to 20% read recall@10 of 0.85 to 0.95 at ef 32
+        /// where the plain walk read 0.99 (W16, 2026-11-13). More admitted
+        /// seeds, a wider budget and redoing a thinly filled walk all left
+        /// that where it was; crossing rejected points is what the plain walk
+        /// does and the two-hop walk did not.
+        ///
+        /// Only at a node with *no* admitted neighbour, and only through a
+        /// few: a filter spread evenly over the points leaves about
+        /// `(1 - s)^m0` of the nodes that way (4% at W12's 9.6% and m0 = 32),
+        /// so the walk that was already good pays little for it (W12-sel10 on
+        /// laion: +4% instructions per query at ef 32 and +6% at ef 128,
+        /// recall@10 0.9810 to 0.9818 and 0.9973 to 0.9979).
+        fn bridge(
+            w: Self,
+            ns: []const u32,
+            frontier: *heap.Frontier,
+            out: *heap.TopK,
+            filter: Index.Filter,
+        ) void {
+            var crossed: usize = 0;
+            for (ns) |n| {
+                if (n == empty_neighbour) break;
+                if (w.outOfBound(n)) continue;
+                if (crossed >= Index.bridge_width) break;
+                if (!w.vis.testAndSet(n)) continue;
+                crossed += 1;
+                const c = Candidate{ .id = n, .score = w.s.score(n) };
+                if (!out.isFull() or c.better(out.peekWorst())) {
+                    frontier.push(c);
+                    // None is admitted when this is called; asked again so
+                    // the heap can never hold a point the filter rejects.
+                    if (filter.admits(n)) out.push(c);
+                }
+            }
+        }
+
+        /// Score an admitted node and keep it if it can still matter.
+        fn consider(w: Self, n: u32, frontier: *heap.Frontier, out: *heap.TopK) void {
+            const c = Candidate{ .id = n, .score = w.s.score(n) };
+            if (!out.isFull() or c.better(out.peekWorst())) {
+                frontier.push(c);
+                out.push(c);
+            }
+        }
+    };
+}
+
+/// The query path's scorer adapter for `Walk`: a prepared query, filtered and
+/// two-hop walks, and the reader's `bound`.
+const QueryScore = struct {
+    pub const filtered = true;
+    pub const bounded = true;
+    pub const gate_next_row = false;
+
+    ctx: *const anyopaque,
+    call: ScoreFn,
+    prefetch: ?PrefetchFn,
+    bound: u32,
+
+    pub inline fn score(s: QueryScore, node: u32) f32 {
+        return s.call(s.ctx, node);
+    }
+};
+
+const QueryWalk = Walk(QueryScore, visited.Selected);
+
 pub const Index = struct {
     graph: *Graph,
     scorer: Scorer,
@@ -400,43 +742,22 @@ pub const Index = struct {
         }
     };
 
-    /// Greedy descent through the upper levels: from `entry`, repeatedly move
-    /// to the best neighbour until no neighbour improves.
-    fn descend(self: *const Index, entry: u32, entry_score: f32, level: u8) Candidate {
-        var best = Candidate{ .id = entry, .score = entry_score };
-        var improved = true;
-        while (improved) {
-            improved = false;
-            // §6.5's prefetch discipline is the scorer's: the arena is behind
-            // the `score` callback, so the index cannot issue vector prefetches
-            // itself (`Scorer.prefetch`); a named no-op stood here for it.
-            const ns = self.graph.neighbours(best.id, level);
-            for (ns) |n| {
-                if (n == empty_neighbour) break;
-                if (n >= self.bound) continue;
-                const s = self.scorer.call(self.scorer.ctx, n);
-                const c = Candidate{ .id = n, .score = s };
-                if (c.better(best)) {
-                    best = c;
-                    improved = true;
-                }
-            }
-        }
-        return best;
+    /// The walk over this index's graph, with this search's scratch.
+    fn walk(self: *const Index, scratch: *Scratch) QueryWalk {
+        return .{
+            .graph = self.graph,
+            .vis = &scratch.vis,
+            .s = .{
+                .ctx = self.scorer.ctx,
+                .call = self.scorer.call,
+                .prefetch = self.scorer.prefetch,
+                .bound = self.bound,
+            },
+        };
     }
 
-    /// The core layer search: best-first traversal bounded by `ef`.
-    ///
-    /// Returns the `ef` best candidates found, in the scratch result heap.
-    ///
-    /// `filter` gates *admission to the result heap*, never expansion: a
-    /// node it rejects is still scored, still pushed on the frontier and
-    /// still expanded, so tombstones keep bridging the graph (§3 keeps them
-    /// in it, uncompacted). What changes is that the heap fills with `ef`
-    /// candidates the caller will keep, rather than `ef` candidates of which
-    /// the caller then drops some. Filtering after the fact left the caller
-    /// short: with `ef == limit` and `d` tombstones among the nearest, the
-    /// client got `limit - d` results while live points existed.
+    /// `Walk.searchLayer` into `out`, emptied to `ef` first: the `ef` best
+    /// candidates found that `filter` admits.
     fn searchLayer(
         self: *const Index,
         entries: []const Candidate,
@@ -452,214 +773,17 @@ pub const Index = struct {
         // this documents the invariant rather than defending against a
         // client.
         std.debug.assert(ef >= 1);
-        var frontier = heap.Frontier.init(scratch.frontier);
         out.reset(ef);
-        const hop = filter != null and filter.?.two_hop;
-
-        for (entries) |e| {
-            if (!scratch.vis.testAndSet(e.id)) continue;
-            frontier.push(e);
-            if (filter == null or filter.?.admits(e.id)) out.push(e);
-        }
-
-        while (frontier.pop()) |current| {
-            // §6.5: "Early termination on the standard 'worst candidate is
-            // worse than current k-th best' condition."
-            if (out.isFull() and current.worse(out.peekWorst())) break;
-
-            const ns = self.graph.neighbours(current.id, level);
-            // And the *next* candidate's list, while this one's rows are being
-            // fetched. The two-pass prefetch below covers the neighbours of the
-            // node in hand; what it cannot cover is the load that starts the
-            // next iteration, `neighbours(peek().id)`, which is a random row of
-            // a 128 MB array and is the one link of the chain nothing hides.
-            // At `-p 1` there is no other query on the core to overlap it with,
-            // which is where W3 spends 972k cycles per query against W4's 650k
-            // for the same work (profiled: `Probe.prefetch` is 17.1% of samples
-            // at `-p 1` against 9.9% saturated).
-            if (frontier.peek()) |next| {
-                const row = self.graph.neighbours(next.id, level);
-                if (row.len > 0) {
-                    @prefetch(&row[0], .{ .rw = .read, .locality = 3, .cache = .data });
-                }
-            }
-            // Two passes over the list, as hnswlib does: first ask for every
-            // neighbour's visited stamp and the first line of its row, then
-            // score. Each neighbour is a random node of the collection, so
-            // both are cache misses, and issued one at a time from the
-            // scoring loop they serialise: at d=4 on 1M points, where a
-            // distance is four multiplies, `searchLayer` was 35% of the
-            // server's CPU and the heaps another 20% (W0, perf).
-            // The stamp is prefetched for write, since `testAndSet` writes it.
-            if (self.scorer.prefetch) |pf| {
-                for (ns) |n| {
-                    if (n == empty_neighbour) break;
-                    scratch.vis.prefetch(n);
-                    pf(self.scorer.ctx, n);
-                }
-            }
-            if (hop) {
-                if (noneAdmitted(ns, self.bound, filter.?)) {
-                    self.bridge(ns, scratch, &frontier, out, filter.?);
-                } else {
-                    self.expandTwoHop(ns, level, scratch, &frontier, out, filter.?);
-                }
-                continue;
-            }
-            for (ns) |n| {
-                if (n == empty_neighbour) break;
-                if (n >= self.bound) continue;
-                if (!scratch.vis.testAndSet(n)) continue;
-                const s = self.scorer.call(self.scorer.ctx, n);
-                const c = Candidate{ .id = n, .score = s };
-                if (!out.isFull() or c.better(out.peekWorst())) {
-                    frontier.push(c);
-                    if (filter == null or filter.?.admits(n)) out.push(c);
-                }
-            }
-        }
-    }
-
-    /// One expansion under a selective filter, ACORN-1 (Patel et al., SIGMOD
-    /// 2024): an admitted neighbour is scored as usual; a rejected one is
-    /// never scored, and its own neighbours stand in for it, admitted ones
-    /// only. So the frontier holds only points the caller can keep and no
-    /// distance is spent on one it cannot, except at a node with no admitted
-    /// neighbour at all, which `bridge` takes.
-    ///
-    /// The plain rule scores every neighbour and expands rejected ones too,
-    /// which at 10% selectivity is nine distances in ten on points that can
-    /// never be returned: W12-sel10's walk at `ef` 32 ran at 284 qps on
-    /// dbpedia-openai-1m, and Qdrant, which does not score what its filter
-    /// rejects, at 2,226.
-    ///
-    /// Each expansion scores at most the list's width (`m0` at level 0), as
-    /// ACORN-1 truncates its compressed neighbourhood to `M`: the two-hop
-    /// fan-out is `m0²`, and uncapped at a loose filter it would score far
-    /// more per step than the plain walk does. A rejected neighbour is marked
-    /// visited only once its hop is taken, so one skipped for the cap can
-    /// still be hopped through from another node.
-    fn expandTwoHop(
-        self: *const Index,
-        ns: []const u32,
-        level: u8,
-        scratch: *Scratch,
-        frontier: *heap.Frontier,
-        out: *heap.TopK,
-        filter: Filter,
-    ) void {
-        // First pass: the row of each admitted neighbour, and the neighbour
-        // list of each rejected one, which is what the second pass reads.
-        if (self.scorer.prefetch) |pf| {
-            for (ns) |n| {
-                if (n == empty_neighbour) break;
-                if (filter.admits(n)) {
-                    scratch.vis.prefetch(n);
-                    pf(self.scorer.ctx, n);
-                } else {
-                    const row = self.graph.neighbours(n, level);
-                    if (row.len > 0) @prefetch(&row[0], .{ .rw = .read, .locality = 3, .cache = .data });
-                }
-            }
-        }
-        const budget = ns.len;
-        var scored: usize = 0;
-        for (ns) |n| {
-            if (n == empty_neighbour) break;
-            if (n >= self.bound) continue;
-            if (filter.admits(n)) {
-                if (!scratch.vis.testAndSet(n)) continue;
-                scored += 1;
-                self.consider(n, frontier, out);
-                continue;
-            }
-            if (scored >= budget) continue;
-            if (!scratch.vis.testAndSet(n)) continue;
-            for (self.graph.neighbours(n, level)) |n2| {
-                if (n2 == empty_neighbour) break;
-                if (scored >= budget) break;
-                if (n2 >= self.bound) continue;
-                // Tested before the visited stamp: a rejected two-hop node is
-                // not taken here, and stamping it would stop a later hop
-                // through it.
-                if (!filter.admits(n2)) continue;
-                if (!scratch.vis.testAndSet(n2)) continue;
-                scored += 1;
-                self.consider(n2, frontier, out);
-            }
-        }
+        self.walk(scratch).searchLayer(scratch.frontier, entries, level, out, filter);
     }
 
     /// How many of a node's neighbours a two-hop walk scores to cross a
-    /// stretch of rejected points (`bridge`). Measured on laion-small-clip's
-    /// W16, in engine instructions per query at ef 32 against the walk
-    /// without it (1.02M): all 32 neighbours 2.56M, eight 2.32M, four 1.94M,
-    /// for recall@10 of 0.9733, 0.9719 and 0.9695 (2026-11-13,
-    /// development-grade).
+    /// stretch of rejected points (`Walk.bridge`). Measured on
+    /// laion-small-clip's W16, in engine instructions per query at ef 32
+    /// against the walk without it (1.02M): all 32 neighbours 2.56M, eight
+    /// 2.32M, four 1.94M, for recall@10 of 0.9733, 0.9719 and 0.9695
+    /// (2026-11-13, development-grade).
     pub const bridge_width = 4;
-
-    /// Whether none of a node's neighbours is admitted.
-    fn noneAdmitted(ns: []const u32, bound: u32, filter: Filter) bool {
-        for (ns) |n| {
-            if (n == empty_neighbour) break;
-            if (n < bound and filter.admits(n)) return false;
-        }
-        return true;
-    }
-
-    /// One expansion of a two-hop walk at a node with no admitted neighbour:
-    /// its first `bridge_width` unvisited neighbours are scored and queued,
-    /// rejected though they are, so the walk can go on through them.
-    ///
-    /// `expandTwoHop` queues admitted points only, so an admitted point more
-    /// than two rejected hops from every other one is out of its reach. When
-    /// the filter follows the vector the admitted points near a query are
-    /// exactly those: laion-small-clip's `similarity > x` ranges admitting 3%
-    /// to 20% read recall@10 of 0.85 to 0.95 at ef 32 where the plain walk
-    /// read 0.99 (W16, 2026-11-13). More admitted seeds, a wider budget and
-    /// redoing a thinly filled walk all left that where it was; crossing
-    /// rejected points is what the plain walk does and the two-hop walk did
-    /// not.
-    ///
-    /// Only at a node with *no* admitted neighbour, and only through a few:
-    /// a filter spread evenly over the points leaves about `(1 - s)^m0` of
-    /// the nodes that way (4% at W12's 9.6% and m0 = 32), so the walk that
-    /// was already good pays little for it (W12-sel10 on laion: +4%
-    /// instructions per query at ef 32 and +6% at ef 128, recall@10 0.9810 to
-    /// 0.9818 and 0.9973 to 0.9979).
-    fn bridge(
-        self: *const Index,
-        ns: []const u32,
-        scratch: *Scratch,
-        frontier: *heap.Frontier,
-        out: *heap.TopK,
-        filter: Filter,
-    ) void {
-        var crossed: usize = 0;
-        for (ns) |n| {
-            if (n == empty_neighbour) break;
-            if (n >= self.bound) continue;
-            if (crossed >= bridge_width) break;
-            if (!scratch.vis.testAndSet(n)) continue;
-            crossed += 1;
-            const c = Candidate{ .id = n, .score = self.scorer.call(self.scorer.ctx, n) };
-            if (!out.isFull() or c.better(out.peekWorst())) {
-                frontier.push(c);
-                // None is admitted when this is called; asked again so the
-                // heap can never hold a point the filter rejects.
-                if (filter.admits(n)) out.push(c);
-            }
-        }
-    }
-
-    /// Score an admitted node and keep it if it can still matter.
-    fn consider(self: *const Index, n: u32, frontier: *heap.Frontier, out: *heap.TopK) void {
-        const c = Candidate{ .id = n, .score = self.scorer.call(self.scorer.ctx, n) };
-        if (!out.isFull() or c.better(out.peekWorst())) {
-            frontier.push(c);
-            out.push(c);
-        }
-    }
 
     /// A predicate applied to *results*, never to the traversal.
     ///
@@ -739,8 +863,9 @@ pub const Index = struct {
         var entry = g.entry_point;
         var entry_score = self.scorer.call(self.scorer.ctx, entry);
         var level = g.max_level;
+        const w = self.walk(scratch);
         while (level > 0) : (level -= 1) {
-            const best = self.descend(entry, entry_score, level);
+            const best = w.descend(entry, entry_score, level);
             entry = best.id;
             entry_score = best.score;
         }

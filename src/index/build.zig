@@ -77,6 +77,27 @@ pub const Scorer = struct {
     }
 };
 
+/// The build's scorer adapter for `hnsw.Walk`: scores against the stored
+/// point being inserted, with no filter and no bound, and prefetches the next
+/// candidate's list only when the row prefetch is on (`--build-prefetch`).
+const InsertScore = struct {
+    pub const filtered = false;
+    pub const bounded = false;
+    pub const gate_next_row = true;
+
+    ctx: *const anyopaque,
+    between: *const fn (ctx: *const anyopaque, a: u32, b: u32) f32,
+    prefetch: ?hnsw.PrefetchFn,
+    /// The point being inserted.
+    node: u32,
+
+    pub inline fn score(s: InsertScore, n: u32) f32 {
+        return s.between(s.ctx, s.node, n);
+    }
+};
+
+const InsertWalk = hnsw.Walk(InsertScore, visited.Generation);
+
 /// `(max_level, entry_point)` as one 64-bit word: `level << 32 | entry`.
 ///
 /// The parallel build shares the entry point between threads and promotes it
@@ -300,27 +321,16 @@ pub const Builder = struct {
         self.scratch_vis.beginQuery();
 
         // Phase 1: greedy descent from the entry point down to the level just
-        // above this node's own, one node per level.
+        // above this node's own, one node per level, the query path's own
+        // descent (`hnsw.Walk.descend`).
+        const w = self.walk(node);
         var ep = snap.entry_point;
         var ep_score = self.scorer.between(self.scorer.ctx, node, ep);
         var level = snap.max_level;
         while (level > node_level) : (level -= 1) {
-            var improved = true;
-            while (improved) {
-                improved = false;
-                for (g.neighbours(ep, level)) |n| {
-                    if (n == empty_neighbour) break;
-                    const s = self.scorer.between(self.scorer.ctx, node, n);
-                    // §8.7's total order, as the search's descent breaks ties
-                    // (`Candidate.better`): equal scores go to the lower id,
-                    // not to whichever came first in the neighbour list.
-                    if (s > ep_score or (s == ep_score and n < ep)) {
-                        ep = n;
-                        ep_score = s;
-                        improved = true;
-                    }
-                }
-            }
+            const best = w.descend(ep, ep_score, level);
+            ep = best.id;
+            ep_score = best.score;
         }
 
         // Phase 2: on each level the node belongs to, run an ef_construct
@@ -365,7 +375,8 @@ pub const Builder = struct {
             // silently truncate the level-0 candidate set.
             self.scratch_vis.beginQuery();
             var results = heap.TopK.init(self.results, g.params.ef_construct);
-            self.searchLayer(node, ep, ep_score, l, &results);
+            const entries = [_]Candidate{.{ .id = ep, .score = ep_score }};
+            w.searchLayer(self.frontier, &entries, l, &results, {});
             const found = results.finish();
             // `beginQuery` just ran, so `ep` passes `testAndSet` and is always
             // the first result: the search cannot come back empty.
@@ -533,8 +544,8 @@ pub const Builder = struct {
     /// Deliberately *not* a claim about what a concurrent reader sees. The
     /// writers publish a new list as a prefix write followed by
     /// `@memset(list[kept..], empty)`, so mid-memset the row genuinely reads
-    /// `[new0, new1, empty, old3]`, and the unlocked descents in `insertOne`
-    /// and `searchLayer` can observe exactly that: they break at the first
+    /// `[new0, new1, empty, old3]`, and the unlocked descents and layer
+    /// searches (`hnsw.Walk`) can observe exactly that: they break at the first
     /// empty and expand a shorter row, which is the connectivity loss this
     /// file measures at 8 threads. That is a known cost of lock-free reads,
     /// not something this rules out. The comment at the write site is the
@@ -558,56 +569,19 @@ pub const Builder = struct {
         }
     }
 
-    fn searchLayer(self: *Builder, node: u32, entry: u32, entry_score: f32, level: u8, out: *heap.TopK) void {
-        const g = self.graph;
-        // `isFull` at k == 0 is true at length 0, and `peekWorst` would then
-        // read an unwritten slot; every caller wants at least the entry back.
-        std.debug.assert(out.k >= 1);
-        var frontier = heap.Frontier.init(self.frontier);
-
-        if (self.scratch_vis.testAndSet(entry)) {
-            const e = Candidate{ .id = entry, .score = entry_score };
-            frontier.push(e);
-            out.push(e);
-        }
-
-        while (frontier.pop()) |current| {
-            if (out.isFull() and current.worse(out.peekWorst())) break;
-            const ns = g.neighbours(current.id, level);
-            // The query path's prefetch (`hnsw.Index.searchLayer`): the next
-            // candidate's list, then every neighbour's stamp and row before
-            // the first is scored. This search had its own scorer type, a
-            // pair of stored points with no prefetch hook, so it never got
-            // it. At d=1536 it is 68% of a drained point's cost (1,065 of
-            // 1,564 us, in-process, 2026-11-11). Measured in-process (micro
-            // numbers, not a server run; random unit vectors at d=1536, 30,000
-            // built on four threads, 2,000 drained by `drainLive` on one
-            // thread, m=16, ef_construct=100, 2026-11-12, interleaved): 1,517,
-            // 1,532 and 1,557 us an insertion without it, 1,399, 1,417 and
-            // 1,418 with, about -8%, and the same drained-graph checksum in
-            // all six. Order and scores are untouched, so the graph is too.
-            if (self.scorer.prefetch) |pf| {
-                if (frontier.peek()) |next| {
-                    const row = g.neighbours(next.id, level);
-                    if (row.len > 0) @prefetch(&row[0], .{ .rw = .read, .locality = 3, .cache = .data });
-                }
-                for (ns) |n| {
-                    if (n == empty_neighbour) break;
-                    self.scratch_vis.prefetch(n);
-                    pf(self.scorer.ctx, n);
-                }
-            }
-            for (ns) |n| {
-                if (n == empty_neighbour) break;
-                if (!self.scratch_vis.testAndSet(n)) continue;
-                const s = self.scorer.between(self.scorer.ctx, node, n);
-                const c = Candidate{ .id = n, .score = s };
-                if (!out.isFull() or c.better(out.peekWorst())) {
-                    frontier.push(c);
-                    out.push(c);
-                }
-            }
-        }
+    /// The walk that inserts `node`: the query path's descent and layer
+    /// search (`hnsw.Walk`), scoring against `node` itself.
+    fn walk(self: *Builder, node: u32) InsertWalk {
+        return .{
+            .graph = self.graph,
+            .vis = &self.scratch_vis,
+            .s = .{
+                .ctx = self.scorer.ctx,
+                .between = self.scorer.between,
+                .prefetch = self.scorer.prefetch,
+                .node = node,
+            },
+        };
     }
 };
 
@@ -2260,4 +2234,99 @@ test "--build-prefetch: the serial build and a one-thread drain write the same g
     }
     try testing.expectEqual(sums[0][0], sums[1][0]);
     try testing.expectEqual(sums[0][1], sums[1][1]);
+}
+
+test "the build and the query path reproduce a frozen graph and frozen results" {
+    // Constants recorded on the code before `searchLayer` and the descent
+    // were shared between the build and the query path, so that refactor
+    // (and any later one claiming to change neither) is held to the same
+    // graph and the same answers. Scored with the strict-order scalar
+    // reference, so the constants do not depend on the build's ISA.
+    const Ref = struct {
+        corpus: *const Corpus,
+        query: []const f32 = &.{},
+
+        fn between(ctx: *const anyopaque, a: u32, b: u32) f32 {
+            const c: *const Corpus = @ptrCast(@alignCast(ctx));
+            return dist.reference.euclid(c.row(a), c.row(b));
+        }
+        fn select(ctx: *const anyopaque, a: u32, b: u32) f32 {
+            const c: *const Corpus = @ptrCast(@alignCast(ctx));
+            return dist.reference.dot(c.row(a), c.row(b));
+        }
+        pub fn score(ctx: *const anyopaque, node: u32) f32 {
+            const self: *const @This() = @ptrCast(@alignCast(ctx));
+            return dist.reference.euclid(self.query, self.corpus.row(node));
+        }
+        fn admits(_: *const anyopaque, node: u32) bool {
+            return node % 7 == 3;
+        }
+        fn rare(_: *const anyopaque, node: u32) bool {
+            return node % 29 == 5;
+        }
+    };
+    const built = 2000;
+    const total = built + 300;
+    const dim = 12;
+    var corpus = try Corpus.init(testing.allocator, total, dim, 0xf20e, .euclid);
+    defer corpus.deinit(testing.allocator);
+
+    var sums: [2]u64 = undefined;
+    var results: u64 = 0;
+    for ([_]bool{ false, true }, 0..) |with_select, arm| {
+        const scorer = Scorer{
+            .ctx = @ptrCast(&corpus),
+            .between = Ref.between,
+            .select = if (with_select) Ref.select else null,
+            .select_ctx = @ptrCast(&corpus),
+            .prefetch = Corpus.prefetch,
+        };
+        var g = try Graph.init(testing.allocator, Params.fromM(8, 64, 0x5eed), total);
+        defer g.deinit();
+        var b = try Builder.init(testing.allocator, &g, scorer);
+        defer b.deinit(testing.allocator);
+        try b.buildSerial(built);
+        try drainLive(testing.allocator, &g, scorer, built, total, 1);
+        g.count = total;
+        sums[arm] = g.checksum();
+        if (with_select) continue;
+
+        // Every query flavour, folded into one hash of ids and score bits.
+        var probe = Ref{ .corpus = &corpus };
+        var idx = hnsw.Index{ .graph = &g, .scorer = .of(&probe) };
+        var scratch = try hnsw.Index.Scratch.init(testing.allocator, total, 128);
+        defer scratch.deinit(testing.allocator);
+        var prng = std.Random.DefaultPrng.init(0x9e7);
+        const rnd = prng.random();
+        var q: [dim]f32 = undefined;
+        var h = std.hash.Wyhash.init(0);
+        // The whole `ef`-sized result set, not a top 10 that a change deep
+        // in the walk could leave alone.
+        const efs = [_]usize{ 64, 32, 32, 48, 32, 40 };
+        var buf: [64]Candidate = undefined;
+        for (0..60) |qi| {
+            for (&q) |*x| x.* = rnd.floatNorm(f32);
+            probe.query = &q;
+            idx.bound = if (qi % 2 == 0) std.math.maxInt(u32) else total - 150;
+            for (efs, 0..) |ef, flavour| {
+                var out = heap.TopK.init(&buf, ef);
+                switch (flavour) {
+                    0 => idx.search(ef, &scratch, &out),
+                    1 => idx.searchFiltered(ef, &scratch, &out, .{ .pred = Ref.admits, .ctx = @ptrCast(&probe) }),
+                    2 => idx.searchFiltered(ef, &scratch, &out, .{ .pred = Ref.admits, .ctx = @ptrCast(&probe), .two_hop = true }),
+                    3 => idx.searchFrom(@intCast(qi * 31 % built), ef, &scratch, &out),
+                    4 => idx.searchFiltered(ef, &scratch, &out, .{ .pred = Ref.rare, .ctx = @ptrCast(&probe), .two_hop = true }),
+                    else => idx.searchFiltered(ef, &scratch, &out, .{ .pred = Ref.rare, .ctx = @ptrCast(&probe) }),
+                }
+                for (out.finish()) |c| {
+                    h.update(std.mem.asBytes(&c.id));
+                    h.update(std.mem.asBytes(&@as(u32, @bitCast(c.score))));
+                }
+            }
+        }
+        results = h.final();
+    }
+    try testing.expectEqual(@as(u64, 0x5c021cdf71096f03), sums[0]);
+    try testing.expectEqual(@as(u64, 0x833fab0abe812ae1), sums[1]);
+    try testing.expectEqual(@as(u64, 0x1daeda21b70b2a89), results);
 }
