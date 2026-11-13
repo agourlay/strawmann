@@ -40,7 +40,7 @@
 
   sift1m, d=128, euclid — these ratios are this dimension's. Also measured: arguana, dbpedia-openai-100K-1536-angular, dbpedia-openai-1m, fiqa, h-and-m-2048-angular-filters, laion-small-clip, quora, scifact
 
-  at equal recall (§7.4's comparison, not equal ef): 2.46x at recall 0.9624, falling to 1.28x at 0.9976, over 8 anchors
+  at equal recall (§7.4's comparison, not equal ef): 2.46x at recall 0.9624, falling to 1.28x at 0.9976 (0.97x to 1.70x, not a measured lead), over 8 anchors
 
   saturating: [strawmann: -n 100000 (2x the table's 50000)]
   mixed read/write: [strawmann: qps over the 60.6 s of the append the search saw (19,371 over the whole search); append 3,300 points/s] [qdrant: qps over the 60.6 s of the append the search saw (1,881 over the whole search); append 3,300 points/s] [search-during-write; no recall join]
