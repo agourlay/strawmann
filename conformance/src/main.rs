@@ -21,6 +21,8 @@ mod dataset_tests;
 mod datasets;
 mod differ;
 mod engine;
+#[cfg(test)]
+mod fixtures;
 mod metamorphic;
 mod oracle;
 mod relevance;

@@ -1132,6 +1132,7 @@ pub fn diff_against_published(ours: &GroundTruth, published_ids: &[u32]) -> GtDi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures::gt;
 
     #[test]
     fn euclid_returns_the_distance_not_its_square() {
@@ -1284,19 +1285,7 @@ mod tests {
     fn is_correct_accepts_a_tie_at_the_boundary() {
         // §4.3: "Strict ID matching understates recall on any dataset
         // containing duplicate or near-duplicate vectors."
-        let gt = GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 100,
-            n_queries: 1,
-            dim: 4,
-            k: 3,
-            ids: vec![1, 2, 3],
-            scores: vec![0.5, 0.7, 0.9],
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
+        let gt = gt(Metric::Euclid, 100, 3, vec![1, 2, 3], vec![0.5, 0.7, 0.9]);
         // An id in the list is correct regardless of score.
         assert_eq!(gt.judge_at(0, 3, 2, 0.7, None, 1e-6), Judgement::Correct);
         // An id not in the list, but tying the k-th score, is also correct.
@@ -1310,19 +1299,13 @@ mod tests {
 
     #[test]
     fn gt_diff_separates_boundary_from_interior_disagreement() {
-        let gt = GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 10,
-            n_queries: 3,
-            dim: 2,
-            k: 10,
-            ids: (0..30).map(|i| (i % 10) as u32).collect(),
-            scores: vec![0.0; 30],
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
+        let gt = gt(
+            Metric::Euclid,
+            10,
+            10,
+            (0..30).map(|i| (i % 10) as u32).collect(),
+            vec![0.0; 30],
+        );
         let mut published: Vec<u32> = gt.ids.clone();
         // Query 0 identical; query 1 differs at the last position; query 2
         // differs at position 0.
@@ -1356,19 +1339,7 @@ mod tests {
 
     #[test]
     fn a_non_member_that_claims_to_beat_the_kth_truth_is_impossible_not_correct() {
-        let gt = GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 100,
-            n_queries: 1,
-            dim: 4,
-            k: 3,
-            ids: vec![1, 2, 3],
-            scores: vec![0.5, 0.7, 0.9],
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
+        let gt = gt(Metric::Euclid, 100, 3, vec![1, 2, 3], vec![0.5, 0.7, 0.9]);
         // Reported score 0.1 for id 99: closer than the true nearest, and not
         // in the truth. The exhaustive scan would have listed it; the engine
         // is lying about the id or the score.
@@ -1775,19 +1746,9 @@ mod gt_diff_tests {
     use super::*;
 
     fn gt(k: usize, rows: &[&[u32]]) -> GroundTruth {
-        GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 1000,
-            n_queries: rows.len(),
-            dim: 4,
-            k,
-            ids: rows.iter().flat_map(|r| r.iter().copied()).collect(),
-            scores: rows.iter().flat_map(|r| r.iter().map(|_| 0.0)).collect(),
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        }
+        let ids: Vec<u32> = rows.iter().flat_map(|r| r.iter().copied()).collect();
+        let scores = vec![0.0; ids.len()];
+        crate::fixtures::gt(Metric::Euclid, 1000, k, ids, scores)
     }
 
     /// The distinction the whole diff turns on: a permuted tie run is not a
@@ -1866,21 +1827,10 @@ mod gt_diff_tests {
 #[cfg(test)]
 mod gt_diff_classification_tests {
     use super::*;
+    use crate::fixtures::gt;
 
     fn gt_row(k: usize, row: &[u32]) -> GroundTruth {
-        GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 1000,
-            n_queries: 1,
-            dim: 4,
-            k,
-            ids: row.to_vec(),
-            scores: vec![0.0; k],
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        }
+        gt(Metric::Euclid, 1000, k, row.to_vec(), vec![0.0; k])
     }
 
     /// The SIFT1M pattern, reduced: tied neighbours permuted early, plus one

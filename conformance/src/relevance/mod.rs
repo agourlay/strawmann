@@ -681,46 +681,17 @@ mod tests {
         assert!(e.contains("quantized"), "{e}");
     }
 
-    /// An absolute tolerance of `v`, which is what these tests mean when they
-    /// pass a bare number: they use synthetic scores around 1.0, where absolute
-    /// and relative coincide closely enough not to be the subject.
-    pub(super) fn abs_eps(v: f64) -> Epsilon {
-        let mut e = crate::differ::tolerance::calibrate(
-            crate::oracle::Metric::Euclid,
-            8,
-            Default::default(),
-            Default::default(),
-            1.0,
-        );
-        e.value = v;
-        e.relative = false;
-        e
-    }
+    // `abs_eps(v)` is an absolute tolerance, which is what these tests mean
+    // when they pass a bare number: they use synthetic scores around 1.0,
+    // where absolute and relative coincide closely enough not to be the
+    // subject.
+    use crate::fixtures::{abs_eps, gt, ret};
     use crate::oracle::Metric;
-
-    fn gt(metric: Metric, k: usize, ids: Vec<u32>, scores: Vec<f64>, nq: usize) -> GroundTruth {
-        GroundTruth {
-            metric,
-            n_base: 1000,
-            n_queries: nq,
-            dim: 8,
-            k,
-            ids,
-            scores,
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        }
-    }
 
     #[test]
     fn perfect_results_score_perfect_recall_and_zero_mrde() {
-        let g = gt(Metric::Euclid, 3, vec![1, 2, 3], vec![0.1, 0.2, 0.3], 1);
-        let r = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![0.1, 0.2, 0.3],
-        }];
+        let g = gt(Metric::Euclid, 1000, 3, vec![1, 2, 3], vec![0.1, 0.2, 0.3]);
+        let r = vec![ret(&[1, 2, 3], &[0.1, 0.2, 0.3])];
         let out = evaluate(&g, &r, &abs_eps(1e-9), 3, None);
         assert_eq!(out.recall_at_1, 1.0);
         assert!(out.mean_relative_distance_error.abs() < 1e-12);
@@ -733,16 +704,16 @@ mod tests {
         // reports their mean.
         let ids: Vec<u32> = (0..20).collect();
         let scores: Vec<f64> = (0..20).map(|i| 0.1 + f64::from(i % 10) * 0.1).collect();
-        let g = gt(Metric::Euclid, 10, ids, scores, 2);
+        let g = gt(Metric::Euclid, 1000, 10, ids, scores);
         let r = vec![
             Returned {
                 ids: (0..10).collect(),
                 scores: (0..10).map(|i| 0.1 + f64::from(i) * 0.1).collect(),
             },
-            Returned {
-                ids: vec![10, 11, 12, 13, 14, 900, 901, 902, 903, 904],
-                scores: vec![0.1, 0.2, 0.3, 0.4, 0.5, 9.0, 9.1, 9.2, 9.3, 9.4],
-            },
+            ret(
+                &[10, 11, 12, 13, 14, 900, 901, 902, 903, 904],
+                &[0.1, 0.2, 0.3, 0.4, 0.5, 9.0, 9.1, 9.2, 9.3, 9.4],
+            ),
         ];
         let eps = abs_eps(1e-9);
         let each = recall_at_10_per_query(&g, &r, &eps, 10, None);
@@ -754,11 +725,8 @@ mod tests {
 
     #[test]
     fn missing_every_neighbour_scores_zero_recall() {
-        let g = gt(Metric::Euclid, 3, vec![1, 2, 3], vec![0.1, 0.2, 0.3], 1);
-        let r = vec![Returned {
-            ids: vec![90, 91, 92],
-            scores: vec![9.0, 9.1, 9.2],
-        }];
+        let g = gt(Metric::Euclid, 1000, 3, vec![1, 2, 3], vec![0.1, 0.2, 0.3]);
+        let r = vec![ret(&[90, 91, 92], &[9.0, 9.1, 9.2])];
         let out = evaluate(&g, &r, &abs_eps(1e-9), 3, None);
         assert_eq!(out.recall_at_1, 0.0);
         // And MRDE is large, which is the signal §4.4 wants: "returned
@@ -770,16 +738,10 @@ mod tests {
     fn mrde_distinguishes_a_near_miss_from_an_unrelated_result() {
         // §4.4's whole reason for reporting MRDE alongside recall: both of
         // these score recall@1 = 0, but they are not the same failure.
-        let g = gt(Metric::Euclid, 1, vec![1], vec![1.0], 1);
+        let g = gt(Metric::Euclid, 1000, 1, vec![1], vec![1.0]);
 
-        let near = vec![Returned {
-            ids: vec![99],
-            scores: vec![1.001],
-        }];
-        let far = vec![Returned {
-            ids: vec![99],
-            scores: vec![50.0],
-        }];
+        let near = vec![ret(&[99], &[1.001])];
+        let far = vec![ret(&[99], &[50.0])];
 
         let a = evaluate(&g, &near, &abs_eps(1e-9), 1, None);
         let b = evaluate(&g, &far, &abs_eps(1e-9), 1, None);
@@ -792,12 +754,9 @@ mod tests {
     #[test]
     fn boundary_ties_count_as_correct() {
         // §4.3's duplicate-vector rule, through the recall path.
-        let g = gt(Metric::Euclid, 2, vec![1, 2], vec![0.5, 0.5], 1);
+        let g = gt(Metric::Euclid, 1000, 2, vec![1, 2], vec![0.5, 0.5]);
         // Point 7 is a duplicate of point 2: same distance, different id.
-        let r = vec![Returned {
-            ids: vec![1, 7],
-            scores: vec![0.5, 0.5],
-        }];
+        let r = vec![ret(&[1, 7], &[0.5, 0.5])];
         let out = evaluate(&g, &r, &abs_eps(1e-6), 2, None);
         assert_eq!(out.recall_at_1, 1.0);
         // Strict id matching would have scored the second position a miss.
@@ -987,26 +946,15 @@ mod tests {
 
 #[cfg(test)]
 mod recall_depth_tests {
-    use super::tests::abs_eps;
     use super::*;
+    use crate::fixtures::{abs_eps, gt, ret};
     use crate::oracle::{GroundTruth, Metric};
 
-    /// Ground truth cached at k=100, queried at k=10.
+    /// Ground truth cached at k=100, queried at k=10: ids 0..100, in order,
+    /// at increasing distance.
     fn gt100() -> GroundTruth {
-        GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 1000,
-            n_queries: 1,
-            dim: 4,
-            k: 100,
-            // Truth is ids 0..100, in order, at increasing distance.
-            ids: (0..100u32).collect(),
-            scores: (0..100).map(f64::from).collect(),
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        }
+        let scores = (0..100).map(f64::from).collect();
+        gt(Metric::Euclid, 1000, 100, (0..100u32).collect(), scores)
     }
 
     /// A truth restricted to 2 points, for W12 point 4's denominator.
@@ -1033,10 +981,7 @@ mod recall_depth_tests {
         // the §7.4 frontier shows a regression the filter caused, not the
         // engine.
         let gt = gt_matching(2);
-        let all_of_them = Returned {
-            ids: vec![0, 1],
-            scores: vec![0.0, 1.0],
-        };
+        let all_of_them = ret(&[0, 1], &[0.0, 1.0]);
         let out = evaluate(&gt, &[all_of_them], &abs_eps(1e-9), 10, None);
         assert_eq!(
             out.recall_at_10, 1.0,
@@ -1045,10 +990,7 @@ mod recall_depth_tests {
 
         // And a miss inside the matching set is still a miss: the denominator
         // moved, the scoring did not become lenient.
-        let one_wrong = Returned {
-            ids: vec![0, 900],
-            scores: vec![0.0, 900.0],
-        };
+        let one_wrong = ret(&[0, 900], &[0.0, 900.0]);
         let out = evaluate(&gt, &[one_wrong], &abs_eps(1e-9), 10, None);
         assert_eq!(out.recall_at_10, 0.5);
     }
@@ -1060,10 +1002,7 @@ mod recall_depth_tests {
         // points made every query a "short list" -- reporting the filter's
         // selectivity as though the engine had answered badly.
         let gt = gt_matching(2);
-        let full = Returned {
-            ids: vec![0, 1],
-            scores: vec![0.0, 1.0],
-        };
+        let full = ret(&[0, 1], &[0.0, 1.0]);
         let out = evaluate(&gt, &[full], &abs_eps(1e-9), 10, None);
         assert_eq!(out.short_lists, 0, "2 of the 2 that exist is a full page");
         assert_eq!(out.returned, 2);
@@ -1071,10 +1010,7 @@ mod recall_depth_tests {
         assert_eq!(out.n_matching, Some(2));
 
         // Genuinely short under the same condition: one of the two missing.
-        let one = Returned {
-            ids: vec![0],
-            scores: vec![0.0],
-        };
+        let one = ret(&[0], &[0.0]);
         let out = evaluate(&gt, &[one], &abs_eps(1e-9), 10, None);
         assert_eq!(out.short_lists, 1);
         assert_eq!(out.returned, 1);
@@ -1101,10 +1037,7 @@ mod recall_depth_tests {
         // The same returned list against §4.3's unfiltered truth: 2 of 10
         // asked-for slots, which is the behaviour every published sift1m
         // recall was measured under and must not move.
-        let two = Returned {
-            ids: vec![0, 1],
-            scores: vec![0.0, 1.0],
-        };
+        let two = ret(&[0, 1], &[0.0, 1.0]);
         let out = evaluate(&gt100(), &[two], &abs_eps(1e-9), 10, None);
         assert_eq!(out.recall_at_10, 0.2);
     }
@@ -1125,10 +1058,7 @@ mod recall_depth_tests {
     /// beside `recall@10=n/a` was Wilson on one imaginary trial.
     #[test]
     fn an_unmeasurable_recall_prints_no_interval() {
-        let short = Returned {
-            ids: vec![0, 1, 2],
-            scores: vec![0.0, 1.0, 2.0],
-        };
+        let short = ret(&[0, 1, 2], &[0.0, 1.0, 2.0]);
         let out = evaluate(&gt100(), &[short], &abs_eps(1e-9), 3, None);
         assert!(out.recall_at_10.is_nan());
         assert!(out.recall_at_10_ci95.low.is_nan() && out.recall_at_10_ci95.high.is_nan());
@@ -1219,10 +1149,7 @@ mod recall_depth_tests {
 
         // Returned nothing at all: recall 0 and MRDE has nothing to average,
         // which is reported as such rather than as a perfect 0.0.
-        let empty = Returned {
-            ids: vec![],
-            scores: vec![],
-        };
+        let empty = ret(&[], &[]);
         let out = evaluate(&gt, &[empty], &abs_eps(1e-9), 10, None);
         assert_eq!(out.recall_at_10, 0.0);
         assert_eq!(out.recall_at_1, 0.0);
@@ -1239,10 +1166,7 @@ mod recall_depth_tests {
     fn a_duplicated_id_counts_once() {
         let gt = gt100();
         // The true nearest, repeated ten times.
-        let returned = Returned {
-            ids: vec![0; 10],
-            scores: vec![0.0; 10],
-        };
+        let returned = ret(&[0; 10], &[0.0; 10]);
         let out = evaluate(&gt, &[returned], &abs_eps(1e-9), 10, None);
         assert_eq!(out.recall_at_10, 0.1, "one neighbour found, not ten");
         assert_eq!(out.recall_at_1, 1.0);

@@ -1427,34 +1427,20 @@ mod tests {
         assert!(!identity_known("abc", "1.19.0", ISA_UNSET));
     }
     use super::*;
-    use tolerance::calibrate;
+    use crate::fixtures::{abs_eps, gt, ret, row_with, tier};
 
     fn eps(metric: Metric, value: f64) -> Epsilon {
-        let mut e = calibrate(
+        Epsilon {
             metric,
-            8,
-            Distribution::default(),
-            Distribution::default(),
-            1.0,
-        );
-        e.value = value;
-        e.relative = false;
-        e
+            ..abs_eps(value)
+        }
     }
 
     fn gt3() -> GroundTruth {
         GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 100,
-            n_queries: 1,
-            dim: 4,
-            k: 3,
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 2.0, 3.0],
             base_checksum: 7,
             query_checksum: 9,
-            condition: None,
-            n_matching: None,
+            ..gt(Metric::Euclid, 100, 3, vec![1, 2, 3], vec![1.0, 2.0, 3.0])
         }
     }
 
@@ -1504,14 +1490,8 @@ mod tests {
 
     #[test]
     fn t1_passes_within_epsilon_and_reports_the_distribution() {
-        let ours = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 2.0, 3.0],
-        }];
-        let theirs = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![1.0 + 1e-7, 2.0, 3.0],
-        }];
+        let ours = vec![ret(&[1, 2, 3], &[1.0, 2.0, 3.0])];
+        let theirs = vec![ret(&[1, 2, 3], &[1.0 + 1e-7, 2.0, 3.0])];
         let r = compare_exact(&ours, &theirs, &gt3(), &eps(Metric::Euclid, 1e-6), 3);
         assert!(r.passed);
         // §8.4: never a bare pass/fail.
@@ -1522,14 +1502,8 @@ mod tests {
 
     #[test]
     fn t1_fails_beyond_epsilon_and_names_the_oracle_verdict() {
-        let ours = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![1.5, 2.0, 3.0],
-        }];
-        let theirs = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 2.0, 3.0],
-        }];
+        let ours = vec![ret(&[1, 2, 3], &[1.5, 2.0, 3.0])];
+        let theirs = vec![ret(&[1, 2, 3], &[1.0, 2.0, 3.0])];
         let r = compare_exact(&ours, &theirs, &gt3(), &eps(Metric::Euclid, 1e-6), 3);
         assert!(!r.passed);
         // §8.2: the arbiter says who is wrong, not just that someone is.
@@ -1540,14 +1514,8 @@ mod tests {
     #[test]
     fn t2_treats_tied_scores_as_an_unordered_class() {
         // §8.5 T2: "their ordering is arbitrary in both engines".
-        let ours = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![5.0, 5.0, 9.0],
-        }];
-        let theirs = vec![Returned {
-            ids: vec![2, 1, 3],
-            scores: vec![5.0, 5.0, 9.0],
-        }];
+        let ours = vec![ret(&[1, 2, 3], &[5.0, 5.0, 9.0])];
+        let theirs = vec![ret(&[2, 1, 3], &[5.0, 5.0, 9.0])];
         let r = compare_ranks(&ours, &theirs, &eps(Metric::Dot, 1e-6));
         assert!(r.passed);
         assert!(
@@ -1737,19 +1705,7 @@ mod tests {
         let scores: Vec<f64> = (0..nq)
             .flat_map(|_| (1..=k).map(|i| i as f64).collect::<Vec<_>>())
             .collect();
-        let gt = GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 100,
-            n_queries: nq,
-            dim: 4,
-            k,
-            ids,
-            scores,
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
+        let gt = gt(Metric::Euclid, 100, k, ids, scores);
 
         let good: Vec<Returned> = (0..nq)
             .map(|_| Returned {
@@ -1779,23 +1735,14 @@ mod tests {
     fn recall_is_not_reported_when_the_request_could_not_produce_it() {
         // A run with limit=3 mechanically caps recall@10 at 0.3. Reporting
         // that number would present a request parameter as a quality result.
-        let gt = GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 100,
-            n_queries: 1,
-            dim: 4,
-            k: 100,
-            ids: (0..100).collect(),
-            scores: (0..100).map(f64::from).collect(),
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
-        let short = vec![Returned {
-            ids: vec![0, 1, 2],
-            scores: vec![0.0, 1.0, 2.0],
-        }];
+        let gt = gt(
+            Metric::Euclid,
+            100,
+            100,
+            (0..100).collect(),
+            (0..100).map(f64::from).collect(),
+        );
+        let short = vec![ret(&[0, 1, 2], &[0.0, 1.0, 2.0])];
         let g = relevance::evaluate(&gt, &short, &eps(Metric::Euclid, 1e-9), 3, None);
 
         assert!(!g.recall_at_1.is_nan());
@@ -1812,19 +1759,7 @@ mod tests {
     /// runs both evaluated to recall 0 with a (0, 0) interval, which overlaps.
     #[test]
     fn t3_does_not_pass_on_nothing() {
-        let gt = GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 100,
-            n_queries: 0,
-            dim: 4,
-            k: 10,
-            ids: vec![],
-            scores: vec![],
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
+        let gt = gt(Metric::Euclid, 100, 10, vec![], vec![]);
         let (r, _, _) = t3_once(&[], &[], &gt, 10);
         assert!(!r.passed, "{}", r.detail);
         assert!(r.detail.contains("n=0"), "{}", r.detail);
@@ -1832,14 +1767,8 @@ mod tests {
 
     #[test]
     fn t4_reports_the_distribution_and_gates_on_dominance_and_rank_correlation() {
-        let q = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![1.1, 2.1, 3.1],
-        }];
-        let f = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 2.0, 3.0],
-        }];
+        let q = vec![ret(&[1, 2, 3], &[1.1, 2.1, 3.1])];
+        let f = vec![ret(&[1, 2, 3], &[1.0, 2.0, 3.0])];
         let held = crate::metamorphic::quantization_dominance(&[(1.0, 0.9), (2.0, 0.95)]);
         let r = quantization_fidelity(&q, &f, &gt3(), "binary", &held);
         assert!(r.passed, "{}", r.detail);
@@ -1856,10 +1785,7 @@ mod tests {
 
         // An encoding that returns the oracle's neighbours in reverse order
         // has broken the ranking, and τ says so.
-        let reversed = vec![Returned {
-            ids: vec![3, 2, 1],
-            scores: vec![3.1, 2.1, 1.1],
-        }];
+        let reversed = vec![ret(&[3, 2, 1], &[3.1, 2.1, 1.1])];
         let r = quantization_fidelity(&reversed, &f, &gt3(), "binary", &held);
         assert!(!r.passed);
         assert!(r.detail.contains("floor"), "{}", r.detail);
@@ -1875,37 +1801,16 @@ mod tests {
         // at every position; one point swapped for another outside any tie.
         // Before ids were compared this passed T1, the tier that licenses the
         // performance claim, with an id-mapping bug.
-        let gt = GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 100,
-            n_queries: 1,
-            dim: 4,
-            k: 3,
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 2.0, 3.0],
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
-        let ours = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 2.0, 3.0],
-        }];
-        let theirs = vec![Returned {
-            ids: vec![1, 9, 3],
-            scores: vec![1.0, 2.0, 3.0],
-        }];
+        let gt = gt(Metric::Euclid, 100, 3, vec![1, 2, 3], vec![1.0, 2.0, 3.0]);
+        let ours = vec![ret(&[1, 2, 3], &[1.0, 2.0, 3.0])];
+        let theirs = vec![ret(&[1, 9, 3], &[1.0, 2.0, 3.0])];
         let e = eps(Metric::Euclid, 1e-6);
         let r = compare_exact(&ours, &theirs, &gt, &e, 3);
         assert!(!r.passed, "{}", r.detail);
         assert!(r.detail.contains("id sets differ"), "{}", r.detail);
 
         // Same multiset, but an id moved across a non-tie: still a defect.
-        let swapped = vec![Returned {
-            ids: vec![2, 1, 3],
-            scores: vec![1.0, 2.0, 3.0],
-        }];
+        let swapped = vec![ret(&[2, 1, 3], &[1.0, 2.0, 3.0])];
         let r = compare_exact(&ours, &swapped, &gt, &e, 3);
         assert!(!r.passed, "{}", r.detail);
         assert!(
@@ -1915,10 +1820,7 @@ mod tests {
         );
 
         // Our own ids disagreeing with the oracle fails regardless of Qdrant.
-        let both_wrong = vec![Returned {
-            ids: vec![1, 9, 3],
-            scores: vec![1.0, 2.0, 3.0],
-        }];
+        let both_wrong = vec![ret(&[1, 9, 3], &[1.0, 2.0, 3.0])];
         let r = compare_exact(&both_wrong, &both_wrong, &gt, &e, 3);
         assert!(!r.passed, "{}", r.detail);
         assert!(r.detail.contains("oracle does not"), "{}", r.detail);
@@ -1928,36 +1830,15 @@ mod tests {
     fn t1_accepts_ids_permuted_within_an_exact_tie() {
         // §8.5 T2: "their ordering is arbitrary in both engines" — a tie
         // broken the other way is not an id divergence.
-        let gt = GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 100,
-            n_queries: 1,
-            dim: 4,
-            k: 3,
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 1.0, 3.0],
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
-        let ours = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 1.0, 3.0],
-        }];
-        let theirs = vec![Returned {
-            ids: vec![2, 1, 3],
-            scores: vec![1.0, 1.0, 3.0],
-        }];
+        let gt = gt(Metric::Euclid, 100, 3, vec![1, 2, 3], vec![1.0, 1.0, 3.0]);
+        let ours = vec![ret(&[1, 2, 3], &[1.0, 1.0, 3.0])];
+        let theirs = vec![ret(&[2, 1, 3], &[1.0, 1.0, 3.0])];
         let r = compare_exact(&ours, &theirs, &gt, &eps(Metric::Euclid, 1e-6), 3);
         assert!(r.passed, "{}", r.detail);
 
         // And a tie at the oracle's cut may be resolved either way: id 4 is
         // not in the truth's top 3 but sits exactly at the 3rd score.
-        let cut = vec![Returned {
-            ids: vec![1, 2, 4],
-            scores: vec![1.0, 1.0, 3.0],
-        }];
+        let cut = vec![ret(&[1, 2, 4], &[1.0, 1.0, 3.0])];
         let r = compare_exact(&cut, &cut, &gt, &eps(Metric::Euclid, 1e-6), 3);
         assert!(r.passed, "{}", r.detail);
     }
@@ -1968,36 +1849,21 @@ mod tests {
         assert!(!compare_ranks(&[], &[], &e).passed);
         // Every query answered empty by both engines: no segment, τ None,
         // RBO 1.0 -- and it used to pass.
-        let empty = vec![
-            Returned {
-                ids: vec![],
-                scores: vec![]
-            };
-            3
-        ];
+        let empty = vec![ret(&[], &[]); 3];
         let r = compare_ranks(&empty, &empty, &e);
         assert!(!r.passed, "{}", r.detail);
         assert!(r.detail.contains("answered empty by both"), "{}", r.detail);
         // One real query among empties is enough to judge.
         let mut mixed = empty.clone();
-        mixed[0] = Returned {
-            ids: vec![1, 2],
-            scores: vec![2.0, 1.0],
-        };
+        mixed[0] = ret(&[1, 2], &[2.0, 1.0]);
         assert!(compare_ranks(&mixed, &mixed, &e).passed);
     }
 
     #[test]
     fn a_duplicated_id_is_a_divergence_not_a_tie() {
         let e = eps(Metric::Euclid, 1e-6);
-        let a = Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![5.0, 5.0, 5.0],
-        };
-        let b = Returned {
-            ids: vec![1, 1, 3],
-            scores: vec![5.0, 5.0, 5.0],
-        };
+        let a = ret(&[1, 2, 3], &[5.0, 5.0, 5.0]);
+        let b = ret(&[1, 1, 3], &[5.0, 5.0, 5.0]);
         let err = ids_agree_up_to_ties(&a, &b, &e).unwrap_err();
         assert!(err.contains("more than once"), "{err}");
     }
@@ -2012,10 +1878,7 @@ mod tests {
 
         // Lists shorter than the limit, when the collection could fill it,
         // are a structural failure even when the two engines agree.
-        let short = vec![Returned {
-            ids: vec![1],
-            scores: vec![1.0],
-        }];
+        let short = vec![ret(&[1], &[1.0])];
         let r = compare_exact(&short, &short, &gt3(), &eps(Metric::Euclid, 1e-6), 3);
         assert!(!r.passed, "{}", r.detail);
         assert!(r.detail.contains("expected 3 results"), "{}", r.detail);
@@ -2034,14 +1897,8 @@ mod tests {
     fn t2_fails_when_the_tie_multisets_differ_and_passes_across_a_shifted_class_cut() {
         let e = eps(Metric::Dot, 1e-6);
         // Different points inside the first tie class.
-        let ours = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![5.0, 5.0, 9.0],
-        }];
-        let theirs = vec![Returned {
-            ids: vec![1, 7, 3],
-            scores: vec![5.0, 5.0, 9.0],
-        }];
+        let ours = vec![ret(&[1, 2, 3], &[5.0, 5.0, 9.0])];
+        let theirs = vec![ret(&[1, 7, 3], &[5.0, 5.0, 9.0])];
         let r = compare_ranks(&ours, &theirs, &e);
         assert!(!r.passed, "{}", r.detail);
         assert!(r.detail.contains("1/"), "{}", r.detail);
@@ -2049,14 +1906,8 @@ mod tests {
         // The lists agree everywhere to within ε but draw a class boundary one
         // apart (0.9ε vs 1.1ε gaps). Class-by-class zip called that a
         // mismatch; cutting only where both cut does not.
-        let a = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 1.0 + 0.9e-6, 2.0],
-        }];
-        let b = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 1.0 + 1.1e-6, 2.0],
-        }];
+        let a = vec![ret(&[1, 2, 3], &[1.0, 1.0 + 0.9e-6, 2.0])];
+        let b = vec![ret(&[1, 2, 3], &[1.0, 1.0 + 1.1e-6, 2.0])];
         let r = compare_ranks(&a, &b, &e);
         assert!(r.passed, "{}", r.detail);
 
@@ -2066,35 +1917,7 @@ mod tests {
 
     #[test]
     fn the_hash_binds_the_limit_and_the_tier_identities() {
-        let base = ConformanceRow {
-            dataset: "sift1m".into(),
-            metric: Metric::Euclid,
-            dim: 128,
-            qdrant_version: "1.19.0".into(),
-            strawmann_commit: "abc".into(),
-            isa_build: "avx512".into(),
-            base_checksum: 1,
-            query_checksum: 2,
-            epsilon: 1e-6,
-            epsilon_relative: false,
-            limit: 10,
-            tiers: vec![
-                TierResult {
-                    advisory: false,
-                    tier: Tier::T0Wire,
-                    passed: true,
-                    detail: String::new(),
-                    distribution: None,
-                },
-                TierResult {
-                    advisory: false,
-                    tier: Tier::T1ExactValue,
-                    passed: true,
-                    detail: String::new(),
-                    distribution: None,
-                },
-            ],
-        };
+        let base = row_with(&[(Tier::T0Wire, true), (Tier::T1ExactValue, true)]);
         let h = base.hash();
 
         let mut l = base.clone();
@@ -2126,41 +1949,19 @@ mod tests {
         // strawmann's first, so its pass was the tier reached whatever
         // Qdrant's said -- and the reverse order would have filed Qdrant's
         // failure as the row's. Advisory results are reported, not counted.
-        let ok = |tier: Tier| TierResult {
-            advisory: false,
-            tier,
-            passed: true,
-            detail: String::new(),
-            distribution: None,
-        };
-        let mut row = ConformanceRow {
-            dataset: "sift1m".into(),
-            metric: Metric::Euclid,
-            dim: 128,
-            qdrant_version: "1.19.0".into(),
-            strawmann_commit: "abc".into(),
-            isa_build: "avx512".into(),
-            base_checksum: 1,
-            query_checksum: 2,
-            epsilon: 1e-6,
-            epsilon_relative: false,
-            limit: 10,
-            tiers: vec![
-                ok(Tier::T0Wire),
-                ok(Tier::T1ExactValue),
-                ok(Tier::Metamorphic),
-                ok(Tier::T2RankTies),
-                ok(Tier::T3AnnStatistical),
-                ok(Tier::T4QuantFidelity),
-                TierResult {
-                    advisory: true,
-                    tier: Tier::T4QuantFidelity,
-                    passed: false,
-                    detail: "qdrant".into(),
-                    distribution: None,
-                },
-            ],
-        };
+        let mut row = row_with(&[
+            (Tier::T0Wire, true),
+            (Tier::T1ExactValue, true),
+            (Tier::Metamorphic, true),
+            (Tier::T2RankTies, true),
+            (Tier::T3AnnStatistical, true),
+            (Tier::T4QuantFidelity, true),
+        ]);
+        row.tiers.push(TierResult {
+            advisory: true,
+            detail: "qdrant".into(),
+            ..tier(Tier::T4QuantFidelity, false)
+        });
         assert_eq!(row.tier_reached(), Some(Tier::T4QuantFidelity));
         // And strawmann's own failing T4 still stops it.
         row.tiers[5].passed = false;
@@ -2169,79 +1970,20 @@ mod tests {
 
     #[test]
     fn tier_reached_stops_at_the_first_failure() {
-        let row = ConformanceRow {
-            dataset: "sift1m".into(),
-            metric: Metric::Euclid,
-            dim: 128,
-            qdrant_version: "1.19.0".into(),
-            strawmann_commit: "abc".into(),
-            isa_build: "avx512".into(),
-            base_checksum: 1,
-            query_checksum: 2,
-            epsilon: 1e-6,
-            epsilon_relative: false,
-            limit: 10,
-            tiers: vec![
-                TierResult {
-                    advisory: false,
-                    tier: Tier::T0Wire,
-                    passed: true,
-                    detail: String::new(),
-                    distribution: None,
-                },
-                TierResult {
-                    advisory: false,
-                    tier: Tier::T1ExactValue,
-                    passed: false,
-                    detail: String::new(),
-                    distribution: None,
-                },
-                // A later tier passing must not raise the reached level past
-                // the failure below it.
-                TierResult {
-                    advisory: false,
-                    tier: Tier::T3AnnStatistical,
-                    passed: true,
-                    detail: String::new(),
-                    distribution: None,
-                },
-            ],
-        };
+        let row = row_with(&[
+            (Tier::T0Wire, true),
+            (Tier::T1ExactValue, false),
+            // A later tier passing must not raise the reached level past
+            // the failure below it.
+            (Tier::T3AnnStatistical, true),
+        ]);
         assert_eq!(row.tier_reached(), Some(Tier::T0Wire));
         assert!(!row.licenses_performance_claim());
     }
 
     #[test]
     fn t1_is_the_tier_that_licenses_a_performance_claim() {
-        let mut row = ConformanceRow {
-            dataset: "sift1m".into(),
-            metric: Metric::Euclid,
-            dim: 128,
-            qdrant_version: "1.19.0".into(),
-            strawmann_commit: "abc".into(),
-            isa_build: "avx512".into(),
-            base_checksum: 1,
-            query_checksum: 2,
-            epsilon: 1e-6,
-            epsilon_relative: false,
-            limit: 10,
-            tiers: vec![
-                TierResult {
-                    advisory: false,
-                    tier: Tier::T0Wire,
-                    passed: true,
-                    detail: String::new(),
-                    distribution: None,
-                },
-                TierResult {
-                    advisory: false,
-                    tier: Tier::T1ExactValue,
-                    passed: true,
-                    detail: String::new(),
-                    distribution: None,
-                },
-            ],
-        };
+        let mut row = row_with(&[(Tier::T0Wire, true), (Tier::T1ExactValue, true)]);
         assert!(row.licenses_performance_claim());
         assert!(accept_performance_row(&row, row.hash()).is_ok());
 
@@ -2255,26 +1997,7 @@ mod tests {
 
     #[test]
     fn the_conformance_hash_changes_with_every_input_that_matters() {
-        let base = ConformanceRow {
-            dataset: "sift1m".into(),
-            metric: Metric::Euclid,
-            dim: 128,
-            qdrant_version: "1.19.0".into(),
-            strawmann_commit: "abc".into(),
-            isa_build: "avx512".into(),
-            base_checksum: 1,
-            query_checksum: 2,
-            epsilon: 1e-6,
-            epsilon_relative: false,
-            limit: 10,
-            tiers: vec![TierResult {
-                advisory: false,
-                tier: Tier::T1ExactValue,
-                passed: true,
-                detail: String::new(),
-                distribution: None,
-            }],
-        };
+        let base = row_with(&[(Tier::T1ExactValue, true)]);
         let h = base.hash();
         // The value itself: rows already published carry it.
         assert_eq!(h, 0x8c62_87d3_7c8c_94aa);
@@ -2310,14 +2033,15 @@ mod tests {
 #[cfg(test)]
 mod licensing_tests {
     use super::*;
+    use crate::fixtures::row_with;
 
     #[test]
     fn the_hash_binds_the_tolerance_the_tiers_were_judged_under() {
         // §8.4 makes ε the parameter that decides every verdict, so a gate that
         // did not bind it would accept a green row produced with --epsilon 1.0
         // as interchangeable with a calibrated one.
-        let a = row_with(vec![(Tier::T0Wire, true), (Tier::T1ExactValue, true)]);
-        let mut b = row_with(vec![(Tier::T0Wire, true), (Tier::T1ExactValue, true)]);
+        let a = row_with(&[(Tier::T0Wire, true), (Tier::T1ExactValue, true)]);
+        let mut b = row_with(&[(Tier::T0Wire, true), (Tier::T1ExactValue, true)]);
         assert_eq!(a.hash(), b.hash(), "identical rows must agree");
 
         b.epsilon = 1.0;
@@ -2327,7 +2051,7 @@ mod licensing_tests {
             "a different ε is a different conformance run"
         );
 
-        let mut c = row_with(vec![(Tier::T0Wire, true), (Tier::T1ExactValue, true)]);
+        let mut c = row_with(&[(Tier::T0Wire, true), (Tier::T1ExactValue, true)]);
         c.epsilon_relative = true;
         assert_ne!(
             a.hash(),
@@ -2338,8 +2062,8 @@ mod licensing_tests {
 
     #[test]
     fn the_hash_binds_the_builds_under_test() {
-        let a = row_with(vec![(Tier::T1ExactValue, true)]);
-        let mut b = row_with(vec![(Tier::T1ExactValue, true)]);
+        let a = row_with(&[(Tier::T1ExactValue, true)]);
+        let mut b = row_with(&[(Tier::T1ExactValue, true)]);
         b.strawmann_commit = "another".into();
         assert_ne!(
             a.hash(),
@@ -2348,38 +2072,12 @@ mod licensing_tests {
         );
     }
 
-    fn row_with(tiers: Vec<(Tier, bool)>) -> ConformanceRow {
-        ConformanceRow {
-            dataset: "t".into(),
-            metric: Metric::Euclid,
-            dim: 4,
-            qdrant_version: "1.19.0".into(),
-            strawmann_commit: "test".into(),
-            isa_build: "native".into(),
-            base_checksum: 0,
-            query_checksum: 0,
-            epsilon: 1e-6,
-            epsilon_relative: false,
-            limit: 10,
-            tiers: tiers
-                .into_iter()
-                .map(|(tier, passed)| TierResult {
-                    advisory: false,
-                    tier,
-                    passed,
-                    detail: String::new(),
-                    distribution: None,
-                })
-                .collect(),
-        }
-    }
-
     /// The exact shape of the SIFT1M run: wire and value equality hold, ranks
     /// agree, but the two engines are at materially different recall. A
     /// single-engine cycle count is still meaningful; a QPS *comparison* is not.
     #[test]
     fn t3_failure_blocks_a_comparative_claim_but_not_a_single_engine_one() {
-        let r = row_with(vec![
+        let r = row_with(&[
             (Tier::T0Wire, true),
             (Tier::T1ExactValue, true),
             (Tier::T2RankTies, true),
@@ -2405,12 +2103,12 @@ mod licensing_tests {
             (Tier::T2RankTies, true),
             (Tier::T3AnnStatistical, true),
         ];
-        let mut r = row_with(green.clone());
+        let mut r = row_with(&green);
         r.strawmann_commit = "unknown".into();
         assert!(!r.licenses_performance_claim());
         assert!(!r.licenses_comparative_claim());
         assert!(accept_performance_row(&r, r.hash()).is_err());
-        let mut r = row_with(green);
+        let mut r = row_with(&green);
         r.qdrant_version = "unpinned".into();
         assert!(!r.licenses_performance_claim());
         assert!(!r.licenses_comparative_claim());
@@ -2422,7 +2120,7 @@ mod licensing_tests {
 
     #[test]
     fn t3_pass_licenses_both() {
-        let r = row_with(vec![
+        let r = row_with(&[
             (Tier::T0Wire, true),
             (Tier::T1ExactValue, true),
             (Tier::T2RankTies, true),
@@ -2434,7 +2132,7 @@ mod licensing_tests {
 
     #[test]
     fn a_t1_failure_blocks_everything() {
-        let r = row_with(vec![(Tier::T0Wire, true), (Tier::T1ExactValue, false)]);
+        let r = row_with(&[(Tier::T0Wire, true), (Tier::T1ExactValue, false)]);
         assert!(!r.licenses_performance_claim());
         assert!(!r.licenses_comparative_claim());
     }
@@ -2443,40 +2141,16 @@ mod licensing_tests {
 #[cfg(test)]
 mod t1_adjudication_tests {
     use super::*;
+    use crate::fixtures::{abs_eps, gt, ret};
 
     fn gt_one(scores: &[f64]) -> GroundTruth {
-        GroundTruth {
-            metric: Metric::Cosine,
-            n_base: 100,
-            n_queries: 1,
-            dim: 4,
-            k: scores.len(),
-            ids: (0..scores.len() as u32).collect(),
-            scores: scores.to_vec(),
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        }
-    }
-
-    fn ret(ids: &[u32], scores: &[f64]) -> Vec<Returned> {
-        vec![Returned {
-            ids: ids.to_vec(),
-            scores: scores.to_vec(),
-        }]
-    }
-
-    fn eps(v: f64) -> Epsilon {
-        Epsilon {
-            metric: Metric::Cosine,
-            dim: 1536,
-            value: v,
-            relative: false,
-            qdrant_spread: Distribution::default(),
-            strawmann_spread: Distribution::default(),
-            multiple: 4.0,
-        }
+        gt(
+            Metric::Cosine,
+            100,
+            scores.len(),
+            (0..scores.len() as u32).collect(),
+            scores.to_vec(),
+        )
     }
 
     /// The headline case, reduced: the two engines disagree by more than ε, and
@@ -2486,9 +2160,9 @@ mod t1_adjudication_tests {
     #[test]
     fn we_pass_when_qdrant_is_the_one_that_drifted() {
         let truth = gt_one(&[0.9059384]);
-        let ours = ret(&[0], &[0.9059384]); // exact
-        let theirs = ret(&[0], &[0.9059391]); // 7e-7 off
-        let r = compare_exact(&ours, &theirs, &truth, &eps(1e-7), 1);
+        let ours = vec![ret(&[0], &[0.9059384])]; // exact
+        let theirs = vec![ret(&[0], &[0.9059391])]; // 7e-7 off
+        let r = compare_exact(&ours, &theirs, &truth, &abs_eps(1e-7), 1);
         assert!(r.passed, "detail: {}", r.detail);
         assert!(r.detail.contains("ACCEPTED"), "{}", r.detail);
         assert!(r.detail.contains("QDRANT is further off"), "{}", r.detail);
@@ -2499,9 +2173,9 @@ mod t1_adjudication_tests {
     #[test]
     fn we_fail_when_we_are_the_one_that_drifted() {
         let truth = gt_one(&[0.9059384]);
-        let ours = ret(&[0], &[0.9059500]); // way off
-        let theirs = ret(&[0], &[0.9059385]); // nearly exact
-        let r = compare_exact(&ours, &theirs, &truth, &eps(1e-7), 1);
+        let ours = vec![ret(&[0], &[0.9059500])]; // way off
+        let theirs = vec![ret(&[0], &[0.9059385])]; // nearly exact
+        let r = compare_exact(&ours, &theirs, &truth, &abs_eps(1e-7), 1);
         assert!(!r.passed, "detail: {}", r.detail);
         assert!(r.detail.contains("WE are further off"), "{}", r.detail);
     }
@@ -2511,9 +2185,9 @@ mod t1_adjudication_tests {
     #[test]
     fn both_inaccurate_still_fails() {
         let truth = gt_one(&[0.9059384]);
-        let ours = ret(&[0], &[0.9070000]);
-        let theirs = ret(&[0], &[0.9080000]);
-        let r = compare_exact(&ours, &theirs, &truth, &eps(1e-7), 1);
+        let ours = vec![ret(&[0], &[0.9070000])];
+        let theirs = vec![ret(&[0], &[0.9080000])];
+        let r = compare_exact(&ours, &theirs, &truth, &abs_eps(1e-7), 1);
         assert!(
             !r.passed,
             "we are closer but nowhere near the truth: {}",
@@ -2525,9 +2199,9 @@ mod t1_adjudication_tests {
     #[test]
     fn agreement_within_epsilon_passes_without_arbitration() {
         let truth = gt_one(&[0.5]);
-        let ours = ret(&[0], &[0.5]);
-        let theirs = ret(&[0], &[0.5]);
-        let r = compare_exact(&ours, &theirs, &truth, &eps(1e-7), 1);
+        let ours = vec![ret(&[0], &[0.5])];
+        let theirs = vec![ret(&[0], &[0.5])];
+        let r = compare_exact(&ours, &theirs, &truth, &abs_eps(1e-7), 1);
         assert!(r.passed);
         assert!(
             !r.detail.contains("ACCEPTED"),
@@ -2543,22 +2217,10 @@ mod t1_adjudication_tests {
     /// not agreement with the truth.
     #[test]
     fn t1_fails_when_both_engines_agree_on_a_wrong_last_id() {
-        let truth = GroundTruth {
-            metric: Metric::Cosine,
-            n_base: 100,
-            n_queries: 1,
-            dim: 4,
-            k: 3,
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 2.0, 3.0],
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
-        let ours = ret(&[1, 2, 99], &[1.0, 2.0, 50.0]);
-        let theirs = ret(&[1, 2, 99], &[1.0, 2.0, 50.0]);
-        let r = compare_exact(&ours, &theirs, &truth, &eps(1e-7), 3);
+        let truth = gt(Metric::Cosine, 100, 3, vec![1, 2, 3], vec![1.0, 2.0, 3.0]);
+        let ours = vec![ret(&[1, 2, 99], &[1.0, 2.0, 50.0])];
+        let theirs = vec![ret(&[1, 2, 99], &[1.0, 2.0, 50.0])];
+        let r = compare_exact(&ours, &theirs, &truth, &abs_eps(1e-7), 3);
         assert!(
             !r.passed,
             "id 99 is not an oracle neighbour and 3 is missing: {}",
@@ -2576,22 +2238,10 @@ mod t1_adjudication_tests {
     /// points made the list is arbitrary.
     #[test]
     fn t1_still_excuses_a_genuinely_tied_oracle_cut() {
-        let truth = GroundTruth {
-            metric: Metric::Cosine,
-            n_base: 100,
-            n_queries: 1,
-            dim: 4,
-            k: 3,
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 2.0, 3.0],
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
-        let ours = ret(&[1, 2, 99], &[1.0, 2.0, 3.0]);
-        let theirs = ret(&[1, 2, 3], &[1.0, 2.0, 3.0]);
-        let r = compare_exact(&ours, &theirs, &truth, &eps(1e-7), 3);
+        let truth = gt(Metric::Cosine, 100, 3, vec![1, 2, 3], vec![1.0, 2.0, 3.0]);
+        let ours = vec![ret(&[1, 2, 99], &[1.0, 2.0, 3.0])];
+        let theirs = vec![ret(&[1, 2, 3], &[1.0, 2.0, 3.0])];
+        let r = compare_exact(&ours, &theirs, &truth, &abs_eps(1e-7), 3);
         assert!(r.passed, "99 ties 3 at the cut on both sides: {}", r.detail);
     }
 
@@ -2599,9 +2249,9 @@ mod t1_adjudication_tests {
     #[test]
     fn a_result_count_mismatch_still_fails() {
         let truth = gt_one(&[0.5, 0.4]);
-        let ours = ret(&[0, 1], &[0.5, 0.4]);
-        let theirs = ret(&[0], &[0.5]);
-        let r = compare_exact(&ours, &theirs, &truth, &eps(1e-7), 2);
+        let ours = vec![ret(&[0, 1], &[0.5, 0.4])];
+        let theirs = vec![ret(&[0], &[0.5])];
+        let r = compare_exact(&ours, &theirs, &truth, &abs_eps(1e-7), 2);
         assert!(!r.passed, "{}", r.detail);
     }
 
@@ -2625,27 +2275,9 @@ mod t1_adjudication_tests {
         // A euclid distance of 300, typical for SIFT descriptors. We are one
         // fp32 ulp off the fp64 truth; Qdrant is a hundred times further.
         let truth = 300.0f64;
-        let gt = GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 1,
-            n_queries: 1,
-            dim: 128,
-            k: 1,
-            ids: vec![7],
-            scores: vec![truth],
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
-        let ours = vec![Returned {
-            ids: vec![7],
-            scores: vec![truth + 3.0e-5],
-        }];
-        let theirs = vec![Returned {
-            ids: vec![7],
-            scores: vec![truth + 3.0e-3],
-        }];
+        let gt = gt(Metric::Euclid, 1, 1, vec![7], vec![truth]);
+        let ours = vec![ret(&[7], &[truth + 3.0e-5])];
+        let theirs = vec![ret(&[7], &[truth + 3.0e-3])];
 
         let r = compare_exact(&ours, &theirs, &gt, &e, 1);
         assert!(
@@ -2671,27 +2303,9 @@ mod t1_adjudication_tests {
             tolerance::DEFAULT_MULTIPLE,
         );
         let truth = 300.0f64;
-        let gt = GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 1,
-            n_queries: 1,
-            dim: 128,
-            k: 1,
-            ids: vec![7],
-            scores: vec![truth],
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
-        let ours = vec![Returned {
-            ids: vec![7],
-            scores: vec![truth + 3.0e-3],
-        }];
-        let theirs = vec![Returned {
-            ids: vec![7],
-            scores: vec![truth + 3.0e-5],
-        }];
+        let gt = gt(Metric::Euclid, 1, 1, vec![7], vec![truth]);
+        let ours = vec![ret(&[7], &[truth + 3.0e-3])];
+        let theirs = vec![ret(&[7], &[truth + 3.0e-5])];
 
         let r = compare_exact(&ours, &theirs, &gt, &e, 1);
         assert!(
@@ -2702,35 +2316,11 @@ mod t1_adjudication_tests {
 
     #[test]
     fn a_differing_query_count_is_structural_and_never_silently_truncated() {
-        let e = eps(1e-6);
-        let gt = GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 4,
-            n_queries: 2,
-            dim: 2,
-            k: 1,
-            ids: vec![0, 1],
-            scores: vec![1.0, 1.0],
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
+        let e = abs_eps(1e-6);
+        let gt = gt(Metric::Euclid, 4, 1, vec![0, 1], vec![1.0, 1.0]);
         // Identical where they overlap, but one engine answered half the queries.
-        let ours = vec![
-            Returned {
-                ids: vec![0],
-                scores: vec![1.0],
-            },
-            Returned {
-                ids: vec![1],
-                scores: vec![1.0],
-            },
-        ];
-        let theirs = vec![Returned {
-            ids: vec![0],
-            scores: vec![1.0],
-        }];
+        let ours = vec![ret(&[0], &[1.0]), ret(&[1], &[1.0])];
+        let theirs = vec![ret(&[0], &[1.0])];
 
         let r = compare_exact(&ours, &theirs, &gt, &e, 1);
         assert!(
@@ -2751,27 +2341,13 @@ mod t1_adjudication_tests {
 #[cfg(test)]
 mod boundary_tie_tests {
     use super::*;
+    use crate::fixtures::{abs_eps, gt, ret as r};
     use rand::{RngExt, SeedableRng};
 
     const EPS: f64 = 1e-6;
 
     fn e() -> Epsilon {
-        Epsilon {
-            metric: Metric::Euclid,
-            dim: 8,
-            value: EPS,
-            relative: false,
-            qdrant_spread: Distribution::default(),
-            strawmann_spread: Distribution::default(),
-            multiple: 4.0,
-        }
-    }
-
-    fn r(ids: &[u32], scores: &[f64]) -> Returned {
-        Returned {
-            ids: ids.to_vec(),
-            scores: scores.to_vec(),
-        }
+        abs_eps(EPS)
     }
 
     // (a) identical except the last id, both last scores equal.
@@ -3153,19 +2729,13 @@ mod boundary_tie_tests {
         let k = 10usize;
         // Every query: neighbours 1..=10 at distances 1..=10; a hidden id 11
         // also at distance 10 ties the cut. The oracle lists 1..=10.
-        let gt = GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 1000,
-            n_queries: n,
-            dim: 128,
+        let gt = gt(
+            Metric::Euclid,
+            1000,
             k,
-            ids: (0..n).flat_map(|_| 1..=k as u32).collect(),
-            scores: (0..n).flat_map(|_| (1..=k).map(|i| i as f64)).collect(),
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
+            (0..n).flat_map(|_| 1..=k as u32).collect(),
+            (0..n).flat_map(|_| (1..=k).map(|i| i as f64)).collect(),
+        );
         let ours: Vec<Returned> = (0..n)
             .map(|_| Returned {
                 ids: (1..=k as u32).collect(),
@@ -3212,28 +2782,16 @@ mod boundary_tie_tests {
 #[cfg(test)]
 mod kendall_and_t4_tests {
     use super::*;
+    use crate::fixtures::{abs_eps, gt, ret, row_with};
 
-    fn gt(ids: &[u32], scores: &[f64]) -> GroundTruth {
-        GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 100,
-            n_queries: 1,
-            dim: 4,
-            k: ids.len(),
-            ids: ids.to_vec(),
-            scores: scores.to_vec(),
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        }
-    }
-
-    fn r(ids: &[u32], scores: &[f64]) -> Vec<Returned> {
-        vec![Returned {
-            ids: ids.to_vec(),
-            scores: scores.to_vec(),
-        }]
+    fn gt_of(ids: &[u32], scores: &[f64]) -> GroundTruth {
+        gt(
+            Metric::Euclid,
+            100,
+            ids.len(),
+            ids.to_vec(),
+            scores.to_vec(),
+        )
     }
 
     fn held() -> crate::metamorphic::PropertyResult {
@@ -3250,19 +2808,8 @@ mod kendall_and_t4_tests {
         assert_eq!(kendall_tau(&[1], &[1]), None);
         // T2 at `--limit 1`: every query is excluded, the average is n/a,
         // and the report says how many were excluded.
-        let e = Epsilon {
-            metric: Metric::Euclid,
-            dim: 8,
-            value: 1e-6,
-            relative: false,
-            qdrant_spread: Distribution::default(),
-            strawmann_spread: Distribution::default(),
-            multiple: 4.0,
-        };
-        let one = |id: u32| Returned {
-            ids: vec![id],
-            scores: vec![1.0],
-        };
+        let e = abs_eps(1e-6);
+        let one = |id: u32| ret(&[id], &[1.0]);
         let t2 = compare_ranks(&[one(1), one(2)], &[one(1), one(2)], &e);
         assert!(t2.passed, "{}", t2.detail);
         assert!(
@@ -3272,10 +2819,7 @@ mod kendall_and_t4_tests {
             t2.detail
         );
         // Mixed: the query with evidence sets the average, the other is counted.
-        let two = Returned {
-            ids: vec![1, 2],
-            scores: vec![1.0, 2.0],
-        };
+        let two = ret(&[1, 2], &[1.0, 2.0]);
         let t2 = compare_ranks(&[two.clone(), one(3)], &[two.clone(), one(3)], &e);
         assert!(
             t2.detail
@@ -3308,9 +2852,9 @@ mod kendall_and_t4_tests {
     // (c) a quantizer returning disjoint points fails T4; a faithful one passes.
     #[test]
     fn t4_fails_a_quantizer_returning_entirely_wrong_points() {
-        let truth = gt(&[1, 2, 3], &[1.0, 2.0, 3.0]);
-        let f = r(&[1, 2, 3], &[1.0, 2.0, 3.0]);
-        let disjoint = r(&[7, 8, 9], &[1.0, 2.0, 3.0]);
+        let truth = gt_of(&[1, 2, 3], &[1.0, 2.0, 3.0]);
+        let f = vec![ret(&[1, 2, 3], &[1.0, 2.0, 3.0])];
+        let disjoint = vec![ret(&[7, 8, 9], &[1.0, 2.0, 3.0])];
         let t = quantization_fidelity(&disjoint, &f, &truth, "pq", &held());
         assert!(!t.passed, "{}", t.detail);
         assert!(
@@ -3325,24 +2869,24 @@ mod kendall_and_t4_tests {
         );
 
         // One right point among wrong ones is no better.
-        let one = r(&[7, 2, 9], &[1.0, 2.0, 3.0]);
+        let one = vec![ret(&[7, 2, 9], &[1.0, 2.0, 3.0])];
         assert!(!quantization_fidelity(&one, &f, &truth, "pq", &held()).passed);
         // Two wrong-order points among wrong ones: evidence, and it is bad.
-        let rev = r(&[3, 8, 1], &[1.0, 2.0, 3.0]);
+        let rev = vec![ret(&[3, 8, 1], &[1.0, 2.0, 3.0])];
         let t = quantization_fidelity(&rev, &f, &truth, "pq", &held());
         assert!(!t.passed, "{}", t.detail);
         assert!(t.detail.contains("floor"), "{}", t.detail);
 
         // Faithful: same points, near scores.
-        let q = r(&[1, 2, 3], &[1.05, 2.05, 3.05]);
+        let q = vec![ret(&[1, 2, 3], &[1.05, 2.05, 3.05])];
         let t = quantization_fidelity(&q, &f, &truth, "pq", &held());
         assert!(t.passed, "{}", t.detail);
         // Faithful in a different in-tie order still passes: τ over the ids
         // is 1/3 for one swap of three... so use four with one adjacent swap:
         // 5 concordant of 6 → τ = 2/3 ≥ 0.5.
-        let truth4 = gt(&[1, 2, 3, 4], &[1.0, 2.0, 3.0, 4.0]);
-        let f4 = r(&[1, 2, 3, 4], &[1.0, 2.0, 3.0, 4.0]);
-        let q4 = r(&[1, 3, 2, 4], &[1.0, 3.0, 2.0, 4.0]);
+        let truth4 = gt_of(&[1, 2, 3, 4], &[1.0, 2.0, 3.0, 4.0]);
+        let f4 = vec![ret(&[1, 2, 3, 4], &[1.0, 2.0, 3.0, 4.0])];
+        let q4 = vec![ret(&[1, 3, 2, 4], &[1.0, 3.0, 2.0, 4.0])];
         assert!(quantization_fidelity(&q4, &f4, &truth4, "pq", &held()).passed);
     }
 
@@ -3353,9 +2897,9 @@ mod kendall_and_t4_tests {
         // a τ of 0 (which failed T4 unconditionally at limit 1) and not a
         // pass by default: the verdict is failure with the "no evidence"
         // reason, and the excluded count is reported.
-        let truth = gt(&[1], &[1.0]);
-        let f = r(&[1], &[1.0]);
-        let q = r(&[1], &[1.01]);
+        let truth = gt_of(&[1], &[1.0]);
+        let f = vec![ret(&[1], &[1.0])];
+        let q = vec![ret(&[1], &[1.01])];
         let t = quantization_fidelity(&q, &f, &truth, "pq", &held());
         assert!(!t.passed, "{}", t.detail);
         assert!(
@@ -3375,39 +2919,15 @@ mod kendall_and_t4_tests {
         );
         // With evidence in one query and none in another, the one with
         // evidence decides and the other is counted, not averaged in as 0.
-        let truth2 = GroundTruth {
-            metric: Metric::Euclid,
-            n_base: 100,
-            n_queries: 2,
-            dim: 4,
-            k: 2,
-            ids: vec![1, 2, 3, 4],
-            scores: vec![1.0, 2.0, 1.0, 2.0],
-            base_checksum: 0,
-            query_checksum: 0,
-            condition: None,
-            n_matching: None,
-        };
-        let f2 = vec![
-            Returned {
-                ids: vec![1, 2],
-                scores: vec![1.0, 2.0],
-            },
-            Returned {
-                ids: vec![3, 4],
-                scores: vec![1.0, 2.0],
-            },
-        ];
-        let q2 = vec![
-            Returned {
-                ids: vec![1, 2],
-                scores: vec![1.0, 2.0],
-            },
-            Returned {
-                ids: vec![9, 4],
-                scores: vec![1.0, 2.0],
-            },
-        ];
+        let truth2 = gt(
+            Metric::Euclid,
+            100,
+            2,
+            vec![1, 2, 3, 4],
+            vec![1.0, 2.0, 1.0, 2.0],
+        );
+        let f2 = vec![ret(&[1, 2], &[1.0, 2.0]), ret(&[3, 4], &[1.0, 2.0])];
+        let q2 = vec![ret(&[1, 2], &[1.0, 2.0]), ret(&[9, 4], &[1.0, 2.0])];
         let t = quantization_fidelity(&q2, &f2, &truth2, "pq", &held());
         assert!(t.passed, "{}", t.detail);
         assert!(
@@ -3422,10 +2942,10 @@ mod kendall_and_t4_tests {
     // ids were not common, rather than a spurious distribution.
     #[test]
     fn t4_fidelity_delta_is_over_common_ids_only() {
-        let truth = gt(&[1, 2, 3], &[1.0, 2.0, 3.0]);
-        let f = r(&[1, 2, 3], &[1.0, 2.0, 3.0]);
+        let truth = gt_of(&[1, 2, 3], &[1.0, 2.0, 3.0]);
+        let f = vec![ret(&[1, 2, 3], &[1.0, 2.0, 3.0])];
 
-        let disjoint = r(&[7, 8, 9], &[1.0, 2.0, 3.0]);
+        let disjoint = vec![ret(&[7, 8, 9], &[1.0, 2.0, 3.0])];
         let t = quantization_fidelity(&disjoint, &f, &truth, "pq", &held());
         let d = t.distribution.clone().unwrap();
         assert_eq!(d.count, 0, "no common id, no delta: {}", t.detail);
@@ -3435,7 +2955,7 @@ mod kendall_and_t4_tests {
         // Positional comparison would have reported |Δ| = 0 everywhere here
         // (same scores at every position); matched by id there is one common
         // point with a real delta, and four ids not common.
-        let partial = r(&[9, 1, 8], &[1.0, 2.5, 3.0]);
+        let partial = vec![ret(&[9, 1, 8], &[1.0, 2.5, 3.0])];
         let t = quantization_fidelity(&partial, &f, &truth, "pq", &held());
         let d = t.distribution.clone().unwrap();
         assert_eq!(d.count, 1, "{}", t.detail);
@@ -3443,7 +2963,7 @@ mod kendall_and_t4_tests {
         assert!(t.detail.contains("4 ids not common"), "{}", t.detail);
 
         // Same points in a different order: every delta matched by id.
-        let reordered = r(&[3, 1, 2], &[3.1, 1.1, 2.1]);
+        let reordered = vec![ret(&[3, 1, 2], &[3.1, 1.1, 2.1])];
         let t = quantization_fidelity(&reordered, &f, &truth, "pq", &held());
         let d = t.distribution.clone().unwrap();
         assert_eq!(d.count, 3);
@@ -3453,34 +2973,12 @@ mod kendall_and_t4_tests {
 
     #[test]
     fn identical_rows_hash_identically_and_limit_or_epsilon_change_it() {
-        let build = || ConformanceRow {
-            dataset: "sift1m".into(),
-            metric: Metric::Euclid,
-            dim: 128,
-            qdrant_version: "1.19.0".into(),
-            strawmann_commit: "abc".into(),
-            isa_build: "avx512".into(),
-            base_checksum: 1,
-            query_checksum: 2,
-            epsilon: 1e-6,
-            epsilon_relative: true,
-            limit: 10,
-            tiers: vec![
-                TierResult {
-                    advisory: false,
-                    tier: Tier::T0Wire,
-                    passed: true,
-                    detail: "x".into(),
-                    distribution: None,
-                },
-                TierResult {
-                    advisory: false,
-                    tier: Tier::T1ExactValue,
-                    passed: true,
-                    detail: "y".into(),
-                    distribution: None,
-                },
-            ],
+        let build = || {
+            let mut row = row_with(&[(Tier::T0Wire, true), (Tier::T1ExactValue, true)]);
+            row.epsilon_relative = true;
+            row.tiers[0].detail = "x".into();
+            row.tiers[1].detail = "y".into();
+            row
         };
         let a = build();
         let b = build();

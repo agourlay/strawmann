@@ -462,12 +462,12 @@ impl Comparison {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures::ret;
 
+    /// A list scored by id, so distinct ids never tie.
     fn r(ids: &[u32]) -> Returned {
-        Returned {
-            ids: ids.to_vec(),
-            scores: ids.iter().map(|&i| f64::from(i)).collect(),
-        }
+        let scores: Vec<f64> = ids.iter().map(|&i| f64::from(i)).collect();
+        crate::fixtures::ret(ids, &scores)
     }
 
     #[test]
@@ -490,16 +490,7 @@ mod tests {
     }
 
     fn eps() -> Epsilon {
-        let mut e = crate::differ::tolerance::calibrate(
-            crate::oracle::Metric::Euclid,
-            8,
-            Default::default(),
-            Default::default(),
-            1.0,
-        );
-        e.value = 1e-6;
-        e.relative = false;
-        e
+        crate::fixtures::abs_eps(1e-6)
     }
 
     #[test]
@@ -513,20 +504,11 @@ mod tests {
 
         // §8.7 breaks ties on internal id, which *is* insertion order, so two
         // equidistant points may swap: not a violation.
-        let tied_a = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![5.0, 5.0, 9.0],
-        }];
-        let tied_b = vec![Returned {
-            ids: vec![2, 1, 3],
-            scores: vec![5.0, 5.0, 9.0],
-        }];
+        let tied_a = vec![ret(&[1, 2, 3], &[5.0, 5.0, 9.0])];
+        let tied_b = vec![ret(&[2, 1, 3], &[5.0, 5.0, 9.0])];
         assert!(permutation_invariance(&tied_a, &tied_b, &eps()).held);
         // But a changed score is.
-        let drifted = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![5.0, 5.0, 9.1],
-        }];
+        let drifted = vec![ret(&[1, 2, 3], &[5.0, 5.0, 9.1])];
         assert!(!permutation_invariance(&tied_a, &drifted, &eps()).held);
 
         // The batch-order check is a different, weaker property under its own
@@ -542,38 +524,20 @@ mod tests {
         // whichever of two points tied at the k-th score makes the cut may
         // change. That is not an order dependence.
         let e = eps();
-        let a = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 2.0, 3.0],
-        }];
-        let b = vec![Returned {
-            ids: vec![1, 2, 4],
-            scores: vec![1.0, 2.0, 3.0],
-        }];
+        let a = vec![ret(&[1, 2, 3], &[1.0, 2.0, 3.0])];
+        let b = vec![ret(&[1, 2, 4], &[1.0, 2.0, 3.0])];
         assert!(permutation_invariance(&a, &b, &e).held);
         assert!(permutation_invariance(&b, &a, &e).held);
         // Within ε/2 at the cut, still.
-        let near = vec![Returned {
-            ids: vec![1, 2, 4],
-            scores: vec![1.0, 2.0, 3.0 + 0.5e-6],
-        }];
+        let near = vec![ret(&[1, 2, 4], &[1.0, 2.0, 3.0 + 0.5e-6])];
         assert!(permutation_invariance(&a, &near, &e).held);
         // A three-wide boundary class, cut two ways and shuffled.
-        let ta = vec![Returned {
-            ids: vec![1, 10, 11],
-            scores: vec![1.0, 5.0, 5.0],
-        }];
-        let tb = vec![Returned {
-            ids: vec![1, 12, 10],
-            scores: vec![1.0, 5.0, 5.0],
-        }];
+        let ta = vec![ret(&[1, 10, 11], &[1.0, 5.0, 5.0])];
+        let tb = vec![ret(&[1, 12, 10], &[1.0, 5.0, 5.0])];
         assert!(permutation_invariance(&ta, &tb, &e).held);
 
         // But a *different* point at the cut, 2ε away, is a real change...
-        let far = vec![Returned {
-            ids: vec![1, 2, 4],
-            scores: vec![1.0, 2.0, 3.0 + 2e-6],
-        }];
+        let far = vec![ret(&[1, 2, 4], &[1.0, 2.0, 3.0 + 2e-6])];
         let res = permutation_invariance(&a, &far, &e);
         assert!(!res.held);
         assert!(
@@ -583,18 +547,12 @@ mod tests {
             res.detail
         );
         // ...as is an interior id that changed while the cut ties.
-        let interior = vec![Returned {
-            ids: vec![1, 9, 4],
-            scores: vec![1.0, 2.0, 3.0],
-        }];
+        let interior = vec![ret(&[1, 9, 4], &[1.0, 2.0, 3.0])];
         let res = permutation_invariance(&a, &interior, &e);
         assert!(!res.held);
         assert!(res.detail.contains("id sets differ"), "{}", res.detail);
         // ...as is an id moved across a gap with the multiset intact.
-        let moved = vec![Returned {
-            ids: vec![2, 1, 3],
-            scores: vec![1.0, 2.0, 3.0],
-        }];
+        let moved = vec![ret(&[2, 1, 3], &[1.0, 2.0, 3.0])];
         assert!(!permutation_invariance(&a, &moved, &e).held);
         // The batch-order property is judged under the same rule.
         assert!(query_order_invariance(&a, &b, &e).held);
@@ -633,18 +591,9 @@ mod tests {
     #[test]
     fn positional_properties_excuse_a_reordered_tie_but_not_a_real_change() {
         let e = eps();
-        let a = vec![Returned {
-            ids: vec![1, 2, 3],
-            scores: vec![1.0, 2.0, 2.0],
-        }];
-        let tied = vec![Returned {
-            ids: vec![1, 3, 2],
-            scores: vec![1.0, 2.0, 2.0],
-        }];
-        let changed = vec![Returned {
-            ids: vec![9, 2, 3],
-            scores: vec![1.0, 2.0, 2.0],
-        }];
+        let a = vec![ret(&[1, 2, 3], &[1.0, 2.0, 2.0])];
+        let tied = vec![ret(&[1, 3, 2], &[1.0, 2.0, 2.0])];
+        let changed = vec![ret(&[9, 2, 3], &[1.0, 2.0, 2.0])];
 
         assert!(query_order_invariance(&a, &tied, &e).held);
         assert!(!query_order_invariance(&a, &changed, &e).held);
@@ -652,29 +601,17 @@ mod tests {
         assert!(!idempotent_upsert(&a, &changed, 10, 10, &e).held);
 
         // top_3 against a top_5 whose tie is ordered the other way.
-        let large = vec![Returned {
-            ids: vec![1, 3, 2, 4, 5],
-            scores: vec![1.0, 2.0, 2.0, 4.0, 5.0],
-        }];
+        let large = vec![ret(&[1, 3, 2, 4, 5], &[1.0, 2.0, 2.0, 4.0, 5.0])];
         assert!(prefix_property(&a, &large, &e).held);
         assert!(!prefix_property(&changed, &large, &e).held);
         // And a tie exchanged across the cut: top_2 = [1, 3] of that top_5.
-        let two = vec![Returned {
-            ids: vec![1, 2],
-            scores: vec![1.0, 2.0],
-        }];
+        let two = vec![ret(&[1, 2], &[1.0, 2.0])];
         assert!(prefix_property(&two, &large, &e).held);
 
         // offset 1 of the top_5, with the tie reordered.
-        let off = vec![Returned {
-            ids: vec![2, 3, 4, 5],
-            scores: vec![2.0, 2.0, 4.0, 5.0],
-        }];
+        let off = vec![ret(&[2, 3, 4, 5], &[2.0, 2.0, 4.0, 5.0])];
         assert!(offset_consistency(&off, &large, 1, &e).held);
-        let off_changed = vec![Returned {
-            ids: vec![2, 3, 9, 5],
-            scores: vec![2.0, 2.0, 4.0, 5.0],
-        }];
+        let off_changed = vec![ret(&[2, 3, 9, 5], &[2.0, 2.0, 4.0, 5.0])];
         assert!(!offset_consistency(&off_changed, &large, 1, &e).held);
     }
 
