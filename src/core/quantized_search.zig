@@ -23,6 +23,7 @@ const quantized = @import("quantized.zig");
 const quant_mod = @import("../quant/quant.zig");
 const heap = @import("../index/heap.zig");
 const hnsw = @import("../index/hnsw.zig");
+const tu = @import("../testing_util.zig");
 const Candidate = heap.Candidate;
 
 // =========================================================================
@@ -352,11 +353,7 @@ test "§6.7 two-stage search: quantized traversal plus rescore matches fp32 clos
 
     var prng = std.Random.DefaultPrng.init(0x977);
     const rnd = prng.random();
-    for (0..n) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, n);
     try buildIndex(&c, .serial, 1);
     try quantize(&c, .scalar);
 
@@ -385,14 +382,7 @@ test "§6.7 two-stage search: quantized traversal plus rescore matches fp32 clos
             .{ .hnsw = &hs, .quant = &qs, .alloc = testing.allocator },
             &got,
         );
-        for (got.finish()) |gc| {
-            for (t) |tc| {
-                if (tc.id == gc.id) {
-                    hits += 1;
-                    break;
-                }
-            }
-        }
+        hits += tu.countShared(got.finish(), t);
     }
     const recall = @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(queries * k));
     // SQ8 traversal with 4x oversampling and fp32 rescore should land very
@@ -410,11 +400,7 @@ test "§6.7: every --rescore-prefetch mode returns the same answer" {
     defer c.deinit();
     var prng = std.Random.DefaultPrng.init(0x1111);
     const rnd = prng.random();
-    for (0..n) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, n);
     try buildIndex(&c, .serial, 1);
     try quantize(&c, .scalar);
     var hs = try hnsw.Index.Scratch.init(testing.allocator, 2048, 512);
@@ -458,11 +444,7 @@ test "§6.7: with rescore on, a wide `ef` reaches the fp32 answer" {
     defer c.deinit();
     var prng = std.Random.DefaultPrng.init(0x42f2);
     const rnd = prng.random();
-    for (0..n) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, n);
     try buildIndex(&c, .serial, 1);
     try quantize(&c, .scalar);
 
@@ -495,14 +477,7 @@ test "§6.7: with rescore on, a wide `ef` reaches the fp32 answer" {
             .{ .hnsw = &hs, .quant = &qs, .alloc = testing.allocator },
             &got_h,
         );
-        for (want) |w| {
-            for (got_h.finish()) |g| {
-                if (g.id == w.id) {
-                    hits += 1;
-                    break;
-                }
-            }
-        }
+        hits += tu.countShared(want, got_h.finish());
     }
     // Exact, not "better than the narrow arm". A `limit`-sized pool cannot
     // reach this, which is the whole point of the assertion.
@@ -521,11 +496,7 @@ test "§6.7: with rescore on, oversampling below ef changes nothing" {
     defer c.deinit();
     var prng = std.Random.DefaultPrng.init(0x5c8a);
     const rnd = prng.random();
-    for (0..n) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, n);
     try buildIndex(&c, .serial, 1);
     try quantize(&c, .scalar);
 
@@ -572,11 +543,7 @@ test "§6.7: quantization.ignore falls back to the fp32 path" {
     defer c.deinit();
     var prng = std.Random.DefaultPrng.init(0x1a1a);
     const rnd = prng.random();
-    for (0..n) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, n);
     try buildIndex(&c, .serial, 1);
     try quantize(&c, .{ .binary = .one });
 
@@ -705,11 +672,7 @@ test "§6.7: the (oversampling, rescore) frontier for binary quantization" {
     defer c.deinit();
     var prng = std.Random.DefaultPrng.init(0x2b2b);
     const rnd = prng.random();
-    for (0..n) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, n);
     try buildIndex(&c, .serial, 1);
     try quantize(&c, .{ .binary = .one });
 
@@ -754,14 +717,8 @@ test "§6.7: the (oversampling, rescore) frontier for binary quantization" {
                     .{ .hnsw = &hs, .quant = &qs, .alloc = testing.allocator },
                     &got,
                 );
-                for (got.finish()) |gc| {
-                    for (t) |tc| {
-                        if (tc.id == gc.id) {
-                            if (do_rescore) hits_with += 1 else hits_without += 1;
-                            break;
-                        }
-                    }
-                }
+                const shared = tu.countShared(got.finish(), t);
+                if (do_rescore) hits_with += shared else hits_without += shared;
             }
         }
 
@@ -810,11 +767,7 @@ test "rebuilds racing overwrites and searches never touch a freed store, and end
     defer c.deinit();
     var prng = std.Random.DefaultPrng.init(0x5afe);
     const rnd = prng.random();
-    for (0..n) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, n);
     c.quant_mode = .scalar;
     try buildIndex(&c, .serial, 1);
 
@@ -934,14 +887,7 @@ test "rebuilds racing overwrites and searches never touch a freed store, and end
         var gb: [128]Candidate = undefined;
         var got = heap.TopK.init(&gb, 10);
         try searchQuantized(&c, .{ .query = &q, .ef = 128, .limit = 10, .quant = .{ .oversampling = 4.0 } }, .{ .hnsw = &hs, .quant = &qs, .alloc = testing.allocator }, &got);
-        for (got.finish()) |g| {
-            for (truth.finish()) |t| {
-                if (t.id == g.id) {
-                    hits += 1;
-                    break;
-                }
-            }
-        }
+        hits += tu.countShared(got.finish(), truth.finish());
     }
     const recall = @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(queries * 10));
     try testing.expect(recall > 0.85);

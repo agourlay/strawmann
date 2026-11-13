@@ -29,6 +29,7 @@ const scroll_mod = @import("scroll.zig");
 const payload_mod = @import("payload.zig");
 const wire = @import("../proto/wire.zig");
 const text = @import("../text/text.zig");
+const tu = @import("../testing_util.zig");
 const scroll = scroll_mod.scroll;
 const search = collection.search;
 const invalidateIndex = collection.invalidateIndex;
@@ -1162,11 +1163,7 @@ test "a rebuild retires the old graph rather than freeing it under a search" {
 
     var prng = std.Random.DefaultPrng.init(0xf1f1);
     const rnd = prng.random();
-    for (0..200) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, 200);
 
     try buildIndex(&c, .serial, 1);
     const first = c.graph.?;
@@ -1205,11 +1202,7 @@ test "a re-quantize retires the old store" {
     defer c.deinit();
     var prng = std.Random.DefaultPrng.init(0xf2f2);
     const rnd = prng.random();
-    for (0..100) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, 100);
 
     try quantize(&c, .scalar);
     try testing.expectEqual(@as(usize, 0), c.retired_quant.items.len);

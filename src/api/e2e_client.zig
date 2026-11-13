@@ -34,6 +34,7 @@ const hpack = strawmann_net.hpack;
 const grpc = strawmann_net.grpc;
 const server = strawmann_net.server;
 const wire = proto.wire;
+const msg = proto.messages;
 
 // =========================================================================
 // A minimal gRPC client, sufficient to drive the server the way tonic does.
@@ -604,25 +605,44 @@ pub fn buildCreateCollection(buf: []u8, name: []const u8, dim: u64, distance: i3
 /// `datatype` is `VectorParams.datatype`, field 6: Default=0, Float32=1,
 /// Uint8=2, Float16=3.
 pub fn buildCreateCollectionDt(buf: []u8, name: []const u8, dim: u64, distance: i32, datatype: i32) ![]const u8 {
+    return buildCreateCollectionWith(buf, name, dim, distance, .{ .datatype = datatype });
+}
+
+/// What a CreateCollection request sets beyond its name and vector shape.
+pub const CreateOptions = struct {
+    /// `VectorParams.datatype`, written only when non-zero.
+    datatype: i32 = 0,
+    /// `hnsw_config.full_scan_threshold`, in KB. 0 by default: every
+    /// collection in these tests is a few hundred points, well under
+    /// Qdrant's default threshold of 10 000 KB, so with the default every
+    /// query here would be answered by the plain scan
+    /// (`handlers.fullScanPreferred`) and the tests that exercise the graph
+    /// path would test nothing. Asking for the graph explicitly is what a bfb
+    /// run on a small collection has to do too. `null` leaves it unset, for
+    /// the tests of the default threshold.
+    full_scan_threshold: ?u64 = 0,
+    /// `hnsw_config.m` and `hnsw_config.ef_construct`, unset when `null`.
+    m: ?u64 = null,
+    ef_construct: ?u64 = null,
+};
+
+/// A CreateCollection request: `hnsw_config` (field 4) when any of its
+/// fields is set, then `vectors_config` (field 10).
+pub fn buildCreateCollectionWith(buf: []u8, name: []const u8, dim: u64, distance: i32, opts: CreateOptions) ![]const u8 {
     var w = wire.Writer.init(buf);
     try w.writeStringField(1, name);
-    {
-        // `hnsw_config { full_scan_threshold = 0 }`. Every collection in
-        // these tests is a few hundred points, well under Qdrant's default
-        // threshold of 10 000 KB, so with the default every query here would
-        // be answered by the plain scan (`handlers.fullScanPreferred`) and
-        // the tests that exercise the graph path would test nothing. Asking
-        // for the graph explicitly is what a bfb run on a small collection
-        // has to do too. The threshold tests build their own create message.
+    if (opts.m != null or opts.ef_construct != null or opts.full_scan_threshold != null) {
         const hc = try w.beginNested(4, 2);
-        try w.writeVarintFieldAlways(3, 0);
+        if (opts.m) |m| try w.writeVarintField(1, m);
+        if (opts.ef_construct) |ef| try w.writeVarintField(2, ef);
+        if (opts.full_scan_threshold) |t| try w.writeVarintFieldAlways(3, t);
         try w.endNested(hc);
     }
     const vc = try w.beginNested(10, 2); // vectors_config (VERIFIED: field 10)
     const p = try w.beginNested(1, 2); // params
     try w.writeVarintField(1, dim);
     try w.writeVarintField(2, @intCast(distance));
-    if (datatype != 0) try w.writeVarintField(6, @intCast(datatype));
+    if (opts.datatype != 0) try w.writeVarintField(6, @intCast(opts.datatype));
     try w.endNested(p);
     try w.endNested(vc);
     return w.written();
@@ -634,25 +654,33 @@ pub fn buildUpsert(buf: []u8, name: []const u8, wait: bool, ids: []const u64, ve
     try w.writeBoolField(2, wait);
     for (ids, vecs) |id, v| {
         const pt = try w.beginNested(3, 3);
-        {
-            const idn = try w.beginNested(1, 2);
-            try w.writeVarintFieldAlways(1, id);
-            try w.endNested(idn);
-        }
-        {
-            // Vectors.vector = 1, Vector.dense = 101 (VERIFIED against the
-            // generated client), DenseVector.data = 1.
-            const vs = try w.beginNested(4, 3);
-            const vec = try w.beginNested(1, 3);
-            const dv = try w.beginNested(101, 3);
-            try w.writePackedFloats(1, v);
-            try w.endNested(dv);
-            try w.endNested(vec);
-            try w.endNested(vs);
-        }
+        try writePointId(&w, id);
+        try writePointVector(&w, v);
         try w.endNested(pt);
     }
     return w.written();
+}
+
+/// `PointStruct.id` (field 1), a numeric `PointId`. Written first, so a
+/// builder can add its payload entries (field 3) between this and
+/// `writePointVector`.
+pub fn writePointId(w: *wire.Writer, id: u64) !void {
+    const idn = try w.beginNested(1, 2);
+    try w.writeVarintFieldAlways(1, id);
+    try w.endNested(idn);
+}
+
+/// `PointStruct.vectors` (field 4) holding one dense vector.
+pub fn writePointVector(w: *wire.Writer, v: []const f32) !void {
+    // Vectors.vector = 1, Vector.dense = 101 (VERIFIED against the
+    // generated client), DenseVector.data = 1.
+    const vs = try w.beginNested(4, 3);
+    const vec = try w.beginNested(1, 3);
+    const dv = try w.beginNested(101, 3);
+    try w.writePackedFloats(1, v);
+    try w.endNested(dv);
+    try w.endNested(vec);
+    try w.endNested(vs);
 }
 
 pub fn buildQueryBatch(buf: []u8, name: []const u8, queries: []const []const f32, limit: u64) ![]const u8 {
@@ -677,3 +705,77 @@ pub fn buildQueryBatch(buf: []u8, name: []const u8, queries: []const []const f32
     }
     return w.written();
 }
+
+// =========================================================================
+// Response readers
+// =========================================================================
+
+/// The `BatchResult`s of a QueryBatchResponse (`repeated BatchResult result
+/// = 1`), any other field skipped.
+pub const Batches = struct {
+    r: wire.Reader,
+
+    pub fn init(body: []const u8) Batches {
+        return .{ .r = wire.Reader.init(body) };
+    }
+
+    pub fn next(self: *Batches) !?Points {
+        while (!self.r.atEnd()) {
+            const t = try self.r.tag();
+            if (t.field != 1) {
+                try self.r.skip(t.wire_type);
+                continue;
+            }
+            return .{ .r = try self.r.nested() };
+        }
+        return null;
+    }
+};
+
+/// One point of a result, as most tests read it: `PointId.num` and score.
+pub const Hit = struct { id: u64 = 0, score: f32 = 0 };
+
+/// The `ScoredPoint`s of one `BatchResult` (field 1), any other field skipped.
+pub const Points = struct {
+    r: wire.Reader,
+
+    /// The first batch of a response whose first field is taken, unchecked,
+    /// to be that batch.
+    pub fn first(body: []const u8) !Points {
+        var r = wire.Reader.init(body);
+        _ = try r.tag();
+        return .{ .r = try r.nested() };
+    }
+
+    /// The next point, as a reader over its fields.
+    pub fn next(self: *Points) !?wire.Reader {
+        while (!self.r.atEnd()) {
+            const t = try self.r.tag();
+            if (t.field != 1) {
+                try self.r.skip(t.wire_type);
+                continue;
+            }
+            return try self.r.nested();
+        }
+        return null;
+    }
+
+    /// The next point's id (field 1) and score (field 3), its other fields
+    /// skipped.
+    pub fn nextHit(self: *Points) !?Hit {
+        var sp = (try self.next()) orelse return null;
+        var hit: Hit = .{};
+        while (!sp.atEnd()) {
+            const st = try sp.tag();
+            switch (st.field) {
+                1 => {
+                    var idr = try sp.nested();
+                    hit.id = (try msg.PointId.decode(&idr)).num;
+                },
+                3 => hit.score = try sp.float(),
+                else => try sp.skip(st.wire_type),
+            }
+        }
+        return hit;
+    }
+};

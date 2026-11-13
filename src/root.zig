@@ -34,4 +34,5 @@ test {
     _ = api;
     _ = quant;
     _ = text;
+    _ = @import("testing_util.zig");
 }

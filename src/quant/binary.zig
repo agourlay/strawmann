@@ -48,6 +48,7 @@
 
 const std = @import("std");
 const dist = @import("../dist/dist.zig");
+const tu = @import("../testing_util.zig");
 const hamming = dist.hamming;
 
 /// Packed-word count for `dim` bits, the *logical* size.
@@ -667,14 +668,7 @@ test "§8.6: recall is monotonically non-decreasing in oversampling" {
             defer testing.allocator.free(out);
             const final = rescorer.run(&q, cand_ids, k, out);
 
-            for (final) |f| {
-                for (exact[0..k]) |e| {
-                    if (e.id == f.id) {
-                        hits += 1;
-                        break;
-                    }
-                }
-            }
+            hits += tu.countShared(final, exact[0..k]);
         }
         const recall = @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(queries * k));
         // Monotone: more candidates can only add true neighbours, never remove

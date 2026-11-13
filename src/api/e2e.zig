@@ -21,8 +21,13 @@ const Client = client_mod.Client;
 const Harness = client_mod.Harness;
 const buildCreateCollection = client_mod.buildCreateCollection;
 const buildCreateCollectionDt = client_mod.buildCreateCollectionDt;
+const buildCreateCollectionWith = client_mod.buildCreateCollectionWith;
 const buildUpsert = client_mod.buildUpsert;
 const buildQueryBatch = client_mod.buildQueryBatch;
+const writePointId = client_mod.writePointId;
+const writePointVector = client_mod.writePointVector;
+const Batches = client_mod.Batches;
+const Points = client_mod.Points;
 
 // =========================================================================
 // Tests
@@ -231,31 +236,14 @@ test "e2e: upsert then QueryBatch returns the true nearest neighbours" {
         var r = wire.Reader.init(resp.body);
         const t = try r.tag();
         try testing.expectEqual(@as(u32, 1), t.field);
-        var batch = try r.nested();
+        var batch: Points = .{ .r = try r.nested() };
 
         var got_ids: [8]u64 = undefined;
         var got_scores: [8]f32 = undefined;
         var n: usize = 0;
-        while (!batch.atEnd()) {
-            const bt = try batch.tag();
-            if (bt.field != 1) {
-                try batch.skip(bt.wire_type);
-                continue;
-            }
-            var sp = try batch.nested();
-            while (!sp.atEnd()) {
-                const st = try sp.tag();
-                switch (st.field) {
-                    1 => {
-                        var idr = try sp.nested();
-                        const pid = try msg.PointId.decode(&idr);
-                        got_ids[n] = pid.num;
-                    },
-                    3 => got_scores[n] = try sp.float(),
-                    else => try sp.skip(st.wire_type),
-                }
-            }
-            n += 1;
+        while (try batch.nextHit()) |hit| : (n += 1) {
+            got_ids[n] = hit.id;
+            got_scores[n] = hit.score;
         }
 
         try testing.expectEqual(@as(usize, 3), n);
@@ -298,31 +286,13 @@ test "e2e: §8.3 Euclid returns the square root while ranking on the square" {
     const resp = try c.call("/qdrant.Points/QueryBatch", try buildQueryBatch(&req_buf, "e", &qs, 3), &out);
     try testing.expectEqual(grpc.Status.ok, resp.status);
 
-    var r = wire.Reader.init(resp.body);
-    _ = try r.tag();
-    var batch = try r.nested();
+    var batch = try Points.first(resp.body);
     var got_ids: [4]u64 = undefined;
     var got_scores: [4]f32 = undefined;
     var n: usize = 0;
-    while (!batch.atEnd()) {
-        const bt = try batch.tag();
-        if (bt.field != 1) {
-            try batch.skip(bt.wire_type);
-            continue;
-        }
-        var sp = try batch.nested();
-        while (!sp.atEnd()) {
-            const st = try sp.tag();
-            switch (st.field) {
-                1 => {
-                    var idr = try sp.nested();
-                    got_ids[n] = (try msg.PointId.decode(&idr)).num;
-                },
-                3 => got_scores[n] = try sp.float(),
-                else => try sp.skip(st.wire_type),
-            }
-        }
-        n += 1;
+    while (try batch.nextHit()) |hit| : (n += 1) {
+        got_ids[n] = hit.id;
+        got_scores[n] = hit.score;
     }
 
     try testing.expectEqual(@as(usize, 3), n);
@@ -604,32 +574,12 @@ test "e2e: a batch of queries returns one BatchResult per query, in order" {
     const resp = try c.call("/qdrant.Points/QueryBatch", try buildQueryBatch(&req_buf, "b", &qs, 1), &out);
     try testing.expectEqual(grpc.Status.ok, resp.status);
 
-    var r = wire.Reader.init(resp.body);
+    var r = Batches.init(resp.body);
     var first_ids: [8]u64 = undefined;
     var batches: usize = 0;
-    while (!r.atEnd()) {
-        const t = try r.tag();
-        if (t.field != 1) {
-            try r.skip(t.wire_type);
-            continue;
-        }
-        var batch = try r.nested();
-        while (!batch.atEnd()) {
-            const bt = try batch.tag();
-            if (bt.field != 1) {
-                try batch.skip(bt.wire_type);
-                continue;
-            }
-            var sp = try batch.nested();
-            while (!sp.atEnd()) {
-                const st = try sp.tag();
-                if (st.field == 1) {
-                    var idr = try sp.nested();
-                    first_ids[batches] = (try msg.PointId.decode(&idr)).num;
-                } else try sp.skip(st.wire_type);
-            }
-        }
-        batches += 1;
+    while (try r.next()) |b| : (batches += 1) {
+        var batch = b;
+        while (try batch.nextHit()) |hit| first_ids[batches] = hit.id;
     }
 
     try testing.expectEqual(@as(usize, 3), batches);
@@ -641,44 +591,18 @@ test "e2e: a batch of queries returns one BatchResult per query, in order" {
 /// Read every `BatchResult` of a `QueryBatchResponse`: `ids[k][..]` and
 /// `scores[k][..]` for batch k, `counts[k]` how many. Returns the batch count.
 fn readAllBatches(body: []const u8, ids: [][]u64, scores: [][]f32, counts: []usize) !usize {
-    var r = wire.Reader.init(body);
+    var r = Batches.init(body);
     var b: usize = 0;
-    while (!r.atEnd()) {
-        const t = try r.tag();
-        if (t.field != 1) {
-            try r.skip(t.wire_type);
-            continue;
-        }
-        var batch = try r.nested();
+    while (try r.next()) |pts| : (b += 1) {
+        var batch = pts;
         var n: usize = 0;
-        while (!batch.atEnd()) {
-            const bt = try batch.tag();
-            if (bt.field != 1) {
-                try batch.skip(bt.wire_type);
-                continue;
-            }
-            var sp = try batch.nested();
-            var id: u64 = 0;
-            var score: f32 = 0;
-            while (!sp.atEnd()) {
-                const st = try sp.tag();
-                switch (st.field) {
-                    1 => {
-                        var idr = try sp.nested();
-                        id = (try msg.PointId.decode(&idr)).num;
-                    },
-                    3 => score = try sp.float(),
-                    else => try sp.skip(st.wire_type),
-                }
-            }
+        while (try batch.nextHit()) |hit| : (n += 1) {
             if (b < ids.len and n < ids[b].len) {
-                ids[b][n] = id;
-                scores[b][n] = score;
+                ids[b][n] = hit.id;
+                scores[b][n] = hit.score;
             }
-            n += 1;
         }
         if (b < counts.len) counts[b] = n;
-        b += 1;
     }
     return b;
 }
@@ -867,9 +791,7 @@ test "e2e: a point with an empty vectors message is refused for having no vector
     try w.writeStringField(1, "nv");
     try w.writeBoolField(2, true);
     const pt = try w.beginNested(3, 3);
-    const idn = try w.beginNested(1, 2);
-    try w.writeVarintFieldAlways(1, 7);
-    try w.endNested(idn);
+    try writePointId(&w, 7);
     const vs = try w.beginNested(4, 3);
     try w.endNested(vs);
     try w.endNested(pt);
@@ -1080,27 +1002,11 @@ test "e2e: §2 wait_index, Yellow while building, Green once indexed" {
         try testing.expectEqual(grpc.Status.ok, resp.status);
 
         // Truth: the query is a stored vector, so its own id must come back.
-        var r = wire.Reader.init(resp.body);
-        _ = try r.tag();
-        var batch = try r.nested();
+        var batch = try Points.first(resp.body);
         var first_id: u64 = std.math.maxInt(u64);
         var got: usize = 0;
-        while (!batch.atEnd()) {
-            const bt = try batch.tag();
-            if (bt.field != 1) {
-                try batch.skip(bt.wire_type);
-                continue;
-            }
-            var sp = try batch.nested();
-            while (!sp.atEnd()) {
-                const st2 = try sp.tag();
-                if (st2.field == 1) {
-                    var idr = try sp.nested();
-                    const pid = (try msg.PointId.decode(&idr)).num;
-                    if (got == 0) first_id = pid;
-                } else try sp.skip(st2.wire_type);
-            }
-            got += 1;
+        while (try batch.nextHit()) |hit| : (got += 1) {
+            if (got == 0) first_id = hit.id;
         }
         try testing.expectEqual(@as(usize, k), got);
         if (first_id == @as(u64, qi * 7 % n)) hits += 1;
@@ -1186,26 +1092,10 @@ test "e2e: exact search bypasses the index and matches brute force" {
         }
     }.lt);
 
-    var r = wire.Reader.init(resp.body);
-    _ = try r.tag();
-    var batch = try r.nested();
+    var batch = try Points.first(resp.body);
     var idx: usize = 0;
-    while (!batch.atEnd()) {
-        const bt = try batch.tag();
-        if (bt.field != 1) {
-            try batch.skip(bt.wire_type);
-            continue;
-        }
-        var sp = try batch.nested();
-        while (!sp.atEnd()) {
-            const st = try sp.tag();
-            if (st.field == 1) {
-                var idr = try sp.nested();
-                const pid = (try msg.PointId.decode(&idr)).num;
-                try testing.expectEqual(truth[idx].id, pid);
-            } else try sp.skip(st.wire_type);
-        }
-        idx += 1;
+    while (try batch.nextHit()) |hit| : (idx += 1) {
+        try testing.expectEqual(truth[idx].id, hit.id);
     }
     try testing.expectEqual(@as(usize, 5), idx);
 
@@ -1346,27 +1236,11 @@ test "e2e: §6.7 quantization is configured on the collection and used for searc
         const resp = try c.call("/qdrant.Points/QueryBatch", w.written(), &out);
         try testing.expectEqual(grpc.Status.ok, resp.status);
 
-        var r = wire.Reader.init(resp.body);
-        _ = try r.tag();
-        var batch = try r.nested();
+        var batch = try Points.first(resp.body);
         var first: u64 = std.math.maxInt(u64);
         var got: usize = 0;
-        while (!batch.atEnd()) {
-            const bt = try batch.tag();
-            if (bt.field != 1) {
-                try batch.skip(bt.wire_type);
-                continue;
-            }
-            var sp = try batch.nested();
-            while (!sp.atEnd()) {
-                const st = try sp.tag();
-                if (st.field == 1) {
-                    var idr = try sp.nested();
-                    const pid = (try msg.PointId.decode(&idr)).num;
-                    if (got == 0) first = pid;
-                } else try sp.skip(st.wire_type);
-            }
-            got += 1;
+        while (try batch.nextHit()) |hit| : (got += 1) {
+            if (got == 0) first = hit.id;
         }
         try testing.expectEqual(@as(usize, 5), got);
         // SQ8 with rescore must still self-retrieve.
@@ -1495,23 +1369,9 @@ test "e2e: a huge hnsw_ef is clamped, not fatal" {
         const resp = try c.call("/qdrant.Points/QueryBatch", w.written(), &out);
         try testing.expectEqual(grpc.Status.ok, resp.status);
         // And the answer is still right, not merely non-fatal.
-        var r = wire.Reader.init(resp.body);
-        _ = try r.tag();
-        var batch = try r.nested();
+        var batch = try Points.first(resp.body);
         var got: usize = 0;
-        while (!batch.atEnd()) {
-            const bt = try batch.tag();
-            if (bt.field != 1) {
-                try batch.skip(bt.wire_type);
-                continue;
-            }
-            var sp = try batch.nested();
-            while (!sp.atEnd()) {
-                const st = try sp.tag();
-                try sp.skip(st.wire_type);
-            }
-            got += 1;
-        }
+        while (try batch.next()) |_| got += 1;
         try testing.expectEqual(@as(usize, 5), got);
     }
 }
@@ -1780,45 +1640,17 @@ test "e2e: a uint8 collection stores bytes and searches them" {
     const resp = try c.call("/qdrant.Points/QueryBatch", try buildQueryBatch(&req_buf, "bytes", &qs, 2), &out);
     try testing.expectEqual(grpc.Status.ok, resp.status);
 
-    var r = wire.Reader.init(resp.body);
+    var r = Batches.init(resp.body);
     var top_id: u64 = 0;
     var top_score: f32 = 0;
     var seen: usize = 0;
-    while (!r.atEnd()) {
-        const t = try r.tag();
-        if (t.field != 1) {
-            try r.skip(t.wire_type);
-            continue;
-        }
-        var batch = try r.nested();
-        while (!batch.atEnd()) {
-            const bt = try batch.tag();
-            if (bt.field != 1) {
-                try batch.skip(bt.wire_type);
-                continue;
-            }
-            var sp = try batch.nested();
-            var id: u64 = 0;
-            var score: f32 = 0;
-            while (!sp.atEnd()) {
-                const st = try sp.tag();
-                switch (st.field) {
-                    1 => {
-                        var idr = try sp.nested();
-                        while (!idr.atEnd()) {
-                            const it = try idr.tag();
-                            if (it.field == 1) id = try idr.varint() else try idr.skip(it.wire_type);
-                        }
-                    },
-                    3 => score = try sp.float(),
-                    else => try sp.skip(st.wire_type),
-                }
-            }
+    while (try r.next()) |b| {
+        var batch = b;
+        while (try batch.nextHit()) |hit| : (seen += 1) {
             if (seen == 0) {
-                top_id = id;
-                top_score = score;
+                top_id = hit.id;
+                top_score = hit.score;
             }
-            seen += 1;
         }
     }
 
@@ -2197,42 +2029,14 @@ fn buildQuery(buf: []u8, name: []const u8, q: []const f32, opts: QueryOpts) ![]c
 
 /// Ids and scores of the first `BatchResult`, in order. Returns the count.
 fn readFirstBatch(body: []const u8, ids: []u64, scores: []f32) !usize {
-    var r = wire.Reader.init(body);
+    var r = Batches.init(body);
+    var batch = (try r.next()) orelse return 0;
     var n: usize = 0;
-    while (!r.atEnd()) {
-        const t = try r.tag();
-        if (t.field != 1) {
-            try r.skip(t.wire_type);
-            continue;
+    while (try batch.nextHit()) |hit| : (n += 1) {
+        if (n < ids.len) {
+            ids[n] = hit.id;
+            scores[n] = hit.score;
         }
-        var batch = try r.nested();
-        while (!batch.atEnd()) {
-            const bt = try batch.tag();
-            if (bt.field != 1) {
-                try batch.skip(bt.wire_type);
-                continue;
-            }
-            var sp = try batch.nested();
-            var id: u64 = 0;
-            var score: f32 = 0;
-            while (!sp.atEnd()) {
-                const st = try sp.tag();
-                switch (st.field) {
-                    1 => {
-                        var idr = try sp.nested();
-                        id = (try msg.PointId.decode(&idr)).num;
-                    },
-                    3 => score = try sp.float(),
-                    else => try sp.skip(st.wire_type),
-                }
-            }
-            if (n < ids.len) {
-                ids[n] = id;
-                scores[n] = score;
-            }
-            n += 1;
-        }
-        return n;
     }
     return n;
 }
@@ -2852,11 +2656,7 @@ test "e2e: a point's payload is stored with it and comes back with with_payload,
     try w.writeBoolField(2, true);
     {
         const pt = try w.beginNested(3, 3);
-        {
-            const idn = try w.beginNested(1, 2);
-            try w.writeVarintFieldAlways(1, 1);
-            try w.endNested(idn);
-        }
+        try writePointId(&w, 1);
         try writePayloadEntry(&w, "k", "v");
         {
             const entry = try w.beginNested(3, 2);
@@ -2866,15 +2666,7 @@ test "e2e: a point's payload is stored with it and comes back with with_payload,
             try w.endNested(val);
             try w.endNested(entry);
         }
-        {
-            const vs = try w.beginNested(4, 3);
-            const vec = try w.beginNested(1, 3);
-            const dv = try w.beginNested(101, 3);
-            try w.writePackedFloats(1, &[_]f32{ 1, 2, 3, 4 });
-            try w.endNested(dv);
-            try w.endNested(vec);
-            try w.endNested(vs);
-        }
+        try writePointVector(&w, &[_]f32{ 1, 2, 3, 4 });
         try w.endNested(pt);
     }
     const resp = try c.call("/qdrant.Points/Upsert", w.written(), &out);
@@ -2937,22 +2729,10 @@ fn buildUpsertWithPayload(buf: []u8, name: []const u8, ids: []const u64, vecs: [
     try w.writeBoolField(2, true);
     for (ids, vecs, kws, ints) |id, v, kw, n| {
         const pt = try w.beginNested(3, 3);
-        {
-            const idn = try w.beginNested(1, 2);
-            try w.writeVarintFieldAlways(1, id);
-            try w.endNested(idn);
-        }
+        try writePointId(&w, id);
         try writePayloadEntry(&w, "a", kw);
         try writeIntegerPayloadEntry(&w, "n", n);
-        {
-            const vs = try w.beginNested(4, 3);
-            const vec = try w.beginNested(1, 3);
-            const dv = try w.beginNested(101, 3);
-            try w.writePackedFloats(1, v);
-            try w.endNested(dv);
-            try w.endNested(vec);
-            try w.endNested(vs);
-        }
+        try writePointVector(&w, v);
         try w.endNested(pt);
     }
     return w.written();
@@ -3095,45 +2875,31 @@ const PointPayload = struct {
 
 /// The first `BatchResult`'s points with their payloads. Returns the count.
 fn readFirstBatchPayloads(body: []const u8, pts: []PointPayload) !usize {
-    var r = wire.Reader.init(body);
+    var r = Batches.init(body);
+    var batch = (try r.next()) orelse return 0;
     var n: usize = 0;
-    while (!r.atEnd()) {
-        const t = try r.tag();
-        if (t.field != 1) {
-            try r.skip(t.wire_type);
-            continue;
-        }
-        var batch = try r.nested();
-        while (!batch.atEnd()) {
-            const bt = try batch.tag();
-            if (bt.field != 1) {
-                try batch.skip(bt.wire_type);
-                continue;
+    while (try batch.next()) |point| : (n += 1) {
+        var sp = point;
+        var p = PointPayload{};
+        while (!sp.atEnd()) {
+            const st = try sp.tag();
+            switch (st.field) {
+                1 => {
+                    var idr = try sp.nested();
+                    p.id = (try msg.PointId.decode(&idr)).num;
+                },
+                2 => {
+                    const e = try sp.bytes();
+                    if (p.n < p.entries.len) {
+                        p.entries[p.n] = e;
+                        p.n += 1;
+                    }
+                },
+                3 => p.score = try sp.float(),
+                else => try sp.skip(st.wire_type),
             }
-            var sp = try batch.nested();
-            var p = PointPayload{};
-            while (!sp.atEnd()) {
-                const st = try sp.tag();
-                switch (st.field) {
-                    1 => {
-                        var idr = try sp.nested();
-                        p.id = (try msg.PointId.decode(&idr)).num;
-                    },
-                    2 => {
-                        const e = try sp.bytes();
-                        if (p.n < p.entries.len) {
-                            p.entries[p.n] = e;
-                            p.n += 1;
-                        }
-                    },
-                    3 => p.score = try sp.float(),
-                    else => try sp.skip(st.wire_type),
-                }
-            }
-            if (n < pts.len) pts[n] = p;
-            n += 1;
         }
-        return n;
+        if (n < pts.len) pts[n] = p;
     }
     return n;
 }
@@ -3234,22 +3000,8 @@ test "e2e: W12's shape: CreateFieldIndex, keyword payloads, filtered QueryBatch 
     // admitting more than that traverses the graph under the predicate and
     // one admitting fewer scores its set directly: both of Qdrant's arms.
     {
-        var w = wire.Writer.init(&req_buf);
-        try w.writeStringField(1, "w12");
-        {
-            const hc = try w.beginNested(4, 2); // hnsw_config
-            try w.writeVarintFieldAlways(3, 1); // full_scan_threshold, KB
-            try w.endNested(hc);
-        }
-        {
-            const vc = try w.beginNested(10, 2); // vectors_config (VERIFIED: 10)
-            const p = try w.beginNested(1, 2);
-            try w.writeVarintFieldAlways(1, 16);
-            try w.writeVarintFieldAlways(2, 2);
-            try w.endNested(p);
-            try w.endNested(vc);
-        }
-        const cr = try c.call("/qdrant.Collections/Create", w.written(), &out);
+        const body = try buildCreateCollectionWith(&req_buf, "w12", 16, 2, .{ .full_scan_threshold = 1 });
+        const cr = try c.call("/qdrant.Collections/Create", body, &out);
         try testing.expectEqual(grpc.Status.ok, cr.status);
     }
     // bfb creates the keyword index *before* uploading (`create_field_indices`).
@@ -3476,11 +3228,7 @@ fn buildUpsertSimilarity(buf: []u8, name: []const u8, ids: []const u64, vecs: []
     try w.writeBoolField(2, true);
     for (ids, vecs, sims) |id, v, sim| {
         const pt = try w.beginNested(3, 3);
-        {
-            const idn = try w.beginNested(1, 2);
-            try w.writeVarintFieldAlways(1, id);
-            try w.endNested(idn);
-        }
+        try writePointId(&w, id);
         {
             const entry = try w.beginNested(3, 2);
             try w.writeStringField(1, "similarity");
@@ -3490,15 +3238,7 @@ fn buildUpsertSimilarity(buf: []u8, name: []const u8, ids: []const u64, vecs: []
             try w.endNested(val);
             try w.endNested(entry);
         }
-        {
-            const vs = try w.beginNested(4, 3);
-            const vec = try w.beginNested(1, 3);
-            const dv = try w.beginNested(101, 3);
-            try w.writePackedFloats(1, v);
-            try w.endNested(dv);
-            try w.endNested(vec);
-            try w.endNested(vs);
-        }
+        try writePointVector(&w, v);
         try w.endNested(pt);
     }
     return w.written();
@@ -3512,15 +3252,8 @@ test "e2e: a float index answers range gt with the exact filtered top-k, through
     var req_buf: [1 << 18]u8 = undefined;
     var out: [1 << 18]u8 = undefined;
     {
-        var w = wire.Writer.init(&req_buf);
-        try w.writeStringField(1, "fl");
-        const vc = try w.beginNested(10, 2); // vectors_config
-        const p = try w.beginNested(1, 2);
-        try w.writeVarintFieldAlways(1, 16);
-        try w.writeVarintFieldAlways(2, 2); // Euclid
-        try w.endNested(p);
-        try w.endNested(vc);
-        const cr = try c.call("/qdrant.Collections/Create", w.written(), &out);
+        const body = try buildCreateCollectionWith(&req_buf, "fl", 16, 2, .{ .full_scan_threshold = null }); // Euclid
+        const cr = try c.call("/qdrant.Collections/Create", body, &out);
         try testing.expectEqual(grpc.Status.ok, cr.status);
     }
 
@@ -3656,20 +3389,9 @@ test "e2e: a two-hop walk under a float range returns the exact filtered top-k w
     var req_buf: [1 << 18]u8 = undefined;
     var out: [1 << 18]u8 = undefined;
     {
-        var w = wire.Writer.init(&req_buf);
-        try w.writeStringField(1, "rg");
-        {
-            const hc = try w.beginNested(4, 2); // hnsw_config
-            try w.writeVarintFieldAlways(3, 0); // full_scan_threshold: always the graph
-            try w.endNested(hc);
-        }
-        const vc = try w.beginNested(10, 2); // vectors_config
-        const p = try w.beginNested(1, 2);
-        try w.writeVarintFieldAlways(1, 16);
-        try w.writeVarintFieldAlways(2, 2); // Euclid
-        try w.endNested(p);
-        try w.endNested(vc);
-        const cr = try c.call("/qdrant.Collections/Create", w.written(), &out);
+        // full_scan_threshold 0: always the graph. Euclid.
+        const body = try buildCreateCollectionWith(&req_buf, "rg", 16, 2, .{ .full_scan_threshold = 0 });
+        const cr = try c.call("/qdrant.Collections/Create", body, &out);
         try testing.expectEqual(grpc.Status.ok, cr.status);
     }
     {
@@ -3784,11 +3506,7 @@ fn buildUpsertShapes(buf: []u8, name: []const u8, first: usize, vecs: []const []
     var dbuf: [64]u8 = undefined;
     for (vecs, first..) |v, i| {
         const pt = try w.beginNested(3, 3);
-        {
-            const idn = try w.beginNested(1, 2);
-            try w.writeVarintFieldAlways(1, i);
-            try w.endNested(idn);
-        }
+        try writePointId(&w, i);
         if (ShapePayload.t(i)) |tv| {
             const entry = try w.beginNested(3, 2);
             try w.writeStringField(1, "t");
@@ -3809,15 +3527,7 @@ fn buildUpsertShapes(buf: []u8, name: []const u8, first: usize, vecs: []const []
             try w.endNested(val);
             try w.endNested(entry);
         }
-        {
-            const vs = try w.beginNested(4, 3);
-            const vec = try w.beginNested(1, 3);
-            const dv = try w.beginNested(101, 3);
-            try w.writePackedFloats(1, v);
-            try w.endNested(dv);
-            try w.endNested(vec);
-            try w.endNested(vs);
-        }
+        try writePointVector(&w, v);
         try w.endNested(pt);
     }
     return w.written();
@@ -3831,15 +3541,8 @@ test "e2e: is_empty, is_null and datetime_range filters return the brute-force f
     var req_buf: [1 << 18]u8 = undefined;
     var out: [1 << 18]u8 = undefined;
     {
-        var w = wire.Writer.init(&req_buf);
-        try w.writeStringField(1, "sh");
-        const vc = try w.beginNested(10, 2); // vectors_config
-        const p = try w.beginNested(1, 2);
-        try w.writeVarintFieldAlways(1, 16);
-        try w.writeVarintFieldAlways(2, 2); // Euclid
-        try w.endNested(p);
-        try w.endNested(vc);
-        const cr = try c.call("/qdrant.Collections/Create", w.written(), &out);
+        const body = try buildCreateCollectionWith(&req_buf, "sh", 16, 2, .{ .full_scan_threshold = null }); // Euclid
+        const cr = try c.call("/qdrant.Collections/Create", body, &out);
         try testing.expectEqual(grpc.Status.ok, cr.status);
     }
 
@@ -4031,11 +3734,7 @@ fn buildUpsertNested(buf: []u8, name: []const u8, first: usize, vecs: []const []
     var kb: [8]u8 = undefined;
     for (vecs, first..) |v, i| {
         const pt = try w.beginNested(3, 3);
-        {
-            const idn = try w.beginNested(1, 2);
-            try w.writeVarintFieldAlways(1, i);
-            try w.endNested(idn);
-        }
+        try writePointId(&w, i);
         {
             const entry = try w.beginNested(3, 2);
             try w.writeStringField(1, "m");
@@ -4066,15 +3765,7 @@ fn buildUpsertNested(buf: []u8, name: []const u8, first: usize, vecs: []const []
             try w.endNested(val);
             try w.endNested(entry);
         }
-        {
-            const vs = try w.beginNested(4, 3);
-            const vec = try w.beginNested(1, 3);
-            const dv = try w.beginNested(101, 3);
-            try w.writePackedFloats(1, v);
-            try w.endNested(dv);
-            try w.endNested(vec);
-            try w.endNested(vs);
-        }
+        try writePointVector(&w, v);
         try w.endNested(pt);
     }
     return w.written();
@@ -4103,15 +3794,8 @@ test "e2e: filters on nested payload paths return the brute-force filtered top-k
     var req_buf: [1 << 18]u8 = undefined;
     var out: [1 << 18]u8 = undefined;
     {
-        var w = wire.Writer.init(&req_buf);
-        try w.writeStringField(1, "nk");
-        const vc = try w.beginNested(10, 2);
-        const p = try w.beginNested(1, 2);
-        try w.writeVarintFieldAlways(1, 16);
-        try w.writeVarintFieldAlways(2, 2); // Euclid
-        try w.endNested(p);
-        try w.endNested(vc);
-        const cr = try c.call("/qdrant.Collections/Create", w.written(), &out);
+        const body = try buildCreateCollectionWith(&req_buf, "nk", 16, 2, .{ .full_scan_threshold = null }); // Euclid
+        const cr = try c.call("/qdrant.Collections/Create", body, &out);
         try testing.expectEqual(grpc.Status.ok, cr.status);
     }
     const n = 300;
@@ -4547,23 +4231,13 @@ test "e2e: reported time includes the time spent queued for a worker" {
 /// The number of `ScoredPoint`s in each `BatchResult` of a QueryBatch
 /// response, in order. Returns how many batches there were.
 fn countBatchResults(body: []const u8, counts: []usize) !usize {
-    var r = wire.Reader.init(body);
+    var r = Batches.init(body);
     var n: usize = 0;
-    while (!r.atEnd()) {
-        const t = try r.tag();
-        if (t.field != 1) {
-            try r.skip(t.wire_type);
-            continue;
-        }
-        var batch = try r.nested();
+    while (try r.next()) |b| : (n += 1) {
+        var batch = b;
         var k: usize = 0;
-        while (!batch.atEnd()) {
-            const bt = try batch.tag();
-            if (bt.field == 1) k += 1;
-            try batch.skip(bt.wire_type);
-        }
+        while (try batch.next()) |_| k += 1;
         if (n < counts.len) counts[n] = k;
-        n += 1;
     }
     return n;
 }
@@ -5094,16 +4768,8 @@ test "e2e: below full_scan_threshold, an approximate query does not start a buil
     var out: [1 << 16]u8 = undefined;
 
     // Default threshold (10 000 KB): the helper's collection sends 0, so this
-    // one is built by hand without an hnsw_config at all.
-    var w = wire.Writer.init(&req_buf);
-    try w.writeStringField(1, "tiny");
-    const vc = try w.beginNested(10, 2);
-    const pp = try w.beginNested(1, 2);
-    try w.writeVarintField(1, 8);
-    try w.writeVarintField(2, 3); // Dot
-    try w.endNested(pp);
-    try w.endNested(vc);
-    const create = try testing.allocator.dupe(u8, w.written());
+    // one is built without an hnsw_config at all.
+    const create = try testing.allocator.dupe(u8, try buildCreateCollectionWith(&req_buf, "tiny", 8, 3, .{ .full_scan_threshold = null })); // Dot
     defer testing.allocator.free(create);
     _ = try c.call("/qdrant.Collections/Create", create, &out);
 
@@ -5203,22 +4869,7 @@ test "e2e: below full_scan_threshold a query is answered exactly, as Qdrant 1.19
     // ef=16 rather than hidden by a graph good enough to be exact anyway.
     const Create = struct {
         fn build(buf: []u8, name: []const u8, threshold: ?u64) ![]const u8 {
-            var w = wire.Writer.init(buf);
-            try w.writeStringField(1, name);
-            {
-                const hc = try w.beginNested(4, 2);
-                try w.writeVarintField(1, 4); // m
-                try w.writeVarintField(2, 1); // ef_construct
-                if (threshold) |t| try w.writeVarintFieldAlways(3, t);
-                try w.endNested(hc);
-            }
-            const vc = try w.beginNested(10, 2);
-            const p = try w.beginNested(1, 2);
-            try w.writeVarintField(1, dim);
-            try w.writeVarintField(2, 3); // Dot
-            try w.endNested(p);
-            try w.endNested(vc);
-            return w.written();
+            return buildCreateCollectionWith(buf, name, dim, 3, .{ .m = 4, .ef_construct = 1, .full_scan_threshold = threshold }); // Dot
         }
     };
     _ = try c.call("/qdrant.Collections/Create", try Create.build(&req_buf, "small", null), &out);
@@ -5431,15 +5082,7 @@ fn buildUpsertUuid(buf: []u8, name: []const u8, ids: []const []const u8, vecs: [
             try w.writeStringField(2, id);
             try w.endNested(idn);
         }
-        {
-            const vs = try w.beginNested(4, 3);
-            const vec = try w.beginNested(1, 3);
-            const dv = try w.beginNested(101, 3);
-            try w.writePackedFloats(1, v);
-            try w.endNested(dv);
-            try w.endNested(vec);
-            try w.endNested(vs);
-        }
+        try writePointVector(&w, v);
         try w.endNested(pt);
     }
     return w.written();
@@ -5462,13 +5105,9 @@ fn readUuidIds(body: []const u8, list_field: u32, out_ids: [][36]u8) !usize {
         // QueryBatch: BatchResult { repeated ScoredPoint result = 1 }; Scroll:
         // the repeated RetrievedPoint is the list itself, one per tag.
         if (list_field == 1) {
-            while (!list.atEnd()) {
-                const bt = try list.tag();
-                if (bt.field != 1) {
-                    try list.skip(bt.wire_type);
-                    continue;
-                }
-                var sp = try list.nested();
+            var pts: Points = .{ .r = list };
+            while (try pts.next()) |point| {
+                var sp = point;
                 n += try readOneUuid(&sp, out_ids[n..]);
             }
         } else {
@@ -5707,33 +5346,13 @@ test "e2e: a gathered exact batch answers what the same queries answer one at a 
     const parse = struct {
         fn go(body: []const u8) !Parsed {
             var p: Parsed = .{};
-            var r = wire.Reader.init(body);
-            while (!r.atEnd()) {
-                const t = try r.tag();
-                if (t.field != 1) {
-                    try r.skip(t.wire_type);
-                    continue;
-                }
-                var batch = try r.nested();
+            var r = Batches.init(body);
+            while (try r.next()) |b| {
+                var batch = b;
                 var this_query: usize = 0;
-                while (!batch.atEnd()) {
-                    const bt = try batch.tag();
-                    if (bt.field != 1) {
-                        try batch.skip(bt.wire_type);
-                        continue;
-                    }
-                    var sp = try batch.nested();
-                    while (!sp.atEnd()) {
-                        const st = try sp.tag();
-                        switch (st.field) {
-                            1 => {
-                                var idr = try sp.nested();
-                                p.ids[p.total] = (try msg.PointId.decode(&idr)).num;
-                            },
-                            3 => p.scores[p.total] = try sp.float(),
-                            else => try sp.skip(st.wire_type),
-                        }
-                    }
+                while (try batch.nextHit()) |hit| {
+                    p.ids[p.total] = hit.id;
+                    p.scores[p.total] = hit.score;
                     p.total += 1;
                     this_query += 1;
                 }
@@ -5823,11 +5442,7 @@ fn buildUpsertText(buf: []u8, name: []const u8, id: u64, values: []const []const
     try w.writeStringField(1, name);
     try w.writeBoolField(2, true);
     const pt = try w.beginNested(3, 3);
-    {
-        const idn = try w.beginNested(1, 2);
-        try w.writeVarintFieldAlways(1, id);
-        try w.endNested(idn);
-    }
+    try writePointId(&w, id);
     {
         const entry = try w.beginNested(3, 2);
         try w.writeStringField(1, "body");
@@ -5850,15 +5465,7 @@ fn buildUpsertText(buf: []u8, name: []const u8, id: u64, values: []const []const
         try w.endNested(val);
         try w.endNested(entry);
     }
-    {
-        const vs = try w.beginNested(4, 3);
-        const vec = try w.beginNested(1, 3);
-        const dv = try w.beginNested(101, 3);
-        try w.writePackedFloats(1, &[_]f32{ 1, 0, 0, 0 });
-        try w.endNested(dv);
-        try w.endNested(vec);
-        try w.endNested(vs);
-    }
+    try writePointVector(&w, &[_]f32{ 1, 0, 0, 0 });
     try w.endNested(pt);
     return w.written();
 }

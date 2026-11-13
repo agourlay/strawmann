@@ -1072,6 +1072,29 @@ pub fn freeBuffers(alloc: std.mem.Allocator, bufs: []([]u8)) void {
     alloc.free(bufs);
 }
 
+/// The fixture most connection tests open with: `n` stream buffers of
+/// `size` bytes from the testing allocator, a `Connection` over them, and a
+/// 4 KiB output buffer for `out`. Used in place, through a pointer to `c`:
+/// `out` points into the fixture, so it must not be moved after that.
+pub const TestConn = struct {
+    bufs: []([]u8),
+    c: Connection,
+    ob: [4096]u8 = undefined,
+
+    pub fn init(n: usize, size: usize) !TestConn {
+        const bufs = try testBuffers(testing.allocator, n, size);
+        return .{ .bufs = bufs, .c = Connection.init(bufs) };
+    }
+
+    pub fn deinit(self: *TestConn) void {
+        freeBuffers(testing.allocator, self.bufs);
+    }
+
+    pub fn out(self: *TestConn) OutBuf {
+        return OutBuf.init(&self.ob);
+    }
+};
+
 test "frame header round-trips, including the reserved bit" {
     var buf: [frame_header_len]u8 = undefined;
     const h = FrameHeader{ .length = 0x123456, .frame_type = .data, .flags = 0x5, .stream_id = 0x7fffffff };
@@ -1089,16 +1112,16 @@ test "frame header round-trips, including the reserved bit" {
 }
 
 test "preface is validated and partial prefaces wait" {
-    const bufs = try testBuffers(testing.allocator, 4, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(4, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
 
     try testing.expectEqual(@as(?usize, null), try c.consumePreface(client_preface[0..10]));
     try testing.expectEqual(@as(?usize, client_preface.len), try c.consumePreface(client_preface));
     try testing.expect(c.preface_seen);
 
     // An HTTP/1.1 request must fail immediately rather than hang.
-    var c2 = Connection.init(bufs);
+    var c2 = Connection.init(tc.bufs);
     try testing.expectError(Error.ProtocolError, c2.consumePreface("GET / HTTP/1.1\r\n"));
 }
 
@@ -1106,12 +1129,11 @@ test "initial frames raise BOTH the stream and connection windows" {
     // The bug this guards: SETTINGS_INITIAL_WINDOW_SIZE governs streams only.
     // Without the stream-0 WINDOW_UPDATE the connection window stays at 65535
     // and a 307 KB upsert still stalls (§6.1).
-    const bufs = try testBuffers(testing.allocator, 4, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(4, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
 
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var out = tc.out();
     try c.sendInitialFrames(&out);
 
     var pos: usize = 0;
@@ -1158,13 +1180,12 @@ test "initial frames raise BOTH the stream and connection windows" {
 }
 
 test "SETTINGS is acked and a peer initial_window_size change adjusts open streams" {
-    const bufs = try testBuffers(testing.allocator, 4, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(4, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
     c.preface_seen = true;
 
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var out = tc.out();
 
     // Open a stream so there is something to adjust.
     const idx = try c.openStream(1);
@@ -1190,9 +1211,9 @@ test "SETTINGS is acked and a peer initial_window_size change adjusts open strea
 }
 
 test "PING is echoed with ACK and the payload preserved" {
-    const bufs = try testBuffers(testing.allocator, 4, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(4, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
     var ob: [256]u8 = undefined;
     var out = OutBuf.init(&ob);
 
@@ -1209,9 +1230,9 @@ test "PING is echoed with ACK and the payload preserved" {
 }
 
 test "a partial frame consumes nothing and asks for more" {
-    const bufs = try testBuffers(testing.allocator, 4, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(4, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
     var ob: [256]u8 = undefined;
     var out = OutBuf.init(&ob);
 
@@ -1230,27 +1251,15 @@ test "a partial frame consumes nothing and asks for more" {
 }
 
 test "HEADERS + DATA with END_STREAM produces a request" {
-    const bufs = try testBuffers(testing.allocator, 4, 4096);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(4, 4096);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
 
     // HEADERS: :path /qdrant.Points/Upsert, no END_STREAM.
-    var hb: [256]u8 = undefined;
-    var hn: usize = 0;
-    hn += hpack.encodeInteger(hb[hn..], 6, 0x40, 4); // literal w/ indexing, name = :path
     const path = "/qdrant.Points/Upsert";
-    hn += hpack.encodeInteger(hb[hn..], 7, 0x00, path.len);
-    @memcpy(hb[hn..][0..path.len], path);
-    hn += path.len;
-
     var frame_buf: [512]u8 = undefined;
-    (FrameHeader{ .length = @intCast(hn), .frame_type = .headers, .flags = Flags.end_headers, .stream_id = 1 })
-        .write(frame_buf[0..frame_header_len]);
-    @memcpy(frame_buf[frame_header_len..][0..hn], hb[0..hn]);
-
-    var r = try c.readFrame(frame_buf[0 .. frame_header_len + hn], &out);
+    var r = try c.readFrame(testHeadersFrame(&frame_buf, 1, Flags.end_headers, path), &out);
     try testing.expectEqual(Event.progress, r.event);
 
     // DATA with END_STREAM.
@@ -1271,19 +1280,14 @@ test "HEADERS + DATA with END_STREAM produces a request" {
 }
 
 test "header block split across CONTINUATION frames reassembles" {
-    const bufs = try testBuffers(testing.allocator, 4, 4096);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(4, 4096);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
 
     var hb: [256]u8 = undefined;
-    var hn: usize = 0;
-    hn += hpack.encodeInteger(hb[hn..], 6, 0x40, 4);
     const path = "/qdrant.Points/QueryBatch";
-    hn += hpack.encodeInteger(hb[hn..], 7, 0x00, path.len);
-    @memcpy(hb[hn..][0..path.len], path);
-    hn += path.len;
+    const hn = testHeaderBlock(&hb, path).len;
 
     const split = hn / 2;
     var frame_buf: [512]u8 = undefined;
@@ -1315,9 +1319,9 @@ test "header block split across CONTINUATION frames reassembles" {
 }
 
 test "connection receive window is topped up before it drains" {
-    const bufs = try testBuffers(testing.allocator, 4, 8 * 1024 * 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(4, 8 * 1024 * 1024);
+    defer tc.deinit();
+    const c = &tc.c;
     var ob: [64 * 1024]u8 = undefined;
     var out = OutBuf.init(&ob);
     try c.sendInitialFrames(&out);
@@ -1354,14 +1358,13 @@ test "connection receive window is topped up before it drains" {
 }
 
 test "exceeding the stream pool yields REFUSED_STREAM, not a stall" {
-    const bufs = try testBuffers(testing.allocator, 2, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(2, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
     // Shrink the pool to the two buffers we allocated by marking the rest used.
     for (c.streams[2..]) |*s| s.state = .open;
 
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var out = tc.out();
 
     var hb: [64]u8 = undefined;
     const hn = hpack.encodeInteger(&hb, 7, 0x80, 2); // :method GET
@@ -1394,14 +1397,13 @@ test "a body larger than the stream buffer fails the stream, not the connection"
     // caller send GOAWAY and tear down the whole connection, taking every
     // other in-flight stream with it and telling the client only "transport
     // error". Uploading d=1536 vectors 512 to a batch (3.1 MB) hit it.
-    const bufs = try testBuffers(testing.allocator, 2, 128);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(2, 128);
+    defer tc.deinit();
+    const c = &tc.c;
     for (c.streams[2..]) |*s| s.state = .open;
     const idx = try c.openStream(1);
 
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var out = tc.out();
     try c.sendInitialFrames(&out);
     out.reset();
 
@@ -1459,11 +1461,10 @@ test "a body that overflows on its END_STREAM frame is drained at once, and late
     // `.draining`. No worker owns it, so a frame after END_STREAM (RFC 9113
     // §5.1: STREAM_CLOSED) frees the slot outright instead of parking it
     // `.orphaned` for a completion that will never come.
-    const bufs = try testBuffers(testing.allocator, 2, 128);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(2, 128);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
     try c.sendInitialFrames(&out);
     out.reset();
     var fb: [512]u8 = undefined;
@@ -1488,11 +1489,10 @@ test "RST_STREAM on a draining stream frees the slot" {
     // Draining is not dispatched: the I/O thread owns the error response, so
     // the slot goes straight back to `.idle` and the reset tells it to drop
     // that response.
-    const bufs = try testBuffers(testing.allocator, 2, 128);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(2, 128);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
     try c.sendInitialFrames(&out);
     out.reset();
     var fb: [512]u8 = undefined;
@@ -1511,9 +1511,9 @@ test "RST_STREAM on a draining stream frees the slot" {
 }
 
 test "oversized frames and bad frame sizes are refused" {
-    const bufs = try testBuffers(testing.allocator, 2, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(2, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
     var ob: [256]u8 = undefined;
     var out = OutBuf.init(&ob);
 
@@ -1534,9 +1534,9 @@ test "oversized frames and bad frame sizes are refused" {
 }
 
 test "PUSH_PROMISE from a client is a protocol error" {
-    const bufs = try testBuffers(testing.allocator, 2, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(2, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
     var ob: [256]u8 = undefined;
     var out = OutBuf.init(&ob);
 
@@ -1546,9 +1546,9 @@ test "PUSH_PROMISE from a client is a protocol error" {
 }
 
 test "unknown frame types are ignored, per RFC 9113 §4.1" {
-    const bufs = try testBuffers(testing.allocator, 2, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(2, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
     var ob: [256]u8 = undefined;
     var out = OutBuf.init(&ob);
 
@@ -1560,14 +1560,13 @@ test "unknown frame types are ignored, per RFC 9113 §4.1" {
 }
 
 test "padded DATA strips padding and still charges it to the window" {
-    const bufs = try testBuffers(testing.allocator, 2, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(2, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
     for (c.streams[2..]) |*s| s.state = .open;
     _ = try c.openStream(1);
 
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var out = tc.out();
     // Send the initial frames first so `recv_window` is already at target;
     // otherwise the top-up fires on the first DATA frame and masks the
     // accounting this test is checking.
@@ -1594,9 +1593,9 @@ test "padded DATA strips padding and still charges it to the window" {
 }
 
 test "window update overflow is a flow-control error" {
-    const bufs = try testBuffers(testing.allocator, 2, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(2, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
     var ob: [256]u8 = undefined;
     var out = OutBuf.init(&ob);
 
@@ -1662,11 +1661,10 @@ test "DATA on a half-closed stream is refused, not dispatched twice" {
     // Without the state check this appended to a body already handed to a
     // worker and returned a *second* `.request` for the same slot: two workers
     // writing one response buffer, two responses on one stream id.
-    const bufs = try testBuffers(testing.allocator, 4, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(4, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
     try c.sendInitialFrames(&out);
     out.reset();
 
@@ -1714,19 +1712,14 @@ test "END_STREAM survives a header block split across CONTINUATION" {
     // END_STREAM on the HEADERS and END_HEADERS on the CONTINUATION. Dropping
     // the flag left the stream `.open` forever, holding a slot while the client
     // waited for a response that could never come.
-    const bufs = try testBuffers(testing.allocator, 4, 4096);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(4, 4096);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
 
     var hb: [256]u8 = undefined;
-    var hn: usize = 0;
-    hn += hpack.encodeInteger(hb[hn..], 6, 0x40, 4); // literal w/ indexing:path
     const path = "/qdrant.Qdrant/HealthCheck";
-    hn += hpack.encodeInteger(hb[hn..], 7, 0x00, path.len);
-    @memcpy(hb[hn..][0..path.len], path);
-    hn += path.len;
+    const hn = testHeaderBlock(&hb, path).len;
 
     const split = hn / 2;
     var frame_buf: [512]u8 = undefined;
@@ -1757,9 +1750,9 @@ test "END_STREAM survives a header block split across CONTINUATION" {
 test "a repeated stream id reuses its slot rather than leaking a new one" {
     // The ordinary gRPC shape ends with a trailing HEADERS on the same stream.
     // Allocating a second slot for it leaks one per request.
-    const bufs = try testBuffers(testing.allocator, 4, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(4, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
 
     const a = try c.openStream(7);
     const b = try c.openStream(7);
@@ -1774,13 +1767,20 @@ test "a repeated stream id reuses its slot rather than leaking a new one" {
 
 /// A HEADERS frame carrying `:path` as a literal with incremental indexing,
 /// which inserts the path into the peer's dynamic table at index 62.
-fn testHeadersFrame(buf: []u8, stream_id: u31, flags: u8, path: []const u8) []const u8 {
-    var hb: [256]u8 = undefined;
+/// A header block of one `:path` field, literal with indexing, written into
+/// `hb`. `pub` for `fuzz.zig`, which splits it across frames.
+pub fn testHeaderBlock(hb: []u8, path: []const u8) []const u8 {
     var hn: usize = 0;
     hn += hpack.encodeInteger(hb[hn..], 6, 0x40, 4); // literal w/ indexing, name = :path
     hn += hpack.encodeInteger(hb[hn..], 7, 0x00, @intCast(path.len));
     @memcpy(hb[hn..][0..path.len], path);
     hn += path.len;
+    return hb[0..hn];
+}
+
+fn testHeadersFrame(buf: []u8, stream_id: u31, flags: u8, path: []const u8) []const u8 {
+    var hb: [256]u8 = undefined;
+    const hn = testHeaderBlock(&hb, path).len;
     (FrameHeader{ .length = @intCast(hn), .frame_type = .headers, .flags = flags, .stream_id = stream_id })
         .write(buf[0..frame_header_len]);
     @memcpy(buf[frame_header_len..][0..hn], hb[0..hn]);
@@ -1799,11 +1799,10 @@ test "RST_STREAM on a dispatched stream holds the slot until the completion free
     // request. The next HEADERS reused it, DATA landed in the buffer under
     // the worker, and the old completion's `closeStream` then reset the *new*
     // stream, whose response was never sent.
-    const bufs = try testBuffers(testing.allocator, 2, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(2, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
 
     var fb: [512]u8 = undefined;
     const r1 = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers | Flags.end_stream, "/a"), &out);
@@ -1846,11 +1845,10 @@ test "RST_STREAM on an undispatched stream frees it and still reports the reset"
     // No worker owns an `.open` stream, so the slot is freed at once; the
     // caller is told anyway so any error response it had queued for the
     // slot (an over-sized body, say) is dropped.
-    const bufs = try testBuffers(testing.allocator, 2, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(2, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
 
     var fb: [512]u8 = undefined;
     _ = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers, "/a"), &out);
@@ -1875,11 +1873,10 @@ test "a refused HEADERS still decodes its block, so the dynamic table stays in s
     // very next request, indexing the entry it believes it added, failed
     // with COMPRESSION_ERROR, a connection error, for a stream that was
     // legitimately refused.
-    const bufs = try testBuffers(testing.allocator, 1, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(1, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
     var fb: [512]u8 = undefined;
 
     // Fills the single slot. `:path /first` becomes dynamic index 62.
@@ -1926,11 +1923,10 @@ test "a refused HEADERS still decodes its block, so the dynamic table stays in s
 test "a split HEADERS keeps its target until the block ends, and CONTINUATION needs an open block" {
     // The HEADERS frame decides where the block goes; the CONTINUATION that
     // ends it applies that decision rather than looking the stream up again.
-    const bufs = try testBuffers(testing.allocator, 2, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(2, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
     var fb: [512]u8 = undefined;
 
     // A CONTINUATION with no block open is a connection error (§6.10).
@@ -1974,11 +1970,10 @@ test "HEADERS with END_STREAM on a half-closed stream is refused, not dispatched
     // The DATA path already guarded this; a trailing HEADERS after END_STREAM
     // re-ran `finishHeaders` on a slot a worker owned and produced a second
     // `.request` for it.
-    const bufs = try testBuffers(testing.allocator, 2, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(2, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
     var fb: [512]u8 = undefined;
 
     const first = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers | Flags.end_stream, "/a"), &out);
@@ -2017,11 +2012,10 @@ test "request trailers on a body that overflowed do not dispatch the truncated b
     // the body drains. A trailing HEADERS+END_STREAM used to reach
     // `finishHeaders` and dispatch the partial body as a request, a second
     // response for a stream already answered RESOURCE_EXHAUSTED.
-    const bufs = try testBuffers(testing.allocator, 2, 128);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(2, 128);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
     try c.sendInitialFrames(&out);
     out.reset();
     var fb: [512]u8 = undefined;
@@ -2124,11 +2118,10 @@ test "stream ids are validated: PING and GOAWAY on 0, PRIORITY off 0, HEADERS od
 }
 
 test "DATA on a stream no HEADERS ever opened is a protocol error, DATA on a closed one is dropped" {
-    const bufs = try testBuffers(testing.allocator, 4, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(4, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
     var fb: [512]u8 = undefined;
 
     var df: [frame_header_len + 2]u8 = undefined;
@@ -2148,11 +2141,10 @@ test "DATA on a stream no HEADERS ever opened is a protocol error, DATA on a clo
 }
 
 test "WINDOW_UPDATE on an idle stream is a protocol error, on a closed one it is credited or dropped" {
-    const bufs = try testBuffers(testing.allocator, 4, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(4, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
     var fb: [512]u8 = undefined;
 
     var wf: [frame_header_len + 4]u8 = undefined;
@@ -2182,11 +2174,10 @@ test "an over-long :path is an unknown method on that stream, not a connection e
     // GOAWAY, tearing down every other stream for one bad request. It is now
     // truncated, which no real method name can match, and dispatched so the
     // server answers UNIMPLEMENTED on that stream alone.
-    const bufs = try testBuffers(testing.allocator, 2, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(2, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
     var fb: [512]u8 = undefined;
 
     const long = "/" ++ @as([200]u8, @splat('x'));
@@ -2201,11 +2192,10 @@ test "streams opened after the peer's GOAWAY are refused, in-flight ones are kep
     // RFC 9113 §6.8: a GOAWAY sender still expects responses on the streams
     // it already opened; the server must not drop them, and has no business
     // dispatching new ones to a connection that is going away.
-    const bufs = try testBuffers(testing.allocator, 2, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
-    var ob: [4096]u8 = undefined;
-    var out = OutBuf.init(&ob);
+    var tc = try TestConn.init(2, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
+    var out = tc.out();
     var fb: [512]u8 = undefined;
 
     const r1 = try c.readFrame(testHeadersFrame(&fb, 1, Flags.end_headers | Flags.end_stream, "/a"), &out);
@@ -2229,9 +2219,9 @@ test "streams opened after the peer's GOAWAY are refused, in-flight ones are kep
 }
 
 test "peer SETTINGS_MAX_FRAME_SIZE and both send windows bound what dataBudget allows" {
-    const bufs = try testBuffers(testing.allocator, 2, 1024);
-    defer freeBuffers(testing.allocator, bufs);
-    var c = Connection.init(bufs);
+    var tc = try TestConn.init(2, 1024);
+    defer tc.deinit();
+    const c = &tc.c;
     var ob: [128 * 1024]u8 = undefined;
     var out = OutBuf.init(&ob);
     const idx = try c.openStream(1);

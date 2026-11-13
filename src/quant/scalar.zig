@@ -59,6 +59,7 @@
 
 const std = @import("std");
 const dist = @import("../dist/dist.zig");
+const tu = @import("../testing_util.zig");
 
 pub const Metric = dist.Metric;
 
@@ -684,34 +685,20 @@ test "quantization preserves ranking well enough to be useful" {
     for (&query) |*x| x.* = rnd.floatNorm(f32);
     const aq = AsymmetricQuery.init(p, &query);
 
-    const Pair = struct { id: u32, s: f32 };
-    const exact = try testing.allocator.alloc(Pair, n);
+    const exact = try testing.allocator.alloc(tu.Pair, n);
     defer testing.allocator.free(exact);
-    const approx = try testing.allocator.alloc(Pair, n);
+    const approx = try testing.allocator.alloc(tu.Pair, n);
     defer testing.allocator.free(approx);
 
     for (0..n) |i| {
         exact[i] = .{ .id = @intCast(i), .s = dist.native.dot(&query, data[i * dim ..][0..dim]) };
         approx[i] = .{ .id = @intCast(i), .s = aq.dot(&query, codes[i * dim ..][0..dim]) };
     }
-    const lt = struct {
-        fn f(_: void, a: Pair, b: Pair) bool {
-            return a.s > b.s;
-        }
-    }.f;
-    std.mem.sort(Pair, exact, {}, lt);
-    std.mem.sort(Pair, approx, {}, lt);
+    tu.sortDesc(exact);
+    tu.sortDesc(approx);
 
     const k = 10;
-    var overlap: usize = 0;
-    for (approx[0..k]) |a| {
-        for (exact[0..k]) |e| {
-            if (a.id == e.id) {
-                overlap += 1;
-                break;
-            }
-        }
-    }
+    const overlap = tu.countShared(approx[0..k], exact[0..k]);
     // SQ8 on random normal data should recover nearly all of the true top-10.
     try testing.expect(overlap >= 8);
 }

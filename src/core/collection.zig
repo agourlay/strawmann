@@ -35,6 +35,7 @@ const quant_mod = @import("../quant/quant.zig");
 const lock = @import("../lock.zig");
 const payload_mod = @import("payload.zig");
 const text_mod = @import("../text/text.zig");
+const tu = @import("../testing_util.zig");
 
 pub const Metric = dist.Metric;
 pub const ExternalId = ids.ExternalId;
@@ -1386,11 +1387,7 @@ test "brute force finds the true nearest neighbours" {
     var prng = std.Random.DefaultPrng.init(0xb0f);
     const rnd = prng.random();
     const n = 100;
-    for (0..n) |i| {
-        var v: [8]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, 8, 0, n);
 
     var q: [8]f32 = undefined;
     for (&q) |*x| x.* = rnd.floatNorm(f32);
@@ -1515,11 +1512,7 @@ test "§8.6 metamorphic: score(x,x) is maximal for every metric" {
 
         var prng = std.Random.DefaultPrng.init(0x5e1f);
         const rnd = prng.random();
-        for (0..20) |i| {
-            var v: [32]f32 = undefined;
-            for (&v) |*x| x.* = rnd.floatNorm(f32);
-            _ = try c.upsert(.{ .num = i }, &v);
-        }
+        try tu.upsertRandom(&c, rnd, 32, 0, 20);
 
         // Query with a stored vector; it must come back first.
         const target: u32 = 7;
@@ -3444,11 +3437,7 @@ test "a quantized build searches on codes, SQ8 choosing its edges on fp32, and t
         var c = try makeCollection(dim, .dot, 256);
         defer c.deinit();
         c.quant_mode = mode;
-        for (0..200) |i| {
-            var v: [dim]f32 = undefined;
-            for (&v) |*x| x.* = rnd.floatNorm(f32);
-            _ = try c.upsert(.{ .num = i }, &v);
-        }
+        try tu.upsertRandom(&c, rnd, dim, 0, 200);
         try buildIndex(&c, .serial, 1);
         const store = c.quant.load(.acquire).?;
         var cs: CodeScorer = undefined;
@@ -3523,11 +3512,7 @@ test "index build flips the collection to Green and search uses the graph" {
     var prng = std.Random.DefaultPrng.init(0xbeef11);
     const rnd = prng.random();
     const n = 1000;
-    for (0..n) |i| {
-        var v: [16]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, 16, 0, n);
 
     // Before the build: no graph, count not indexed.
     try testing.expectEqual(IndexState.absent, c.index_state.load(.acquire));
@@ -3558,14 +3543,7 @@ test "index build flips the collection to Green and search uses the graph" {
         var gb: [k]Candidate = undefined;
         var got = heap.TopK.init(&gb, k);
         search(&c, &q, 128, .approximate, &scratch, &got);
-        for (got.finish()) |gc| {
-            for (t) |tc| {
-                if (tc.id == gc.id) {
-                    hits += 1;
-                    break;
-                }
-            }
-        }
+        hits += tu.countShared(got.finish(), t);
     }
     const recall = @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(queries * k));
     try testing.expect(recall > 0.95);
@@ -3578,11 +3556,7 @@ test "exact:true bypasses the graph even when one exists" {
     defer c.deinit();
     var prng = std.Random.DefaultPrng.init(0x1234);
     const rnd = prng.random();
-    for (0..200) |i| {
-        var v: [8]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, 8, 0, 200);
     try buildIndex(&c, .serial, 1);
 
     var q: [8]f32 = undefined;
@@ -3608,11 +3582,7 @@ test "deleted points are filtered from graph results without disconnecting it" {
     var prng = std.Random.DefaultPrng.init(0x777);
     const rnd = prng.random();
     const n = 400;
-    for (0..n) |i| {
-        var v: [8]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, 8, 0, n);
     try buildIndex(&c, .serial, 1);
 
     // Delete a quarter of the points.
@@ -3650,21 +3620,13 @@ test "a write keeps the graph and the pending tail is searched exhaustively" {
     const rnd = prng.random();
 
     const indexed = 800;
-    for (0..indexed) |i| {
-        var v: [4]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, 4, 0, indexed);
     try buildIndex(&c, .serial, 1);
     try testing.expectEqual(IndexState.ready, c.index_state.load(.acquire));
 
     // A handful of new points: well under `rebuild_ratio`, so the graph stays.
     var target: [4]f32 = .{ 9, 9, 9, 9 };
-    for (0..20) |i| {
-        var v: [4]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = indexed + i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, 4, indexed, 20);
     // The last point is the exact answer to `target`, and it is in the tail.
     const answer = try c.upsert(.{ .num = 9999 }, &target);
 
@@ -3910,11 +3872,7 @@ test "points upserted during a build are not stranded outside the index" {
     defer c.deinit();
     var prng = std.Random.DefaultPrng.init(0x57a1e);
     const rnd = prng.random();
-    for (0..n) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, n);
 
     // `build_hook` runs on the build thread after the graph is built and
     // before it is published, exactly where an upsert during a build lands.
@@ -3960,11 +3918,7 @@ test "the graph path returns a full page even with heavy tombstoning" {
     var prng = std.Random.DefaultPrng.init(0xd00d);
     const rnd = prng.random();
     const n = 1000;
-    for (0..n) |i| {
-        var v: [8]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, 8, 0, n);
     try buildIndex(&c, .serial, 1);
 
     // 30% tombstones: enough that a k=10 query previously came back with ~7.
@@ -4459,11 +4413,7 @@ test "a quantized store is reclaimed on the same rule as the graph" {
     defer c.deinit();
     var prng = std.Random.DefaultPrng.init(0x5107);
     const rnd = prng.random();
-    for (0..300) |i| {
-        var v: [8]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, 8, 0, 300);
     c.quant_mode = .scalar;
     try buildIndex(&c, .serial, 1);
     try buildIndex(&c, .serial, 1);
@@ -4610,11 +4560,7 @@ test "an in-place overwrite counts toward the rebuild and is searched at its new
     var prng = std.Random.DefaultPrng.init(0x0ae2);
     const rnd = prng.random();
     const n = 500;
-    for (0..n) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, n);
     try buildIndex(&c, .serial, 1);
     try testing.expectEqual(Status.green, c.status());
     try testing.expectEqual(@as(usize, 0), c.overwritten_since_build.load(.acquire));
@@ -4720,11 +4666,7 @@ test "the quantized store is published as one pointer and retired, never freed, 
     defer c.deinit();
     var prng = std.Random.DefaultPrng.init(0x9a1);
     const rnd = prng.random();
-    for (0..200) |i| {
-        var v: [8]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, 8, 0, 200);
     try testing.expect(c.quant.load(.acquire) == null);
     try quantize(&c, .scalar);
     const first = c.quant.load(.acquire).?;
@@ -4818,11 +4760,7 @@ test "a build that cannot quantize publishes neither the graph nor a store over 
     c.quant_mode = .scalar;
     var prng = std.Random.DefaultPrng.init(0x00f);
     const rnd = prng.random();
-    for (0..100) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, 100);
     try buildIndex(&c, .serial, 1);
     const g0 = c.graph.?;
     const s0 = c.quant.load(.acquire).?;
@@ -4918,11 +4856,7 @@ test "tombstones among the nearest do not shorten the page when ef equals limit"
     var prng = std.Random.DefaultPrng.init(0xdead);
     const rnd = prng.random();
     const n = 500;
-    for (0..n) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, n);
     try buildIndex(&c, .serial, 1);
 
     var scratch = try hnsw.Index.Scratch.init(testing.allocator, 1024, 128);
@@ -4957,11 +4891,7 @@ test "a gathered scan returns exactly what the same queries return one at a time
     var prng = std.Random.DefaultPrng.init(0x9A7E);
     const rnd = prng.random();
     const n = 700;
-    for (0..n) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, n);
     // A tombstone among the data, since the gather skips them once per row and
     // the single-query scan skips them per query: the two must still agree.
     _ = c.delete(.{ .num = 3 });
@@ -5010,11 +4940,7 @@ test "a gathered scan honours a filter the same way one query at a time does" {
     defer c.deinit();
     var prng = std.Random.DefaultPrng.init(0x1234);
     const rnd = prng.random();
-    for (0..300) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, 300);
 
     // Admit the even offsets only, which is the shape a payload index gives.
     const Even = struct {
@@ -5082,11 +5008,7 @@ test "a graph covering more than the reader's snapshot returns a point twice" {
     var prng = std.Random.DefaultPrng.init(0xD0B1E);
     const rnd = prng.random();
     const n = 200;
-    for (0..n) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, n);
     try buildIndex(&c, .serial, 1);
 
     var scratch = try hnsw.Index.Scratch.init(testing.allocator, 512, 64);
@@ -5178,11 +5100,7 @@ test "live insertion keeps every appended point findable exactly once" {
     const rnd = prng.random();
 
     const built = 800;
-    for (0..built) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, built);
     try buildIndex(&c, .serial, 1);
     try testing.expectEqual(@as(usize, built), c.graph.?.count);
 
@@ -5245,11 +5163,7 @@ test "live insertion leaves the collection searchable after a rebuild" {
     defer c.deinit();
     var prng = std.Random.DefaultPrng.init(0x22FE);
     const rnd = prng.random();
-    for (0..400) |i| {
-        var v: [dim]f32 = undefined;
-        for (&v) |*x| x.* = rnd.floatNorm(f32);
-        _ = try c.upsert(.{ .num = i }, &v);
-    }
+    try tu.upsertRandom(&c, rnd, dim, 0, 400);
     try buildIndex(&c, .serial, 1);
     for (400..500) |i| {
         var v: [dim]f32 = undefined;

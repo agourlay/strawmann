@@ -460,11 +460,7 @@ fn interleavedStreamsRound(alloc: std.mem.Allocator, seed: u64) !void {
 
     var hb: [64]u8 = undefined;
     const path = "/qdrant.Points/QueryBatch";
-    var hn: usize = 0;
-    hn += hpack.encodeInteger(hb[hn..], 6, 0x40, 4);
-    hn += hpack.encodeInteger(hb[hn..], 7, 0x00, path.len);
-    @memcpy(hb[hn..][0..path.len], path);
-    hn += path.len;
+    const hn = h2.testHeaderBlock(&hb, path).len;
 
     const frames = 60 + rnd.uintLessThan(usize, 200);
     for (0..frames) |_| {

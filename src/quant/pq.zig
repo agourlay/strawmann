@@ -27,6 +27,7 @@
 
 const std = @import("std");
 const dist = @import("../dist/dist.zig");
+const tu = @import("../testing_util.zig");
 const pq_adc = dist.pq_adc;
 
 //: k-means passes per subspace. 25 was a literal at the one call site, beside
@@ -676,16 +677,10 @@ test "§6.7: PQ generates candidates for rescore, it does not rank directly" {
     var qt = try QueryTable.init(testing.allocator, &cb);
     defer qt.deinit(testing.allocator);
 
-    const Pair = struct { id: u32, s: f32 };
-    const exact = try testing.allocator.alloc(Pair, n);
+    const exact = try testing.allocator.alloc(tu.Pair, n);
     defer testing.allocator.free(exact);
-    const approx = try testing.allocator.alloc(Pair, n);
+    const approx = try testing.allocator.alloc(tu.Pair, n);
     defer testing.allocator.free(approx);
-    const lt = struct {
-        fn f(_: void, a: Pair, b: Pair) bool {
-            return a.s > b.s;
-        }
-    }.f;
 
     const queries = 25;
     var contained: usize = 0;
@@ -703,18 +698,9 @@ test "§6.7: PQ generates candidates for rescore, it does not rank directly" {
             exact[i] = .{ .id = @intCast(i), .s = dist.native.euclid(query, data[i * dim ..][0..dim]) };
             approx[i] = .{ .id = @intCast(i), .s = qt.score(codes[i * cb.m ..][0..cb.m]) };
         }
-        std.mem.sort(Pair, exact, {}, lt);
-        std.mem.sort(Pair, approx, {}, lt);
-
-        const cand = approx[0 .. k * oversample];
-        for (exact[0..k]) |e| {
-            for (cand) |a| {
-                if (a.id == e.id) {
-                    contained += 1;
-                    break;
-                }
-            }
-        }
+        tu.sortDesc(exact);
+        tu.sortDesc(approx);
+        contained += tu.countShared(exact[0..k], approx[0 .. k * oversample]);
     }
 
     const candidate_recall = @as(f64, @floatFromInt(contained)) /
@@ -752,32 +738,17 @@ test "PQ direct top-k overlap is modest, which is why rescore exists" {
     defer qt.deinit(testing.allocator);
     qt.build(&cb, .euclid, &query);
 
-    const Pair = struct { id: u32, s: f32 };
-    const exact = try testing.allocator.alloc(Pair, n);
+    const exact = try testing.allocator.alloc(tu.Pair, n);
     defer testing.allocator.free(exact);
-    const approx = try testing.allocator.alloc(Pair, n);
+    const approx = try testing.allocator.alloc(tu.Pair, n);
     defer testing.allocator.free(approx);
     for (0..n) |i| {
         exact[i] = .{ .id = @intCast(i), .s = dist.native.euclid(&query, data[i * dim ..][0..dim]) };
         approx[i] = .{ .id = @intCast(i), .s = qt.score(codes[i * cb.m ..][0..cb.m]) };
     }
-    const lt = struct {
-        fn f(_: void, a: Pair, b: Pair) bool {
-            return a.s > b.s;
-        }
-    }.f;
-    std.mem.sort(Pair, exact, {}, lt);
-    std.mem.sort(Pair, approx, {}, lt);
-
-    var overlap: usize = 0;
-    for (approx[0..k]) |a| {
-        for (exact[0..k]) |e| {
-            if (a.id == e.id) {
-                overlap += 1;
-                break;
-            }
-        }
-    }
+    tu.sortDesc(exact);
+    tu.sortDesc(approx);
+    const overlap = tu.countShared(approx[0..k], exact[0..k]);
     // Non-vacuous in both directions: PQ carries real signal (not zero) but is
     // not a substitute for the exact score (not ten).
     try testing.expect(overlap >= 3);
