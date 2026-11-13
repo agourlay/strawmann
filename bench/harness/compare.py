@@ -1121,8 +1121,12 @@ def recall_required_of() -> dict[str, bool]:
     for w in table():
         if w.upload_only:
             continue
+        # W16 searches through bfb's config file, which spells no `--search`.
+        # Filed as "not a search", it skipped the equal-recall rule, and laion
+        # 1112 printed 1.17x at recall 0.9551 against 0.9710.
+        searches = "--search" in w.args or w.dataset_tests == "search"
         exempt = (w.id == "W0" or "--search-exact" in w.args or "--scroll" in w.args
-                  or "--search" not in w.args)
+                  or not searches)
         out[w.id] = not exempt
     return out
 
