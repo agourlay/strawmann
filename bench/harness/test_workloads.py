@@ -3962,6 +3962,46 @@ class AbChain1112Tests(unittest.TestCase):
                          [("full", "abc1234", ()), ("memo", "abc1234", ("--prune-memo",))])
 
 
+class AbChain1116Tests(unittest.TestCase):
+    """Night A: the filtered walk, the shared layer search, --build-prefetch."""
+
+    def test_steps_arms_and_every_row_exists_on_its_corpus(self):
+        ch = importlib.import_module("ab_chain_1116")
+        ab = importlib.import_module("commit_ab")
+        chain = {s.name: s.argv for s in ch.steps("t", "abc1234")}
+        self.assertEqual(list(chain), [
+            "walk-w12-sift1m", "walk-w12-laion", "walk-w16-laion", "walk-w12-hnm",
+            "walk-w16-hnm", "walk-w12-dbpedia", "layer-sift1m", "build-prefetch-dbpedia"])
+
+        def opt(argv, name):
+            i, out = argv.index(name) + 1, []
+            while i < len(argv) and not argv[i].startswith("--"):
+                out.append(argv[i])
+                i += 1
+            return out
+
+        def arms(argv):
+            flags = [argv[j + 1] for j in range(len(argv)) if argv[j] == "--flags"]
+            return [(a.name, a.source, a.flags)
+                    for a in ab.parse_arms(opt(argv, "--commits"), flags)]
+
+        self.assertEqual(arms(chain["walk-w16-hnm"]),
+                         [("before", ch.WALK_PARENT, ()), ("after", ch.WALK, ())])
+        self.assertEqual(arms(chain["layer-sift1m"]),
+                         [("base", ch.LAYER_PARENT, ()), ("walk", ch.LAYER, ())])
+        self.assertEqual(arms(chain["build-prefetch-dbpedia"]),
+                         [("off", "abc1234", ()), ("on", "abc1234", ("--build-prefetch",))])
+        before = workloads.DATASET
+        try:
+            for name, argv in chain.items():
+                workloads.use_dataset(opt(argv, "--dataset")[0])
+                ids = workloads.by_id()
+                for wid in opt(argv, "--upload") + opt(argv, "--rows"):
+                    self.assertIn(wid, ids, f"{name}: {wid}")
+        finally:
+            workloads.use_dataset(before)
+
+
 class ReclaimAbTests(unittest.TestCase):
     """findings 62: a resident collection against one reclaimed and re-read."""
 
