@@ -243,25 +243,50 @@ republish (published a01b629), a laion pair whose W16 rows failed on
 planner ladder on sift1m and laion (`bench/results/planner-ab-1112-*`,
 within 1% of 1103's costs).
 
+### Done 2026-11-12 night (unit `strawmann-night-1113`)
+
+sift1m, laion and h-and-m, three passes each on 9ab0cc3, T4 on all three,
+published d1a09e2 after four harness fixes (8475c76, 89d1ea6, 5ccb328,
+1085f6d). The PQ regression is recovered (af8bf2d: laion W8 18,726), laion's
+fp32 instructions per query are back to 1109's, and W16 measured on laion
+for the first time. A/Bs: the planner refit held (laion W12-sel10-ef256
++7.2%, sift1m flat); `--build-prefetch` read W11-steady +5.9% and W11
+-2.5%, undecided.
+
 ### Before the next night
 
-- The PQ regression (laion W8 -6.4% at equal instructions against 1109),
-  suspected in the `Query` union (ee3dbcc): in-process, being chased.
-- Short result lists under laion's range conditions at low ef (W16 sweep:
-  `short_lists=32` at ef 32 and 64): engine, being fixed.
-- W16's ACORN: bfb refuses `--acorn` on a dataset source. Operator call:
-  W16 without ACORN on both engines, or a bfb PR first.
-- A pair with FAILED rows still rewrites its page (fullrun publish policy).
-- fp32 +3% instructions per query since 1109: first suspect removed
-  (d37d931); confirm in the next pair.
+- **The upgrade timer.** `apt-daily-upgrade.timer` fires about 06:00 to
+  07:00 and re-executed systemd during h-and-m 1112's pass 3, which took the
+  cgroup I/O counts away. Mask it for the night, or add the permanent
+  `Delegate=` drop-in. Night A crosses that window.
+- Close the other Claude and Codex sessions; their builds were 2 to 10
+  cores of foreign load on 2026-11-13.
 
 ### Next nights
 
-- **Night 2:** sift1m, laion (with W16 once it measures) and h-and-m, three
-  passes each, on the promoted defaults (`--exact-gather`, rescore prefetch
-  `whole`), about 11 h.
-- **Night 3:** dbpedia-openai-1m, about 10.8 h.
-- **An h-and-m pair with W16** (bfb pin 1498125, a new stamp for h-and-m).
+Estimates from the 1110 and 1112 nights; settle waits took about a quarter
+of each run, so a busier host runs longer.
+
+**Night A, about 9.7 h:**
+- An h-and-m pair with W16, three passes (about 4.3 h). First on bfb
+  1498125 (qdrant/bfb#193), so a new series: STALE against 1112 by design.
+- A/B of the filtered walk, 5ae0616 against 4a13a33, W12-sel10 and W16
+  rows (about 3.2 h). laion and h-and-m carry W16; sift1m and dbpedia
+  check W12 alone. Expect laion W12-sel10 about 5% lower and W16 recall at
+  Qdrant's.
+- A/B of the shared layer search, a98d0b1 (`hnsw.Walk`, results proven
+  identical, three hot functions compile differently) against its base, on
+  sift1m: W2, W3, W4, W10-ef128, W11-steady (about 1 h). Lands only if
+  flat or better.
+- `--build-prefetch` repeat on dbpedia-1m, W11-steady and W11 (about
+  1.2 h).
+
+Shorter, about 7 h, ending before the upgrade window: the filtered-walk
+A/B on laion and h-and-m only, and no `--build-prefetch` repeat.
+
+**Night B, about 10.8 h:** dbpedia-openai-1m, three passes, on its own.
+The first dbpedia pair with the filtered walk and the exact-gather
+default's large-scan path.
 
 ### Waiting on a decision
 
@@ -270,10 +295,8 @@ within 1% of 1103's costs).
 
 ### To build
 
-- **The real-filter rows (findings 55):** an upload row and a search row on
-  bfb's dataset path, a recall the row carries (bfb's precision) that
-  `compare.py` and the report read, and the ε-tie check against our filtered
-  oracle. After the bfb decision, since the rows run on it.
+- **W16's unfiltered half:** recall@10 0.9655 against Qdrant's 0.9728 on
+  laion at ef 32, untouched by the filtered walk and now most of W16's gap.
 
 ### Dropped
 
