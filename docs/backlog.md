@@ -253,36 +253,38 @@ for the first time. A/Bs: the planner refit held (laion W12-sel10-ef256
 +7.2%, sift1m flat); `--build-prefetch` read W11-steady +5.9% and W11
 -2.5%, undecided.
 
+### Done 2026-11-16 night (unit `strawmann-night-1116`, Night A)
+
+The h-and-m pair on bfb 1498125, T4, published as measured: the first h-and-m
+W16 reads 0.18x to 0.38x of Qdrant at higher recall (12 to 17M instructions
+a query against 0.9M), and the matched-recall headline, W4, W5 and W10 are
+withheld because strawmANN's pass 1 ran 13 to 18% faster after a reclaim of
+its file pages (item 62). The A/Bs (`bench/results/ab-1116-*`):
+- The filtered walk (5ae0616) kept: W12-sel10 flat on sift1m, -2.4% on
+  dbpedia, -4.4% on laion, -5.3% on h-and-m. W16 pays for laion's recall
+  (-16 to -28%); h-and-m W16-ef256 +31% from the selective scan. The old
+  walk was as slow on h-and-m W16, so the gap to Qdrant is the planner's.
+- The shared layer search (a98d0b1) landed: flat to +1.9%, 2 to 3.5%
+  fewer instructions a query.
+- `--build-prefetch` repeated 11-13's reading (W11-steady +6.0%, W11
+  -2.6%) and is dropped.
+
 ### Before the next night
 
-- **The upgrade timer.** `apt-daily-upgrade.timer` fires about 06:00 to
-  07:00 and re-executed systemd during h-and-m 1112's pass 3, which took the
-  cgroup I/O counts away. Mask it for the night, or add the permanent
-  `Delegate=` drop-in. Night A crosses that window.
-- Close the other Claude and Codex sessions; their builds were 2 to 10
-  cores of foreign load on 2026-11-13.
+- Mask `apt-daily-upgrade.timer` for the night (unmask after), or add the
+  permanent `Delegate=` drop-in.
+- Close the other Claude and Codex sessions, Firefox and Slack.
 
 ### Next nights
 
-Estimates from the 1110 and 1112 nights; settle waits took about a quarter
+Estimates from the 1116 night's A/B steps; settle waits took about a quarter
 of each run, so a busier host runs longer.
 
-**Night A, about 9.7 h:**
-- An h-and-m pair with W16, three passes (about 4.3 h). First on bfb
-  1498125 (qdrant/bfb#193), so a new series: STALE against 1112 by design.
-- A/B of the filtered walk, 5ae0616 against 4a13a33, W12-sel10 and W16
-  rows (about 3.2 h). laion and h-and-m carry W16; sift1m and dbpedia
-  check W12 alone. Expect laion W12-sel10 about 5% lower and W16 recall at
-  Qdrant's.
-- A/B of the shared layer search, a98d0b1 (`hnsw.Walk`, results proven
-  identical, three hot functions compile differently) against its base, on
-  sift1m: W2, W3, W4, W10-ef128, W11-steady (about 1 h). Lands only if
-  flat or better.
-- `--build-prefetch` repeat on dbpedia-1m, W11-steady and W11 (about
-  1.2 h).
-
-Shorter, about 7 h, ending before the upgrade window: the filtered-walk
-A/B on laion and h-and-m only, and no `--build-prefetch` repeat.
+**Night A2, about 2.5 h:** which plan h-and-m's W16 queries should take.
+`planner_ab.py --workload W16 --reps 3` forces scan, two_hop and walk beside
+the model's own pick on the W16 ladder (ef 32 to 512), on laion and h-and-m.
+Throughput only: recall per plan needs the conformance pass after. Then
+refit `filteredPlan` on real conditions, or widen the selective scan.
 
 **Night B, about 10.8 h:** dbpedia-openai-1m, three passes, on its own.
 The first dbpedia pair with the filtered walk and the exact-gather
@@ -300,6 +302,9 @@ default's large-scan path.
 
 ### Dropped
 
+- `--build-prefetch` as a default: measured twice on dbpedia-openai-1m
+  (11-13, 11-16), W11-steady +6% and W11 -2.6% at +8% instructions. The
+  flag stays, off.
 - dbpedia W9's 8% since the Zig 0.16 build (1008 to 1110, equal instructions):
   no 0.16 toolchain is left and today's source needs 0.17, so a toolchain arm
   cannot isolate it.
