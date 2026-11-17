@@ -267,7 +267,8 @@ def _huge_page_note(wid: str, got: list[dict]) -> str | None:
 
 #: `procstat.MEMORY_FIELDS` as the note names them.
 _MEMORY_NAMES = {"mem_available_bytes": "MemAvailable", "swap_used_bytes": "host swap",
-                 "engine_swap_bytes": "engine VmSwap"}
+                 "engine_swap_bytes": "engine VmSwap",
+                 "rss_file_bytes": "engine file RSS"}
 
 
 def _memory_note(wid: str, got: list[dict]) -> str | None:

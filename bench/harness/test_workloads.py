@@ -3850,6 +3850,32 @@ class PlannerAbTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--upload") + 1], "W12-upload")
         self.assertIn("W12-sel10-ef512", argv)
         self.assertEqual(argv[argv.index("--tag") + 1], "planner-ab-1103-laion-small-clip")
+        self.assertEqual(self.pa.argv("laion-small-clip", "abc1234", "planner-ab-1103", "4-11",
+                                      "0-3", 1, "W12"), argv)
+
+    def test_w16_runs_every_plan_and_the_model_on_the_corpus_s_own_tests(self):
+        argv = self.pa.argv("h-and-m-2048-angular-filters", "abc1234", "t", "4-11", "0-3", 3,
+                            "W16")
+        ab = importlib.import_module("commit_ab")
+        arms = ab.parse_arms(argv[argv.index("--commits") + 1:argv.index("--flags")],
+                             [argv[i + 1] for i, a in enumerate(argv) if a == "--flags"])
+        self.assertEqual([(a.name, a.flags) for a in arms], [
+            ("scan", ("--filtered-plan", "scan")), ("two_hop", ("--filtered-plan", "two_hop")),
+            ("walk", ("--filtered-plan", "walk")), ("auto", ("--filtered-plan", "auto"))])
+        self.assertEqual(argv[argv.index("--upload") + 1], "W16-upload")
+        rows = argv[argv.index("--rows") + 1:argv.index("--commits")]
+        self.assertEqual(rows, [f"W16-ef{ef}" for ef in (32, 64, 128, 256, 512)])
+        before = workloads.DATASET
+        try:
+            for ds in self.pa.W16_DATASETS:
+                workloads.use_dataset(ds)
+                self.assertTrue({"W16-upload", *rows} <= set(workloads.by_id()), ds)
+        finally:
+            workloads.use_dataset(before)
+
+    def test_w16_refuses_a_corpus_without_filtered_tests(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.pa.main(["planner_ab.py", "--workload", "W16", "--datasets", "sift1m"])
 
     def test_the_model_break_even_is_where_filtered_plan_flips(self):
         # handlers.zig's points at the sizes a query selects, m0=32: laion

@@ -9,6 +9,12 @@ against Qdrant. This runs the W12-sel10 ef ladder once per plan, through
 `commit_ab.py` with `--filtered-plan` forced, on each corpus; `--fit` reads
 the summaries back and sets the measured break-even width beside the model's.
 
+`--workload W16` runs the same ladder on a corpus's own filtered tests
+(laion, h-and-m), with the plain walk and the model's own pick beside the
+two forced plans: h-and-m 1116 read W16 at 0.18x to 0.38x of Qdrant, 12 to
+17M instructions a query, and could not say which plan the queries took.
+`--fit` reads W12 only.
+
 Throughput only: a dev A/B records no recall. The scan is exact, so a two-hop
 width that wins on q/s still has to clear the recall the conformance pass
 measures before the model may pick it.
@@ -35,23 +41,29 @@ import workloads
 DATASETS = {"sift1m": 128, "laion-small-clip": 512, "h-and-m-2048-angular-filters": 2048,
             "dbpedia-openai-100K-1536-angular": 1536}
 PLANS = ("scan", "two_hop")
+#: Each workload's upload, its ladder's row name and the plans it forces.
+WORKLOADS = {"W12": ("W12-upload", "W12-sel10-ef{ef}", PLANS),
+             "W16": ("W16-upload", "W16-ef{ef}", ("scan", "two_hop", "walk", "auto"))}
+#: The corpora that ship filtered tests, so carry W16.
+W16_DATASETS = ("laion-small-clip", "h-and-m-2048-angular-filters")
 EFS = (32, 64, 128, 256, 512)
 #: `hnsw_m * 2` at the engine's default m of 16, which W12 does not override.
 M0 = 32
 
 
-def rows() -> list[str]:
-    return [f"W12-sel10-ef{ef}" for ef in EFS]
+def rows(workload: str = "W12") -> list[str]:
+    return [WORKLOADS[workload][1].format(ef=ef) for ef in EFS]
 
 
 def argv(dataset: str, commit: str, tag: str, server_cpus: str, client_cpus: str,
-         reps: int) -> list[str]:
-    """One corpus's `commit_ab.py` run: both plans on one build."""
+         reps: int, workload: str = "W12") -> list[str]:
+    """One corpus's `commit_ab.py` run: every plan on one build."""
+    upload, _, plans = WORKLOADS[workload]
     return ["commit_ab.py", "--server-cpus", server_cpus, "--client-cpus", client_cpus,
             "--dataset", dataset, "--reps", str(reps), "--tag", f"{tag}-{dataset}",
-            "--upload", "W12-upload", "--rows", *rows(),
-            "--commits", *(f"{p}={commit}" for p in PLANS),
-            *(x for p in PLANS for x in ("--flags", f"{p}=--filtered-plan {p}"))]
+            "--upload", upload, "--rows", *rows(workload),
+            "--commits", *(f"{p}={commit}" for p in plans),
+            *(x for p in plans for x in ("--flags", f"{p}=--filtered-plan {p}"))]
 
 
 #: `handlers.scanRowCycles`'s table: cycles per matched row at each width.
@@ -137,7 +149,9 @@ def main(args_in: list[str]) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--server-cpus", default="4-11")
     ap.add_argument("--client-cpus", default="0-3")
-    ap.add_argument("--datasets", nargs="+", default=list(DATASETS), choices=list(DATASETS))
+    ap.add_argument("--workload", default="W12", choices=list(WORKLOADS))
+    ap.add_argument("--datasets", nargs="+", choices=list(DATASETS),
+                    help="default: every corpus, or those with filtered tests for W16")
     ap.add_argument("--commit", help="the build to measure (default: this checkout's HEAD)")
     ap.add_argument("--reps", type=int, default=1)
     ap.add_argument("--tag", default=f"planner-ab-{time.strftime('%m%d')}")
@@ -145,15 +159,19 @@ def main(args_in: list[str]) -> int:
     args = ap.parse_args(args_in[1:])
     if args.fit:
         return report(args.tag)
+    datasets = args.datasets or list(W16_DATASETS if args.workload == "W16" else DATASETS)
+    if args.workload == "W16" and (bad := sorted(set(datasets) - set(W16_DATASETS))):
+        ap.error(f"no filtered tests, so no W16, on {', '.join(bad)}")
     commit = args.commit or head_commit()
     rc = 0
-    for ds in args.datasets:
-        fullrun.say(f"planner A/B on {ds} at {commit}")
+    for ds in datasets:
+        fullrun.say(f"planner A/B ({args.workload}) on {ds} at {commit}")
         code = commit_ab.main(argv(ds, commit, args.tag, args.server_cpus,
-                                   args.client_cpus, args.reps))
+                                   args.client_cpus, args.reps, args.workload))
         print(f"{ds}: rc={code}", flush=True)
         rc |= code
-    report(args.tag)
+    if args.workload == "W12":
+        report(args.tag)
     return rc
 
 

@@ -901,6 +901,27 @@ class NoiseTests(unittest.TestCase):
                           text)
             self.assertNotIn("W3: memory", text)
 
+    def test_a_pass_whose_file_pages_were_reclaimed_is_named(self):
+        """h-and-m 1116: pass 1 ran W4 13% faster with 186 MiB of the engine's
+        file pages gone and nothing else in memory moved."""
+        import importlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _reload(root)
+            agg = importlib.reload(importlib.import_module("aggregate"))
+            for i, (q, rss) in enumerate(((5202.0, 891_785_216), (4603.0, 1_086_128_128),
+                                          (4621.0, 1_086_136_320)), start=1):
+                self._rep(root, f"lbl-rep{i}", [
+                    _row("W4", q, rss_file_bytes=rss),
+                    _row("W3", 1290.0, rss_file_bytes=1_086_128_128 - i)])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                self.assertEqual(agg.main(["aggregate.py", "lbl",
+                                           "lbl-rep1", "lbl-rep2", "lbl-rep3"]), 0)
+            text = out.getvalue()
+            self.assertIn("W4: memory differs across the 3 passes (engine file RSS", text)
+            self.assertNotIn("W3: memory", text)
+
     def test_a_folded_floor_says_mixed_when_the_passes_disagree(self):
         import importlib
         with tempfile.TemporaryDirectory() as tmp:
