@@ -3940,6 +3940,17 @@ class PlannerAbTests(unittest.TestCase):
         finally:
             workloads.use_dataset(before)
 
+    def test_plans_narrows_the_arms_and_refuses_one_the_workload_lacks(self):
+        argv = self.pa.argv("h-and-m-2048-angular-filters", "abc1234", "t", "4-11", "0-3", 3,
+                            "W16", ("scan", "walk", "auto"))
+        self.assertEqual(argv[argv.index("--commits") + 1:argv.index("--flags")],
+                         ["scan=abc1234", "walk=abc1234", "auto=abc1234"])
+        self.assertNotIn("two_hop=--filtered-plan two_hop", argv)
+        self.assertEqual(self.pa.argv("laion-small-clip", "a", "t", "4-11", "0-3", 1, "W16", ()),
+                         self.pa.argv("laion-small-clip", "a", "t", "4-11", "0-3", 1, "W16"))
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.pa.main(["planner_ab.py", "--plans", "walk"])
+
     def test_w16_refuses_a_corpus_without_filtered_tests(self):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             self.pa.main(["planner_ab.py", "--workload", "W16", "--datasets", "sift1m"])

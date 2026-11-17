@@ -57,9 +57,10 @@ def rows(workload: str = "W12") -> list[str]:
 
 
 def argv(dataset: str, commit: str, tag: str, server_cpus: str, client_cpus: str,
-         reps: int, workload: str = "W12") -> list[str]:
-    """One corpus's `commit_ab.py` run: every plan on one build."""
-    upload, _, plans = WORKLOADS[workload]
+         reps: int, workload: str = "W12", plans: tuple[str, ...] | None = None) -> list[str]:
+    """One corpus's `commit_ab.py` run: every plan (or those named) on one build."""
+    upload, _, every = WORKLOADS[workload]
+    plans = plans or every
     return ["commit_ab.py", "--server-cpus", server_cpus, "--client-cpus", client_cpus,
             "--dataset", dataset, "--reps", str(reps), "--tag", f"{tag}-{dataset}",
             "--upload", upload, "--rows", *rows(workload),
@@ -155,6 +156,9 @@ def main(args_in: list[str]) -> int:
     ap.add_argument("--workload", default="W12", choices=list(WORKLOADS))
     ap.add_argument("--datasets", nargs="+", choices=list(DATASETS),
                     help="default: every corpus, or those with filtered tests for W16")
+    ap.add_argument("--plans", nargs="+",
+                    help="force only these (default: every plan the workload has); h-and-m's "
+                    "two_hop ran 82 q/s at W16-ef32 on 1117, 11 min a row")
     ap.add_argument("--commit", help="the build to measure (default: this checkout's HEAD)")
     ap.add_argument("--reps", type=int, default=1)
     ap.add_argument("--tag", default=f"planner-ab-{time.strftime('%m%d')}")
@@ -165,12 +169,15 @@ def main(args_in: list[str]) -> int:
     datasets = args.datasets or list(W16_DATASETS if args.workload == "W16" else DATASETS)
     if args.workload == "W16" and (bad := sorted(set(datasets) - set(W16_DATASETS))):
         ap.error(f"no filtered tests, so no W16, on {', '.join(bad)}")
+    if args.plans and (bad := sorted(set(args.plans) - set(WORKLOADS[args.workload][2]))):
+        ap.error(f"{args.workload} has no plan {', '.join(bad)}")
     commit = args.commit or head_commit()
     rc = 0
     for ds in datasets:
         fullrun.say(f"planner A/B ({args.workload}) on {ds} at {commit}")
         code = commit_ab.main(argv(ds, commit, args.tag, args.server_cpus,
-                                   args.client_cpus, args.reps, args.workload))
+                                   args.client_cpus, args.reps, args.workload,
+                                   tuple(args.plans or ())))
         print(f"{ds}: rc={code}", flush=True)
         rc |= code
     if args.workload == "W12":
