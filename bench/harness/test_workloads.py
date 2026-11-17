@@ -906,13 +906,41 @@ class WorkloadTests(unittest.TestCase):
         files = {"/proc/meminfo": "MemTotal: 64000000 kB\nMemAvailable: 1000 kB\n"
                                   "SwapTotal: 8000 kB\nSwapFree: 3000 kB\n",
                  "/proc/7/status": "Name: strawmann\nVmSwap:     12 kB\n"}
-        with mock.patch.object(procstat, "_read", files.get):
-            self.assertEqual(procstat.memory_state(7), {"mem_available_bytes": 1000 * 1024,
+        none = dict.fromkeys(procstat.MEMORY_FIELDS)
+        with mock.patch.object(procstat, "_read", files.get), \
+                mock.patch.object(procstat, "cgroup_dir", lambda pid: None):
+            self.assertEqual(procstat.memory_state(7), {**none,
+                                                        "mem_available_bytes": 1000 * 1024,
                                                         "swap_used_bytes": 5000 * 1024,
                                                         "engine_swap_bytes": 12 * 1024})
             self.assertEqual(procstat.memory_state(None)["engine_swap_bytes"], None)
         with mock.patch.object(procstat, "_read", lambda p: None):
             self.assertEqual(procstat.memory_state(7), dict.fromkeys(procstat.MEMORY_FIELDS))
+
+    def test_memory_state_reads_the_reclaim_counters_host_wide_and_the_engines(self):
+        """h-and-m 1116: 186 MiB of the engine's file pages went between two
+        rows, and nothing said who took them."""
+        import procstat
+        files = {"/proc/vmstat": "nr_free_pages 9\npswpout 3175\npgsteal_kswapd 47616\n"
+                                 "pgsteal_direct 0\nworkingset_refault_file 12\nbad x\n",
+                 "/cg/memory.stat": "anon 1\npgsteal 47616\nworkingset_refault_file 0\n"}
+        with mock.patch.object(procstat, "_read", files.get), \
+                mock.patch.object(procstat, "cgroup_dir", lambda pid: Path("/cg")):
+            got = procstat.memory_state(7)
+        self.assertEqual({k: got[k] for k in (*procstat.VMSTAT_KEYS.values(),
+                                              *procstat.CGROUP_MEMORY_KEYS.values())},
+                         {"vm_pswpout": 3175, "vm_pgsteal_kswapd": 47616,
+                          "vm_pgsteal_direct": 0, "vm_refault_file": 12,
+                          "engine_cg_pgsteal": 47616, "engine_cg_refault_file": 0})
+        with mock.patch.object(procstat, "_read", files.get):
+            got = procstat.memory_state(None)
+        self.assertEqual(got["vm_pswpout"], 3175)
+        self.assertIsNone(got["engine_cg_pgsteal"])
+        # Every field lands on the row's schema, so the sink keeps it.
+        import row_schema
+        names = {f.name for c in vars(row_schema).values() if isinstance(c, type)
+                 and hasattr(c, "__dataclass_fields__") for f in c.__dataclass_fields__.values()}
+        self.assertLessEqual(set(procstat.MEMORY_FIELDS), names)
 
     def test_search_completions_reads_bfbs_timestamps_and_skips_the_rest(self):
         p = Path(self.tmp.name) / "s.jsonl"
@@ -3832,6 +3860,42 @@ class CommitAbTests(unittest.TestCase):
             self.assertLess(text.index("old"), text.index("new"))
             self.assertIn("1,758", text)
 
+    def test_w16_recall_per_arm_is_swept_read_back_and_summarised(self):
+        import recall
+        argv = self.ab.recall_argv("t", "scan", "http://localhost:6334")
+        self.assertEqual(argv[1:], [str(Path(self.ab.__file__).with_name("recall.py")),
+                                    "t-scan-recall", "--engine", "http://localhost:6334",
+                                    "--collections", "bench16"])
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "recall.json"
+            f.write_text(json.dumps({"points": [
+                {"ef": 32, "recall_at_10": 0.9957}, {"ef": 64, "recall_at_10": 0.9982},
+                {"ef": 128, "recall_at_10": None}]}))
+            seen = []
+            with mock.patch.object(recall, "recall_path",
+                                   lambda *a, **k: seen.append((a, k)) or f):
+                got = self.ab.arm_recall("t", "scan", "h-and-m-2048-angular-filters")
+            self.assertEqual(got, {32: 0.9957, 64: 0.9982})
+            self.assertEqual(seen[0][0][0], "t-scan-recall")
+            self.assertEqual(seen[0][1], {"grade": "tests"})
+            with mock.patch.object(recall, "recall_path", lambda *a, **k: Path(tmp) / "no"):
+                self.assertEqual(self.ab.arm_recall("t", "walk", "x"), {})
+            rows = [{"id": "W16-ef32", "commit": "scan", "qps": 2000.0, "n_queries": 1000}]
+            self.ab.write_summary(Path(tmp), rows, ["scan", "walk"], None,
+                                  {"scan": got, "walk": {}})
+            text = (Path(tmp) / "summary.txt").read_text()
+            self.assertIn("scan      ef32 0.9957  ef64 0.9982", text)
+            self.assertIn("walk      -", text)
+            doc = json.loads((Path(tmp) / "summary.json").read_text())
+            self.assertEqual(doc["w16_recall"]["scan"], {"32": 0.9957, "64": 0.9982})
+
+    def test_recall_tests_needs_the_w16_upload(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.object(self.ab.ab_common, "prepare") as prep:
+            self.ab.main(["commit_ab.py", "--server-cpus", "4-11", "--client-cpus", "0-3",
+                          "--upload", "W12-upload", "--recall-tests"])
+        prep.assert_not_called()
+
 
 class PlannerAbTests(unittest.TestCase):
     """The filtered planner's refit: both plans forced on one build, per corpus."""
@@ -3865,6 +3929,9 @@ class PlannerAbTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--upload") + 1], "W16-upload")
         rows = argv[argv.index("--rows") + 1:argv.index("--commits")]
         self.assertEqual(rows, [f"W16-ef{ef}" for ef in (32, 64, 128, 256, 512)])
+        self.assertIn("--recall-tests", argv)
+        self.assertNotIn("--recall-tests", self.pa.argv("laion-small-clip", "abc1234", "t",
+                                                         "4-11", "0-3", 1))
         before = workloads.DATASET
         try:
             for ds in self.pa.W16_DATASETS:

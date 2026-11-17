@@ -13,7 +13,8 @@ the summaries back and sets the measured break-even width beside the model's.
 (laion, h-and-m), with the plain walk and the model's own pick beside the
 two forced plans: h-and-m 1116 read W16 at 0.18x to 0.38x of Qdrant, 12 to
 17M instructions a query, and could not say which plan the queries took.
-`--fit` reads W12 only.
+Each arm's W16 recall is swept once (`commit_ab.py --recall-tests`), so the
+summary says which plan keeps it. `--fit` reads W12 only.
 
 Throughput only: a dev A/B records no recall. The scan is exact, so a two-hop
 width that wins on q/s still has to clear the recall the conformance pass
@@ -63,7 +64,9 @@ def argv(dataset: str, commit: str, tag: str, server_cpus: str, client_cpus: str
             "--dataset", dataset, "--reps", str(reps), "--tag", f"{tag}-{dataset}",
             "--upload", upload, "--rows", *rows(workload),
             "--commits", *(f"{p}={commit}" for p in plans),
-            *(x for p in plans for x in ("--flags", f"{p}=--filtered-plan {p}"))]
+            *(x for p in plans for x in ("--flags", f"{p}=--filtered-plan {p}")),
+            # Which plan keeps the recall, beside which is fastest.
+            *(["--recall-tests"] if workload == "W16" else [])]
 
 
 #: `handlers.scanRowCycles`'s table: cycles per matched row at each width.

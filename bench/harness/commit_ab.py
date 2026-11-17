@@ -26,8 +26,10 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import functools
+import json
 import re
 import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -35,6 +37,7 @@ from pathlib import Path
 import ab_common
 import fullrun
 
+import recall
 import workloads
 
 #: findings 69's range, oldest first: the 0930 build, the drainer-on-upsert
@@ -190,6 +193,40 @@ def table_text(summary: list[dict], commits: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def recall_label(tag: str, arm: str) -> str:
+    """Where one arm's W16 recall sweep is written, beside the A/B's own directory."""
+    return f"{tag}-{arm}-recall"
+
+
+def recall_argv(tag: str, arm: str, uri: str) -> list[str]:
+    """`recall.py` over the corpus's own filtered tests, against the arm's
+    engine with its W16 collection still loaded: recall per arm, which a
+    throughput row cannot say (planner_ab's forced plans)."""
+    return [sys.executable, str(Path(__file__).with_name("recall.py")),
+            recall_label(tag, arm), "--engine", uri, "--collections", recall.TESTS_COLLECTION]
+
+
+def arm_recall(tag: str, arm: str, dataset: str) -> dict[int, float]:
+    """`{ef: recall@10}` from one arm's sweep, empty when it did not run."""
+    f = recall.recall_path(recall_label(tag, arm), dataset, recall.TESTS_COLLECTION,
+                           workloads.w16_limit(), grade=recall.TESTS_GRADE)
+    if not f.exists():
+        return {}
+    return {pt["ef"]: pt["recall_at_10"] for pt in json.loads(f.read_text())["points"]
+            if pt.get("recall_at_10") is not None}
+
+
+def recall_text(recalls: dict[str, dict[int, float]]) -> str:
+    """One line per arm: W16 recall@10 at each ef."""
+    if not any(recalls.values()):
+        return ""
+    lines = ["", "W16 recall@10 (the corpus's own tests, first rep)"]
+    for arm, by_ef in recalls.items():
+        cells = "  ".join(f"ef{ef} {r:.4f}" for ef, r in sorted(by_ef.items()))
+        lines.append(f"{arm:<9} {cells or '-'}")
+    return "\n".join(lines) + "\n"
+
+
 def measure(w: workloads.Workload, uri: str, out: Path, commit: str, rep: int) -> dict:
     results = out / f"{worktree_dir(commit).name}-r{rep}"
     row = ab_common.run_row(w, uri, results)
@@ -239,6 +276,9 @@ def run_sessions(args, out: Path, binaries: dict[str, Path], rows: list[dict]) -
                 row = measure(table[wid], uri, out, commit, rep)
                 row["drain"] = drain_lines(log)[-3:]
                 rows.append(row)
+            # After the rows, so the sweep never sits inside a measurement.
+            if args.recall_tests and rep == 1:
+                subprocess.run(recall_argv(args.tag, commit, uri), check=False)
 
         if ab_common.session(start, fullrun.stop_strawmann, table[args.upload], uri,
                              log.parent, body):
@@ -247,14 +287,17 @@ def run_sessions(args, out: Path, binaries: dict[str, Path], rows: list[dict]) -
 
 
 def write_summary(out: Path, rows: list[dict], commits: list[str],
-                  builds: dict[str, str] | None = None) -> None:
+                  builds: dict[str, str] | None = None,
+                  recalls: dict[str, dict[int, float]] | None = None) -> None:
     summary = summarise(rows)
     doc = {"commits": commits, "summary": summary, "rows": rows}
     if builds:
         # Each arm's engine, whose worktree is named by the hash its ref
         # resolved to: `scan=HEAD` says nothing once HEAD has moved.
         doc["builds"] = builds
-    ab_common.write_summary(out, doc, table_text(summary, commits))
+    if recalls:
+        doc["w16_recall"] = {a: {str(ef): r for ef, r in v.items()} for a, v in recalls.items()}
+    ab_common.write_summary(out, doc, table_text(summary, commits) + recall_text(recalls or {}))
 
 
 def main(argv: list[str]) -> int:
@@ -272,7 +315,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--rows", nargs="+", default=list(ROWS))
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--tag", default=f"commit-ab-{time.strftime('%m%d')}")
+    ap.add_argument("--recall-tests", action="store_true",
+                    help="after each arm's first rep, sweep W16's recall over the "
+                         "corpus's own tests (needs W16-upload)")
     args = ap.parse_args(argv[1:])
+    if args.recall_tests and args.upload != "W16-upload":
+        ap.error("--recall-tests sweeps the W16 collection: pass --upload W16-upload")
 
     ab_common.prepare(args.dataset, args.client_cpus)
     ab_common.warn_foreign()
@@ -290,7 +338,9 @@ def main(argv: list[str]) -> int:
     try:
         return run_sessions(args, out, binaries, rows)
     finally:
-        write_summary(out, rows, names, {k: str(v) for k, v in binaries.items()})
+        recalls = ({n: arm_recall(args.tag, n, args.dataset) for n in names}
+                   if args.recall_tests else None)
+        write_summary(out, rows, names, {k: str(v) for k, v in binaries.items()}, recalls)
 
 
 if __name__ == "__main__":
