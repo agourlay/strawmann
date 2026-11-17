@@ -364,7 +364,7 @@
 <div class="panel" id="h-and-m-2048-angular-filters">
   <div class="panel-head">
     <strong>h-and-m-2048-angular-filters <span>· d=2048, cosine, 105,100 vectors</span></strong>
-    <span>measured 2026-11-13 · 3 passes · gate <code>pass</code> both arms</span>
+    <span>measured 2026-11-16 · 3 passes · gate <code>pass</code> both arms</span>
   </div>
   <div class="scroll">
   <table>
@@ -373,34 +373,29 @@
     </thead>
     <tbody>
       <tr>
-        <td class="what">At equal recall<small>§7.4's comparison, over 6 anchors</small></td>
-        <td class="num span" colspan="2">best at recall 0.9941, falling to 1.84x at 0.9991</td>
-        <td><div class="ratio win" title="strawmANN serves 1.89x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:37.8%"></i></span><b>1.89x</b></div></td>
+        <td class="what">Saturating<small>closed loop, every core busy; not compared, the full table says why</small></td>
+        <td class="num">4,621</td><td class="num">5,647</td>
+        <td><div class="ratio even" title="not compared: the full table says why"><b>-</b></div></td>
       </tr>
       <tr>
-        <td class="what">Saturating<small>closed loop, every core busy</small></td>
-        <td class="num">4,633</td><td class="num">5,647</td>
-        <td><div class="ratio lose" title="strawmANN serves 0.82x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:16.4%"></i></span><b>0.82x</b></div></td>
-      </tr>
-      <tr>
-        <td class="what">Batched<small>16 queries per request</small></td>
-        <td class="num">4,617</td><td class="num">5,964</td>
-        <td><div class="ratio lose" title="strawmANN serves 0.77x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:15.4%"></i></span><b>0.77x</b></div></td>
+        <td class="what">Batched<small>16 queries per request; not compared, the full table says why</small></td>
+        <td class="num">4,585</td><td class="num">5,972</td>
+        <td><div class="ratio even" title="not compared: the full table says why"><b>-</b></div></td>
       </tr>
       <tr>
         <td class="what">Exact<small>brute force, no index</small></td>
-        <td class="num">70</td><td class="num">72</td>
+        <td class="num">71</td><td class="num">71</td>
         <td><div class="ratio even" title="within this dataset&#x27;s noise band: no measured difference, not a small one"><b>parity</b></div></td>
       </tr>
       <tr>
-        <td class="what">One query at a time<small>single client, latency bound</small></td>
-        <td class="num">1,292</td><td class="num">988</td>
-        <td><div class="ratio win" title="strawmANN serves 1.31x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:26.2%"></i></span><b>1.31x</b></div></td>
+        <td class="what">One query at a time<small>single client, latency bound; strawmANN&#x27;s recall is higher (T3): compare at equal recall</small></td>
+        <td class="num">1,290</td><td class="num">977</td>
+        <td><div class="ratio win" title="strawmANN serves 1.32x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:26.4%"></i></span><b>1.32x</b></div></td>
       </tr>
       <tr>
-        <td class="what">Quantized, PQ<small>recall 0.9982 against 0.9966</small></td>
-        <td class="num">6,569</td><td class="num">4,982</td>
-        <td><div class="ratio win" title="strawmANN serves 1.32x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:26.4%"></i></span><b>1.32x</b></div></td>
+        <td class="what">Quantized, PQ<small>recall 0.9981 against 0.9966</small></td>
+        <td class="num">6,805</td><td class="num">4,986</td>
+        <td><div class="ratio win" title="strawmANN serves 1.36x Qdrant&#x27;s queries per second"><span class="track" aria-hidden="true"><i style="width:27.2%"></i></span><b>1.36x</b></div></td>
       </tr>
     </tbody>
   </table>
@@ -409,7 +404,7 @@
     Every row, with its latency percentiles, recall and the rows the comparison
     refuses, is in <a href="https://github.com/agourlay/strawmann/blob/main/docs/comparison-h-and-m-2048-angular-filters.md"><code>comparison-h-and-m-2048-angular-filters.md</code></a>.
     These ratios are this dimension's and do not carry to another.
-    <a class="report-link" href="reports/report-h-and-m-2048-angular-filters-sm-hnm-perf-1112-vs-qd-hnm-perf-1112-2026-11-13-0358.html">Full report for this run</a>
+    <a class="report-link" href="reports/report-h-and-m-2048-angular-filters-sm-hnm-perf-1116-vs-qd-hnm-perf-1116-2026-11-16-1743.html">Full report for this run</a>
   </div>
 </div>
 <!-- END landing-h-and-m-2048-angular-filters -->
