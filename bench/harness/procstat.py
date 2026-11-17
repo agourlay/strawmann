@@ -857,7 +857,26 @@ def huge_pages(pid: int | None) -> dict[str, int | None]:
 
 #: `memory_state`'s fields: the host's free memory and swap, and the engine's
 #: swapped-out bytes, after the row.
-MEMORY_FIELDS = ("mem_available_bytes", "swap_used_bytes", "engine_swap_bytes")
+#: `/proc/vmstat`'s reclaim counters, host-wide, as page counts.
+VMSTAT_KEYS = {"pswpout": "vm_pswpout", "pgsteal_kswapd": "vm_pgsteal_kswapd",
+               "pgsteal_direct": "vm_pgsteal_direct",
+               "workingset_refault_file": "vm_refault_file"}
+#: The engine's own cgroup `memory.stat`: reclaim of its pages alone.
+CGROUP_MEMORY_KEYS = {"pgsteal": "engine_cg_pgsteal",
+                      "workingset_refault_file": "engine_cg_refault_file"}
+MEMORY_FIELDS = ("mem_available_bytes", "swap_used_bytes", "engine_swap_bytes",
+                 *VMSTAT_KEYS.values(), *CGROUP_MEMORY_KEYS.values())
+
+
+def _counters(text: str | None, keys: dict[str, str]) -> dict[str, int | None]:
+    """`name value` lines (`/proc/vmstat`, `memory.stat`) named in `keys`."""
+    out: dict[str, int | None] = dict.fromkeys(keys.values())
+    for line in (text or "").splitlines():
+        name, _, value = line.partition(" ")
+        if name in keys:
+            with contextlib.suppress(ValueError):
+                out[keys[name]] = int(value)
+    return out
 
 
 def memory_state(pid: int | None) -> dict[str, int | None]:
@@ -883,6 +902,13 @@ def memory_state(pid: int | None) -> dict[str, int | None]:
             out["swap_used_bytes"] = (kib["SwapTotal"] - kib["SwapFree"]) * 1024
     out.update(_kb_fields(_read(f"/proc/{pid}/status") if pid else None,
                           ("engine_swap_bytes",), {"VmSwap:": "engine_swap_bytes"}))
+    # Cumulative counters, not deltas: h-and-m 1116's pass 1 lost 186 MiB of
+    # the engine's file pages between W2 and W3, outside any row. Two rows'
+    # counters bracket the gap between them too, and say whether kswapd or a
+    # direct reclaim took the pages, host-wide or from the engine's cgroup.
+    out.update(_counters(_read("/proc/vmstat"), VMSTAT_KEYS))
+    cg = cgroup_dir(pid) if pid else None
+    out.update(_counters(_read(str(cg / "memory.stat")) if cg else None, CGROUP_MEMORY_KEYS))
     return out
 
 

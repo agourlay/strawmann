@@ -279,6 +279,15 @@ class MemoryFields:
     mem_available_bytes: int | None = None
     swap_used_bytes: int | None = None
     engine_swap_bytes: int | None = None
+    #: Reclaim counters after the row, cumulative page counts
+    #: (`procstat.VMSTAT_KEYS`, `procstat.CGROUP_MEMORY_KEYS`): the difference
+    #: between two rows says what was reclaimed between them.
+    vm_pswpout: int | None = None
+    vm_pgsteal_kswapd: int | None = None
+    vm_pgsteal_direct: int | None = None
+    vm_refault_file: int | None = None
+    engine_cg_pgsteal: int | None = None
+    engine_cg_refault_file: int | None = None
     rss_shmem_bytes: int | None = None
 
 
