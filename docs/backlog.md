@@ -308,9 +308,16 @@ default's large-scan path.
 
 ### To build
 
-- **h-and-m W16's filtered scan reads full vectors:** about 16 MB a query
-  (Night A2). Prescore the matches on a quantized copy and rescore the best
-  in fp32, as the unfiltered path does.
+- **Per-value links for indexed keyword fields (Qdrant's payload blocks):**
+  h-and-m's W16 filters match a median 1,712 of 105,100 points (p25 200,
+  p90 15,659) and do not follow the query: in 47% of the tests matching
+  1,250 to 10,000 points, none of the 100 nearest pass. Qdrant scans under
+  its threshold (1,250 points at d=2048) and otherwise walks a graph with
+  extra links per keyword value (`hnsw/build/payload_blocks.rs` at
+  b4ebd966f), so it stays inside the matching set. strawmANN scans up to
+  about 1,500 to 5,000 matches and two-hops the rest (27 to 35% of the
+  tests) through rejected points: about 20M cycles each at ef 32 against
+  the model's 1.6M, most of auto's 8.4M a query.
 - **W16's unfiltered half:** recall@10 0.9655 against Qdrant's 0.9728 on
   laion at ef 32, untouched by the filtered walk and now most of W16's gap.
 
