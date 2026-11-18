@@ -9,7 +9,8 @@ each build's W4 and W10-ef128 over a fresh W2 upload, rotating the build
 order every rep so a drift over the session lands on every build alike.
 
 Development-grade: no Qdrant, no §7.1 publication gate. Each row still
-records its own foreign load. Usage:
+records its own foreign load, and a host whose governor or boost a reboot
+reset is refused (`--lax` to measure on it anyway). Usage:
 
     commit_ab.py --server-cpus 4-11 --client-cpus 0-3 [--reps 3]
                  [--dataset laion-small-clip] [--commits A B ...]
@@ -318,9 +319,15 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--recall-tests", action="store_true",
                     help="after each arm's first rep, sweep W16's recall over the "
                          "corpus's own tests (needs W16-upload)")
+    ap.add_argument("--lax", action="store_true",
+                    help="measure on a host whose static settings (governor, boost) fail")
     args = ap.parse_args(argv[1:])
     if args.recall_tests and args.upload != "W16-upload":
         ap.error("--recall-tests sweeps the W16 collection: pass --upload W16-upload")
+    if (bad := ab_common.host_setting_failures()) and not args.lax:
+        print("refusing: the host fails bench/setup.py check on what waiting cannot fix\n  "
+              + "\n  ".join(bad) + "\n`sudo bench/setup.py apply`, or --lax", file=sys.stderr)
+        return 1
 
     ab_common.prepare(args.dataset, args.client_cpus)
     ab_common.warn_foreign()

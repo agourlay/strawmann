@@ -13,6 +13,7 @@ import contextlib
 import dataclasses
 import json
 import os
+import re
 import signal
 import statistics
 import subprocess
@@ -57,6 +58,25 @@ def warn_foreign(oom: bool = False, claude: bool = True) -> None:
     if found := [c for _, c in procstat.processes() if c == "claude"]:
         print(f"!! {len(found)} claude process(es) alive; their idle CPU is foreign load",
               flush=True)
+
+
+def host_setting_failures() -> list[str]:
+    """`bench/setup.py check`'s failures that waiting cannot clear.
+
+    No §7.1 gate here, but a reboot resets the governor and boost, and on
+    2026-11-17 a four-hour planner A/B ran under `powersave` with boost on
+    while the night after it refused. Foreign load is left to each row's own
+    record, as before.
+    """
+    gate = subprocess.run([sys.executable, str(workloads.ROOT / "bench/setup.py"), "check"],
+                          capture_output=True, text=True)
+    if gate.returncode == 0:
+        return []
+    out = re.sub(r"\x1b\[[0-9;]*m", "", gate.stdout + gate.stderr)
+    fails = [ln.strip() for ln in out.splitlines() if "FAIL" in ln]
+    if not fails:  # a crash or a timeout, not a verdict
+        return ["bench/setup.py check failed"]
+    return [ln for ln in fails if "NOT quiescent" not in ln]
 
 
 def warn_other_engines() -> None:

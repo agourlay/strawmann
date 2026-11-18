@@ -3896,6 +3896,34 @@ class CommitAbTests(unittest.TestCase):
                           "--upload", "W12-upload", "--recall-tests"])
         prep.assert_not_called()
 
+    def test_a_reset_governor_refuses_and_foreign_load_does_not(self):
+        def gate(out, rc=1):
+            return mock.patch.object(self.ab.ab_common.subprocess, "run", return_value=
+                                     subprocess.CompletedProcess([], rc, out, ""))
+        reset = ("  \x1b[31mFAIL\x1b[0m governor=powersave, expected performance\n"
+                 "  FAIL boost=enabled\n")
+        with gate(reset):
+            self.assertEqual(self.ab.ab_common.host_setting_failures(),
+                             ["FAIL governor=powersave, expected performance",
+                              "FAIL boost=enabled"])
+        with gate("  FAIL NOT quiescent: firefox(30%)\n"):
+            self.assertEqual(self.ab.ab_common.host_setting_failures(), [])
+        with gate("all ok\n", rc=0):
+            self.assertEqual(self.ab.ab_common.host_setting_failures(), [])
+        with gate("Traceback\n"):
+            self.assertEqual(self.ab.ab_common.host_setting_failures(),
+                             ["bench/setup.py check failed"])
+        argv = ["commit_ab.py", "--server-cpus", "4-11", "--client-cpus", "0-3"]
+        with gate(reset), contextlib.redirect_stderr(io.StringIO()) as err, \
+                mock.patch.object(self.ab.ab_common, "prepare") as prep:
+            self.assertEqual(self.ab.main(argv), 1)
+        prep.assert_not_called()
+        self.assertIn("governor=powersave", err.getvalue())
+        with gate(reset), mock.patch.object(self.ab.ab_common, "prepare",
+                                            side_effect=RuntimeError("went on")), \
+                self.assertRaisesRegex(RuntimeError, "went on"):
+            self.ab.main([*argv, "--lax"])
+
 
 class PlannerAbTests(unittest.TestCase):
     """The filtered planner's refit: both plans forced on one build, per corpus."""
