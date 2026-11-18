@@ -263,14 +263,31 @@ its file pages (item 62). The A/Bs (`bench/results/ab-1116-*`):
 - The filtered walk (5ae0616) kept: W12-sel10 flat on sift1m, -2.4% on
   dbpedia, -4.4% on laion, -5.3% on h-and-m. W16 pays for laion's recall
   (-16 to -28%); h-and-m W16-ef256 +31% from the selective scan. The old
-  walk was as slow on h-and-m W16, so the gap to Qdrant is the planner's.
+  walk was as slow on h-and-m W16, which read as the planner's gap; Night
+  A2 (below) refuted that.
 - The shared layer search (a98d0b1) landed: flat to +1.9%, 2 to 3.5%
   fewer instructions a query.
 - `--build-prefetch` repeated 11-13's reading (W11-steady +6.0%, W11
   -2.6%) and is dropped.
 
+### Done 2026-11-17 (unit `strawmann-night-1117`, Night A2)
+
+`planner_ab.py --workload W16 --plans scan walk auto --reps 3` on h-and-m
+(`bench/results/planner-w16-1117n-*`): the model's own pick beats every
+forced plan at every ef, 1,341 to 1,993 q/s against the scan's 1,021 and
+the plain walk's 57 to 119 (two_hop 82 at ef 32, 11-17 afternoon), at
+recall@10 0.9949 to 0.9998. So the planner is not h-and-m W16's gap. The
+scan reads about 16 MB of DRAM a query (about 2,000 matches of 8 KiB at
+2,860k instructions and 16,300k cycles) and auto 6 to 11 MB: the gap is the
+bytes read per match. Measured under `powersave` with boost on after a
+reboot (arms comparable, scan within 5% of the afternoon's), which
+`commit_ab` now refuses. Night B refused at the host gate for the same
+reason and is still owed.
+
 ### Before the next night
 
+- After any reboot, `sudo bench/setup.py apply` (governor, boost), then
+  `bench/setup.py check` right before setting the timer.
 - Mask `apt-daily-upgrade.timer` for the night (unmask after), or add the
   permanent `Delegate=` drop-in.
 - Close the other Claude and Codex sessions, Firefox and Slack.
@@ -279,12 +296,6 @@ its file pages (item 62). The A/Bs (`bench/results/ab-1116-*`):
 
 Estimates from the 1116 night's A/B steps; settle waits took about a quarter
 of each run, so a busier host runs longer.
-
-**Night A2, about 2.5 h:** which plan h-and-m's W16 queries should take.
-`planner_ab.py --workload W16 --reps 3` forces scan, two_hop and walk beside
-the model's own pick on the W16 ladder (ef 32 to 512), on laion and h-and-m.
-Throughput only: recall per plan needs the conformance pass after. Then
-refit `filteredPlan` on real conditions, or widen the selective scan.
 
 **Night B, about 10.8 h:** dbpedia-openai-1m, three passes, on its own.
 The first dbpedia pair with the filtered walk and the exact-gather
@@ -297,6 +308,9 @@ default's large-scan path.
 
 ### To build
 
+- **h-and-m W16's filtered scan reads full vectors:** about 16 MB a query
+  (Night A2). Prescore the matches on a quantized copy and rescore the best
+  in fp32, as the unfiltered path does.
 - **W16's unfiltered half:** recall@10 0.9655 against Qdrant's 0.9728 on
   laion at ef 32, untouched by the filtered walk and now most of W16's gap.
 
